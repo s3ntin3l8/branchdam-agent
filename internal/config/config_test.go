@@ -154,3 +154,40 @@ ingest:
 		t.Error("expected RequireUnbuffered=true")
 	}
 }
+
+func TestLoadPruneConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+prune:
+  enabled: true
+  minAgeHours: 48
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Prune.Enabled || cfg.Prune.MinAgeHours != 48 {
+		t.Errorf("got %+v, want Enabled=true MinAgeHours=48", cfg.Prune)
+	}
+}
+
+func TestLoadPruneConfigDefaultsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  baseUrl: http://x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Prune.Enabled {
+		t.Error("expected Prune.Enabled=false when the prune block is entirely absent")
+	}
+}

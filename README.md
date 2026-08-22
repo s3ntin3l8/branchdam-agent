@@ -38,6 +38,14 @@ See [CLAUDE.md](CLAUDE.md) for the milestone breakdown.
   still ingest a card, then finish the archive copy and `POST /api/v1/agent/rebase` once
   reconnected -- see [`docs/offline-queue.md`](docs/offline-queue.md) for the full state machine,
   the copy-before-rebase ordering guarantee, and the server-side prerequisite this depends on.
+- A `prune` subcommand (branchdam#230-adjacent -- not the same thing as real Tier-1 NLE scratch
+  pruning, which stays architecturally blocked; see `internal/config.PruneConfig`'s doc comment):
+  deletes an offline-ingested file's `ingest.localEditRoot` mirror once
+  `POST /api/v1/agent/node-status` (branchDAM's first agent-reachable read endpoint) confirms the
+  Tier-3 archive copy is live and hash-verified. Only ever considers `queue.db` rows -- a plain
+  online `ingest` has no durable local-path ledger to prune against. Two independent safety
+  checks run before any deletion: a symlink-aware containment check against `LocalEditRoot`, and
+  a size/mtime re-stat against what was recorded at ingest time.
 - `internal/luminar/`, `internal/nodeindex/` -- a `luminar-sync` subcommand: reads a Luminar
   `catalog.db` read-only (`?mode=ro`, never `?immutable=1`) and emits `EVENT_EDGE_ATTACHED` at
   `tier: 2, confidence: 0.89` for each edit->source pair it finds and can resolve to known
@@ -111,6 +119,22 @@ go run ./cmd/branchdam-agent luminar-sync -config config.yaml -catalog /path/to/
 [`internal/nodeindex`](internal/nodeindex/nodeindex.go)'s doc comment for why this exists (no
 agent-reachable lookup-by-path endpoint on branchDAM yet) and
 [`docs/luminar-catalog.md`](docs/luminar-catalog.md) for the node-resolution scope decision.
+
+### 6. Prune already-archived local-edit mirrors
+
+```sh
+# Preview only -- never deletes anything:
+go run ./cmd/branchdam-agent prune -config config.yaml -dry-run
+
+go run ./cmd/branchdam-agent prune -config config.yaml
+# Or keep pruning periodically:
+go run ./cmd/branchdam-agent prune -config config.yaml -watch
+```
+
+Requires `prune.enabled: true` in `config.yaml` (defaults to false -- opt-in, on purpose) and
+the same `offline.queueDbPath`/`ingest.localEditRoot` used by `-offline` ingest and
+`queue-drain` above. Only files ingested via `ingest -offline` are ever candidates; a plain
+online `ingest` run has nothing for this to check against.
 
 ### 6. Run the tray shell
 

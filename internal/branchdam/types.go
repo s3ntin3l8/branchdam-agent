@@ -205,6 +205,13 @@ type RebaseRequest struct {
 	FileExt    string  `json:"fileExt,omitempty"`
 	SizeBytes  int64   `json:"sizeBytes,omitempty"`
 	FastHash   *string `json:"fastHash,omitempty"`
+	// FullHash is only consumed server-side on the unknown-NodeUUID (insert)
+	// branch -- a known node's rebase never overwrites content hashes, so
+	// this only matters for the rare case where this call arrives before its
+	// EVENT_NODE_CREATED was applied. Set anyway, since we always have it on
+	// hand (queue.Record.FullHash) and it's what unblocks
+	// POST /api/v1/agent/node-status ever reporting "verified" for that node.
+	FullHash *string `json:"fullHash,omitempty"`
 	// StorageLocationID is deprecated and ignored -- see
 	// NodeCreatedPayload.StorageLocationID.
 	StorageLocationID int64 `json:"storageLocationId,omitempty"`
@@ -219,4 +226,32 @@ type RebaseResponse struct {
 	StorageLocationID int64  `json:"storageLocationId"`
 	FilePath          string `json:"filePath"`
 	Status            string `json:"status"`
+}
+
+// NodeStatusRequest is the request body for POST /api/v1/agent/node-status
+// (internal/httpapi.AgentNodeStatusInput in branchdam) -- the first
+// agent-reachable read endpoint; every other /api/v1/agent/* route is
+// write-oriented. NodeUUIDs is capped server-side at 200 per call.
+type NodeStatusRequest struct {
+	NodeUUIDs []string `json:"nodeUuids"`
+}
+
+// NodeStatusEntry is one NodeUUID's reported status. Found=false is not an
+// error -- it means no media_nodes row currently has that node_uuid (never
+// synced, or a stale UUID). Verified mirrors branchDAM's own
+// ListPrunableNodes eligibility predicate: full_hash non-NULL and 64 hex
+// characters (BLAKE3-256) -- LifecycleState/Tier are only meaningful when
+// Found is true.
+type NodeStatusEntry struct {
+	NodeUUID       string `json:"nodeUuid"`
+	Found          bool   `json:"found"`
+	LifecycleState string `json:"lifecycleState,omitempty"`
+	Tier           string `json:"tier,omitempty"`
+	Verified       bool   `json:"verified"`
+}
+
+// NodeStatusResponse is the response body for POST /api/v1/agent/node-status
+// (internal/httpapi.AgentNodeStatusOutput in branchdam).
+type NodeStatusResponse struct {
+	Statuses []NodeStatusEntry `json:"statuses"`
 }
