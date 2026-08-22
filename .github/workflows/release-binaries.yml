@@ -1,0 +1,156 @@
+name: Release Binaries
+
+# Fires when release-please's own workflow merges a release PR and creates
+# the GitHub Release (googleapis/release-please-action@v5's default
+# behavior, not disabled here -- see release-please.yml). branchdam-agent is
+# a desktop tray/CLI binary, not a service (see release-please.yml's own
+# comment for why there's no Docker image) -- this is the actual
+# distribution path an operator uses to get it onto a workstation, since
+# nothing else in this repo publishes a downloadable artifact.
+on:
+  release:
+    types: [published]
+  # Manual re-run for debugging the build/package steps (e.g. a cross-compile
+  # regression) without cutting a new release. The upload job stays gated to
+  # the `release` event -- see that job's `if:` -- so a manual dispatch never
+  # tries to attach assets to a release that doesn't exist for this ref.
+  workflow_dispatch:
+    inputs:
+      version-suffix:
+        description: "Value stamped into main.version for this test build (no release is created or modified)"
+        required: false
+        default: "manual-test"
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_VERSION: ${{ github.event.release.tag_name || github.event.inputs.version-suffix }}
+
+jobs:
+  # linux/amd64: native build. The tray itself is Windows/macOS-only
+  # (internal/tray/run_unsupported.go returns ErrUnsupported at runtime on
+  # Linux -- see CLAUDE.md), but every other subcommand (preflight, ingest,
+  # luminar-sync, queue-drain) is fully supported headless on Linux, so a
+  # Linux build is still worth publishing.
+  build-linux:
+    name: build (linux/amd64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" \
+            -o dist/branchdam-agent ./cmd/branchdam-agent
+      - name: Package
+        run: tar -C dist -czf branchdam-agent-linux-amd64.tar.gz branchdam-agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: branchdam-agent-linux-amd64.tar.gz
+          retention-days: 1
+
+  # windows/amd64: cross-compiled from ubuntu-latest -- fyne.io/systray
+  # v1.12.2's Windows backend is pure Go (syscall + x/sys/windows, no cgo),
+  # verified locally before ci-cd.yml's own build-windows job was added (see
+  # that job's comment). Two binaries, same reasoning as Makefile's
+  # build-windows target: -H windowsgui is link-scoped to the WHOLE binary,
+  # and branchdam-agent.exe alone also serves preflight/ingest/luminar-sync,
+  # whose stdout an operator needs to see in a console, so it stays
+  # console-linked while branchdam-agent-tray.exe adds -H windowsgui so a
+  # login-item launch never flashes a console window.
+  build-windows:
+    name: build (windows/amd64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+            -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" \
+            -o dist/branchdam-agent.exe ./cmd/branchdam-agent
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+            -ldflags="-s -w -H windowsgui -X main.version=${{ env.RELEASE_VERSION }}" \
+            -o dist/branchdam-agent-tray.exe ./cmd/branchdam-agent
+      - name: Package
+        run: |
+          cd dist
+          zip -j ../branchdam-agent-windows-amd64.zip branchdam-agent.exe branchdam-agent-tray.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64
+          path: branchdam-agent-windows-amd64.zip
+          retention-days: 1
+
+  # darwin/arm64: requires a real macOS host, same as ci-cd.yml's
+  # build-darwin-full job -- fyne.io/systray's darwin backend is
+  # Objective-C (cgo), and there is no darwin cgo cross-toolchain on
+  # ubuntu-latest. Native build, so CGO_ENABLED defaults on (needed for the
+  # tray). Apple Silicon only, matching the plan doc's stated target
+  # ("Windows 11 and macOS Apple Silicon") -- no darwin/amd64 leg.
+  build-darwin:
+    name: build (darwin/arm64)
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: |
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" \
+            -o dist/branchdam-agent ./cmd/branchdam-agent
+      - name: Package
+        run: tar -C dist -czf branchdam-agent-darwin-arm64.tar.gz branchdam-agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64
+          path: branchdam-agent-darwin-arm64.tar.gz
+          retention-days: 1
+
+  # Collects the three platform artifacts and attaches them (plus a combined
+  # checksum file) to the GitHub Release release-please already created --
+  # no separate tag/release creation here, only asset upload.
+  upload:
+    name: attach to release
+    if: github.event_name == 'release'
+    needs: [build-linux, build-windows, build-darwin]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Checksums
+        run: |
+          cd dist
+          find . -maxdepth 2 -type f -exec sha256sum {} \; | sed 's#\./[^/]*/##' > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz \
+            dist/windows-amd64/branchdam-agent-windows-amd64.zip \
+            dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz \
+            dist/SHA256SUMS.txt \
+            --repo "${{ github.repository }}" --clobber
