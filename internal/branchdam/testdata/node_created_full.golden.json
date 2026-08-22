@@ -1,0 +1,21 @@
+{
+  "nodeUuid": "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
+  "filePath": "/storage/archive/2026/2026-07-15_ILCE-7M4/DSC01234.ARW",
+  "fileName": "DSC01234.ARW",
+  "fileExt": ".ARW",
+  "sizeBytes": 52428800,
+  "mtimeUnix": 1752591000,
+  "fastHash": "a17463135ce85764",
+  "fullHash": "d1b2c3a4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff",
+  "phash": -4611686018427387903,
+  "cameraModel": "ILCE-7M4",
+  "cameraSerial": "1234567",
+  "lensModel": "FE 24-70mm F2.8 GM",
+  "capturedAtUnix": 1752591000,
+  "originalDocumentId": "xmp.did:0190f1a2-orig",
+  "documentId": "xmp.did:0190f1a2-doc",
+  "derivedFromId": "xmp.did:0190f1a2-parent",
+  "filenameStem": "dsc01234",
+  "gpsLatitude": -33.9151,
+  "gpsLongitude": 18.4115
+}

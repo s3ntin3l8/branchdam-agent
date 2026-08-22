@@ -1,15 +1,29 @@
-# Example configuration for go-http-template.
-# Copy to config.yaml and adjust. Values in ${VAR} are expanded from
-# environment variables at load time -- NOTE: expandEnv does not support
-# `:-default` syntax (it treats everything between ${ and } as one literal
-# env-var name), so "${LISTEN_ADDR:-:8080}" would set listenAddr to that
-# literal string whenever LISTEN_ADDR is unset, not fall back to 8080. Use
-# ${VAR} only for values you actually want to source from the environment;
-# these two match internal/config's own defaultConfig() defaults instead.
+# Example configuration for branchdam-agent.
+# Copy to config.yaml (or ~/.config/branchdam-agent/config.yaml) and adjust.
+# Values in ${VAR} are expanded from environment variables at load time --
+# NOTE: expandEnv does not support `:-default` syntax (it treats everything
+# between ${ and } as one literal env-var name), so "${API_KEY:-changeme}"
+# would set apiKey to that literal string whenever API_KEY is unset, not fall
+# back to "changeme". Use ${VAR} only for values you actually want to source
+# from the environment.
 
-listenAddr: ":8080"
-logLevel: "info"
+server:
+  baseUrl: "http://localhost:8080"
+  # Sent as the raw X-API-Key header. The server rejects a key under 32
+  # characters with a 503 ("agent authentication is not configured").
+  apiKey: "${BRANCHDAM_AGENT_API_KEY}"
 
-http:
-  readTimeoutSecs: 15
-  writeTimeoutSecs: 15
+# Self-asserted identity for this workstation. There is no per-agent
+# authentication on the server side (a single shared apiKey, per the
+# plan's contract-gap 6) -- agentId is only used for handshake logging and
+# the (server-global, not per-agent) pendingEventsCount.
+agentId: "workstation-01"
+
+# Workstation-path -> server-container-path rewrites. branchDAM's agent
+# event payloads require server-container, absolute, symlink-free paths --
+# unlike .dam.json's raw_path (workstation-native, translated by the
+# server's own pathRewrites), there is no rewrite pass on agent payloads, so
+# the agent must translate before it ever builds a request body.
+pathMappings:
+  - workstationPath: "D:\\Photos\\Archive"
+    containerPath: "/storage/archive"
