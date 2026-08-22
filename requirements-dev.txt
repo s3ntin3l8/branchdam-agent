@@ -1,0 +1,12 @@
+# Python dev/test dependencies for hooks/resolve/ (see .github/workflows/ci-python.yml).
+#
+# This repo is otherwise a Go project (see go.mod) -- this file exists only because
+# s3ntin3l8/.github's reusable ci-python.yml workflow has no working-directory
+# input, so its install step always looks for a *root*-level requirements-dev.txt /
+# pyproject.toml / requirements.txt, regardless of where the Python code actually
+# lives. Deliberately minimal: no mypy/pip-audit/detect-secrets here, since those
+# steps would then run (as hard or advisory gates) against the whole repo -- e.g.
+# detect-secrets against a .secrets.baseline generated for the Go template, not for
+# any Python code -- which is out of scope for this hook.
+pytest>=8.0
+pytest-cov>=5.0

@@ -1,0 +1,37 @@
+name: Python CI
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "hooks/resolve/**"
+      - "requirements-dev.txt"
+      - ".github/workflows/ci-python.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "hooks/resolve/**"
+      - "requirements-dev.txt"
+      - ".github/workflows/ci-python.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    permissions:
+      contents: read
+    uses: s3ntin3l8/.github/.github/workflows/ci-python.yml@main
+    with:
+      python-version: "3.12"
+      # hooks/resolve/branchdam_render_hook.py's Resolve-API-calling half is
+      # marked `# pragma: no cover` -- there is no Resolve install available on
+      # this runner to exercise it (see hooks/resolve/README.md's "Manual
+      # testing" section). The pure manifest-writing half is fully covered.
+      # Floor at 0 rather than asserting a number here: this reusable workflow
+      # has no working-directory input, so --cov measures the whole repo, and
+      # ratcheting that up would be tracking Go-repo noise, not this hook's own
+      # coverage. Codecov (below) still reports the real per-path number.
+      coverage-source: "hooks/resolve"
+      coverage-fail-under: "0"
+    secrets: inherit

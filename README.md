@@ -49,6 +49,13 @@ exposes a `/health` endpoint.
 - Security scans (CodeQL) and dependency reviews are automated in the CI pipeline.
 - `detect-secrets` runs in pre-commit and CI against `.secrets.baseline`.
 
+## Workstation hooks
+
+`hooks/` holds standalone scripts that run on a workstation outside this repo's Go
+service, for tools that don't have their own agent client. See
+[`hooks/resolve/README.md`](hooks/resolve/README.md) for the DaVinci Resolve
+post-render `.dam.json` hook.
+
 ## Releases
 
 Releases are automated via [Release Please](https://github.com/googleapis/release-please).
