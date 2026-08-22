@@ -19,4 +19,4 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/s3ntin3l8/go-http-template
+        - github.com/s3ntin3l8/branchdam-agent

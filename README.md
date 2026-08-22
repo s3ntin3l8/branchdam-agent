@@ -1,8 +1,29 @@
-# Go HTTP Template
+# branchdam-agent
 
-A minimal Go backend template using `net/http` (stdlib), structured config, and
-full CI/CD via reusable workflows from
-[`s3ntin3l8/.github`](https://github.com/s3ntin3l8/.github).
+The workstation agent for [branchDAM](https://github.com/s3ntin3l8/branchdam) (phase 10 of the
+original spec) -- a Go binary that will eventually ingest SD cards, keep an offline queue, and
+report to branchDAM over its existing `/api/v1/agent/*` REST contract. See branchDAM's
+`.claude/plans/can-we-walk-through-sharded-lighthouse.md` for the full phased plan this repo
+implements.
+
+This is **M0**: the repo scaffold and the hand-written REST client every later milestone depends
+on. There is no tray UI, card ingest, offline queue, or DaVinci/Luminar integration yet -- see
+[CLAUDE.md](CLAUDE.md) for the milestone breakdown.
+
+## What's here today
+
+- `internal/branchdam/` -- the REST client for branchDAM's agent-server contract
+  (`hello`/`handshake`/`events`/`rebase`), with DTOs hand-synced to branchDAM's own
+  `internal/agent/types.go` and `internal/httpapi/routes.go`, plus a golden-file conformance test
+  (`internal/branchdam/conformance_test.go`).
+- `internal/hashing/`, `internal/naming/`, `internal/phash/` -- ports of the three pieces of
+  branchDAM server logic an agent-ingested file must reproduce exactly to stay consistent with a
+  normal server-side scan (`FastHash`'s sampled-window algorithm, `naming.Stem`'s filename
+  normalization, and `ExtractPHash`'s decode-then-exiftool-fallback call sequence), each with
+  golden-vector tests generated from branchDAM's real implementation.
+- `cmd/branchdam-agent/` -- a `preflight` subcommand: checks the configured branchDAM server is
+  reachable and returns its version, checks `exiftool` on `PATH`, and prints the configured
+  workstation-path -> container-path mappings.
 
 ## Quick Start
 
@@ -19,15 +40,13 @@ make build           # compile all packages
 make test            # run tests with race detection
 ```
 
-### 3. Run the server
+### 3. Run preflight against a branchDAM server
 
 ```sh
 cp config.example.yaml config.yaml
-go run ./cmd/server -config ./config.yaml
+# edit config.yaml: server.baseUrl, server.apiKey (>= 32 chars), agentId, pathMappings
+go run ./cmd/branchdam-agent preflight -config config.yaml
 ```
-
-The server listens on the address from `config.yaml` (default `:8080`) and
-exposes a `/health` endpoint.
 
 ## Commands
 
@@ -59,7 +78,8 @@ post-render `.dam.json` hook.
 ## Releases
 
 Releases are automated via [Release Please](https://github.com/googleapis/release-please).
-Use [Conventional Commits](https://www.conventionalcommits.org/) to trigger version bumps.
+Use [Conventional Commits](https://www.conventionalcommits.org/) to trigger version bumps. No
+Docker image is published -- this is a desktop CLI/tray binary, not a service.
 
 ## License
 
