@@ -21,11 +21,13 @@ var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 // (~/.config/branchdam-agent/config.yaml per the plan, or wherever -config
 // points).
 type Config struct {
-	Server       ServerConfig  `yaml:"server"`
-	AgentID      string        `yaml:"agentId"`
-	PathMappings []PathMapping `yaml:"pathMappings"`
-	Ingest       IngestConfig  `yaml:"ingest"`
-	Offline      OfflineConfig `yaml:"offline"`
+	Server       ServerConfig     `yaml:"server"`
+	AgentID      string           `yaml:"agentId"`
+	PathMappings []PathMapping    `yaml:"pathMappings"`
+	Ingest       IngestConfig     `yaml:"ingest"`
+	Offline      OfflineConfig    `yaml:"offline"`
+	Tray         TrayConfig       `yaml:"tray"`
+	SelfUpdate   SelfUpdateConfig `yaml:"selfUpdate"`
 }
 
 // OfflineConfig configures M2's offline queue (issue #4): where queue.db
@@ -49,6 +51,58 @@ type OfflineConfig struct {
 	// (three retries, then FAILED, with the failure looking like an auth
 	// problem -- see internal/branchdam's HTTPError doc comments).
 	Tier0ContainerRoot string `yaml:"tier0ContainerRoot"`
+}
+
+// TrayConfig configures the M1 tray shell (issue #3): the embedded
+// localhost status page and login-item registration. Both are additive to
+// the headless `ingest`/`preflight`/`luminar-sync` subcommands -- nothing
+// here is required for those to keep working.
+type TrayConfig struct {
+	// StatusAddr is the address the embedded status HTTP server binds.
+	// Deliberately defaults to a loopback-only address (never a bare
+	// ":port") -- the status page renders local filesystem paths and (once
+	// M2 lands) queue depth, not something to expose beyond the
+	// workstation itself. Defaults to "127.0.0.1:38080" when empty.
+	StatusAddr string `yaml:"statusAddr"`
+	// StartOnLogin registers (or removes) a per-user login item -- a
+	// LaunchAgent plist on macOS, a Run-key value on Windows -- so the tray
+	// starts automatically at login. Off by default; an operator opts in
+	// explicitly. No effect on platforms other than windows/darwin.
+	StartOnLogin bool `yaml:"startOnLogin"`
+}
+
+// SelfUpdateConfig gates github.com/creativeprojects/go-selfupdate. Off by
+// default per the plan/issue -- an operator must opt in explicitly before
+// the tray ever checks GitHub for a newer release, let alone replaces its
+// own binary.
+type SelfUpdateConfig struct {
+	// Enabled turns self-update checks on. Default false.
+	Enabled bool `yaml:"enabled"`
+	// Repo is the "owner/name" GitHub repository slug releases are
+	// published from. Defaults to "s3ntin3l8/branchdam-agent" when empty.
+	Repo string `yaml:"repo"`
+}
+
+// DefaultStatusAddr is TrayConfig.StatusAddr's fallback when empty.
+const DefaultStatusAddr = "127.0.0.1:38080"
+
+// DefaultSelfUpdateRepo is SelfUpdateConfig.Repo's fallback when empty.
+const DefaultSelfUpdateRepo = "s3ntin3l8/branchdam-agent"
+
+// StatusAddrOrDefault returns t.StatusAddr, or DefaultStatusAddr when unset.
+func (t TrayConfig) StatusAddrOrDefault() string {
+	if t.StatusAddr == "" {
+		return DefaultStatusAddr
+	}
+	return t.StatusAddr
+}
+
+// RepoOrDefault returns s.Repo, or DefaultSelfUpdateRepo when unset.
+func (s SelfUpdateConfig) RepoOrDefault() string {
+	if s.Repo == "" {
+		return DefaultSelfUpdateRepo
+	}
+	return s.Repo
 }
 
 // IngestConfig configures M1's SD-card ingest core: where the two copies
