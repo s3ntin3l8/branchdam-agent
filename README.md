@@ -120,14 +120,20 @@ go run ./cmd/branchdam-agent tray -config config.yaml
 
 Starts the tray icon (windows/darwin) plus an embedded status page (default
 `http://127.0.0.1:38080/`, loopback-only -- see `tray.statusAddr` in `config.example.yaml`)
-showing configured watch directories, the local scratch directory, and queue status (a stub until
-M2's offline queue lands -- deliberately labelled as such, never a fabricated number). The tray
-menu's "Ingest now" and its automatic card-insertion trigger both call the same
+showing configured watch directories, the local scratch directory, and queue status (a stub --
+M2's offline queue landed concurrently with this PR but isn't wired into this display yet;
+deliberately labelled as such, never a fabricated number). The tray menu's "Ingest now" and its
+automatic card-insertion trigger both call the same
 `internal/ingest.Engine.IngestCard` the headless `ingest` subcommand uses.
 
 On Linux, `tray` builds and runs, but immediately returns an error (`tray: unsupported on this
 platform`) -- the tray is scoped to Windows/macOS per the plan doc; a Linux workstation still has
 the fully-tested headless `ingest` path.
+
+To also build in real self-update support (off by default even then -- see `selfUpdate.enabled`),
+add `-tags selfupdate` to the build: `go build -tags selfupdate ./cmd/branchdam-agent`. Every
+other build command in this README and the Makefile (including the CI-verified ones) deliberately
+omits that tag -- see "Tray shell: platform-specific findings" below for why.
 
 ## Tray shell: platform-specific findings (issue #3)
 
@@ -155,11 +161,14 @@ This PR could only be developed and CI-verified from a Linux host. What was chec
   fix is a hand-assembled `.app` bundle with `Info.plist`/`LSUIElement=1` -- **not implemented in
   this PR**. Check this first on real hardware before shipping a macOS build to an actual
   workstation.
-- **`macos-26` GitHub-hosted runner availability for this public repo: see this PR's description**
-  for what the `build-darwin-full` job (`.github/workflows/ci-cd.yml`) actually did on the first
-  push -- it is not a required branch-protection check, so a queued/unavailable outcome there
-  does not block merging, but it does determine whether the darwin *tray* binary (as opposed to
-  the build-only check above) gets proven in CI at all.
+- **`macos-26` GitHub-hosted runner availability for this public repo: VERIFIED usable.** The
+  `build-darwin-full` job (`runs-on: macos-26`, `.github/workflows/ci-cd.yml`) -- the whole
+  module including `internal/tray`'s cgo darwin backend, `go build ./...` on a real macOS host --
+  passed in ~1 minute on this PR's first push. `macos-26` minutes are not queued/unavailable for
+  this public repo. It's still not a required branch-protection check (a review-bot-down /
+  runner-flake shouldn't block every merge, same reasoning as this repo's other non-required
+  jobs), but the darwin *tray* binary itself is now proven in CI, not just the build-only
+  `build-darwin` exclusion-based check.
 - **Login-item registration** (`internal/autostart/`) is implemented for both platforms --
   `autostart_darwin.go` writes/loads a LaunchAgent plist, `autostart_windows.go` writes an
   `HKCU\...\Run` value via `golang.org/x/sys/windows/registry` -- and is testable up to the actual
@@ -167,6 +176,16 @@ This PR could only be developed and CI-verified from a Linux host. What was chec
   on Linux; the platform-tagged write paths are proven only by the `build-windows`/`build-darwin`
   cross-compiles, same caveat as the rest of this list. Off by default (`tray.startOnLogin` in
   config).
+- **Self-update requires `-tags selfupdate` at build time, on top of `selfUpdate.enabled: true`
+  in config.** `go-selfupdate` v1.6.0 imports `golang.org/x/crypto/openpgp` unconditionally from
+  its top-level package, which `govulncheck` flags as `GO-2026-5932` (unfixed, no upgrade path --
+  v1.6.0 is the newest tag). `govulncheck` runs inside this repo's required
+  `test-go / lint-and-test` check with no per-repo suppression available, so the real
+  implementation (`internal/selfupdate/selfupdate.go`) only compiles in behind that build tag;
+  every default build links `selfupdate_stub.go` instead, which returns
+  `selfupdate.ErrNotCompiledIn`. See `CLAUDE.md`'s matching key invariant for the full
+  verification (`govulncheck` clean without the tag, reproduces `GO-2026-5932` with it) and
+  tracked follow-up issue #14.
 
 ## Commands
 
