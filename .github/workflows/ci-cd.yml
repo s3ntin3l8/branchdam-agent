@@ -18,20 +18,14 @@ jobs:
       coverage-fail-under: "0"
     secrets: inherit
 
-  # Not part of ci-go.yml's own lint step -- .golangci.yml declares
-  # `version: "2"`, which requires a pinned v2.x binary rather than
-  # whatever "latest" resolves to, so it runs as its own job here, mirroring
-  # branchDAM's ci.yml (the sibling repo this client talks to).
-  golangci-lint:
-    name: golangci-lint
-    runs-on: ubuntu-latest
+  build-docker:
+    needs: [test-go]
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.12.2
+      packages: write
+      id-token: write
+    uses: s3ntin3l8/.github/.github/workflows/docker-publish.yml@main
+    with:
+      image-name: "s3ntin3l8/${{ github.event.repository.name }}"
+      push-edge: ${{ github.event_name == 'push' }}
+    secrets: inherit
