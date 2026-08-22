@@ -131,3 +131,37 @@ func TestRenderPathTraversalSequenceNotStripped(t *testing.T) {
 		t.Skip("sanitizeSegment now strips \"..\" -- update RenderPath's doc comment to match and delete this test's stale framing")
 	}
 }
+
+func TestRenderPathStemAndExtTokens(t *testing.T) {
+	vars := TemplateVars{
+		CapturedAt:   time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC),
+		CameraModel:  "ILCE-7M4",
+		OriginalName: "DSC01234.ARW",
+	}
+	got := RenderPath("{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{stem}_custom.{ext}", vars)
+	want := "2026/2026-08-22_ILCE-7M4/DSC01234_custom.ARW"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSuffixedFilename(t *testing.T) {
+	tests := []struct {
+		orig   string
+		suffix string
+		want   string
+	}{
+		{"DSC0001.JPG", "_2", "DSC0001_2.JPG"},
+		{"clip.mp4", "_3", "clip_3.mp4"},
+		{"README", "_2", "README_2"},
+		{".gitignore", "_2", ".gitignore_2"},
+		{"DSC0001.JPG", "", "DSC0001.JPG"},
+	}
+	for _, tc := range tests {
+		got := SuffixedFilename(tc.orig, tc.suffix)
+		if got != tc.want {
+			t.Errorf("SuffixedFilename(%q, %q) = %q, want %q", tc.orig, tc.suffix, got, tc.want)
+		}
+	}
+}
+

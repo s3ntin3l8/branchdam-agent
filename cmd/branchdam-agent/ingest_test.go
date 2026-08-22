@@ -108,3 +108,71 @@ func TestRunIngestMissingCardFlag(t *testing.T) {
 		t.Errorf("run([ingest] without -card) = %d, want 2", got)
 	}
 }
+
+func TestRunIngestCollisionMultiSubdir(t *testing.T) {
+	var mu sync.Mutex
+	var envelopes []map[string]any
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/events", func(w http.ResponseWriter, r *http.Request) {
+		var env map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&env)
+		mu.Lock()
+		envelopes = append(envelopes, env)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"eventId":"evt-1"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	sub1 := filepath.Join(cardRoot, "DCIM", "100")
+	sub2 := filepath.Join(cardRoot, "DCIM", "101")
+	archiveRoot := filepath.Join(dir, "archive")
+	localRoot := filepath.Join(dir, "local")
+	if err := os.MkdirAll(sub1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sub2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub1, "DSC0001.JPG"), []byte("photo-1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub2, "DSC0001.JPG"), []byte("photo-2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"" + srv.URL + "\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"pathMappings:\n" +
+		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"    containerPath: \"/storage/archive\"\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + archiveRoot + "\"\n" +
+		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  pathTemplate: \"{original_name}\"\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := run([]string{"ingest", "-config", cfgPath, "-card", cardRoot, "-timeout", "30s"})
+	if got != 0 {
+		t.Fatalf("run([ingest]) = %d, want 0", got)
+	}
+
+	if _, err := os.Stat(filepath.Join(archiveRoot, "DSC0001.JPG")); err != nil {
+		t.Errorf("expected DSC0001.JPG in archive: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(archiveRoot, "DSC0001_2.JPG")); err != nil {
+		t.Errorf("expected DSC0001_2.JPG in archive: %v", err)
+	}
+}
+

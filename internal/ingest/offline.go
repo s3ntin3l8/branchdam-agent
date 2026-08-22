@@ -83,9 +83,10 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 		return OfflineCardResult{}, fmt.Errorf("ingest: walk card root %s: %w", cardRoot, err)
 	}
 
+	stemSuffix := make(map[string]string)
 	var result OfflineCardResult
 	for _, f := range files {
-		fr := e.ingestFileOffline(ctx, f)
+		fr := e.ingestFileOffline(ctx, f, stemSuffix)
 		result.Files = append(result.Files, fr)
 	}
 	return result, nil
@@ -124,7 +125,7 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 // Sidecars (.xmp/.srt) skip steps 4-5 entirely: no NodeCreatedPayload, no
 // EVENT_NODE_CREATED, no rebase -- only the local write and the archive-copy
 // queue row, mirroring IngestCard's sidecar handling.
-func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string) OfflineFileResult {
+func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuffix map[string]string) OfflineFileResult {
 	fr := OfflineFileResult{SourcePath: srcPath}
 
 	ext := extNoDot(srcPath)
@@ -165,7 +166,30 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string) OfflineF
 		vars.CameraModel = exif.CameraModel
 	}
 
-	relPath := RenderPath(e.Ingest.PathTemplate, vars)
+	primaryRel := RenderPath(e.Ingest.PathTemplate, vars)
+	primaryLocal := filepath.Join(e.Ingest.LocalEditRoot, primaryRel)
+	if _, err := os.Stat(primaryLocal); err == nil {
+		if e.Queue != nil {
+			if _, claimed, err := e.Queue.ByLocalPath(ctx, primaryLocal); err == nil && !claimed {
+				_ = os.Remove(primaryLocal)
+			}
+		}
+	}
+
+	stem, _ := splitBase(filepath.Base(srcPath))
+	stemKey := filepath.Join(filepath.Dir(srcPath), stem)
+	knownSuffix := ""
+	if stemSuffix != nil {
+		knownSuffix = stemSuffix[stemKey]
+	}
+
+	roots := []string{e.Ingest.LocalEditRoot}
+	resolution := ResolveDestination(roots, e.Ingest.PathTemplate, vars, srcPath, knownSuffix)
+	if stemSuffix != nil && resolution.Suffix != "" {
+		stemSuffix[stemKey] = resolution.Suffix
+	}
+
+	relPath := resolution.RelPath
 	archivePath := filepath.Join(e.Ingest.ArchiveRoot, relPath)
 	localPath := filepath.Join(e.Ingest.LocalEditRoot, relPath)
 	fr.LocalPath = localPath
@@ -187,11 +211,13 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string) OfflineF
 
 	localVerify, err := Verify(localPath, writeRes.FullHash)
 	if err != nil {
+		_ = os.Remove(localPath)
 		fr.Err = fmt.Errorf("verify local copy: %w", err)
 		return fr
 	}
 	fr.LocalVerify = localVerify
 	if !localVerify.Verified {
+		_ = os.Remove(localPath)
 		fr.Err = fmt.Errorf("ingest: local copy verification failed for %s -- safe-eject withheld", srcPath)
 		return fr
 	}

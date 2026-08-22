@@ -279,6 +279,20 @@ func (s *Store) BySourcePath(ctx context.Context, sourcePath string) (Record, bo
 	return rec, true, nil
 }
 
+// ByLocalPath returns the row with local_path = localPath, or ok=false if none exists.
+func (s *Store) ByLocalPath(ctx context.Context, localPath string) (Record, bool, error) {
+	row := s.db.QueryRowContext(ctx, selectCols+" WHERE local_path = ? ORDER BY id DESC LIMIT 1", localPath)
+	rec, err := scanRecord(row)
+	if err == sql.ErrNoRows { //nolint:errorlint // database/sql sentinel, never wrapped
+		return Record{}, false, nil
+	}
+	if err != nil {
+		return Record{}, false, fmt.Errorf("queue: lookup by local_path %s: %w", localPath, err)
+	}
+	return rec, true, nil
+}
+
+
 // Pending returns every row not yet Done(), oldest first -- the set Drain
 // works through on each pass.
 func (s *Store) Pending(ctx context.Context) ([]Record, error) {
