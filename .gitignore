@@ -1,0 +1,53 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+coverage.txt
+junit.xml
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# Build output
+/dist/
+/out/
+/tmp/
+
+# Pre-commit hook tool installs (govulncheck, etc.)
+.bin/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets (use config.example.yaml instead)
+config.yaml
+.env
+
+# Local deploy overrides (real host rules, real hostnames) -- keep a
+# generic compose.yaml checked in; per-deployment specifics go in a
+# gitignored override that `docker compose` merges in automatically.
+compose.override.yaml
+compose.override.yml
+
+# Pre-commit
+.pre-commit-config.yaml.backup

@@ -1,0 +1,15 @@
+# Example configuration for go-http-template.
+# Copy to config.yaml and adjust. Values in ${VAR} are expanded from
+# environment variables at load time -- NOTE: expandEnv does not support
+# `:-default` syntax (it treats everything between ${ and } as one literal
+# env-var name), so "${LISTEN_ADDR:-:8080}" would set listenAddr to that
+# literal string whenever LISTEN_ADDR is unset, not fall back to 8080. Use
+# ${VAR} only for values you actually want to source from the environment;
+# these two match internal/config's own defaultConfig() defaults instead.
+
+listenAddr: ":8080"
+logLevel: "info"
+
+http:
+  readTimeoutSecs: 15
+  writeTimeoutSecs: 15

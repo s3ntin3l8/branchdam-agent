@@ -1,0 +1,73 @@
+# Blueprint: Standard Go Pre-commit Config
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v2.12.2
+    hooks:
+      - id: golangci-lint
+        args: ['--timeout', '5m']
+
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        # `gofmt -l` only LISTS unformatted files and exits 0 regardless --
+        # it never actually fails the hook. `test -z` on its output is what
+        # makes drift block a commit.
+        entry: bash -c 'test -z "$(gofmt -l $(git ls-files "*.go"))"'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: go-vet
+        name: go vet
+        entry: go vet ./...
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: go-mod-tidy
+        name: go mod tidy (check)
+        # `-diff` reports without mutating go.mod/go.sum -- plain `go mod
+        # tidy` rewrites the working tree as a side effect of *checking*.
+        entry: bash -c 'go mod tidy -diff && git diff --exit-code go.mod go.sum'
+        language: system
+        types: [go]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: go-test
+        name: go test
+        entry: go test -race ./...
+        language: system
+        types: [go]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: govulncheck
+        name: govulncheck
+        # Install to a repo-local GOBIN rather than `which govulncheck ||
+        # echo skipping` -- the old form silently no-ops (exit 0) on any
+        # machine that has never had it installed, which is every fresh
+        # clone.
+        entry: bash -c 'GOBIN="$(git rev-parse --show-toplevel)/.bin" go install golang.org/x/vuln/cmd/govulncheck@latest && "$(git rev-parse --show-toplevel)/.bin/govulncheck" ./...'
+        language: system
+        types: [go]
+        pass_filenames: false
+        stages: [pre-push]
