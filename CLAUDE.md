@@ -78,6 +78,7 @@ whatever "latest" resolves to.
 | `cmd/branchdam-agent/luminarsync.go` | `luminar-sync`'s flag parsing and orchestration (open catalog, load node index, run `luminar.Syncer`, print a summary); `--dump-schema` mode for recovering a real catalog's schema |
 | `cmd/branchdam-agent/ingest.go` | `ingest --card <path> --config <path>`: the headless driver over `internal/ingest.Engine`, and the report printer that decides the process exit code / "safe to eject" line |
 | `cmd/branchdam-agent/tray.go` | `tray -config <path>`: builds the same `ingest.Engine` `ingest.go` does, wires `internal/tray.Runner`, the status server, optional self-update check, and optional login-item registration, then calls `tray.Run` (blocks until the tray quits or the process is signalled) |
+| `cmd/branchdam-agent/prune.go` | `prune -config <path> [-dry-run] [-watch]` (branchdam#230-adjacent): deletes an offline-ingested file's `LocalEditRoot` mirror once `POST /api/v1/agent/node-status` confirms the Tier-3 archive copy live and hash-verified. Only ever considers `queue.db` rows with `Record.Done() == true`; see the "Prune never trusts..." invariant below |
 | `internal/branchdam/` | The REST client for branchDAM's `/api/v1/agent/*` contract -- one file per endpoint (`hello.go`, `handshake.go`, `events.go`, `rebase.go`), `types.go` for the hand-synced DTOs, `errors.go` for client-side validation gates and fatal/transient error classification, `conformance_test.go` + `testdata/*.golden.json` for the byte-for-byte fixture tests |
 | `internal/hashing/` | Byte-for-byte port of branchDAM's `FastHash` (sampled xxHash64) and `PerceptualHash` (thin `goimagehash.PerceptionHash` wrapper), plus M1's own addition `StreamingFastHasher` -- a single-pass, `io.Writer`-shaped variant proven byte-identical to `FastHash` by an equivalence test, so the M1 dual-copy writer never re-reads the card a second time just to compute `fast_hash` |
 | `internal/naming/` | Byte-for-byte port of branchDAM's `naming.Stem`/`naming.Analyze` filename normalization |
@@ -89,7 +90,7 @@ whatever "latest" resolves to.
 | `internal/tray/` | The tray shell (issue #3): `tray.go` (`Runner` -- watch-dir/scratch/queue-stub state and `TriggerIngest`, no UI import, unit-tested on any host), `run_supported.go` (`//go:build windows \|\| darwin`, the repo's only `fyne.io/systray` import: menu wiring, card-insertion auto-ingest via `internal/ingest.Detector`), `run_unsupported.go` (`//go:build !windows && !darwin`, returns `ErrUnsupported` -- this is what Linux CI actually builds/tests), `statusserver.go` + `assets/index.html` (embedded `net/http` status page, loopback-only by construction -- see `normalizeLoopback`), `icon.go` (`buildTrayIcon` renders the tray icon in Go at startup -- a PNG wrapped as a single-image `.ico` container, no binary asset committed to the repo; a single `.ico` buffer works for both windows and darwin per `fyne.io/systray`'s own doc comment) |
 | `internal/autostart/` | Login-item registration, off by default (`tray.startOnLogin`): `autostart.go` (untagged plist-XML rendering, unit-tested on Linux), `autostart_darwin.go` (`//go:build darwin`, writes + `launchctl load`s a LaunchAgent plist), `autostart_windows.go` (`//go:build windows`, `golang.org/x/sys/windows/registry` write to `HKCU\...\Run`), `autostart_other.go` (`//go:build !windows && !darwin`, `ErrUnsupported` stub) |
 | `internal/selfupdate/` | Thin wrapper over `github.com/creativeprojects/go-selfupdate` v1.6.0's `DetectLatest`/`UpdateCommand`, gated by `selfUpdate.enabled` (off by default) -- `selfupdate.go` (the implementation, compiled into every build), `result.go` (`CheckResult`) |
-| `internal/config/` | YAML config loader: branchDAM server URL + API key, this workstation's self-asserted `agentId`, the workstation-path -> container-path map `preflight` prints, `ingest:` -- archive/local-edit roots, the naming template, and card-detection polling -- and (this PR) `tray:`/`selfUpdate:` |
+| `internal/config/` | YAML config loader: branchDAM server URL + API key, this workstation's self-asserted `agentId`, the workstation-path -> container-path map `preflight` prints, `ingest:` -- archive/local-edit roots, the naming template, and card-detection polling -- `tray:`/`selfUpdate:`, and `prune:` (`PruneConfig`: `enabled`, `minAgeHours`, opt-in and off by default) |
 | `config.example.yaml` | Reference config with `${VAR}` placeholders |
 | `.github/workflows/` | Thin callers of the reusable workflows in `s3ntin3l8/.github`, minus the Docker jobs the template ships (no image is published from this repo), plus this repo's own `build-windows`/`build-darwin`/`build-darwin-full` jobs in `ci-cd.yml` (not covered by the shared `ci-go.yml`, which only builds for the runner's own host OS/arch) |
 | `.editorconfig` | Shared editor settings (LF, UTF-8, final newline; tabs for Go) |
@@ -257,6 +258,22 @@ whatever "latest" resolves to.
   with a `-tags selfupdate` build-tag split; that split is gone now that the input exists). Drop
   the `govulncheck-ignore` entry once `go-selfupdate` itself stops importing `openpgp`
   unconditionally.
+- **`prune` never trusts a single signal before deleting a file -- server verification, a
+  containment check, and a TOCTOU re-stat all have to agree.** `Record.Done()` alone means
+  nothing about server-side truth (a permanently `RebaseStatus=FAILED` row still passes it);
+  the actual gate is `POST /api/v1/agent/node-status` reporting `found && verified && tier ==
+  TIER3_MASTER_ARCHIVE && lifecycleState in (ACTIVE, HIDDEN)`. Even then, `withinRoot`
+  (`filepath.EvalSymlinks` on both `LocalEditRoot` and the candidate, never a lexical
+  `filepath.Rel`/`HasPrefix` check) must confirm the resolved path is actually under
+  `LocalEditRoot` -- this agent has no `storage.Guard` equivalent, so this check *is* that
+  safety net. And the file is re-`os.Lstat`'d immediately before deletion and compared against
+  `Record.SizeBytes`/`MtimeUnix`, since the node-status round trip is real elapsed time during
+  which the file could change. Sidecar (`queue.KindSidecar`) rows are never looked up at all --
+  they never get their own `EVENT_NODE_CREATED`, so their `NodeUUID` can never resolve
+  server-side. This is branchdam#230-adjacent, not a fix for it: only an offline-ingested file's
+  own `LocalEditRoot` mirror is ever prunable, never real Tier-1 `LOCAL_SCRATCH` (Resolve
+  caches/proxies) -- see branchDAM's `docs/workflow-coverage.md` item 12 for why that stays
+  architecturally blocked.
 
 ## CI/CD — uses centralized reusable workflows
 

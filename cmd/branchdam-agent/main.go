@@ -2,7 +2,10 @@
 // of the original spec). Subcommands landed so far: `preflight` (M0),
 // `luminar-sync` (M4), `ingest` (M1's headless ingest-core driver, plus
 // `-offline` for M2's offline queue), `queue-drain` (M2, drains queue.db on
-// reconnect), and `tray` (M1's tray shell, issue #3 -- a thin driver over
+// reconnect), `prune` (branchdam#230-adjacent -- deletes an offline-ingested
+// file's LocalEditRoot mirror once the server confirms the Tier-3 copy is
+// live and hash-verified; see internal/config.PruneConfig's doc comment for
+// scope), and `tray` (M1's tray shell, issue #3 -- a thin driver over
 // the same internal/ingest.Engine `ingest` uses; see internal/tray's doc
 // comment). See docs/roadmap.md in the branchdam repo and this repo's
 // CLAUDE.md.
@@ -42,6 +45,8 @@ func run(args []string) int {
 		return runIngestCmd(args[1:])
 	case "queue-drain":
 		return runQueueDrainCmd(args[1:])
+	case "prune":
+		return runPruneCmd(args[1:])
 	case "tray":
 		return runTrayCmd(args[1:])
 	case "-h", "--help", "help":
@@ -65,6 +70,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  luminar-sync  read a Luminar catalog.db and emit EVENT_EDGE_ATTACHED for edit->source pairs")
 	fmt.Fprintln(os.Stderr, "  ingest        ingest a card's contents: dual-copy verified write + submit (-offline for issue #4's offline queue flow)")
 	fmt.Fprintln(os.Stderr, "  queue-drain   drain queue.db on reconnect: submit queued events, copy archive bytes, rebase to Tier-3")
+	fmt.Fprintln(os.Stderr, "  prune         delete offline-ingested files' LocalEditRoot mirror once the server confirms them verified (-dry-run to preview)")
 	fmt.Fprintln(os.Stderr, "  tray          run the tray-resident shell (windows/darwin only) over the same ingest core")
 	fmt.Fprintln(os.Stderr, "  version       print the agent's own version")
 }

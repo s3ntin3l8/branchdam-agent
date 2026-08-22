@@ -26,6 +26,7 @@ type Config struct {
 	PathMappings []PathMapping    `yaml:"pathMappings"`
 	Ingest       IngestConfig     `yaml:"ingest"`
 	Offline      OfflineConfig    `yaml:"offline"`
+	Prune        PruneConfig      `yaml:"prune"`
 	Tray         TrayConfig       `yaml:"tray"`
 	SelfUpdate   SelfUpdateConfig `yaml:"selfUpdate"`
 }
@@ -51,6 +52,27 @@ type OfflineConfig struct {
 	// (three retries, then FAILED, with the failure looking like an auth
 	// problem -- see internal/branchdam's HTTPError doc comments).
 	Tier0ContainerRoot string `yaml:"tier0ContainerRoot"`
+}
+
+// PruneConfig configures the `prune` subcommand (branchdam#230-adjacent):
+// deleting this workstation's own LocalEditRoot mirror of a file once
+// POST /api/v1/agent/node-status confirms the Tier-3 archive copy is live
+// and hash-verified. Only applies to offline-ingested files tracked in
+// queue.db -- a plain online `ingest` leaves no durable local-path ledger,
+// so it is out of scope. This is NOT real Tier-1 LOCAL_SCRATCH pruning
+// (Resolve caches/proxies) -- that stays architecturally blocked; see
+// branchdam's docs/workflow-coverage.md item 12.
+type PruneConfig struct {
+	// Enabled gates the entire subcommand -- false (the default) means
+	// `prune`/`prune -watch` refuse to run at all, so accidentally invoking
+	// this on a machine that hasn't opted in can't delete anything.
+	Enabled bool `yaml:"enabled"`
+	// MinAgeHours is the grace period after a file's own mtime (not when it
+	// was queued/ingested -- deliberately mirroring branchDAM's own
+	// cacheTtlHours basis) before it becomes prune-eligible, even if the
+	// server already reports it verified. Defaults to 24 when Enabled is
+	// true and this is left at its zero value.
+	MinAgeHours int `yaml:"minAgeHours"`
 }
 
 // TrayConfig configures the M1 tray shell (issue #3): the embedded

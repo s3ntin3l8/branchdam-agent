@@ -190,6 +190,7 @@ func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID 
 		}
 
 		fastHash := r.FastHash
+		fullHash := r.FullHash
 		_, err := client.Rebase(ctx, branchdam.RebaseRequest{
 			NodeUUID:   r.NodeUUID,
 			TargetPath: r.ArchiveContainerPath,
@@ -198,6 +199,7 @@ func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID 
 			FileExt:    r.FileExt,
 			SizeBytes:  r.SizeBytes,
 			FastHash:   &fastHash,
+			FullHash:   &fullHash,
 		})
 		if err != nil {
 			var httpErr *branchdam.HTTPError

@@ -73,6 +73,22 @@ offline:
   # section before relying on -offline in production.
   tier0ContainerRoot: "/storage/staging/workstation-01"
 
+# The `prune` subcommand (branchdam#230-adjacent -- NOT real Tier-1
+# LOCAL_SCRATCH/NLE-cache pruning, which stays architecturally blocked; see
+# branchDAM's docs/workflow-coverage.md item 12). Deletes an offline-ingested
+# file's ingest.localEditRoot mirror once POST /api/v1/agent/node-status
+# confirms its Tier-3 archive copy is live and hash-verified. Only ever
+# considers queue.db rows -- requires offline.queueDbPath above to be set.
+prune:
+  # Off by default, on purpose: opt in explicitly per workstation before
+  # `prune`/`prune -watch` will delete anything at all.
+  enabled: false
+  # Grace period, in hours, after a file's own mtime (not when it was
+  # queued/ingested -- deliberately mirroring branchDAM's own
+  # cacheTtlHours basis) before it becomes prune-eligible, even once the
+  # server reports it verified. Defaults to 24 if left unset while enabled.
+  minAgeHours: 24
+
 # The tray shell (branchdam-agent tray). Both sub-sections are additive --
 # the headless preflight/ingest/luminar-sync subcommands never read this.
 tray:
