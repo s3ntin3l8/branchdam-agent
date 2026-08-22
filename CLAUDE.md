@@ -88,7 +88,7 @@ whatever "latest" resolves to.
 | `internal/ingest/` | M1's SD-card ingest core, UI-free: `carddetect.go` (poll-based removable-volume detection), `writer.go` (one-read/two-write `DualWrite`), `verify.go`+`verify_linux.go`+`verify_other.go` (cache-defeating re-read, O_DIRECT on Linux with a documented buffered-floor fallback), `metadata.go` (exiftool extraction ported from branchDAM's `probe.go`, sidecar merge, `capturedAt` fallback chain), `srt.go` (DJI GPS-on-video wiring over `internal/djisrt`), `naming.go` (destination path template), `pathmap.go` (workstation->container path translation), `extensions.go` (video/image extension sets, copied from branchDAM's `pipeline.videoExts`/`imageExts` for parity), `ingest.go` (`Engine`, the orchestrator both the CLI and a later tray drive) |
 | `internal/tray/` | The tray shell (issue #3): `tray.go` (`Runner` -- watch-dir/scratch/queue-stub state and `TriggerIngest`, no UI import, unit-tested on any host), `run_supported.go` (`//go:build windows \|\| darwin`, the repo's only `fyne.io/systray` import: menu wiring, card-insertion auto-ingest via `internal/ingest.Detector`), `run_unsupported.go` (`//go:build !windows && !darwin`, returns `ErrUnsupported` -- this is what Linux CI actually builds/tests), `statusserver.go` + `assets/index.html` (embedded `net/http` status page, loopback-only by construction -- see `normalizeLoopback`), `icon.go` (`buildTrayIcon` renders the tray icon in Go at startup -- a PNG wrapped as a single-image `.ico` container, no binary asset committed to the repo; a single `.ico` buffer works for both windows and darwin per `fyne.io/systray`'s own doc comment) |
 | `internal/autostart/` | Login-item registration, off by default (`tray.startOnLogin`): `autostart.go` (untagged plist-XML rendering, unit-tested on Linux), `autostart_darwin.go` (`//go:build darwin`, writes + `launchctl load`s a LaunchAgent plist), `autostart_windows.go` (`//go:build windows`, `golang.org/x/sys/windows/registry` write to `HKCU\...\Run`), `autostart_other.go` (`//go:build !windows && !darwin`, `ErrUnsupported` stub) |
-| `internal/selfupdate/` | Thin wrapper over `github.com/creativeprojects/go-selfupdate` v1.6.0's `DetectLatest`/`UpdateCommand`, gated by `selfUpdate.enabled` (off by default) AND a `-tags selfupdate` build tag (see the key invariant below for why the build tag exists) -- `selfupdate.go` (`//go:build selfupdate`, the real implementation), `selfupdate_stub.go` (`//go:build !selfupdate`, returns `ErrNotCompiledIn`, what every default build actually links), `result.go` (untagged `CheckResult`, identical either way) |
+| `internal/selfupdate/` | Thin wrapper over `github.com/creativeprojects/go-selfupdate` v1.6.0's `DetectLatest`/`UpdateCommand`, gated by `selfUpdate.enabled` (off by default) -- `selfupdate.go` (the implementation, compiled into every build), `result.go` (`CheckResult`) |
 | `internal/config/` | YAML config loader: branchDAM server URL + API key, this workstation's self-asserted `agentId`, the workstation-path -> container-path map `preflight` prints, `ingest:` -- archive/local-edit roots, the naming template, and card-detection polling -- and (this PR) `tray:`/`selfUpdate:` |
 | `config.example.yaml` | Reference config with `${VAR}` placeholders |
 | `.github/workflows/` | Thin callers of the reusable workflows in `s3ntin3l8/.github`, minus the Docker jobs the template ships (no image is published from this repo), plus this repo's own `build-windows`/`build-darwin`/`build-darwin-full` jobs in `ci-cd.yml` (not covered by the shared `ci-go.yml`, which only builds for the runner's own host OS/arch) |
@@ -244,26 +244,18 @@ whatever "latest" resolves to.
   operator sets the corresponding config flag.** `tray.startOnLogin: false` and
   `selfUpdate.enabled: false` in `config.example.yaml`; `cmd/branchdam-agent/tray.go` reads both
   directly off `config.Config` with no separate CLI override that could silently re-enable either.
-- **`internal/selfupdate`'s real implementation only compiles into the binary with an explicit
-  `-tags selfupdate` build flag -- a compile-time gate on top of, not instead of,
-  `selfUpdate.enabled`.** Forced by a real, currently-unfixable govulncheck finding, not a style
-  choice: `go-selfupdate` v1.6.0's top-level package (`validate.go`) imports
+- **`internal/selfupdate`'s real implementation is compiled into every build, no build tag
+  required.** `go-selfupdate` v1.6.0's top-level package (`validate.go`) imports
   `golang.org/x/crypto/openpgp` unconditionally (regardless of which `Validator` you actually
   configure), which is `GO-2026-5932` -- "unmaintained, unsafe by design ... Fixed in: N/A" -- and
-  v1.6.0 is `go-selfupdate`'s newest tag, so there is no upgrade path either. `govulncheck` runs
-  unconditionally inside this repo's **required** `test-go / lint-and-test` check (the shared
-  `s3ntin3l8/.github/ci-go.yml` workflow, no ignore-list input this repo can reach), so with the
-  import compiled in by default that required check fails on every push, permanently. Verified
-  before adding the tag: `govulncheck ./...` (no tags) is clean; `GOFLAGS=-tags=selfupdate
-  govulncheck ./...` reproduces `GO-2026-5932` exactly. `selfupdate_stub.go`
-  (`//go:build !selfupdate`) is what every default build (`make build`, `make check`, CI) actually
-  links -- same `Check`/`Apply`/`CheckResult` surface, so `cmd/branchdam-agent/tray.go` needs no
-  build tag of its own and behaves identically either way, just returning
-  `selfupdate.ErrNotCompiledIn` (surfaced truthfully on the tray status page, not silently
-  swallowed) when `selfUpdate.enabled: true` is set against a default-built binary. **Do not
-  "simplify" this back to one file** -- see issue #14 for the real fix, which is upstream
-  (`go-selfupdate` drops `openpgp`) or a shared-workflow change (`ci-go.yml` growing a
-  vulncheck-ignore input), not something to resolve in this repo alone.
+  v1.6.0 is `go-selfupdate`'s newest tag, so there is no upgrade path either. This repo's
+  **required** `test-go / lint-and-test` check suppresses that specific finding via
+  `s3ntin3l8/.github/ci-go.yml`'s `govulncheck-ignore` input (`ci-cd.yml`'s `test-go` job passes
+  `govulncheck-ignore: "GO-2026-5932"`) -- see `s3ntin3l8/.github#49` for that shared-workflow
+  change and issue #14 for the history (this repo previously worked around the lack of that input
+  with a `-tags selfupdate` build-tag split; that split is gone now that the input exists). Drop
+  the `govulncheck-ignore` entry once `go-selfupdate` itself stops importing `openpgp`
+  unconditionally.
 
 ## CI/CD — uses centralized reusable workflows
 

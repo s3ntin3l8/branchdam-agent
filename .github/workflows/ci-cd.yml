@@ -16,6 +16,11 @@ jobs:
     uses: s3ntin3l8/.github/.github/workflows/ci-go.yml@main
     with:
       coverage-fail-under: "0"
+      # go-selfupdate v1.6.0 unconditionally imports golang.org/x/crypto/openpgp
+      # (GO-2026-5932, "Fixed in: N/A", no upstream upgrade path). Reviewed and
+      # tracked in issue #14 -- re-check periodically whether an upstream fix
+      # exists and drop this once one does.
+      govulncheck-ignore: "GO-2026-5932"
     secrets: inherit
 
   # Not part of ci-go.yml's own lint step -- .golangci.yml declares

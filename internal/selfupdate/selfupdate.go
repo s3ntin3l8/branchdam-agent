@@ -1,40 +1,19 @@
-//go:build selfupdate
-
 // Package selfupdate wraps github.com/creativeprojects/go-selfupdate v1.6.0
 // behind a small surface, gated entirely by config.SelfUpdateConfig.Enabled
 // (default false -- see issue #3 and the plan doc's UI-stack section: "wire
 // but off by default").
 //
-// The real implementation in THIS file only compiles into the binary with
-// an explicit `-tags selfupdate` build flag -- an outer gate on top of the
-// runtime config flag, not a replacement for it. This is a deliberate
-// deviation from the issue's literal "off by default via config," forced by
-// a real, unfixable finding: go-selfupdate v1.6.0's top-level package
-// (validate.go, unconditionally, regardless of which Validator you actually
-// use) imports golang.org/x/crypto/openpgp, which govulncheck flags as
-// GO-2026-5932 ("unmaintained, unsafe by design ... Fixed in: N/A" -- there
-// is no patched x/crypto version to upgrade to, and v1.6.0 is
-// go-selfupdate's newest tag, so there is no upgrade path either).
-// govulncheck runs unconditionally inside this repo's REQUIRED
-// `test-go / lint-and-test` check (the shared
-// s3ntin3l8/.github/ci-go.yml workflow, which exposes no vulncheck-ignore
-// input this repo can reach) -- with the import compiled in by default, the
-// required check fails on every push, permanently. Verified before adding
-// the build tag: `govulncheck ./...` (no tags) is clean; `GOFLAGS=-tags=selfupdate
-// govulncheck ./...` reproduces GO-2026-5932, confirming the tag is what's
-// actually load-bearing here, not just a file that happens not to be
-// imported by anything.
-//
-// selfupdate_stub.go is the `//go:build !selfupdate` counterpart everything
-// else (default `make build`, `make check`, CI) actually compiles --
-// same Check/Apply/CheckResult surface, so cmd/branchdam-agent/tray.go needs
-// no build tag of its own and calls the same two functions either way.
-//
-// The proper fix is one of: go-selfupdate drops openpgp from its default
-// import graph upstream, or ci-go.yml grows a vulncheck-ignore input (a
-// shared-workflow change, not a per-repo workaround -- same pattern as this
-// repo's other shared-workflow-only fixes). Track the compromise, don't
-// just carry it silently: see issue #14.
+// This package used to be split behind a `-tags selfupdate` build tag,
+// because go-selfupdate v1.6.0's top-level package (validate.go,
+// unconditionally, regardless of which Validator you actually use) imports
+// golang.org/x/crypto/openpgp, which govulncheck flags as GO-2026-5932
+// ("unmaintained, unsafe by design ... Fixed in: N/A"), and that check runs
+// inside this repo's REQUIRED `test-go / lint-and-test` check. That's no
+// longer necessary: s3ntin3l8/.github/ci-go.yml's govulncheck-ignore input
+// (added for this exact case, see s3ntin3l8/.github#49) lets this repo's CI
+// suppress GO-2026-5932 specifically -- see issue #14 for the full history
+// and re-check periodically whether go-selfupdate itself has dropped the
+// unconditional openpgp import, at which point the ignore entry can go too.
 package selfupdate
 
 import (
