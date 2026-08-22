@@ -1,0 +1,40 @@
+# Codecov reads this file from the default branch (main), not from the PR
+# that introduces it -- a PR adding/editing this file is itself still
+# evaluated under whatever config is already on main, so this PR's own
+# Codecov status runs against no config (Codecov defaults) rather than
+# against the targets below.
+#
+# 75% project/patch target, informational rather than blocking: as of this
+# change the repo sits at 66.31% (Codecov's line-and-partials basis, which
+# reads lower than a local `go tool cover` statement percentage -- see the
+# PR that introduces this file for both numbers side by side). Coverage is
+# being raised toward the target in the same PR, but keeping the status
+# informational rather than default avoids a hard-failing gate landing on
+# the very PR meant to close the gap, and gives headroom before flipping it
+# to blocking once the repo is consistently above 75%.
+#
+# There is no equivalent `node` flag here (unlike branchdam's codecov.yml) --
+# this repo has no web/ frontend, it's a headless-capable Go binary with an
+# embedded status UI served from a Vite bundle checked in as a static asset,
+# not built/tested by this repo's own CI.
+coverage:
+  status:
+    project:
+      default:
+        target: 75%
+        informational: true
+    patch:
+      default:
+        target: 75%
+        informational: true
+
+# Matches the `flags:` value the shared ci-go.yml reusable workflow
+# (s3ntin3l8/.github) already uploads coverage under.
+flags:
+  go:
+    paths:
+      - internal/
+      - cmd/
+
+comment:
+  layout: "reach, diff, flags, files"
