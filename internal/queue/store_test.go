@@ -248,3 +248,63 @@ func TestBySourcePathResume(t *testing.T) {
 		t.Errorf("NodeUUID = %q, want uuid-resume", got.NodeUUID)
 	}
 }
+
+// TestOpenFailsWhenDirectoryDoesNotExist covers Open's error branches
+// (sql.Open/init failing) -- a path under a nonexistent parent directory
+// can never succeed.
+func TestOpenFailsWhenDirectoryDoesNotExist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "no-such-subdir", "nested", "queue.db")
+	if _, err := Open(path); err == nil {
+		t.Fatal("expected Open to fail when the parent directory does not exist")
+	}
+}
+
+// TestQueryAndExecErrorBranchesOnClosedStore exercises every method's SQL
+// error-wrap branch at once: every query/exec against an already-closed
+// *sql.DB deterministically fails, which is the cheapest reliable way to
+// reach each method's `return nil, fmt.Errorf(...)` line without needing a
+// real SQL failure condition (corrupt file, permission denial, etc.).
+func TestQueryAndExecErrorBranchesOnClosedStore(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ctx := context.Background()
+	if _, _, err := s.ByNodeUUID(ctx, "x"); err == nil {
+		t.Error("ByNodeUUID on a closed store: expected an error")
+	}
+	if _, _, err := s.BySourcePath(ctx, "/x"); err == nil {
+		t.Error("BySourcePath on a closed store: expected an error")
+	}
+	if _, err := s.Pending(ctx); err == nil {
+		t.Error("Pending on a closed store: expected an error")
+	}
+	if _, err := s.All(ctx); err == nil {
+		t.Error("All on a closed store: expected an error")
+	}
+	if err := s.InsertPending(ctx, NewRecord{NodeUUID: "x", Kind: KindMedia}); err == nil {
+		t.Error("InsertPending on a closed store: expected an error")
+	}
+	if err := s.MarkNodeCreatedSubmitted(ctx, "x", "evt", time.Now()); err == nil {
+		t.Error("MarkNodeCreatedSubmitted on a closed store: expected an error")
+	}
+	if err := s.MarkNodeCreatedAttempt(ctx, "x", "err", time.Now()); err == nil {
+		t.Error("MarkNodeCreatedAttempt on a closed store: expected an error")
+	}
+	if err := s.MarkArchiveCopyDone(ctx, "x"); err == nil {
+		t.Error("MarkArchiveCopyDone on a closed store: expected an error")
+	}
+	if err := s.MarkArchiveCopyAttempt(ctx, "x", "err", time.Now()); err == nil {
+		t.Error("MarkArchiveCopyAttempt on a closed store: expected an error")
+	}
+	if err := s.MarkRebaseDone(ctx, "x"); err == nil {
+		t.Error("MarkRebaseDone on a closed store: expected an error")
+	}
+	if err := s.MarkRebaseAttempt(ctx, "x", "err", time.Now()); err == nil {
+		t.Error("MarkRebaseAttempt on a closed store: expected an error")
+	}
+	if err := s.MarkRebaseFailed(ctx, "x", "err"); err == nil {
+		t.Error("MarkRebaseFailed on a closed store: expected an error")
+	}
+}

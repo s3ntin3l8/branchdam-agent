@@ -127,6 +127,30 @@ func TestDualWriteRefusesToOverwriteExistingDestination(t *testing.T) {
 	}
 }
 
+func TestDualWriteSourceDoesNotExist(t *testing.T) {
+	dir := t.TempDir()
+	_, err := DualWrite(filepath.Join(dir, "does-not-exist.bin"), filepath.Join(dir, "archive.bin"), filepath.Join(dir, "local.bin"))
+	if err == nil {
+		t.Fatal("expected an error for a nonexistent source file")
+	}
+}
+
+// TestCreateExclusiveMkdirFails covers createExclusive's MkdirAll error
+// branch: a path component that already exists as a regular file (not a
+// directory) can never be created as a directory underneath it.
+func TestCreateExclusiveMkdirFails(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// blocker is a regular file; treating it as a directory component must fail.
+	_, err := createExclusive(filepath.Join(blocker, "subdir", "dest.bin"))
+	if err == nil {
+		t.Fatal("expected createExclusive to fail when a path component is a regular file")
+	}
+}
+
 // TestDualWriteCleansUpArchiveCopyWhenLocalCreateFails proves that when the
 // SECOND destination's O_EXCL create fails (a pre-existing file at
 // localPath, or any other setup error), DualWrite does not leave a

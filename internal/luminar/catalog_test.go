@@ -166,6 +166,83 @@ func TestOpenRejectsPathWithQueryOrFragmentCharacters(t *testing.T) {
 	}
 }
 
+// TestEditSourcePairsRejectsEmptyPath covers the loud-failure branch for a
+// query that returns a NULL/empty source_path or edit_path -- almost
+// certainly the wrong column against the guessed schema. Surfacing this
+// here, rather than silently skipping the row, is cheaper to debug than a
+// missing pair discovered three layers up in the syncer.
+func TestEditSourcePairsRejectsEmptyPath(t *testing.T) {
+	dir := t.TempDir()
+	path := createFixtureCatalog(t, dir)
+
+	ctx := context.Background()
+	cat, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = cat.Close() }()
+
+	// Selects ZFILEPATH twice as a stand-in for edit_path, so edit_path is
+	// never empty -- swap in an empty-string literal for source_path
+	// instead to hit the loud-failure branch deterministically.
+	_, err = cat.EditSourcePairs(ctx, `SELECT '' AS source_path, ZFILEPATH AS edit_path, Z_PK AS source_row_id, Z_PK AS edit_row_id FROM ZASSET LIMIT 1`)
+	if err == nil {
+		t.Fatal("expected an error for a query returning an empty source_path, got nil")
+	}
+}
+
+// TestEditSourcePairsQueryError covers db.QueryContext's own error branch --
+// a query referencing a table that doesn't exist in this catalog's schema
+// (the most likely real-world cause: a guessed query against a Luminar
+// version whose schema has since changed).
+func TestEditSourcePairsQueryError(t *testing.T) {
+	dir := t.TempDir()
+	path := createFixtureCatalog(t, dir)
+
+	ctx := context.Background()
+	cat, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = cat.Close() }()
+
+	_, err = cat.EditSourcePairs(ctx, `SELECT a, b, c, d FROM ZNO_SUCH_TABLE`)
+	if err == nil {
+		t.Fatal("expected an error for a query against a nonexistent table, got nil")
+	}
+}
+
+// TestDumpSchemaQueryUsesRealSQLiteMaster is a light sanity check that
+// DumpSchema's SQL/type/name triples are non-degenerate for a CREATE
+// TABLE statement, not just that the two known table names appear (already
+// covered by TestDumpSchema) -- confirms the SQL column itself is
+// populated, which --dump-schema's whole value proposition depends on.
+func TestDumpSchemaQueryUsesRealSQLiteMaster(t *testing.T) {
+	dir := t.TempDir()
+	path := createFixtureCatalog(t, dir)
+
+	ctx := context.Background()
+	cat, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = cat.Close() }()
+
+	objs, err := cat.DumpSchema(ctx)
+	if err != nil {
+		t.Fatalf("DumpSchema: %v", err)
+	}
+	for _, o := range objs {
+		if o.Type == "table" && o.Name == "ZASSET" {
+			if o.SQL == "" {
+				t.Error("ZASSET's SQL column is empty, want its CREATE TABLE statement")
+			}
+			return
+		}
+	}
+	t.Fatal("ZASSET not found in schema dump")
+}
+
 func TestOpenNonexistentFile(t *testing.T) {
 	// mode=ro against a file that doesn't exist must fail, not silently
 	// create one -- that's the whole point of read-only access to a

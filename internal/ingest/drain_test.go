@@ -383,3 +383,29 @@ func TestDrainHandshakeFailureDoesNotAbortPass(t *testing.T) {
 		t.Errorf("expected the rest of the pass to proceed despite a handshake failure, got %+v", stats)
 	}
 }
+
+// TestBackoffFor pins the exponential backoff curve directly: attempts < 1
+// clamps to 1 (backoffBase), doubling each attempt thereafter, capped at
+// backoffCap. Everything else in this file exercises backoffFor only
+// indirectly through Drain's retry paths.
+func TestBackoffFor(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	cases := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{0, backoffBase}, // clamps to attempts=1
+		{1, backoffBase}, // 2s
+		{2, 4 * time.Second},
+		{3, 8 * time.Second},
+		{5, 32 * time.Second},
+		{20, backoffCap}, // capped well before 20 doublings
+	}
+	for _, tc := range cases {
+		got := backoffFor(tc.attempts, now)
+		want := now.Add(tc.want)
+		if !got.Equal(want) {
+			t.Errorf("backoffFor(%d) = %v, want %v (delay %v)", tc.attempts, got, want, tc.want)
+		}
+	}
+}

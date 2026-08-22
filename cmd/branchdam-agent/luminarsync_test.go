@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
+	"github.com/s3ntin3l8/branchdam-agent/internal/luminar"
 )
 
 // createTestCatalog builds a minimal catalog.db shaped like
@@ -238,5 +242,51 @@ func TestRunLuminarSyncMissingNodeIndexFlag(t *testing.T) {
 	got := run([]string{"luminar-sync", "-catalog", catalogPath})
 	if got != 2 {
 		t.Errorf("run([luminar-sync]) with no -node-index = %d, want 2", got)
+	}
+}
+
+// failingWriter always errors, for covering runDumpSchema's write-error
+// branch (e.g. stdout closed by the caller mid-write).
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, fmt.Errorf("simulated write failure")
+}
+
+func TestRunDumpSchemaCatalogError(t *testing.T) {
+	dir := t.TempDir()
+	catalogPath := createTestCatalog(t, dir)
+
+	cat, err := luminar.Open(context.Background(), catalogPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Closing the catalog before DumpSchema forces its query to fail,
+	// covering runDumpSchema's error branch directly rather than only its
+	// happy path (already covered by TestRunLuminarSyncDumpSchema).
+	if err := cat.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var buf bytes.Buffer
+	got := runDumpSchema(context.Background(), &buf, cat)
+	if got != 1 {
+		t.Errorf("runDumpSchema against a closed catalog = %d, want 1", got)
+	}
+}
+
+func TestRunDumpSchemaWriteError(t *testing.T) {
+	dir := t.TempDir()
+	catalogPath := createTestCatalog(t, dir)
+
+	cat, err := luminar.Open(context.Background(), catalogPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = cat.Close() }()
+
+	got := runDumpSchema(context.Background(), failingWriter{}, cat)
+	if got != 1 {
+		t.Errorf("runDumpSchema with a failing writer = %d, want 1", got)
 	}
 }
