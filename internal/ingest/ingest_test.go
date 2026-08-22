@@ -163,3 +163,33 @@ func TestIngestCardMissingPathMappingFailsThatFile(t *testing.T) {
 		t.Error("must not submit an event when the container path can't be constructed")
 	}
 }
+
+func TestIngestCardRequireUnbufferedFailsOnBufferedFloor(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "photo.jpg"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeClient{}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+	e.Ingest.RequireUnbuffered = true
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	if len(res.Files) != 1 {
+		t.Fatalf("got %d files, want 1", len(res.Files))
+	}
+	fr := res.Files[0]
+	// On tmpfs / Linux tmp dir, O_DIRECT returns EINVAL, so method is buffered_floor.
+	if fr.ArchiveVerify.Method == VerifyMethodBufferedFloor || fr.LocalVerify.Method == VerifyMethodBufferedFloor {
+		if fr.Err == nil {
+			t.Error("expected error when RequireUnbuffered=true and method is buffered_floor")
+		}
+	}
+}

@@ -134,3 +134,23 @@ selfUpdate:
 		t.Errorf("got %+v", cfg.SelfUpdate)
 	}
 }
+
+func TestLoadRequireUnbuffered(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+ingest:
+  requireUnbuffered: true
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Ingest.RequireUnbuffered {
+		t.Error("expected RequireUnbuffered=true")
+	}
+}
