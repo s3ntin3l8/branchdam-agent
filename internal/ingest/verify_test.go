@@ -31,7 +31,9 @@ func TestVerifyMatchAndMismatch(t *testing.T) {
 	}
 
 	h := blake3.New()
-	h.Write(content)
+	if _, err := h.Write(content); err != nil {
+		t.Fatal(err)
+	}
 	wantHash := string(h.Sum(nil))
 	wantHashHex := ""
 	for _, b := range h.Sum(nil) {

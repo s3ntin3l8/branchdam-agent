@@ -154,4 +154,3 @@ ingest:
 		t.Error("expected RequireUnbuffered=true")
 	}
 }
-
