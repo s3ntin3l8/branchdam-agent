@@ -6,9 +6,11 @@ report to branchDAM over its existing `/api/v1/agent/*` REST contract. See branc
 `.claude/plans/can-we-walk-through-sharded-lighthouse.md` for the full phased plan this repo
 implements.
 
-Landed so far: **M0** (repo scaffold + REST client), **M3** (DaVinci Resolve post-render hook,
-`hooks/resolve/`), and **M4** (Luminar `catalog.db` reader, this PR). There is still no tray UI,
-card ingest, or offline queue -- see [CLAUDE.md](CLAUDE.md) for the milestone breakdown.
+Landed so far: **M0** (repo scaffold + REST client), the SD-card ingest core half of **M1**
+(dual-copy verified write, metadata extraction, headless `ingest` -- no tray UI yet), **M2**
+(offline queue + rebase handoff, this PR), **M3** (DaVinci Resolve post-render hook,
+`hooks/resolve/`), and **M4** (Luminar `catalog.db` reader). There is still no tray UI -- see
+[CLAUDE.md](CLAUDE.md) for the milestone breakdown.
 
 ## What's here today
 
@@ -24,6 +26,17 @@ card ingest, or offline queue -- see [CLAUDE.md](CLAUDE.md) for the milestone br
 - `cmd/branchdam-agent/` -- a `preflight` subcommand: checks the configured branchDAM server is
   reachable and returns its version, checks `exiftool` on `PATH`, and prints the configured
   workstation-path -> container-path mappings.
+- `internal/ingest/` -- the SD-card ingest core: one-read/two-write dual-copy writer, a
+  cache-defeating verified re-read (`fsync`+close+reopen floor, unbuffered/`O_DIRECT` where the
+  platform supports it), DJI `.srt` telemetry parsing for the video's own GPS fields, and
+  submission via `internal/branchdam`. Headless via `ingest -card <path>`.
+- `internal/queue/`, `internal/ingest`'s `IngestCardOffline`/`Drain` -- M2's offline queue
+  (`ingest -offline`, `queue-drain`): every intended event persisted to `queue.db`
+  (`modernc.org/sqlite`) before any network call, so a workstation with no route to the NAS can
+  still ingest a card, then finish the archive copy and `POST /api/v1/agent/rebase` once
+  reconnected -- see [`docs/offline-queue.md`](docs/offline-queue.md) for the full state machine,
+  the copy-before-rebase ordering guarantee, and the server-side prerequisite this depends on
+  (**not yet deployed** as of this PR -- see that doc's first section).
 - `internal/luminar/`, `internal/nodeindex/` -- a `luminar-sync` subcommand: reads a Luminar
   `catalog.db` read-only (`?mode=ro`, never `?immutable=1`) and emits `EVENT_EDGE_ATTACHED` at
   `tier: 2, confidence: 0.89` for each edit->source pair it finds and can resolve to known
@@ -54,7 +67,27 @@ cp config.example.yaml config.yaml
 go run ./cmd/branchdam-agent preflight -config config.yaml
 ```
 
-### 4. Sync a Luminar catalog
+### 4. Ingest an SD card, including offline
+
+```sh
+# Online (server reachable): dual-copy write, immediate EVENT_NODE_CREATED.
+go run ./cmd/branchdam-agent ingest -config config.yaml -card /media/$USER/UNTITLED
+
+# Offline (no route to the NAS/server): local copy only, everything else queued.
+go run ./cmd/branchdam-agent ingest -config config.yaml -card /media/$USER/UNTITLED -offline
+
+# On reconnect: submit queued events, copy archive bytes, rebase to Tier-3.
+go run ./cmd/branchdam-agent queue-drain -config config.yaml
+# Or keep draining until connectivity returns:
+go run ./cmd/branchdam-agent queue-drain -config config.yaml -watch
+```
+
+`-offline` requires `offline.queueDbPath` and `offline.tier0ContainerRoot` set in `config.yaml`
+(see `config.example.yaml`), and branchDAM must have a matching `TIER0_LOCAL_STAGING` storage
+location configured -- see [`docs/offline-queue.md`](docs/offline-queue.md) before relying on this
+against a real deployment.
+
+### 5. Sync a Luminar catalog
 
 ```sh
 # Dry run first -- resolves and logs what would be emitted, never contacts the server:

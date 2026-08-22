@@ -25,6 +25,30 @@ type Config struct {
 	AgentID      string        `yaml:"agentId"`
 	PathMappings []PathMapping `yaml:"pathMappings"`
 	Ingest       IngestConfig  `yaml:"ingest"`
+	Offline      OfflineConfig `yaml:"offline"`
+}
+
+// OfflineConfig configures M2's offline queue (issue #4): where queue.db
+// lives and the Tier-0 container path this workstation's EVENT_NODE_CREATED
+// payloads target while offline. See internal/queue's package doc and
+// internal/ingest/drain.go for the state machine this backs.
+type OfflineConfig struct {
+	// QueueDBPath is where queue.db is created/opened. Must be writable and
+	// persistent across a restart -- this is the entire crash-safety
+	// contract's storage. Required for `ingest -offline` and `queue-drain`;
+	// unused otherwise.
+	QueueDBPath string `yaml:"queueDbPath"`
+	// Tier0ContainerRoot is the server-container path prefix
+	// EVENT_NODE_CREATED targets while a file's archive bytes don't exist
+	// anywhere durable yet -- e.g. "/storage/staging/workstation-01" (the
+	// plan's recommended per-machine subtree, since there is no per-agent
+	// identity server-side to disambiguate an otherwise-shared root). The
+	// branchDAM server must have a TIER0_LOCAL_STAGING storage_locations
+	// entry whose rootPath resolves to (a container-side view of) this
+	// prefix; see docs/offline-queue.md for what happens if it doesn't
+	// (three retries, then FAILED, with the failure looking like an auth
+	// problem -- see internal/branchdam's HTTPError doc comments).
+	Tier0ContainerRoot string `yaml:"tier0ContainerRoot"`
 }
 
 // IngestConfig configures M1's SD-card ingest core: where the two copies

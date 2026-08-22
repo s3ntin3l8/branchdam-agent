@@ -13,6 +13,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/naming"
 	"github.com/s3ntin3l8/branchdam-agent/internal/phash"
+	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 )
 
 // nodeCreator is the subset of *branchdam.Client's surface Engine needs, so
@@ -32,6 +33,19 @@ type Engine struct {
 	Ingest   config.IngestConfig
 	Mappings []config.PathMapping
 	Exiftool *Exiftool
+
+	// Queue backs IngestCardOffline (offline.go) -- nil for a plain online
+	// Engine (IngestCard doesn't touch it), required for any call to
+	// IngestCardOffline. Set directly by the caller (cmd/branchdam-agent's
+	// -offline ingest path); NewEngine leaves it nil.
+	Queue *queue.Store
+	// Tier0ContainerRoot is the server-container path prefix
+	// IngestCardOffline sends as EVENT_NODE_CREATED's filePath (the "Tier-0
+	// container path" issue #4 requires) -- already in container-path form,
+	// no PathMapping translation applied to it (contrast ArchivePath, which
+	// is a workstation path translated via ToContainerPath). Required for
+	// IngestCardOffline; unused by IngestCard.
+	Tier0ContainerRoot string
 
 	// Now/NewNodeUUID are overridable for tests; default to time.Now and a
 	// real UUIDv7 mint (google/uuid.NewV7) via NewEngine.
