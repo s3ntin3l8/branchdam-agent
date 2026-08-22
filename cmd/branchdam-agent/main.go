@@ -38,6 +38,8 @@ func run(args []string) int {
 		return runLuminarSyncCmd(args[1:])
 	case "ingest":
 		return runIngestCmd(args[1:])
+	case "queue-drain":
+		return runQueueDrainCmd(args[1:])
 	case "-h", "--help", "help":
 		usage()
 		return 0
@@ -57,7 +59,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "subcommands:")
 	fmt.Fprintln(os.Stderr, "  preflight     check server connectivity, exiftool, and path mappings")
 	fmt.Fprintln(os.Stderr, "  luminar-sync  read a Luminar catalog.db and emit EVENT_EDGE_ATTACHED for edit->source pairs")
-	fmt.Fprintln(os.Stderr, "  ingest        ingest a card's contents: dual-copy verified write + submit")
+	fmt.Fprintln(os.Stderr, "  ingest        ingest a card's contents: dual-copy verified write + submit (-offline for issue #4's offline queue flow)")
+	fmt.Fprintln(os.Stderr, "  queue-drain   drain queue.db on reconnect: submit queued events, copy archive bytes, rebase to Tier-3")
 	fmt.Fprintln(os.Stderr, "  version       print the agent's own version")
 }
 

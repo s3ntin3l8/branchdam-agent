@@ -49,3 +49,22 @@ ingest:
     - "/media/${USER}"
     - "/run/media/${USER}"
   pollIntervalSecs: 2
+
+# M2's offline queue (branchdam-agent ingest --offline / queue-drain) -- see
+# docs/offline-queue.md for the full state machine this backs. Both keys are
+# required for `ingest -offline` and `queue-drain`; neither is used by a
+# plain `ingest` run.
+offline:
+  # Where queue.db is created/opened. Must be on writable, persistent local
+  # storage -- this file is the entire crash-safety guarantee (see
+  # docs/offline-queue.md).
+  queueDbPath: "C:\\ProgramData\\branchdam-agent\\queue.db"
+  # Server-container path prefix EVENT_NODE_CREATED targets while a file's
+  # archive bytes don't exist anywhere durable yet. The branchDAM server
+  # must have a matching TIER0_LOCAL_STAGING storage_locations entry --
+  # per-machine subtree recommended (there is no per-agent identity to
+  # disambiguate an otherwise-shared root; see agentId's comment above).
+  # THIS IS A PREREQUISITE THAT MAY NOT EXIST YET on your branchDAM
+  # deployment -- see docs/offline-queue.md's "server-side prerequisite"
+  # section before relying on -offline in production.
+  tier0ContainerRoot: "/storage/staging/workstation-01"

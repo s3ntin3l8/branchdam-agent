@@ -11,6 +11,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
+	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 )
 
 // runIngestCmd implements `branchdam-agent ingest --card <path> --config
@@ -27,6 +28,7 @@ func runIngestCmd(args []string) int {
 	configPath := fs.String("config", "config.yaml", "path to config file")
 	cardPath := fs.String("card", "", "path to the card's root directory (a mounted volume, or a fixture directory)")
 	timeout := fs.Duration("timeout", 10*time.Minute, "overall ingest run timeout")
+	offline := fs.Bool("offline", false, "offline mode (issue #4): write the local copy only, queue the archive copy and EVENT_NODE_CREATED in queue.db for a later `queue-drain` -- see offline.* in config and docs/offline-queue.md")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -55,6 +57,10 @@ func runIngestCmd(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
+	if *offline {
+		return runIngestOffline(ctx, engine, cfg, *cardPath)
+	}
+
 	start := time.Now()
 	result, err := engine.IngestCard(ctx, *cardPath)
 	if err != nil {
@@ -63,6 +69,90 @@ func runIngestCmd(args []string) int {
 	}
 
 	ok := printIngestReport(os.Stdout, *cardPath, result, time.Since(start))
+	if !ok {
+		return 1
+	}
+	return 0
+}
+
+// runIngestOffline is `ingest -offline`'s body: open queue.db, wire it and
+// Tier0ContainerRoot into the Engine, and run IngestCardOffline instead of
+// IngestCard. Unlike the online path, a per-file Err here is the only
+// failure mode that matters at ingest time -- everything else (submission,
+// archive copy, rebase) is queued for `queue-drain` to finish later.
+func runIngestOffline(ctx context.Context, engine *ingest.Engine, cfg config.Config, cardPath string) int {
+	if cfg.Offline.QueueDBPath == "" {
+		fmt.Fprintln(os.Stderr, "branchdam-agent ingest -offline: offline.queueDbPath must be set in config")
+		return 1
+	}
+	if cfg.Offline.Tier0ContainerRoot == "" {
+		fmt.Fprintln(os.Stderr, "branchdam-agent ingest -offline: offline.tier0ContainerRoot must be set in config")
+		return 1
+	}
+
+	store, err := queue.Open(cfg.Offline.QueueDBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent ingest -offline: open queue db %q: %v\n", cfg.Offline.QueueDBPath, err)
+		return 1
+	}
+	defer func() { _ = store.Close() }()
+
+	engine.Queue = store
+	engine.Tier0ContainerRoot = cfg.Offline.Tier0ContainerRoot
+
+	start := time.Now()
+	result, err := engine.IngestCardOffline(ctx, cardPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent ingest -offline: %v\n", err)
+		return 1
+	}
+
+	return printOfflineIngestReport(os.Stdout, cardPath, result, time.Since(start))
+}
+
+// printOfflineIngestReport mirrors printIngestReport's shape, adapted to
+// OfflineFileResult's fields: there is no EventID to print (see that type's
+// doc comment), and "safe to eject" only ever gates on the local copy
+// verifying -- the archive copy and rebase are `queue-drain`'s job, not
+// this command's.
+func printOfflineIngestReport(w io.Writer, cardPath string, result ingest.OfflineCardResult, elapsed time.Duration) int {
+	_, _ = fmt.Fprintln(w, "branchdam-agent ingest -offline")
+	_, _ = fmt.Fprintln(w, "===============================")
+	_, _ = fmt.Fprintf(w, "card: %s\n\n", cardPath)
+
+	ok := true
+	queued, skipped, failed := 0, 0, 0
+	for _, f := range result.Files {
+		switch {
+		case f.Err != nil:
+			failed++
+			ok = false
+			_, _ = fmt.Fprintf(w, "[FAIL] %s: %v\n", f.SourcePath, f.Err)
+		case f.Skipped:
+			skipped++
+			_, _ = fmt.Fprintf(w, "[SKIP] %s: %s\n", f.SourcePath, f.SkipReason)
+		default:
+			queued++
+			resumed := ""
+			if f.AlreadyQueued {
+				resumed = " (resumed from a previous run)"
+			}
+			inline := "not yet submitted"
+			if f.SubmittedInline {
+				inline = "submitted"
+			}
+			_, _ = fmt.Fprintf(w, "[QUEUED] %s -> %s (nodeUuid=%s, EVENT_NODE_CREATED %s, localVerify=%s%s)\n",
+				f.SourcePath, f.LocalPath, f.NodeUUID, inline, f.LocalVerify.Method, resumed)
+		}
+	}
+
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintf(w, "%d queued, %d skipped, %d failed (%s)\n", queued, skipped, failed, elapsed.Round(time.Millisecond))
+	if ok {
+		_, _ = fmt.Fprintln(w, "safe to eject -- archive copy and server rebase are pending; run `branchdam-agent queue-drain` on reconnect")
+	} else {
+		_, _ = fmt.Fprintln(w, "NOT safe to eject -- one or more files failed")
+	}
 	if !ok {
 		return 1
 	}
