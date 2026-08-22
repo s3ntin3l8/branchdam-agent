@@ -196,6 +196,11 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string) FileResult {
 		return fr
 	}
 
+	if e.Ingest.RequireUnbuffered && (archiveVerify.Method == VerifyMethodBufferedFloor || localVerify.Method == VerifyMethodBufferedFloor) {
+		fr.Err = fmt.Errorf("ingest: unbuffered verify required by config, but verify fell back to buffered floor (archive=%s, local=%s) -- safe-eject withheld", archiveVerify.Method, localVerify.Method)
+		return fr
+	}
+
 	if fr.IsSidecar {
 		fr.Skipped = true
 		fr.SkipReason = "sidecar file (.xmp/.srt): copied to both destinations, no EVENT_NODE_CREATED submitted"

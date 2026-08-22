@@ -171,18 +171,16 @@ whatever "latest" resolves to.
   `TestStreamingFastHasherMatchesFastHash` (`internal/hashing/hashing_test.go`). `DualWrite` also
   refuses to overwrite an existing destination (`O_EXCL`) -- a caller retrying a failed ingest
   must remove or rename the partial destination itself first.
-- **Verify decides buffered-vs-O_DIRECT once, at open time, and never falls back mid-stream.**
+- **Verify decides unbuffered-vs-buffered-floor once, at open time, and never falls back mid-stream.**
   `internal/ingest.Verify` re-reads a file DualWrite already `fsync`'d and closed; on Linux
-  (`verify_linux.go`) it tries `O_DIRECT` first and falls back to a plain reopen only if the
-  *open itself* fails (the expected case on tmpfs and some network/overlay filesystems, which
-  return `EINVAL`) -- a fallback triggered by a later read failure would silently turn a
-  cache-defeating claim into a cache-poisoned one. `VerifyResult.Method` records which path was
-  actually used (`unbuffered` vs `buffered_floor`) so this is inspectable, not just asserted.
-  macOS `F_NOCACHE` / Windows `FILE_FLAG_NO_BUFFERING` (`verify_other.go`) are **not implemented
-  in this PR** -- no macOS/Windows host was available to validate against, the same gap the plan
-  doc's UI-stack section flags for tray packaging. The documented floor (`fsync` + close +
-  reopen, no direct I/O) still applies on those platforms; this is a stated limitation; a
-  follow-up PR adding either is additive.
+  (`verify_linux.go`) it tries `O_DIRECT`, on macOS (`verify_darwin.go`) it uses `F_NOCACHE` (fcntl),
+  and on Windows (`verify_windows.go`) it uses `FILE_FLAG_NO_BUFFERING` via `CreateFile` with sector-aligned
+  reads. Each platform falls back to the plain reopen floor only if the unbuffered open itself fails (the
+  expected case on tmpfs, network shares, or filesystems lacking direct I/O support) -- a fallback
+  triggered by a later read failure would silently turn a cache-defeating claim into a cache-poisoned one.
+  `VerifyResult.Method` records which path was actually used (`unbuffered` vs `buffered_floor`). The
+  optional config knob `ingest.requireUnbuffered` (default `false`) treats any degradation to
+  `buffered_floor` as a fatal verification failure, withholding safe-eject.
 - **pHash is computed from the just-written local edit copy, not the card.** Exif extraction
   (`internal/ingest.Exiftool.Exif`) still runs against the source path directly, before the
   copy -- it supplies the naming template's `{camera_model}`/`{yyyy}-{mm}-{dd}` placeholders, so
