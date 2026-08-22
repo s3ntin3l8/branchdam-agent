@@ -88,3 +88,49 @@ func TestLoadMissingFile(t *testing.T) {
 		t.Error("expected error for missing file")
 	}
 }
+
+func TestTrayAndSelfUpdateDefaults(t *testing.T) {
+	var cfg Config
+	if got := cfg.Tray.StatusAddrOrDefault(); got != DefaultStatusAddr {
+		t.Errorf("got %q, want default %q", got, DefaultStatusAddr)
+	}
+	if got := cfg.SelfUpdate.RepoOrDefault(); got != DefaultSelfUpdateRepo {
+		t.Errorf("got %q, want default %q", got, DefaultSelfUpdateRepo)
+	}
+	if cfg.Tray.StartOnLogin {
+		t.Error("StartOnLogin must default to false")
+	}
+	if cfg.SelfUpdate.Enabled {
+		t.Error("SelfUpdate.Enabled must default to false")
+	}
+}
+
+func TestLoadTrayAndSelfUpdateOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+tray:
+  statusAddr: "127.0.0.1:9999"
+  startOnLogin: true
+selfUpdate:
+  enabled: true
+  repo: "someone/fork"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tray.StatusAddrOrDefault() != "127.0.0.1:9999" {
+		t.Errorf("got %q", cfg.Tray.StatusAddrOrDefault())
+	}
+	if !cfg.Tray.StartOnLogin {
+		t.Error("expected StartOnLogin=true")
+	}
+	if !cfg.SelfUpdate.Enabled || cfg.SelfUpdate.RepoOrDefault() != "someone/fork" {
+		t.Errorf("got %+v", cfg.SelfUpdate)
+	}
+}

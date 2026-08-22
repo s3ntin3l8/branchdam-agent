@@ -68,3 +68,22 @@ offline:
   # deployment -- see docs/offline-queue.md's "server-side prerequisite"
   # section before relying on -offline in production.
   tier0ContainerRoot: "/storage/staging/workstation-01"
+
+# The tray shell (branchdam-agent tray). Both sub-sections are additive --
+# the headless preflight/ingest/luminar-sync subcommands never read this.
+tray:
+  # Loopback-only address for the embedded status page. Never a bare
+  # ":port" -- the page renders local paths and (once M2 lands) queue
+  # depth, not something meant to leave the workstation.
+  statusAddr: "127.0.0.1:38080"
+  # Registers a per-user login item (LaunchAgent plist on macOS, a Run-key
+  # value on Windows) so the tray starts automatically at login. Off by
+  # default -- opt in explicitly per workstation.
+  startOnLogin: false
+
+# github.com/creativeprojects/go-selfupdate, wired but OFF by default. Set
+# enabled: true only once you're deliberately shipping releases from
+# server.repo and want the tray to check for and apply them automatically.
+selfUpdate:
+  enabled: false
+  repo: "s3ntin3l8/branchdam-agent"

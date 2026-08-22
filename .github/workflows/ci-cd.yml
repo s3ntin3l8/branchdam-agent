@@ -35,3 +35,69 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
+
+  # windows/amd64 cross-build (issue #3). fyne.io/systray v1.12.2's Windows
+  # backend is pure Go (syscall + x/sys/windows, no cgo), so this compiles
+  # from ubuntu-latest with CGO_ENABLED=0 -- verified locally before adding
+  # this job, not assumed. Two binaries, deliberately: -H windowsgui is
+  # link-scoped to the WHOLE binary, and this one binary also serves
+  # preflight/ingest/luminar-sync, whose stdout an operator needs to see in
+  # a console. branchdam-agent.exe stays console-linked for those;
+  # branchdam-agent-tray.exe adds -H windowsgui so double-clicking (or a
+  # login-item launch) never flashes a console window for the tray. Not
+  # part of ci-go.yml (that reusable workflow only builds for the runner's
+  # own host OS/arch) -- this is this repo's own addition.
+  build-windows:
+    name: build (windows/amd64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make build-windows
+
+  # darwin/arm64 build-only check, EXCLUDING internal/tray and
+  # cmd/branchdam-agent (which imports it). Verified locally: Go's linker
+  # cross-compiles a pure-Go GOOS=darwin GOARCH=arm64 binary with
+  # CGO_ENABLED=0 from Linux without issue, but fyne.io/systray's darwin
+  # backend is Objective-C (cgo) -- CGO_ENABLED=0 fails on that package
+  # specifically with "undefined: setInternalLoop" etc, not a linker
+  # problem. There is no darwin cgo cross-toolchain on ubuntu-latest, so
+  # this job can only prove the rest of the module (ingest core, the REST
+  # client, the ported hashing/naming/phash packages, autostart's plist
+  # rendering) still cross-compiles clean for darwin/arm64; it does NOT
+  # prove the tray binary builds for macOS. See build-darwin-full below /
+  # the PR body for what does cover that.
+  build-darwin:
+    name: build (darwin/arm64, excl. tray)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make build-darwin
+
+  # Full darwin/arm64 build of the tray binary itself, requiring a real
+  # macOS host for its cgo backend. Gated on whether macos-26 runner
+  # minutes are actually usable for this public repo -- see the PR body for
+  # what the one-off probe run found. If this job is failing/queued
+  # indefinitely rather than compiling, that's the documented, known-open
+  # blocker for the darwin leg specifically, not a regression to chase.
+  build-darwin-full:
+    name: build (darwin/arm64, full, incl. tray)
+    runs-on: macos-26
+    timeout-minutes: 10 # bounds a queued-indefinitely runner-availability outcome, see comment above
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go build ./...

@@ -1,9 +1,11 @@
 // Command branchdam-agent is the workstation agent for branchDAM (phase 10
-// of the original spec). This M0 milestone ships only the `preflight`
-// subcommand -- the first thing an operator runs, and the first thing every
-// support question starts with. Tray UI, card ingest, the offline queue,
-// and the DaVinci/Luminar integrations are later milestones; see
-// docs/roadmap.md in the branchdam repo and this repo's CLAUDE.md.
+// of the original spec). Subcommands landed so far: `preflight` (M0),
+// `luminar-sync` (M4), `ingest` (M1's headless ingest-core driver, plus
+// `-offline` for M2's offline queue), `queue-drain` (M2, drains queue.db on
+// reconnect), and `tray` (M1's tray shell, issue #3 -- a thin driver over
+// the same internal/ingest.Engine `ingest` uses; see internal/tray's doc
+// comment). See docs/roadmap.md in the branchdam repo and this repo's
+// CLAUDE.md.
 package main
 
 import (
@@ -40,6 +42,8 @@ func run(args []string) int {
 		return runIngestCmd(args[1:])
 	case "queue-drain":
 		return runQueueDrainCmd(args[1:])
+	case "tray":
+		return runTrayCmd(args[1:])
 	case "-h", "--help", "help":
 		usage()
 		return 0
@@ -61,6 +65,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  luminar-sync  read a Luminar catalog.db and emit EVENT_EDGE_ATTACHED for edit->source pairs")
 	fmt.Fprintln(os.Stderr, "  ingest        ingest a card's contents: dual-copy verified write + submit (-offline for issue #4's offline queue flow)")
 	fmt.Fprintln(os.Stderr, "  queue-drain   drain queue.db on reconnect: submit queued events, copy archive bytes, rebase to Tier-3")
+	fmt.Fprintln(os.Stderr, "  tray          run the tray-resident shell (windows/darwin only) over the same ingest core")
 	fmt.Fprintln(os.Stderr, "  version       print the agent's own version")
 }
 

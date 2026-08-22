@@ -6,11 +6,10 @@ report to branchDAM over its existing `/api/v1/agent/*` REST contract. See branc
 `.claude/plans/can-we-walk-through-sharded-lighthouse.md` for the full phased plan this repo
 implements.
 
-Landed so far: **M0** (repo scaffold + REST client), the SD-card ingest core half of **M1**
-(dual-copy verified write, metadata extraction, headless `ingest` -- no tray UI yet), **M2**
-(offline queue + rebase handoff, this PR), **M3** (DaVinci Resolve post-render hook,
-`hooks/resolve/`), and **M4** (Luminar `catalog.db` reader). There is still no tray UI -- see
-[CLAUDE.md](CLAUDE.md) for the milestone breakdown.
+Landed so far: **M0** (repo scaffold + REST client), **M1** (SD-card ingest core, dual-copy
+verified write, plus the tray shell around it), **M2** (offline queue + rebase handoff), **M3**
+(DaVinci Resolve post-render hook, `hooks/resolve/`), and **M4** (Luminar `catalog.db` reader).
+See [CLAUDE.md](CLAUDE.md) for the milestone breakdown.
 
 ## What's here today
 
@@ -26,23 +25,31 @@ Landed so far: **M0** (repo scaffold + REST client), the SD-card ingest core hal
 - `cmd/branchdam-agent/` -- a `preflight` subcommand: checks the configured branchDAM server is
   reachable and returns its version, checks `exiftool` on `PATH`, and prints the configured
   workstation-path -> container-path mappings.
-- `internal/ingest/` -- the SD-card ingest core: one-read/two-write dual-copy writer, a
-  cache-defeating verified re-read (`fsync`+close+reopen floor, unbuffered/`O_DIRECT` where the
-  platform supports it), DJI `.srt` telemetry parsing for the video's own GPS fields, and
-  submission via `internal/branchdam`. Headless via `ingest -card <path>`.
+- `internal/ingest/` -- the SD-card ingest core: poll-based card detection, one-read/two-write
+  dual-copy writer, a cache-defeating verified re-read (`fsync`+close+reopen floor,
+  unbuffered/`O_DIRECT` where the platform supports it), DJI `.srt` telemetry parsing for the
+  video's own GPS fields, and metadata extraction at promoted-column parity with a server-side
+  scan. No UI imports -- the headless `ingest -card <path>` subcommand and the `tray` subcommand
+  below both drive it, neither duplicates it.
 - `internal/queue/`, `internal/ingest`'s `IngestCardOffline`/`Drain` -- M2's offline queue
   (`ingest -offline`, `queue-drain`): every intended event persisted to `queue.db`
   (`modernc.org/sqlite`) before any network call, so a workstation with no route to the NAS can
   still ingest a card, then finish the archive copy and `POST /api/v1/agent/rebase` once
   reconnected -- see [`docs/offline-queue.md`](docs/offline-queue.md) for the full state machine,
-  the copy-before-rebase ordering guarantee, and the server-side prerequisite this depends on
-  (**not yet deployed** as of this PR -- see that doc's first section).
+  the copy-before-rebase ordering guarantee, and the server-side prerequisite this depends on.
 - `internal/luminar/`, `internal/nodeindex/` -- a `luminar-sync` subcommand: reads a Luminar
   `catalog.db` read-only (`?mode=ro`, never `?immutable=1`) and emits `EVENT_EDGE_ATTACHED` at
   `tier: 2, confidence: 0.89` for each edit->source pair it finds and can resolve to known
   `nodeUuid`s. Luminar's schema is undocumented -- see
   [`docs/luminar-catalog.md`](docs/luminar-catalog.md) for the research, confidence level, and how
   to correct the query against a real catalog.
+- `internal/tray/`, `internal/autostart/`, `internal/selfupdate/` -- the tray shell (issue #3): a
+  `fyne.io/systray` icon/menu (windows/darwin only) plus an embedded `net/http` status page
+  showing watch directories, scratch-directory info, and queue status (a stub -- M2's offline
+  queue landed concurrently with this PR and isn't wired into the status page's display yet);
+  login-item registration (off by default); `go-selfupdate` wiring (off by default via config, and
+  compiled in only with `-tags selfupdate` -- see "Tray shell" below for platform-specific
+  findings from this PR).
 
 ## Quick Start
 
@@ -105,6 +112,81 @@ go run ./cmd/branchdam-agent luminar-sync -config config.yaml -catalog /path/to/
 agent-reachable lookup-by-path endpoint on branchDAM yet) and
 [`docs/luminar-catalog.md`](docs/luminar-catalog.md) for the node-resolution scope decision.
 
+### 6. Run the tray shell
+
+```sh
+go run ./cmd/branchdam-agent tray -config config.yaml
+```
+
+Starts the tray icon (windows/darwin) plus an embedded status page (default
+`http://127.0.0.1:38080/`, loopback-only -- see `tray.statusAddr` in `config.example.yaml`)
+showing configured watch directories, the local scratch directory, and queue status (a stub --
+M2's offline queue landed concurrently with this PR but isn't wired into this display yet;
+deliberately labelled as such, never a fabricated number). The tray menu's "Ingest now" and its
+automatic card-insertion trigger both call the same
+`internal/ingest.Engine.IngestCard` the headless `ingest` subcommand uses.
+
+On Linux, `tray` builds and runs, but immediately returns an error (`tray: unsupported on this
+platform`) -- the tray is scoped to Windows/macOS per the plan doc; a Linux workstation still has
+the fully-tested headless `ingest` path.
+
+To also build in real self-update support (off by default even then -- see `selfUpdate.enabled`),
+add `-tags selfupdate` to the build: `go build -tags selfupdate ./cmd/branchdam-agent`. Every
+other build command in this README and the Makefile (including the CI-verified ones) deliberately
+omits that tag -- see "Tray shell: platform-specific findings" below for why.
+
+## Tray shell: platform-specific findings (issue #3)
+
+This PR could only be developed and CI-verified from a Linux host. What was checked, and how:
+
+- **Windows console flash.** `-H windowsgui` is link-scoped to the *whole* binary, and this one
+  binary also serves `preflight`/`ingest`/`luminar-sync`, whose stdout an operator needs in a
+  console. So there are two Windows build outputs from the same source
+  (`make build-windows`): `branchdam-agent.exe` (console-linked, for the CLI subcommands) and
+  `branchdam-agent-tray.exe` (`-H windowsgui`-linked, for the tray/login-item launch path).
+  Verified locally: `file dist/branchdam-agent-tray.exe` reports `PE32+ executable (GUI)` versus
+  `(console)` for the other binary.
+- **`fyne.io/systray` v1.12.2's cross-compile matrix**, verified with a throwaway probe before
+  writing any tray code: pure Go (`CGO_ENABLED=0`) on `GOOS=windows`; needs cgo (Objective-C) on
+  `GOOS=darwin`, which fails to even compile with `CGO_ENABLED=0` (`undefined: setInternalLoop`
+  etc, not a linker error) and there is no darwin cgo cross-toolchain on `ubuntu-latest`. This is
+  why `internal/tray` isolates the systray import behind a `windows || darwin` build tag
+  (`run_supported.go`) with a `run_unsupported.go` stub for every other `GOOS` (including Linux,
+  where CI actually builds/tests/lints this repo) -- and why the darwin CI leg
+  (`build-darwin` in `.github/workflows/ci-cd.yml`) is a build-only check over everything
+  **except** `internal/tray` and `cmd/branchdam-agent` (which imports it): that's the boundary
+  Linux CI can actually prove for darwin/arm64, not the whole tray binary.
+- **macOS Dock-icon behavior: still UNVERIFIED.** No macOS host was available (`uname -a` on the
+  development machine: Linux). If a bare `fyne.io/systray` binary shows a Dock icon on macOS, the
+  fix is a hand-assembled `.app` bundle with `Info.plist`/`LSUIElement=1` -- **not implemented in
+  this PR**. Check this first on real hardware before shipping a macOS build to an actual
+  workstation.
+- **`macos-26` GitHub-hosted runner availability for this public repo: VERIFIED usable.** The
+  `build-darwin-full` job (`runs-on: macos-26`, `.github/workflows/ci-cd.yml`) -- the whole
+  module including `internal/tray`'s cgo darwin backend, `go build ./...` on a real macOS host --
+  passed in ~1 minute on this PR's first push. `macos-26` minutes are not queued/unavailable for
+  this public repo. It's still not a required branch-protection check (a review-bot-down /
+  runner-flake shouldn't block every merge, same reasoning as this repo's other non-required
+  jobs), but the darwin *tray* binary itself is now proven in CI, not just the build-only
+  `build-darwin` exclusion-based check.
+- **Login-item registration** (`internal/autostart/`) is implemented for both platforms --
+  `autostart_darwin.go` writes/loads a LaunchAgent plist, `autostart_windows.go` writes an
+  `HKCU\...\Run` value via `golang.org/x/sys/windows/registry` -- and is testable up to the actual
+  file/registry write: the plist XML rendering (`autostart.go`, untagged) has unit tests that run
+  on Linux; the platform-tagged write paths are proven only by the `build-windows`/`build-darwin`
+  cross-compiles, same caveat as the rest of this list. Off by default (`tray.startOnLogin` in
+  config).
+- **Self-update requires `-tags selfupdate` at build time, on top of `selfUpdate.enabled: true`
+  in config.** `go-selfupdate` v1.6.0 imports `golang.org/x/crypto/openpgp` unconditionally from
+  its top-level package, which `govulncheck` flags as `GO-2026-5932` (unfixed, no upgrade path --
+  v1.6.0 is the newest tag). `govulncheck` runs inside this repo's required
+  `test-go / lint-and-test` check with no per-repo suppression available, so the real
+  implementation (`internal/selfupdate/selfupdate.go`) only compiles in behind that build tag;
+  every default build links `selfupdate_stub.go` instead, which returns
+  `selfupdate.ErrNotCompiledIn`. See `CLAUDE.md`'s matching key invariant for the full
+  verification (`govulncheck` clean without the tag, reproduces `GO-2026-5932` with it) and
+  tracked follow-up issue #14.
+
 ## Commands
 
 | Command | Does |
@@ -116,7 +198,9 @@ agent-reachable lookup-by-path endpoint on branchDAM yet) and
 | `make vet` | Run go vet. |
 | `make tidy` | Run go mod tidy. |
 | `make vulncheck` | Check for known vulnerabilities. |
-| `make build` | Build all packages. |
+| `make build` | Build all packages (host OS/arch). |
+| `make build-windows` | Cross-compile both Windows binaries into `dist/` -- see "Tray shell" above. |
+| `make build-darwin` | Build-only check for darwin/arm64, excluding `internal/tray`/`cmd/branchdam-agent` -- see "Tray shell" above. |
 | `make clean` | Remove build artifacts and caches. |
 
 ## Security

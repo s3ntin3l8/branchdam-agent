@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>branchDAM agent</title>
+<meta http-equiv="refresh" content="10">
+<style>
+  body { font: 14px -apple-system, "Segoe UI", sans-serif; margin: 2rem; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.2rem; margin-bottom: 0.25rem; }
+  .version { color: #888; font-size: 0.85rem; margin-bottom: 1.5rem; }
+  section { margin-bottom: 1.5rem; }
+  h2 { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.03em; color: #555; margin-bottom: 0.4rem; }
+  ul { margin: 0; padding-left: 1.2rem; }
+  .stub { color: #a15c00; }
+  .ok { color: #147d3c; }
+  .fail { color: #b3261e; }
+  code { background: #eee; padding: 0.1rem 0.3rem; border-radius: 3px; }
+</style>
+</head>
+<body>
+  <h1>branchDAM agent</h1>
+  <div class="version">version {{.Version}} &middot; localhost only, not exposed off this workstation</div>
+
+  <section>
+    <h2>Watch directories</h2>
+    {{if .Status.WatchDirs}}
+    <ul>
+      {{range .Status.WatchDirs}}<li><code>{{.}}</code></li>{{end}}
+    </ul>
+    {{else}}
+    <p>No watch directories configured (<code>ingest.cardRoots</code> in config.yaml).</p>
+    {{end}}
+  </section>
+
+  <section>
+    <h2>Scratch (local edit) directory</h2>
+    <p>{{.Status.ScratchNote}}</p>
+  </section>
+
+  <section>
+    <h2>Queue status</h2>
+    <p class="stub">{{.Status.QueueStatus}}</p>
+  </section>
+
+  <section>
+    <h2>Last ingest</h2>
+    {{if .Status.LastIngest}}
+      {{with .Status.LastIngest}}
+        <p>
+          card <code>{{.CardPath}}</code>, {{since .StartedAt}} ago, took {{.Elapsed}}<br>
+          {{if .Err}}
+            <span class="fail">failed: {{.Err}}</span>
+          {{else}}
+            <span class="ok">{{.Submitted}} submitted</span>, {{.Skipped}} skipped, {{if gt .Failed 0}}<span class="fail">{{.Failed}} failed</span>{{else}}0 failed{{end}}
+          {{end}}
+        </p>
+      {{end}}
+    {{else}}
+    <p>No ingest run yet this session.</p>
+    {{end}}
+  </section>
+
+  <section>
+    <h2>Self-update</h2>
+    <p>{{.Status.SelfUpdateNote}}</p>
+  </section>
+</body>
+</html>

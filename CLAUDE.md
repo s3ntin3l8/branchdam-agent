@@ -20,14 +20,18 @@ This repo closes that gap, in milestones:
 - **M0** -- repo scaffold, the `internal/branchdam/` REST client, three ported pieces
   of server logic (`FastHash`, `PerceptualHash`'s call sequence, `naming.Stem`), and a
   `preflight` subcommand. No SQLite, no tray, no ingest.
-- **M1 (this PR, ingest-core half only -- see below)** -- SD-card ingest core: card detection
-  (poll-based), one read/two writes, BLAKE3-256 verify against a cache-defeating re-read, DJI
-  `.srt` GPS parsing, metadata extraction at promoted-column parity with a server-side scan, and
-  the headless `ingest` subcommand. The tray shell itself (`fyne.io/systray` + embedded web UI)
-  is deliberately a separate, later PR -- issue #2 scoped it out explicitly, and this package has
-  no UI imports for exactly that reason: the tray, when it lands, is a second, thin driver over
-  `internal/ingest.Engine`, not a rewrite of it.
-- **M2** -- offline queue (`modernc.org/sqlite`) + the rebase handoff.
+- **M1 (ingest-core half landed earlier; tray shell landed in this PR, issue #3)** -- SD-card
+  ingest core: card detection (poll-based), one read/two writes, BLAKE3-256 verify against a
+  cache-defeating re-read, DJI `.srt` GPS parsing, metadata extraction at promoted-column parity
+  with a server-side scan, and the headless `ingest` subcommand. This PR adds the tray shell
+  around it: `internal/tray/` (`fyne.io/systray` on windows/darwin, an embedded `net/http` status
+  page everywhere else the package builds), `internal/autostart/` (login-item registration,
+  off by default), `internal/selfupdate/` (`go-selfupdate` wiring, off by default), and the `tray`
+  subcommand. `internal/tray` still has no server/ingest-logic duplication -- it is a second, thin
+  driver over `internal/ingest.Engine`, exactly as issue #2 required when it scoped the tray out
+  of the ingest-core PR.
+- **M2 (issue #4, in progress in a separate worktree as this PR is written)** -- offline queue
+  (`modernc.org/sqlite`) + the rebase handoff.
 - **M3** -- DaVinci Resolve post-render hook (Python, `hooks/resolve/`).
 - **M4 (this PR)** -- Luminar `catalog.db` reader (`internal/luminar/`, `internal/nodeindex/`,
   `luminar-sync` subcommand). Schema mapping is unverified -- see `docs/luminar-catalog.md`.
@@ -69,10 +73,11 @@ whatever "latest" resolves to.
 
 | Path | Responsibility |
 |---|---|
-| `cmd/branchdam-agent/main.go` | Entrypoint + subcommand dispatch (`preflight`, `luminar-sync`, `ingest`, `version`) |
+| `cmd/branchdam-agent/main.go` | Entrypoint + subcommand dispatch (`preflight`, `luminar-sync`, `ingest`, `tray`, `version`) |
 | `cmd/branchdam-agent/preflight.go` | `preflight`'s checks (server reachability/version, `exiftool` on `PATH`, path mappings), factored out of `main.go` so it's testable without capturing stdout |
 | `cmd/branchdam-agent/luminarsync.go` | `luminar-sync`'s flag parsing and orchestration (open catalog, load node index, run `luminar.Syncer`, print a summary); `--dump-schema` mode for recovering a real catalog's schema |
 | `cmd/branchdam-agent/ingest.go` | `ingest --card <path> --config <path>`: the headless driver over `internal/ingest.Engine`, and the report printer that decides the process exit code / "safe to eject" line |
+| `cmd/branchdam-agent/tray.go` | `tray -config <path>`: builds the same `ingest.Engine` `ingest.go` does, wires `internal/tray.Runner`, the status server, optional self-update check, and optional login-item registration, then calls `tray.Run` (blocks until the tray quits or the process is signalled) |
 | `internal/branchdam/` | The REST client for branchDAM's `/api/v1/agent/*` contract -- one file per endpoint (`hello.go`, `handshake.go`, `events.go`, `rebase.go`), `types.go` for the hand-synced DTOs, `errors.go` for client-side validation gates and fatal/transient error classification, `conformance_test.go` + `testdata/*.golden.json` for the byte-for-byte fixture tests |
 | `internal/hashing/` | Byte-for-byte port of branchDAM's `FastHash` (sampled xxHash64) and `PerceptualHash` (thin `goimagehash.PerceptionHash` wrapper), plus M1's own addition `StreamingFastHasher` -- a single-pass, `io.Writer`-shaped variant proven byte-identical to `FastHash` by an equivalence test, so the M1 dual-copy writer never re-reads the card a second time just to compute `fast_hash` |
 | `internal/naming/` | Byte-for-byte port of branchDAM's `naming.Stem`/`naming.Analyze` filename normalization |
@@ -81,9 +86,12 @@ whatever "latest" resolves to.
 | `internal/nodeindex/` | Maps a file path to the `nodeUuid` it was ingested as (`Resolver` interface, `FileIndex` JSON-file implementation) -- works around there being no agent-reachable lookup-by-path endpoint on branchDAM |
 | `internal/djisrt/` | Byte-for-byte port of branchDAM's `internal/djisrt` -- DJI `.srt` first-GPS-fix telemetry parser, including `isValidFix`'s pre-lock `(0,0)` rejection |
 | `internal/ingest/` | M1's SD-card ingest core, UI-free: `carddetect.go` (poll-based removable-volume detection), `writer.go` (one-read/two-write `DualWrite`), `verify.go`+`verify_linux.go`+`verify_other.go` (cache-defeating re-read, O_DIRECT on Linux with a documented buffered-floor fallback), `metadata.go` (exiftool extraction ported from branchDAM's `probe.go`, sidecar merge, `capturedAt` fallback chain), `srt.go` (DJI GPS-on-video wiring over `internal/djisrt`), `naming.go` (destination path template), `pathmap.go` (workstation->container path translation), `extensions.go` (video/image extension sets, copied from branchDAM's `pipeline.videoExts`/`imageExts` for parity), `ingest.go` (`Engine`, the orchestrator both the CLI and a later tray drive) |
-| `internal/config/` | YAML config loader: branchDAM server URL + API key, this workstation's self-asserted `agentId`, the workstation-path -> container-path map `preflight` prints, and (M1) `ingest:` -- archive/local-edit roots, the naming template, and card-detection polling |
+| `internal/tray/` | The tray shell (issue #3): `tray.go` (`Runner` -- watch-dir/scratch/queue-stub state and `TriggerIngest`, no UI import, unit-tested on any host), `run_supported.go` (`//go:build windows \|\| darwin`, the repo's only `fyne.io/systray` import: menu wiring, card-insertion auto-ingest via `internal/ingest.Detector`), `run_unsupported.go` (`//go:build !windows && !darwin`, returns `ErrUnsupported` -- this is what Linux CI actually builds/tests), `statusserver.go` + `assets/index.html` (embedded `net/http` status page, loopback-only by construction -- see `normalizeLoopback`), `icon.go` (`buildTrayIcon` renders the tray icon in Go at startup -- a PNG wrapped as a single-image `.ico` container, no binary asset committed to the repo; a single `.ico` buffer works for both windows and darwin per `fyne.io/systray`'s own doc comment) |
+| `internal/autostart/` | Login-item registration, off by default (`tray.startOnLogin`): `autostart.go` (untagged plist-XML rendering, unit-tested on Linux), `autostart_darwin.go` (`//go:build darwin`, writes + `launchctl load`s a LaunchAgent plist), `autostart_windows.go` (`//go:build windows`, `golang.org/x/sys/windows/registry` write to `HKCU\...\Run`), `autostart_other.go` (`//go:build !windows && !darwin`, `ErrUnsupported` stub) |
+| `internal/selfupdate/` | Thin wrapper over `github.com/creativeprojects/go-selfupdate` v1.6.0's `DetectLatest`/`UpdateCommand`, gated by `selfUpdate.enabled` (off by default) AND a `-tags selfupdate` build tag (see the key invariant below for why the build tag exists) -- `selfupdate.go` (`//go:build selfupdate`, the real implementation), `selfupdate_stub.go` (`//go:build !selfupdate`, returns `ErrNotCompiledIn`, what every default build actually links), `result.go` (untagged `CheckResult`, identical either way) |
+| `internal/config/` | YAML config loader: branchDAM server URL + API key, this workstation's self-asserted `agentId`, the workstation-path -> container-path map `preflight` prints, `ingest:` -- archive/local-edit roots, the naming template, and card-detection polling -- and (this PR) `tray:`/`selfUpdate:` |
 | `config.example.yaml` | Reference config with `${VAR}` placeholders |
-| `.github/workflows/` | Thin callers of the reusable workflows in `s3ntin3l8/.github`, minus the Docker jobs the template ships (no image is published from this repo) |
+| `.github/workflows/` | Thin callers of the reusable workflows in `s3ntin3l8/.github`, minus the Docker jobs the template ships (no image is published from this repo), plus this repo's own `build-windows`/`build-darwin`/`build-darwin-full` jobs in `ci-cd.yml` (not covered by the shared `ci-go.yml`, which only builds for the runner's own host OS/arch) |
 | `.editorconfig` | Shared editor settings (LF, UTF-8, final newline; tabs for Go) |
 | `.claude/` | `settings.json` + `hooks/session-start.sh`: a SessionStart hook that installs Go deps and tooling so [Claude Code on the web](https://code.claude.com/docs/en/claude-code-on-the-web) sessions can build, test, and lint. Runs only in the remote env |
 
@@ -202,6 +210,60 @@ whatever "latest" resolves to.
   sidesteps branchDAM issue #251 (classifying `.srt` in general is unsafe, since it's also the
   universal subtitle extension) entirely -- there is no `.srt`-specific classification logic
   here, only a GPS lookup scoped to videos.
+- **The tray shell (`internal/tray/`) never duplicates `internal/ingest.Engine`'s logic --
+  `Runner.TriggerIngest` is the one place both the menu-click handler and the card-insertion
+  watch loop call into it.** Both `cmd/branchdam-agent/tray.go` and `ingest.go` build the same
+  `ingest.NewEngine(...)` and hand it to their respective driver; a change to ingest behavior
+  never needs a matching tray-side change.
+- **The status page binds loopback-only by construction, not by convention.**
+  `tray.normalizeLoopback` rewrites a bare `":port"` (which `net/http` would otherwise bind to
+  every interface) to `"127.0.0.1:port"` before `ListenAndServe` ever runs -- CodeQL is a required
+  check and a wide-open bind on a page that renders local filesystem paths (and, after M2, queue
+  depth) is exactly the kind of thing it flags. The page also never renders `server.apiKey`;
+  `TestHandleIndexRendersStatus` pins both (loopback rewrite + no-secret-leak) as regression
+  tests.
+- **Queue status is a literal stub string (`tray.QueueStatusStub`) until M2, never a fabricated
+  number.** Same "no fake numbers" discipline the M1 gate's step 2b documents for
+  `node_metadata` counts -- issue #3 says this explicitly, and `TestStatusQueueStatusIsAlwaysTheStub`
+  is the regression test.
+- **`-H windowsgui` is link-scoped to the whole binary, so there are two Windows build outputs
+  from the same `cmd/branchdam-agent` source, not one.** `branchdam-agent.exe` (console-linked)
+  serves `preflight`/`ingest`/`luminar-sync`, whose stdout an operator needs; `branchdam-agent-tray.exe`
+  (`-H windowsgui`-linked) is for the tray/login-item launch path, where a console flash on every
+  start would be the exact bug issue #3 calls out. Both come from `make build-windows`.
+- **`internal/tray`'s systray import is isolated behind `//go:build windows || darwin`
+  (`run_supported.go`), with a `run_unsupported.go` stub (`//go:build !windows && !darwin`) for
+  everything else.** This is not defensive boilerplate -- `fyne.io/systray` v1.12.2's darwin
+  backend needs cgo (Objective-C) and fails to even compile under `CGO_ENABLED=0`
+  (`undefined: setInternalLoop` etc), and there is no darwin cgo cross-toolchain on the
+  `ubuntu-latest` runner this repo's required `test-go`/`golangci-lint` checks use. Without the
+  split, importing `internal/tray` from `cmd/branchdam-agent` would either force cgo everywhere or
+  break Linux CI outright. Verified locally before writing any tray code, not assumed from the
+  plan doc's Windows/darwin framing (which says nothing about Linux).
+- **Both login-item registration and self-update are off by default, and stay off unless the
+  operator sets the corresponding config flag.** `tray.startOnLogin: false` and
+  `selfUpdate.enabled: false` in `config.example.yaml`; `cmd/branchdam-agent/tray.go` reads both
+  directly off `config.Config` with no separate CLI override that could silently re-enable either.
+- **`internal/selfupdate`'s real implementation only compiles into the binary with an explicit
+  `-tags selfupdate` build flag -- a compile-time gate on top of, not instead of,
+  `selfUpdate.enabled`.** Forced by a real, currently-unfixable govulncheck finding, not a style
+  choice: `go-selfupdate` v1.6.0's top-level package (`validate.go`) imports
+  `golang.org/x/crypto/openpgp` unconditionally (regardless of which `Validator` you actually
+  configure), which is `GO-2026-5932` -- "unmaintained, unsafe by design ... Fixed in: N/A" -- and
+  v1.6.0 is `go-selfupdate`'s newest tag, so there is no upgrade path either. `govulncheck` runs
+  unconditionally inside this repo's **required** `test-go / lint-and-test` check (the shared
+  `s3ntin3l8/.github/ci-go.yml` workflow, no ignore-list input this repo can reach), so with the
+  import compiled in by default that required check fails on every push, permanently. Verified
+  before adding the tag: `govulncheck ./...` (no tags) is clean; `GOFLAGS=-tags=selfupdate
+  govulncheck ./...` reproduces `GO-2026-5932` exactly. `selfupdate_stub.go`
+  (`//go:build !selfupdate`) is what every default build (`make build`, `make check`, CI) actually
+  links -- same `Check`/`Apply`/`CheckResult` surface, so `cmd/branchdam-agent/tray.go` needs no
+  build tag of its own and behaves identically either way, just returning
+  `selfupdate.ErrNotCompiledIn` (surfaced truthfully on the tray status page, not silently
+  swallowed) when `selfUpdate.enabled: true` is set against a default-built binary. **Do not
+  "simplify" this back to one file** -- see issue #14 for the real fix, which is upstream
+  (`go-selfupdate` drops `openpgp`) or a shared-workflow change (`ci-go.yml` growing a
+  vulncheck-ignore input), not something to resolve in this repo alone.
 
 ## CI/CD — uses centralized reusable workflows
 
@@ -209,6 +271,20 @@ Workflows here are **callers** of `s3ntin3l8/.github/.github/workflows/*.yml@mai
 (`ci-go` only -- no `build-docker`, unlike the template), `codeql.yml`, `dependency-review.yml`,
 `release-please.yml` (release-please only, no Docker publish step -- a later milestone adds a
 real cross-platform release matrix for Windows/macOS packaging, not this repo's CI today).
+
+`ci-cd.yml` also has three jobs of its own (not from the shared `ci-go.yml`, which only builds for
+the runner's own host OS/arch), added for the tray shell (issue #3): **`build-windows`**
+(`ubuntu-latest`, `CGO_ENABLED=0 GOOS=windows`, pure Go for `fyne.io/systray` on that platform --
+builds both `dist/branchdam-agent.exe` and the `-H windowsgui`-linked
+`dist/branchdam-agent-tray.exe` via `make build-windows`); **`build-darwin`** (`ubuntu-latest`,
+`CGO_ENABLED=0 GOOS=darwin`, build-only, deliberately excluding `internal/tray` and
+`cmd/branchdam-agent` -- `fyne.io/systray`'s darwin backend is cgo/Objective-C and there is no
+darwin cgo cross-toolchain on `ubuntu-latest`, so this only proves the rest of the module still
+cross-compiles clean); and **`build-darwin-full`** (`runs-on: macos-26`, `timeout-minutes: 10`,
+builds the whole module including the tray package -- whether this job is usable at all depends
+on `macos-26` runner availability for this public repo, checked empirically rather than assumed;
+see the PR that introduced it for the result). None of the three is in branch protection's
+required-checks list.
 
 **The #1 thing to get right:** a caller job that invokes a reusable workflow needing write scopes
 **must declare a `permissions:` block** -- the default `GITHUB_TOKEN` is read-only and the run
