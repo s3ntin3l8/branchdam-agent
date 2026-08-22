@@ -47,9 +47,8 @@ See [CLAUDE.md](CLAUDE.md) for the milestone breakdown.
   `fyne.io/systray` icon/menu (windows/darwin only) plus an embedded `net/http` status page
   showing watch directories, scratch-directory info, and queue status (a stub -- M2's offline
   queue landed concurrently with this PR and isn't wired into the status page's display yet);
-  login-item registration (off by default); `go-selfupdate` wiring (off by default via config, and
-  compiled in only with `-tags selfupdate` -- see "Tray shell" below for platform-specific
-  findings from this PR).
+  login-item registration (off by default); `go-selfupdate` wiring (off by default via config --
+  see "Tray shell" below for platform-specific findings from this PR).
 
 ## Quick Start
 
@@ -130,10 +129,8 @@ On Linux, `tray` builds and runs, but immediately returns an error (`tray: unsup
 platform`) -- the tray is scoped to Windows/macOS per the plan doc; a Linux workstation still has
 the fully-tested headless `ingest` path.
 
-To also build in real self-update support (off by default even then -- see `selfUpdate.enabled`),
-add `-tags selfupdate` to the build: `go build -tags selfupdate ./cmd/branchdam-agent`. Every
-other build command in this README and the Makefile (including the CI-verified ones) deliberately
-omits that tag -- see "Tray shell: platform-specific findings" below for why.
+Self-update support (off by default -- see `selfUpdate.enabled`) is compiled into every build; no
+build tag is required.
 
 ## Tray shell: platform-specific findings (issue #3)
 
@@ -176,16 +173,13 @@ This PR could only be developed and CI-verified from a Linux host. What was chec
   on Linux; the platform-tagged write paths are proven only by the `build-windows`/`build-darwin`
   cross-compiles, same caveat as the rest of this list. Off by default (`tray.startOnLogin` in
   config).
-- **Self-update requires `-tags selfupdate` at build time, on top of `selfUpdate.enabled: true`
-  in config.** `go-selfupdate` v1.6.0 imports `golang.org/x/crypto/openpgp` unconditionally from
-  its top-level package, which `govulncheck` flags as `GO-2026-5932` (unfixed, no upgrade path --
-  v1.6.0 is the newest tag). `govulncheck` runs inside this repo's required
-  `test-go / lint-and-test` check with no per-repo suppression available, so the real
-  implementation (`internal/selfupdate/selfupdate.go`) only compiles in behind that build tag;
-  every default build links `selfupdate_stub.go` instead, which returns
-  `selfupdate.ErrNotCompiledIn`. See `CLAUDE.md`'s matching key invariant for the full
-  verification (`govulncheck` clean without the tag, reproduces `GO-2026-5932` with it) and
-  tracked follow-up issue #14.
+- **Self-update is gated only by `selfUpdate.enabled: true` in config -- no build tag required.**
+  `go-selfupdate` v1.6.0 imports `golang.org/x/crypto/openpgp` unconditionally from its top-level
+  package, which `govulncheck` flags as `GO-2026-5932` (unfixed, no upgrade path -- v1.6.0 is the
+  newest tag). This repo's `test-go / lint-and-test` check suppresses that specific finding via
+  `s3ntin3l8/.github/ci-go.yml`'s `govulncheck-ignore` input (added for this exact case, see
+  `s3ntin3l8/.github#49`). See `CLAUDE.md`'s matching key invariant and tracked follow-up issue
+  #14 for when the ignore entry can be dropped.
 
 ## Commands
 
