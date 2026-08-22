@@ -194,6 +194,12 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 	localPath := filepath.Join(e.Ingest.LocalEditRoot, relPath)
 	fr.LocalPath = localPath
 
+	if resolution.AlreadyIngested {
+		fr.Skipped = true
+		fr.SkipReason = "already ingested (identical file exists at destination)"
+		return fr
+	}
+
 	// An orphaned partial from a run that crashed after WriteLocal but
 	// before the queue row was inserted: nothing durable promised this file
 	// exists yet, so it's safe -- and necessary, or O_EXCL below wedges
