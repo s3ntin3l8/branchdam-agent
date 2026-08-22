@@ -394,3 +394,76 @@ func TestCopyToArchiveIsIdempotentOnAlreadyVerifiedFile(t *testing.T) {
 		t.Error("expected the second call to leave the already-verified file untouched")
 	}
 }
+
+// TestIngestCardOfflineSkipIdenticalDuplicate mirrors
+// TestIngestCardReingestSkipIdentical for the offline path: two distinct
+// source files (different folders, identical basename and content) collide
+// on the same rendered destination. ResolveDestination reports
+// AlreadyIngested for the second one, which must be honored -- skipped
+// without deleting the first file's already-verified local copy, minting a
+// second NodeUUID, or inserting a second queue row for the same content.
+func TestIngestCardOfflineSkipIdenticalDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	dir1 := filepath.Join(cardRoot, "DCIM", "100MSDCF")
+	dir2 := filepath.Join(cardRoot, "DCIM", "101MSDCF")
+	if err := os.MkdirAll(dir1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir1, "DSC0001.JPG"), []byte("identical-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir2, "DSC0001.JPG"), []byte("identical-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openStoreT(t)
+	e := newOfflineTestEngine(t, failingClient{}, filepath.Join(dir, "archive"), filepath.Join(dir, "local"), "/storage/staging/agent-1", store)
+	e.Ingest.PathTemplate = "{original_name}"
+
+	res, err := e.IngestCardOffline(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCardOffline: %v", err)
+	}
+	if len(res.Files) != 2 {
+		t.Fatalf("got %d files, want 2", len(res.Files))
+	}
+
+	var queued, skipped int
+	for _, f := range res.Files {
+		if f.Err != nil {
+			t.Fatalf("unexpected error for %s: %v", f.SourcePath, f.Err)
+		}
+		if f.Skipped {
+			skipped++
+			if f.SkipReason != "already ingested (identical file exists at destination)" {
+				t.Errorf("got skip reason %q", f.SkipReason)
+			}
+		} else if f.Queued {
+			queued++
+		}
+	}
+	if queued != 1 || skipped != 1 {
+		t.Fatalf("got queued=%d skipped=%d, want 1 and 1", queued, skipped)
+	}
+
+	// Only the first file's content should remain -- the second run must
+	// not have deleted and rewritten it out from under the first NodeUUID.
+	localPath := filepath.Join(dir, "local", "DSC0001.JPG")
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("local copy missing: %v", err)
+	}
+	if string(data) != "identical-content" {
+		t.Errorf("local copy content = %q", data)
+	}
+
+	// No suffixed sibling should have been created -- the duplicate was
+	// skipped, not auto-suffixed as a distinct file.
+	if _, err := os.Stat(filepath.Join(dir, "local", "DSC0001_2.JPG")); err == nil {
+		t.Error("did not expect a suffixed DSC0001_2.JPG -- duplicate should have been skipped, not renamed")
+	}
+}

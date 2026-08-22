@@ -169,8 +169,11 @@ whatever "latest" resolves to.
   bytes `hashing.FastHash`'s `sampleRegions` would read (including the overlapping-window case
   for a sub-6MiB file), proven byte-identical by
   `TestStreamingFastHasherMatchesFastHash` (`internal/hashing/hashing_test.go`). `DualWrite` also
-  refuses to overwrite an existing destination (`O_EXCL`) -- a caller retrying a failed ingest
-  must remove or rename the partial destination itself first.
+  refuses to overwrite an existing destination (`O_EXCL`) -- on verification failure, `internal/ingest.Engine`
+  cleans up both partial destination copies so subsequent retries never wedge on "file exists". Destination
+  naming collisions are resolved automatically (`ResolveDestination`): identical existing destination files are
+  skipped gracefully, while distinct files with the same rendered path are auto-suffixed (`_2`, `_3`) with
+  matching sidecar pairing.
 - **Verify decides unbuffered-vs-buffered-floor once, at open time, and never falls back mid-stream.**
   `internal/ingest.Verify` re-reads a file DualWrite already `fsync`'d and closed; on Linux
   (`verify_linux.go`) it tries `O_DIRECT`, on macOS (`verify_darwin.go`) it uses `F_NOCACHE` (fcntl),

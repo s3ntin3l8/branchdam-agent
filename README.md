@@ -27,10 +27,11 @@ See [CLAUDE.md](CLAUDE.md) for the milestone breakdown.
   workstation-path -> container-path mappings.
 - `internal/ingest/` -- the SD-card ingest core: poll-based card detection, one-read/two-write
   dual-copy writer, a cache-defeating verified re-read (`fsync`+close+reopen floor,
-  unbuffered/`O_DIRECT` where the platform supports it), DJI `.srt` telemetry parsing for the
-  video's own GPS fields, and metadata extraction at promoted-column parity with a server-side
-  scan. No UI imports -- the headless `ingest -card <path>` subcommand and the `tray` subcommand
-  below both drive it, neither duplicates it.
+  unbuffered/`O_DIRECT` where the platform supports it), verify-failure cleanup of partial files,
+  collision resolution with auto-suffixing (`_2`, `_3`) and identical-content skip, DJI `.srt`
+  telemetry parsing for the video's own GPS fields, and metadata extraction at promoted-column
+  parity with a server-side scan. No UI imports -- the headless `ingest -card <path>` subcommand and
+  the `tray` subcommand below both drive it, neither duplicates it.
 - `internal/queue/`, `internal/ingest`'s `IngestCardOffline`/`Drain` -- M2's offline queue
   (`ingest -offline`, `queue-drain`): every intended event persisted to `queue.db`
   (`modernc.org/sqlite`) before any network call, so a workstation with no route to the NAS can

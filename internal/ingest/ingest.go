@@ -111,9 +111,10 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 		return CardResult{}, fmt.Errorf("ingest: walk card root %s: %w", cardRoot, err)
 	}
 
+	stemSuffix := make(map[string]string)
 	var result CardResult
 	for _, f := range files {
-		fr := e.ingestFile(ctx, f)
+		fr := e.ingestFile(ctx, f, stemSuffix)
 		result.Files = append(result.Files, fr)
 	}
 	return result, nil
@@ -122,7 +123,7 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 // ingestFile runs the full pipeline for one source file: metadata
 // extraction (needed up front to fill the naming template), dual-copy
 // write, verify, DJI .srt GPS, and (for non-sidecar files) submission.
-func (e *Engine) ingestFile(ctx context.Context, srcPath string) FileResult {
+func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string) FileResult {
 	fr := FileResult{SourcePath: srcPath}
 
 	ext := extNoDot(srcPath)
@@ -159,11 +160,30 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string) FileResult {
 		vars.CameraModel = exif.CameraModel
 	}
 
-	relPath := RenderPath(e.Ingest.PathTemplate, vars)
+	stem, _ := splitBase(filepath.Base(srcPath))
+	stemKey := filepath.Join(filepath.Dir(srcPath), stem)
+	knownSuffix := ""
+	if stemSuffix != nil {
+		knownSuffix = stemSuffix[stemKey]
+	}
+
+	roots := []string{e.Ingest.ArchiveRoot, e.Ingest.LocalEditRoot}
+	resolution := ResolveDestination(roots, e.Ingest.PathTemplate, vars, srcPath, knownSuffix)
+	if stemSuffix != nil && resolution.Suffix != "" {
+		stemSuffix[stemKey] = resolution.Suffix
+	}
+
+	relPath := resolution.RelPath
 	archivePath := filepath.Join(e.Ingest.ArchiveRoot, relPath)
 	localPath := filepath.Join(e.Ingest.LocalEditRoot, relPath)
 	fr.ArchivePath = archivePath
 	fr.LocalPath = localPath
+
+	if resolution.AlreadyIngested {
+		fr.Skipped = true
+		fr.SkipReason = "already ingested (identical file exists at destination)"
+		return fr
+	}
 
 	writeRes, err := DualWrite(srcPath, archivePath, localPath)
 	if err != nil {
@@ -180,18 +200,24 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string) FileResult {
 
 	archiveVerify, err := Verify(archivePath, writeRes.FullHash)
 	if err != nil {
+		_ = os.Remove(archivePath)
+		_ = os.Remove(localPath)
 		fr.Err = fmt.Errorf("verify archive copy: %w", err)
 		return fr
 	}
 	fr.ArchiveVerify = archiveVerify
 	localVerify, err := Verify(localPath, writeRes.FullHash)
 	if err != nil {
+		_ = os.Remove(archivePath)
+		_ = os.Remove(localPath)
 		fr.Err = fmt.Errorf("verify local copy: %w", err)
 		return fr
 	}
 	fr.LocalVerify = localVerify
 
 	if !archiveVerify.Verified || !localVerify.Verified {
+		_ = os.Remove(archivePath)
+		_ = os.Remove(localPath)
 		fr.Err = fmt.Errorf("ingest: verification failed for %s (archive verified=%v, local verified=%v) -- safe-eject withheld", srcPath, archiveVerify.Verified, localVerify.Verified)
 		return fr
 	}
