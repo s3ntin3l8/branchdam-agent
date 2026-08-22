@@ -139,6 +139,10 @@ type IngestConfig struct {
 	// PollIntervalSecs is the card-detection poll interval; defaults to 2
 	// (matching the plan's "poll every ~2s is sufficient") when <= 0.
 	PollIntervalSecs int `yaml:"pollIntervalSecs"`
+	// RequireUnbuffered makes a fallback to VerifyMethodBufferedFloor fatal
+	// during verification (withholding safe-eject and failing the ingest run)
+	// rather than advisory/logged. Defaults to false.
+	RequireUnbuffered bool `yaml:"requireUnbuffered"`
 }
 
 // ServerConfig is the branchDAM server this agent reports to.

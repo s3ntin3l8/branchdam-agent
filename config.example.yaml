@@ -49,6 +49,10 @@ ingest:
     - "/media/${USER}"
     - "/run/media/${USER}"
   pollIntervalSecs: 2
+  # Treat a fallback to buffered_floor verify as fatal (withhold safe-eject)
+  # instead of advisory/logged. Linux uses O_DIRECT, macOS uses F_NOCACHE,
+  # Windows uses FILE_FLAG_NO_BUFFERING. Default false.
+  requireUnbuffered: false
 
 # M2's offline queue (branchdam-agent ingest --offline / queue-drain) -- see
 # docs/offline-queue.md for the full state machine this backs. Both keys are
