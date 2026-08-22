@@ -27,3 +27,25 @@ agentId: "workstation-01"
 pathMappings:
   - workstationPath: "D:\\Photos\\Archive"
     containerPath: "/storage/archive"
+
+# M1's SD-card ingest core (branchdam-agent ingest --card <path>). Both
+# archiveRoot and localEditRoot are workstation-native paths this process
+# writes to directly (no storage.Guard involved -- this runs on the
+# workstation, not the server); archiveRoot must be covered by one of the
+# pathMappings above so the agent can translate a written file's path into
+# the container form NodeCreatedPayload.FilePath requires.
+ingest:
+  archiveRoot: "D:\\Photos\\Archive"
+  localEditRoot: "D:\\Photos\\Edit"
+  # {yyyy}/{mm}/{dd}/{camera_model}/{original_name} placeholders. Both
+  # archiveRoot and localEditRoot derive their destination path from this
+  # SAME template, which is what makes the local copy mirror the archive
+  # subtree by construction.
+  pathTemplate: "{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}"
+  # Parent directories polled for newly mounted removable volumes (used by
+  # the tray's card-detection loop, not by a direct `ingest --card <path>`
+  # invocation).
+  cardRoots:
+    - "/media/${USER}"
+    - "/run/media/${USER}"
+  pollIntervalSecs: 2

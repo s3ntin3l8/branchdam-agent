@@ -1,0 +1,17 @@
+1
+00:00:00,000 --> 00:00:00,033
+<font size="28">FrameCnt: 1, DiffTime: 33ms
+2024-03-20 12:59:17,819
+[iso: 400] [shutter: 1/320.0] [fnum: 1.7] [ev: 2.0] [color_md: default] [focal_len: 36.30] [latitude: 30.335120] [longitude: -81.655480] [rel_alt: 6.500 abs_alt: -32.309] [ct: 5695]</font>
+
+2
+00:00:00,033 --> 00:00:00,066
+<font size="28">FrameCnt: 2, DiffTime: 33ms
+2024-03-20 12:59:17,852
+[iso: 400] [shutter: 1/320.0] [fnum: 1.7] [ev: 2.0] [color_md: default] [focal_len: 36.30] [latitude: 30.335119] [longitude: -81.655481] [rel_alt: 6.520 abs_alt: -32.289] [ct: 5695]</font>
+
+3
+00:00:00,066 --> 00:00:00,100
+<font size="28">FrameCnt: 3, DiffTime: 33ms
+2024-03-20 12:59:17,885
+[iso: 400] [shutter: 1/320.0] [fnum: 1.7] [ev: 2.0] [color_md: default] [focal_len: 36.30] [latitude: 30.335117] [longitude: -81.655483] [rel_alt: 6.540 abs_alt: -32.269] [ct: 5695]</font>

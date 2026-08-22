@@ -1,0 +1,17 @@
+1
+00:00:00,000 --> 00:00:00,033
+<font size="28">FrameCnt: 1, DiffTime: 33ms
+2024-03-20 12:59:16,000
+[iso: 100] [shutter: 1/500.0] [fnum: 2.8] [ev: 0.0] [latitude: 0.000000] [longitude: 0.000000] [rel_alt: 0.000 abs_alt: 0.000]</font>
+
+2
+00:00:00,033 --> 00:00:00,066
+<font size="28">FrameCnt: 2, DiffTime: 33ms
+2024-03-20 12:59:16,033
+[iso: 100] [shutter: 1/500.0] [fnum: 2.8] [ev: 0.0] [latitude: 0.000000] [longitude: 0.000000] [rel_alt: 0.000 abs_alt: 0.000]</font>
+
+3
+00:00:00,066 --> 00:00:00,100
+<font size="28">FrameCnt: 3, DiffTime: 33ms
+2024-03-20 12:59:17,819
+[iso: 400] [shutter: 1/320.0] [fnum: 1.7] [ev: 2.0] [latitude: 30.335120] [longitude: -81.655480] [rel_alt: 6.500 abs_alt: -32.309]</font>

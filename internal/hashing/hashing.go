@@ -114,3 +114,82 @@ func PerceptualHash(img image.Image) (int64, error) {
 	}
 	return int64(h.GetHash()), nil
 }
+
+// StreamingFastHasher is an io.Writer that, fed a file's bytes in a single
+// forward pass (offset 0 through size, in order, any chunk size), captures
+// exactly the bytes FastHash(io.ReaderAt, size) would read via
+// sampleRegions -- so a caller that must stream a source exactly once (the
+// M1 dual-copy card writer: one read of the card, two writes, no second
+// pass) can still obtain byte-identical parity with FastHash's ReaderAt-based
+// algorithm, never a reimplementation or approximation of it.
+//
+// This is NOT a general-purpose streaming hasher: Write must be called with
+// monotonically increasing, contiguous, non-overlapping byte ranges
+// covering [0, size) exactly once (i.e. a plain sequential copy loop) for
+// Sum to agree with FastHash. It exists specifically to sit inside an
+// io.MultiWriter alongside the destination file writers during that single
+// pass.
+type StreamingFastHasher struct {
+	size    int64
+	regions [3]region
+	bufs    [3][]byte
+	off     int64
+}
+
+// NewStreamingFastHasher allocates capture buffers for size's three
+// sample windows (sampleRegions(size) -- identical clamping/overlap
+// behavior as FastHash itself, including the size<=0 and sub-6MiB
+// overlapping-window cases). Total buffer size is at most 6MiB regardless
+// of how large size is.
+func NewStreamingFastHasher(size int64) *StreamingFastHasher {
+	regions := sampleRegions(size)
+	h := &StreamingFastHasher{size: size, regions: regions}
+	for i, r := range regions {
+		n := r.end - r.start
+		if n < 0 {
+			n = 0
+		}
+		h.bufs[i] = make([]byte, n)
+	}
+	return h
+}
+
+// Write implements io.Writer, copying p's bytes into whichever of the three
+// capture buffers (possibly more than one, for overlapping windows on a
+// sub-6MiB file) they fall into, tracked against the running offset since
+// the hasher was constructed. Always returns (len(p), nil) -- there is
+// nothing in this operation that can fail.
+func (h *StreamingFastHasher) Write(p []byte) (int, error) {
+	n := len(p)
+	chunkStart := h.off
+	chunkEnd := h.off + int64(n)
+	for i, r := range h.regions {
+		if r.end <= r.start {
+			continue
+		}
+		lo := max(chunkStart, r.start)
+		hi := min(chunkEnd, r.end)
+		if lo < hi {
+			copy(h.bufs[i][lo-r.start:hi-r.start], p[lo-chunkStart:hi-chunkStart])
+		}
+	}
+	h.off += int64(n)
+	return n, nil
+}
+
+// Sum computes the FastHash-equivalent digest from the captured windows:
+// xxHash64 over first, then middle, then last window's bytes (in that
+// order, matching FastHash's ReadAt call order), then the raw 8-byte
+// big-endian size appended to the hash state, formatted as 16 lowercase hex
+// characters. Byte-identical to FastHash(sourceReaderAt, size) provided
+// Write was called as documented on StreamingFastHasher.
+func (h *StreamingFastHasher) Sum() string {
+	hh := xxhash.New()
+	for _, buf := range h.bufs {
+		_, _ = hh.Write(buf)
+	}
+	var sizeBuf [8]byte
+	binary.BigEndian.PutUint64(sizeBuf[:], uint64(h.size))
+	_, _ = hh.Write(sizeBuf[:])
+	return fmt.Sprintf("%016x", hh.Sum64())
+}

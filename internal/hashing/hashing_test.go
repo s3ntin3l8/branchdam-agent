@@ -87,6 +87,66 @@ func TestFastHashDeterministicAndSensitive(t *testing.T) {
 	}
 }
 
+// TestStreamingFastHasherMatchesFastHash proves StreamingFastHasher (fed a
+// file's bytes in one forward pass, via multiple Write calls of varying
+// chunk sizes to catch a capturer that only handles whole-window-aligned
+// writes) produces byte-identical output to FastHash's ReaderAt-based
+// algorithm, across sizes chosen to exercise every boundary the two-arg
+// sampleRegions clamp logic has: zero, sub-2MiB (all three windows
+// coincide), exactly one window, straddling a window boundary by one byte
+// in each direction, exactly the 6MiB point where windows stop overlapping,
+// and comfortably past it. This is the regression test for the specific bug
+// class called out in StreamingFastHasher's doc comment: assigning an
+// overlapping byte to only one window instead of every window it belongs
+// to.
+func TestStreamingFastHasherMatchesFastHash(t *testing.T) {
+	sizes := []int{
+		0,
+		1,
+		2*1024*1024 - 1,
+		2 * 1024 * 1024,
+		2*1024*1024 + 1,
+		3 * 1024 * 1024,
+		6*1024*1024 - 1,
+		6 * 1024 * 1024,
+		10 * 1024 * 1024,
+	}
+	for _, size := range sizes {
+		data := patternBytes(size)
+		want, err := FastHash(bytes.NewReader(data), int64(size))
+		if err != nil {
+			t.Fatalf("size %d: FastHash: %v", size, err)
+		}
+
+		// Feed the streaming hasher in irregular, non-window-aligned chunk
+		// sizes (a real dual-copy writer's io.Copy buffer size has no
+		// relationship to fastHashSampleSize) to prove Write's overlap math
+		// doesn't depend on chunk boundaries lining up with window
+		// boundaries.
+		h := NewStreamingFastHasher(int64(size))
+		const chunk = 99991 // prime, deliberately not a power of two
+		for off := 0; off < len(data); {
+			end := off + chunk
+			if end > len(data) {
+				end = len(data)
+			}
+			n, err := h.Write(data[off:end])
+			if err != nil {
+				t.Fatalf("size %d: Write: %v", size, err)
+			}
+			if n != end-off {
+				t.Fatalf("size %d: Write returned n=%d, want %d", size, n, end-off)
+			}
+			off = end
+		}
+		got := h.Sum()
+
+		if got != want {
+			t.Errorf("size %d: StreamingFastHasher.Sum() = %q, want %q (FastHash)", size, got, want)
+		}
+	}
+}
+
 // TestPerceptualHashGoldenVectors decodes the three committed image fixtures
 // (testdata/gradient.{png,jpg,gif}) -- a 64x64 deterministic RGB gradient,
 // deliberately not a solid color, so goimagehash's DCT actually has

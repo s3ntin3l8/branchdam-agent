@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install-hooks test lint fmt vet tidy vulncheck build clean
+.PHONY: help install-hooks test lint fmt vet tidy vulncheck build clean check
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -31,6 +31,8 @@ vulncheck: ## Check for known vulnerabilities
 
 build: ## Build all packages
 	go build ./...
+
+check: build vet test ## One-shot pre-PR gate: build + vet + test (does not require pre-commit -- see `lint`)
 
 clean: ## Remove build artifacts and caches
 	rm -f coverage.txt
