@@ -17,11 +17,16 @@ master currently reaches the graph only via an operator-triggered scan; SD-card 
 bit-for-bit verification or safe-eject signalling; stills lineage has no confidence-1.00 path.
 This repo closes that gap, in milestones:
 
-- **M0 (this PR)** -- repo scaffold, the `internal/branchdam/` REST client, three ported pieces
+- **M0** -- repo scaffold, the `internal/branchdam/` REST client, three ported pieces
   of server logic (`FastHash`, `PerceptualHash`'s call sequence, `naming.Stem`), and a
   `preflight` subcommand. No SQLite, no tray, no ingest.
-- **M1** -- tray shell + SD-card ingest core (one read, two writes, BLAKE3-256 verify against an
-  unbuffered re-read, DJI `.srt` GPS parsing).
+- **M1 (this PR, ingest-core half only -- see below)** -- SD-card ingest core: card detection
+  (poll-based), one read/two writes, BLAKE3-256 verify against a cache-defeating re-read, DJI
+  `.srt` GPS parsing, metadata extraction at promoted-column parity with a server-side scan, and
+  the headless `ingest` subcommand. The tray shell itself (`fyne.io/systray` + embedded web UI)
+  is deliberately a separate, later PR -- issue #2 scoped it out explicitly, and this package has
+  no UI imports for exactly that reason: the tray, when it lands, is a second, thin driver over
+  `internal/ingest.Engine`, not a rewrite of it.
 - **M2** -- offline queue (`modernc.org/sqlite`) + the rebase handoff.
 - **M3** -- DaVinci Resolve post-render hook (Python, `hooks/resolve/`).
 - **M4 (this PR)** -- Luminar `catalog.db` reader (`internal/luminar/`, `internal/nodeindex/`,
@@ -52,6 +57,7 @@ both sides call the same `goimagehash` library).
 | `make tidy` | Run go mod tidy. |
 | `make vulncheck` | Run govulncheck for known vulnerabilities. |
 | `make build` | Build all packages. |
+| `make check` | One-shot pre-PR gate: build + vet + test (does not run `lint` -- that needs `pre-commit` installed, see `make install-hooks`). |
 | `make clean` | Remove build artifacts and test caches. |
 
 golangci-lint also runs as its own pinned CI job (`v2.12.2`, matching `.golangci.yml`'s
@@ -63,16 +69,19 @@ whatever "latest" resolves to.
 
 | Path | Responsibility |
 |---|---|
-| `cmd/branchdam-agent/main.go` | Entrypoint + subcommand dispatch (`preflight`, `luminar-sync`, `version`) |
+| `cmd/branchdam-agent/main.go` | Entrypoint + subcommand dispatch (`preflight`, `luminar-sync`, `ingest`, `version`) |
 | `cmd/branchdam-agent/preflight.go` | `preflight`'s checks (server reachability/version, `exiftool` on `PATH`, path mappings), factored out of `main.go` so it's testable without capturing stdout |
 | `cmd/branchdam-agent/luminarsync.go` | `luminar-sync`'s flag parsing and orchestration (open catalog, load node index, run `luminar.Syncer`, print a summary); `--dump-schema` mode for recovering a real catalog's schema |
+| `cmd/branchdam-agent/ingest.go` | `ingest --card <path> --config <path>`: the headless driver over `internal/ingest.Engine`, and the report printer that decides the process exit code / "safe to eject" line |
 | `internal/branchdam/` | The REST client for branchDAM's `/api/v1/agent/*` contract -- one file per endpoint (`hello.go`, `handshake.go`, `events.go`, `rebase.go`), `types.go` for the hand-synced DTOs, `errors.go` for client-side validation gates and fatal/transient error classification, `conformance_test.go` + `testdata/*.golden.json` for the byte-for-byte fixture tests |
-| `internal/hashing/` | Byte-for-byte port of branchDAM's `FastHash` (sampled xxHash64) and `PerceptualHash` (thin `goimagehash.PerceptionHash` wrapper) |
+| `internal/hashing/` | Byte-for-byte port of branchDAM's `FastHash` (sampled xxHash64) and `PerceptualHash` (thin `goimagehash.PerceptionHash` wrapper), plus M1's own addition `StreamingFastHasher` -- a single-pass, `io.Writer`-shaped variant proven byte-identical to `FastHash` by an equivalence test, so the M1 dual-copy writer never re-reads the card a second time just to compute `fast_hash` |
 | `internal/naming/` | Byte-for-byte port of branchDAM's `naming.Stem`/`naming.Analyze` filename normalization |
 | `internal/phash/` | Port of branchDAM's `probe.ExtractPHash` *call sequence* (direct decode, then exiftool `-PreviewImage`/`-JpgFromRaw`/`-ThumbnailImage` fallback, first decodable wins) -- not a reimplementation of exiftool itself |
 | `internal/luminar/` | Reads a Luminar `catalog.db` (`?mode=ro`, never `?immutable=1`) and emits `EVENT_EDGE_ATTACHED` for edit->source pairs; the actual (unverified) schema query is isolated in `query.go` and overridable via `--query-file` -- see `docs/luminar-catalog.md` |
 | `internal/nodeindex/` | Maps a file path to the `nodeUuid` it was ingested as (`Resolver` interface, `FileIndex` JSON-file implementation) -- works around there being no agent-reachable lookup-by-path endpoint on branchDAM |
-| `internal/config/` | YAML config loader: branchDAM server URL + API key, this workstation's self-asserted `agentId`, and the workstation-path -> container-path map `preflight` prints |
+| `internal/djisrt/` | Byte-for-byte port of branchDAM's `internal/djisrt` -- DJI `.srt` first-GPS-fix telemetry parser, including `isValidFix`'s pre-lock `(0,0)` rejection |
+| `internal/ingest/` | M1's SD-card ingest core, UI-free: `carddetect.go` (poll-based removable-volume detection), `writer.go` (one-read/two-write `DualWrite`), `verify.go`+`verify_linux.go`+`verify_other.go` (cache-defeating re-read, O_DIRECT on Linux with a documented buffered-floor fallback), `metadata.go` (exiftool extraction ported from branchDAM's `probe.go`, sidecar merge, `capturedAt` fallback chain), `srt.go` (DJI GPS-on-video wiring over `internal/djisrt`), `naming.go` (destination path template), `pathmap.go` (workstation->container path translation), `extensions.go` (video/image extension sets, copied from branchDAM's `pipeline.videoExts`/`imageExts` for parity), `ingest.go` (`Engine`, the orchestrator both the CLI and a later tray drive) |
+| `internal/config/` | YAML config loader: branchDAM server URL + API key, this workstation's self-asserted `agentId`, the workstation-path -> container-path map `preflight` prints, and (M1) `ingest:` -- archive/local-edit roots, the naming template, and card-detection polling |
 | `config.example.yaml` | Reference config with `${VAR}` placeholders |
 | `.github/workflows/` | Thin callers of the reusable workflows in `s3ntin3l8/.github`, minus the Docker jobs the template ships (no image is published from this repo) |
 | `.editorconfig` | Shared editor settings (LF, UTF-8, final newline; tabs for Go) |
@@ -139,12 +148,60 @@ whatever "latest" resolves to.
   -- captures everything between `${` and `}` as one literal environment-variable name, no
   `:-default` support.
 - **Agent payload paths are server-container, absolute, symlink-free -- there is no server-side
-  rewrite pass on them.** `internal/config.PathMapping` is what a future ingest milestone
-  translates a workstation path through *before* it ever appears in a request body;
-  `preflight` prints the configured mappings so an operator can eyeball them first. This is the
-  opposite convention from `.dam.json`'s `raw_path` (workstation-native, translated server-side)
-  that M3's Resolve hook will use -- deliberately called out here since the plan doc flags it as
-  the single most confusable thing across the whole phase-10 design.
+  rewrite pass on them.** `internal/config.PathMapping` + `internal/ingest.ToContainerPath`
+  (longest-prefix match) is what M1's ingest core translates a written archive path through
+  *before* it ever appears in a request body; `preflight` prints the configured mappings so an
+  operator can eyeball them first. This is the opposite convention from `.dam.json`'s `raw_path`
+  (workstation-native, translated server-side) that M3's Resolve hook will use -- deliberately
+  called out here since the plan doc flags it as the single most confusable thing across the
+  whole phase-10 design.
+- **`internal/ingest.DualWrite` never re-reads the card to compute `fast_hash`.** It streams the
+  source into both destinations plus `hashing.StreamingFastHasher` and `blake3.New()`
+  simultaneously via `io.MultiWriter`, in one pass -- `StreamingFastHasher` captures exactly the
+  bytes `hashing.FastHash`'s `sampleRegions` would read (including the overlapping-window case
+  for a sub-6MiB file), proven byte-identical by
+  `TestStreamingFastHasherMatchesFastHash` (`internal/hashing/hashing_test.go`). `DualWrite` also
+  refuses to overwrite an existing destination (`O_EXCL`) -- a caller retrying a failed ingest
+  must remove or rename the partial destination itself first.
+- **Verify decides buffered-vs-O_DIRECT once, at open time, and never falls back mid-stream.**
+  `internal/ingest.Verify` re-reads a file DualWrite already `fsync`'d and closed; on Linux
+  (`verify_linux.go`) it tries `O_DIRECT` first and falls back to a plain reopen only if the
+  *open itself* fails (the expected case on tmpfs and some network/overlay filesystems, which
+  return `EINVAL`) -- a fallback triggered by a later read failure would silently turn a
+  cache-defeating claim into a cache-poisoned one. `VerifyResult.Method` records which path was
+  actually used (`unbuffered` vs `buffered_floor`) so this is inspectable, not just asserted.
+  macOS `F_NOCACHE` / Windows `FILE_FLAG_NO_BUFFERING` (`verify_other.go`) are **not implemented
+  in this PR** -- no macOS/Windows host was available to validate against, the same gap the plan
+  doc's UI-stack section flags for tray packaging. The documented floor (`fsync` + close +
+  reopen, no direct I/O) still applies on those platforms; this is a stated limitation; a
+  follow-up PR adding either is additive.
+- **pHash is computed from the just-written local edit copy, not the card.** Exif extraction
+  (`internal/ingest.Exiftool.Exif`) still runs against the source path directly, before the
+  copy -- it supplies the naming template's `{camera_model}`/`{yyyy}-{mm}-{dd}` placeholders, so
+  it has to happen first, and it is its own necessary subprocess read regardless of what
+  `DualWrite`'s single Go-level byte-stream pass does. pHash, by contrast, has no such ordering
+  requirement and would mean a *second* full read of a possibly slow SD card reader if it ran
+  against the source -- so it runs against the local destination copy after `Verify` has already
+  proven that copy byte-identical to the source. "One read of the card," per issue #2, is
+  specifically about not doubling the cost of the large sequential byte-stream pass; it does not
+  (and structurally cannot) extend to exiftool's or pHash's own independent reads.
+- **`.xmp`/`.srt` sidecar files are copied to both destinations but never get their own
+  `EVENT_NODE_CREATED`.** The archive is meant to be a complete mirror of the card, so
+  `internal/ingest.Engine` still runs them through `DualWrite`+`Verify`; `FileResult.Skipped` is
+  what suppresses submission. This sidesteps branchDAM issue #249 (bare `.xmp` files becoming
+  orphan graph nodes) for the agent path specifically, without deciding #249 itself -- a
+  server-side scan of the same archive directory will still register the sidecar as its own
+  `media_nodes` row via its existing `.xmp`-as-orphan behavior, which is why the parity test keys
+  its file-by-file diff on the set of files the agent actually submitted, not on every row either
+  database ends up with.
+- **DJI `.srt` GPS lands on the video's own event, never a separate node or edge.** Ported
+  `internal/djisrt.ParseFirstPoint` (`isValidFix` rejects the pre-lock `(0,0)` placeholder, same
+  as branchDAM's own copy) is called only for a video-extension file with a same-stem `.srt`
+  sidecar (`internal/ingest.findSRTSidecar`, tried against both `.srt` and `.SRT` casing); the
+  first valid fix's lat/lon are set directly on that video's `NodeCreatedPayload`. This is what
+  sidesteps branchDAM issue #251 (classifying `.srt` in general is unsafe, since it's also the
+  universal subtitle extension) entirely -- there is no `.srt`-specific classification logic
+  here, only a GPS lookup scoped to videos.
 
 ## CI/CD — uses centralized reusable workflows
 

@@ -24,6 +24,43 @@ type Config struct {
 	Server       ServerConfig  `yaml:"server"`
 	AgentID      string        `yaml:"agentId"`
 	PathMappings []PathMapping `yaml:"pathMappings"`
+	Ingest       IngestConfig  `yaml:"ingest"`
+}
+
+// IngestConfig configures M1's SD-card ingest core: where the two copies
+// land and what relative-path template both derive from, and card-detection
+// polling. ArchiveRoot/LocalEditRoot are workstation-native paths (this
+// process writes to them with plain os.* calls, never through branchDAM's
+// storage.Guard -- the agent runs on the workstation, not the server).
+// ArchiveRoot's workstation-to-container translation for the
+// EVENT_NODE_CREATED payload goes through PathMappings above; LocalEditRoot
+// is never translated or sent to the server at all.
+type IngestConfig struct {
+	// ArchiveRoot is the workstation path backing the Tier-3 archive
+	// destination (e.g. a mounted NAS share). Must have a matching
+	// PathMapping so the agent can translate a written file's path into the
+	// server-container, absolute, symlink-free form NodeCreatedPayload.FilePath
+	// requires.
+	ArchiveRoot string `yaml:"archiveRoot"`
+	// LocalEditRoot is the workstation path for the local edit copy (fast
+	// local/NVMe scratch). Never sent to the server -- the local copy is not
+	// a server-tracked node.
+	LocalEditRoot string `yaml:"localEditRoot"`
+	// PathTemplate is the relative-path template both ArchiveRoot and
+	// LocalEditRoot derive a destination path from, so the local copy
+	// mirrors the archive subtree by construction. Supports
+	// {yyyy}/{mm}/{dd}/{camera_model}/{original_name} placeholders -- see
+	// internal/ingest's naming.go. Defaults to
+	// "{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}" when empty.
+	PathTemplate string `yaml:"pathTemplate"`
+	// CardRoots are the parent directories polled for newly mounted
+	// removable volumes (e.g. "/media/$USER", "/run/media/$USER" on Linux,
+	// "/Volumes" on macOS). Only used by the `ingest --watch` poll loop, not
+	// by a direct `ingest --card <path>` invocation.
+	CardRoots []string `yaml:"cardRoots"`
+	// PollIntervalSecs is the card-detection poll interval; defaults to 2
+	// (matching the plan's "poll every ~2s is sufficient") when <= 0.
+	PollIntervalSecs int `yaml:"pollIntervalSecs"`
 }
 
 // ServerConfig is the branchDAM server this agent reports to.
