@@ -292,7 +292,6 @@ func (s *Store) ByLocalPath(ctx context.Context, localPath string) (Record, bool
 	return rec, true, nil
 }
 
-
 // Pending returns every row not yet Done(), oldest first -- the set Drain
 // works through on each pass.
 func (s *Store) Pending(ctx context.Context) ([]Record, error) {

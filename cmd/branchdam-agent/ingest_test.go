@@ -175,4 +175,3 @@ func TestRunIngestCollisionMultiSubdir(t *testing.T) {
 		t.Errorf("expected DSC0001_2.JPG in archive: %v", err)
 	}
 }
-

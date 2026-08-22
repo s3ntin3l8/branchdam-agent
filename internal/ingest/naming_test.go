@@ -164,4 +164,3 @@ func TestSuffixedFilename(t *testing.T) {
 		}
 	}
 }
-

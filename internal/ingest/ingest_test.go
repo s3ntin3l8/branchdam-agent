@@ -268,4 +268,3 @@ func TestIngestCardReingestSkipIdentical(t *testing.T) {
 		t.Errorf("got skip reason %q", res2.Files[0].SkipReason)
 	}
 }
-
