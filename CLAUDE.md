@@ -24,7 +24,8 @@ This repo closes that gap, in milestones:
   unbuffered re-read, DJI `.srt` GPS parsing).
 - **M2** -- offline queue (`modernc.org/sqlite`) + the rebase handoff.
 - **M3** -- DaVinci Resolve post-render hook (Python, `hooks/resolve/`).
-- **M4** -- Luminar `catalog.db` reader.
+- **M4 (this PR)** -- Luminar `catalog.db` reader (`internal/luminar/`, `internal/nodeindex/`,
+  `luminar-sync` subcommand). Schema mapping is unverified -- see `docs/luminar-catalog.md`.
 
 See the plan doc for the full reasoning behind each (notably: why Go and not Rust/Tauri --
 `internal/hashing.PerceptualHash` has to be bit-identical to branchDAM's own, which only holds if
@@ -62,12 +63,15 @@ whatever "latest" resolves to.
 
 | Path | Responsibility |
 |---|---|
-| `cmd/branchdam-agent/main.go` | Entrypoint + subcommand dispatch (`preflight`, `version`) |
+| `cmd/branchdam-agent/main.go` | Entrypoint + subcommand dispatch (`preflight`, `luminar-sync`, `version`) |
 | `cmd/branchdam-agent/preflight.go` | `preflight`'s checks (server reachability/version, `exiftool` on `PATH`, path mappings), factored out of `main.go` so it's testable without capturing stdout |
+| `cmd/branchdam-agent/luminarsync.go` | `luminar-sync`'s flag parsing and orchestration (open catalog, load node index, run `luminar.Syncer`, print a summary); `--dump-schema` mode for recovering a real catalog's schema |
 | `internal/branchdam/` | The REST client for branchDAM's `/api/v1/agent/*` contract -- one file per endpoint (`hello.go`, `handshake.go`, `events.go`, `rebase.go`), `types.go` for the hand-synced DTOs, `errors.go` for client-side validation gates and fatal/transient error classification, `conformance_test.go` + `testdata/*.golden.json` for the byte-for-byte fixture tests |
 | `internal/hashing/` | Byte-for-byte port of branchDAM's `FastHash` (sampled xxHash64) and `PerceptualHash` (thin `goimagehash.PerceptionHash` wrapper) |
 | `internal/naming/` | Byte-for-byte port of branchDAM's `naming.Stem`/`naming.Analyze` filename normalization |
 | `internal/phash/` | Port of branchDAM's `probe.ExtractPHash` *call sequence* (direct decode, then exiftool `-PreviewImage`/`-JpgFromRaw`/`-ThumbnailImage` fallback, first decodable wins) -- not a reimplementation of exiftool itself |
+| `internal/luminar/` | Reads a Luminar `catalog.db` (`?mode=ro`, never `?immutable=1`) and emits `EVENT_EDGE_ATTACHED` for edit->source pairs; the actual (unverified) schema query is isolated in `query.go` and overridable via `--query-file` -- see `docs/luminar-catalog.md` |
+| `internal/nodeindex/` | Maps a file path to the `nodeUuid` it was ingested as (`Resolver` interface, `FileIndex` JSON-file implementation) -- works around there being no agent-reachable lookup-by-path endpoint on branchDAM |
 | `internal/config/` | YAML config loader: branchDAM server URL + API key, this workstation's self-asserted `agentId`, and the workstation-path -> container-path map `preflight` prints |
 | `config.example.yaml` | Reference config with `${VAR}` placeholders |
 | `.github/workflows/` | Thin callers of the reusable workflows in `s3ntin3l8/.github`, minus the Docker jobs the template ships (no image is published from this repo) |
