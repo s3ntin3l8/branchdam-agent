@@ -53,10 +53,10 @@ func runUpdateCmd(args []string) int {
 		return 1
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
+	checkCtx, cancelCheck := context.WithTimeout(context.Background(), *timeout)
+	defer cancelCheck()
 
-	result, err := up.Check(ctx, version)
+	result, err := up.Check(checkCtx, version)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "branchdam-agent update: %v\n", err)
 		return 1
@@ -85,7 +85,14 @@ func runUpdateCmd(args []string) int {
 		return 1
 	}
 
-	appliedVersion, err := up.Apply(ctx, version, layout)
+	// Apply gets its own timeout, independent of the check's, so a slow
+	// Check can't eat into the budget Apply needs to get through a
+	// multi-step Windows sibling-then-primary swap -- see Apply's own doc
+	// comment on why a cancel landing mid-swap is worse than a slow one.
+	applyCtx, cancelApply := context.WithTimeout(context.Background(), *timeout)
+	defer cancelApply()
+
+	appliedVersion, err := up.Apply(applyCtx, version, layout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "branchdam-agent update: apply: %v\n", err)
 		return 1
