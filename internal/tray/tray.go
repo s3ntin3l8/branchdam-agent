@@ -113,13 +113,14 @@ func (u UpdateStatus) Note() string {
 }
 
 // Status is the full snapshot the embedded status page and the tray menu
-// both render from. QueueStatus is a stub -- deliberately literal text, not
-// a fabricated number, per the issue's explicit instruction not to show
-// fake numbers.
+// both render from. QueueStatus replaced the M2-era QueueStatusStub in
+// issue #32 -- see that type's own doc comment for the
+// Configured-vs-Err distinction that preserves the "never fabricate a
+// number" invariant the stub used to hold as a literal string.
 type Status struct {
 	WatchDirs   []string
 	ScratchNote string
-	QueueStatus string
+	QueueStatus QueueStatus
 	LastIngest  *IngestSummary
 	SelfUpdate  UpdateStatus
 	// Busy and BusyCard reflect Runner.Busy() -- shown on the status page
@@ -129,14 +130,6 @@ type Status struct {
 	Busy     bool
 	BusyCard string
 }
-
-// QueueStatusStub is Status.QueueStatus's placeholder. M2's offline queue
-// (issue #4, `internal/queue` + `queue.db`) landed concurrently with this
-// PR (a separate worktree, per this repo's issue #3/#4 split) and is not
-// wired into the tray/status-page display yet -- that's follow-on work
-// (querying `queue.db` for a real depth/backlog readout), not something
-// this package should fabricate a number for in the meantime.
-const QueueStatusStub = "offline queue exists (M2) but is not yet wired into the tray status page"
 
 // Runner owns the state a tray-resident process needs: the ingest engine
 // to drive, which directories to describe as "watched," and the outcome of
@@ -157,6 +150,11 @@ type Runner struct {
 	// card mid-copy.
 	gate sync.Mutex
 
+	// drainMu is a SEPARATE mutex from gate, deliberately -- see
+	// TriggerDrain's doc comment for why a drain pass must never be
+	// blocked by (or block) an ingest or a self-update apply.
+	drainMu sync.Mutex
+
 	// mu guards every field below, including ingester/watchDirs/
 	// scratchDir -- unlike before issue #31's settings menu, these are no
 	// longer set once at construction and left alone; Reconfigure can
@@ -169,6 +167,20 @@ type Runner struct {
 	busy       bool
 	busyCard   string
 	busySince  time.Time
+
+	// queueReader/drainer/pruner are nil-able (issue #32): nil means "not
+	// configured" (no offline.queueDbPath, or prune.enabled is false),
+	// the honest signal QueueStatus.Configured/PruneEnabled surface --
+	// never treated as an error. Set once via SetQueueDeps, not swapped by
+	// Reconfigure: unlike ingester/watchDirs/scratchDir, queue.db is
+	// opened once at tray startup (cmd/branchdam-agent/tray.go) and its
+	// path is not one of the fields issue #31's settings menu can edit, so
+	// there is nothing here that needs to survive a live config reload.
+	queueReader QueueReader
+	drainer     Drainer
+	pruner      Pruner
+	lastDrain   *DrainSummary
+	lastPrune   *PruneSummary
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -268,6 +280,92 @@ func (r *Runner) TryLockIdle() (release func(), ok bool) {
 	return r.gate.Unlock, true
 }
 
+// SetQueueDeps wires the offline-queue status readout and the drain/prune
+// timers' targets (issue #32). Any of reader/drainer/pruner may be nil --
+// see the Runner field doc comment above for why that is a normal,
+// honestly-reported configuration, not an error condition.
+func (r *Runner) SetQueueDeps(reader QueueReader, drainer Drainer, pruner Pruner) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.queueReader = reader
+	r.drainer = drainer
+	r.pruner = pruner
+}
+
+// TriggerDrain runs one internal/ingest.Drain pass via the configured
+// Drainer, if one is wired and no other drain pass is currently running.
+// drainMu is a DEDICATED mutex, deliberately never Runner.gate: gate is
+// held for an ingest's or a self-update apply's entire duration, and a 5s
+// drain timer sharing it would drop every tick during the exact window
+// the queue is filling (an ingest in progress), while a drain pass holding
+// gate across a slow NAS archive copy would block an inserted card from
+// ingesting for minutes. Drain is stateless across calls (per-row
+// next-attempt timestamps in queue.db are the real backoff), so skipping a
+// tick outright when a previous pass is still running -- rather than
+// queuing behind it -- is always safe and is what keeps concurrent passes
+// from ever piling up. ran=false covers both "not configured" and "already
+// running"; the caller (a timer tick or a menu click) treats both the same
+// way: nothing to show beyond what Status() already reports.
+func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bool) {
+	if !r.drainMu.TryLock() {
+		return DrainSummary{}, false
+	}
+	defer r.drainMu.Unlock()
+
+	r.mu.Lock()
+	drainer := r.drainer
+	r.mu.Unlock()
+	if drainer == nil {
+		return DrainSummary{}, false
+	}
+
+	summary, err := drainer.Drain(ctx)
+	summary.At = time.Now()
+	if err != nil {
+		summary.Err = err
+	}
+
+	r.mu.Lock()
+	r.lastDrain = &summary
+	r.mu.Unlock()
+
+	return summary, true
+}
+
+// TriggerPrune runs one internal/prune.Pass pass via the configured
+// Pruner, if one is wired and TryLockIdle succeeds. Unlike TriggerDrain,
+// this DOES share Runner.gate (via TryLockIdle) with ingest and
+// self-update: prune deletes from ingest.LocalEditRoot while an ingest
+// writes into it, the real hazard a shared process introduces that
+// `prune -watch` running standalone never had to guard against. Skipping
+// a busy tick is safe at prune's own (much longer) cadence.
+func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bool) {
+	release, ok := r.TryLockIdle()
+	if !ok {
+		return PruneSummary{}, false
+	}
+	defer release()
+
+	r.mu.Lock()
+	pruner := r.pruner
+	r.mu.Unlock()
+	if pruner == nil {
+		return PruneSummary{}, false
+	}
+
+	summary, err := pruner.Prune(ctx)
+	summary.At = time.Now()
+	if err != nil {
+		summary.Err = err
+	}
+
+	r.mu.Lock()
+	r.lastPrune = &summary
+	r.mu.Unlock()
+
+	return summary, true
+}
+
 // Reconfigure swaps in a freshly built Ingester plus the watch/scratch
 // description it should report going forward -- the guarded-rebuild
 // mechanism issue #31's settings menu applies every hot-reloadable config
@@ -307,6 +405,10 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	busyCard := r.busyCard
 	watchDirs := append([]string(nil), r.watchDirs...)
 	scratchDir := r.scratchDir
+	queueReader := r.queueReader
+	pruneEnabled := r.pruner != nil
+	lastDrain := r.lastDrain
+	lastPrune := r.lastPrune
 	r.mu.Unlock()
 
 	scratchNote := "not configured"
@@ -314,10 +416,20 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		scratchNote = fmt.Sprintf("%s (usage tracking not yet implemented)", scratchDir)
 	}
 
+	qs := QueueStatus{PruneEnabled: pruneEnabled, LastDrain: lastDrain, LastPrune: lastPrune}
+	if queueReader != nil {
+		qs.Configured = true
+		if counts, err := queueReader.Counts(context.Background()); err != nil {
+			qs.Err = err
+		} else {
+			qs.Counts = counts
+		}
+	}
+
 	return Status{
 		WatchDirs:   watchDirs,
 		ScratchNote: scratchNote,
-		QueueStatus: QueueStatusStub,
+		QueueStatus: qs,
 		LastIngest:  last,
 		SelfUpdate:  selfUpdate,
 		Busy:        busy,

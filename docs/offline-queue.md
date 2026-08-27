@@ -80,8 +80,8 @@ interval to make this astronomically unlikely without depending on anything the 
 Each of the three steps has its own attempt counter and `next_attempt_unix` column. A failure
 schedules the next attempt at `2s * 2^(attempts-1)`, capped at 5 minutes (`backoffFor` in
 `internal/ingest/drain.go`). `Drain` is stateless across calls -- it is the persisted
-next-attempt timestamps that turn repeated calls (`queue-drain -watch`, a cron job, a future tray
-timer) into backoff rather than a tight retry loop.
+next-attempt timestamps that turn repeated calls (`queue-drain -watch`, a cron job, or the tray's
+own `offline.drainIntervalSecs` timer, issue #32) into backoff rather than a tight retry loop.
 
 `node_created` and `archive_copy` retry indefinitely -- every realistic failure mode on those two
 (network down, NAS unmounted) is expected to eventually clear. `rebase` is the one step with a
@@ -136,8 +136,28 @@ what's outstanding.
   plan decision 3 exists to prevent. Symptom to look for: `queue.db` rows stuck `SUBMITTED` +
   `DONE` + `DONE` whose `media_nodes` counterpart is `INDEXED_SHALLOW` with a `NULL full_hash`.
 - **Genuinely offline for a long time**: every step backs off up to 5 minutes between attempts.
-  `queue-drain -watch` (or repeated manual invocation, or a future tray timer) is expected to be
+  `queue-drain -watch` (or repeated manual invocation, or the tray's own timer) is expected to be
   running continuously or periodically for the queue to actually drain once connectivity returns.
+
+## Single writer once the tray is running (issue #32)
+
+`branchdam-agent tray` now opens `queue.db` itself (when `offline.queueDbPath` is set) and runs its
+own drain and prune passes on independent timers (`offline.drainIntervalSecs`,
+`prune.intervalMinutes`) via `internal/tray.Runner.TriggerDrain`/`TriggerPrune` -- see
+`cmd/branchdam-agent/queueagent.go`. With the tray running, it is the one long-lived process
+holding `queue.db` open, the same role `queue-drain -watch` used to play alone. Running
+`queue-drain -watch` (or `prune -watch`) *alongside* a running tray is redundant, not unsafe:
+`queue.Store`'s WAL journal mode plus `busy_timeout=5000` (see `internal/queue/store.go`) make
+concurrent writers from two processes correct, just pointless double work. There is no new lock
+file or exclusion mechanism -- this is a documentation note, not an enforced invariant.
+
+`Runner.TriggerDrain` and `Runner.TriggerPrune` use deliberately different locking (see their doc
+comments in `internal/tray/tray.go`): drain uses its own dedicated mutex, entirely independent of
+the ingest/self-update gate, so a 5s drain tick is never dropped during an ingest and never blocks
+one either; prune shares that gate (via `TryLockIdle`) because it deletes from
+`ingest.localEditRoot` while an ingest can be writing into it -- a hazard that only exists once
+prune and ingest share a process, which `prune -watch` running standalone never had to guard
+against.
 
 ## M2 gate: verifying this against a local branchDAM instance
 

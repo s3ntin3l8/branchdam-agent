@@ -204,10 +204,21 @@ ignore entry can be dropped.
   original design doc flagged and this PR did not spike separately). `configSettings`'s own logic
   (persistence, reload, restart-required diffing) is pinned by tests substituting a fake
   `dialogRunner`; the dialogs' actual rendering is not.
-- **Tray status page's queue field is a stub.** The embedded status page
-  (`http://127.0.0.1:38080/` by default, loopback-only) shows queue status as
-  `tray.QueueStatusStub`, a literal placeholder string, not a real count -- the offline queue
-  isn't wired into the status page's display yet.
+- **Tray queue status has no live rate/ETA or in-progress-transfer readout (issue #32).** The
+  status page and menu show a real `internal/queue.Store.Counts` snapshot (pending, permanently
+  failed, done) plus the last completed drain/prune pass's summary -- but not a live "copying
+  X.jpg, 40% done" or a bytes/sec rate while a drain's archive copy is in flight, even though
+  `internal/ingest`'s progress-callback plumbing (`ProgressEvent`) already exists and could feed
+  one. Deferred as its own follow-on: it needs a progress callback threaded through a
+  concurrently-running `Drain` pass with its own synchronization against `Runner`'s polled
+  `Status()` calls, which is meaningfully more design surface than the Counts-based readout this
+  PR shipped. `offline.drainIntervalSecs`/`prune.intervalMinutes` are also config-file-only for
+  now -- not yet exposed in the tray's settings menu.
+- **Tray-driven drain/prune passes are unverified on real hardware.** `Runner.TriggerDrain`/
+  `TriggerPrune`'s locking (a dedicated mutex for drain, sharing the ingest/self-update gate for
+  prune) and the two background timers (`cmd/branchdam-agent/queueagent.go`'s `startPeriodic`) are
+  pinned by unit tests with fake `Drainer`/`Pruner`s, but nothing here has exercised a real
+  drain/prune pass running concurrently with a real card ingest on Windows or macOS.
 - **The Luminar `catalog.db` query is unvalidated against a real catalog.** Luminar's schema is
   undocumented; see [`luminar-catalog.md`](luminar-catalog.md) for the research behind the
   built-in query, its confidence level, and `--dump-schema` for correcting it against your own

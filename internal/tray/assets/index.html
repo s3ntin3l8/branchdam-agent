@@ -39,7 +39,31 @@
 
   <section>
     <h2>Queue status</h2>
-    <p class="stub">{{.Status.QueueStatus}}</p>
+    {{if not .Status.QueueStatus.Configured}}
+    <p class="stub">not configured (set <code>offline.queueDbPath</code> in config.yaml to enable)</p>
+    {{else if .Status.QueueStatus.Err}}
+    <p class="fail">error reading queue.db: {{.Status.QueueStatus.Err}}</p>
+    {{else}}
+    <p>
+      {{.Status.QueueStatus.Counts.Pending}} pending ({{.Status.QueueStatus.Counts.PendingBytes}} bytes awaiting upload),
+      {{if gt .Status.QueueStatus.Counts.Failed 0}}<span class="fail">{{.Status.QueueStatus.Counts.Failed}} permanently failed</span>{{else}}0 permanently failed{{end}},
+      {{.Status.QueueStatus.Counts.Done}} done
+    </p>
+    {{end}}
+    {{with .Status.QueueStatus.LastDrain}}
+    <p>
+      last drain {{since .At}} ago:
+      {{if .Err}}<span class="fail">failed: {{.Err}}</span>{{else}}
+      {{.NodeCreatedSent}} submitted, {{.ArchiveCopiesDone}} archived, {{.RebasesDone}} rebased{{if gt .RebasesFailed 0}}, <span class="fail">{{.RebasesFailed}} permanently failed</span>{{end}}
+      {{end}}
+    </p>
+    {{end}}
+    {{with .Status.QueueStatus.LastPrune}}
+    <p>
+      last prune {{since .At}} ago:
+      {{if .Err}}<span class="fail">failed: {{.Err}}</span>{{else}}{{.Pruned}} pruned, {{.FreedBytes}} bytes freed{{end}}
+    </p>
+    {{end}}
   </section>
 
   <section>

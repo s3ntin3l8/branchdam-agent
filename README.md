@@ -193,6 +193,15 @@ showing configured watch directories, the local scratch directory, and queue sta
 menu's "Ingest now" and its automatic card-insertion trigger both call the same
 `internal/ingest.Engine.IngestCard` the headless `ingest` subcommand uses.
 
+**Offline queue.** When `offline.queueDbPath` is set, the tray opens `queue.db` itself and runs
+drain and prune passes on their own background timers (`offline.drainIntervalSecs`, default 5s;
+`prune.intervalMinutes`, default 30, only when `prune.enabled: true`) -- no separate
+`queue-drain -watch`/`prune -watch` process is needed while the tray is running (see
+[`docs/offline-queue.md`](docs/offline-queue.md)). "Drain queue now" and "Prune now" menu items run
+the same passes on demand. The status page and menu show a real backlog count and permanently
+failed count from `queue.db`, never a fabricated number when the queue isn't configured or can't be
+read.
+
 On Linux, `tray` builds and runs, but immediately returns an error (`tray: unsupported on this
 platform`) -- the tray is scoped to Windows/macOS; a Linux workstation still has the fully-tested
 headless `ingest` path.

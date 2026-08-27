@@ -53,6 +53,24 @@ type OfflineConfig struct {
 	// (three retries, then FAILED, with the failure looking like an auth
 	// problem -- see internal/branchdam's HTTPError doc comments).
 	Tier0ContainerRoot string `yaml:"tier0ContainerRoot"`
+	// DrainIntervalSecs is how often the tray runs an internal/ingest.Drain
+	// pass on its own timer (issue #32) once a tray is running -- distinct
+	// from `queue-drain -watch`'s own -interval flag, which defaults to the
+	// same 5s but is a separate process's own loop. Defaults to 5 when <= 0.
+	DrainIntervalSecs int `yaml:"drainIntervalSecs"`
+}
+
+// DefaultDrainIntervalSecs is OfflineConfig.DrainIntervalSecs's fallback
+// when unset -- matching queue-drain -watch's own default -interval.
+const DefaultDrainIntervalSecs = 5
+
+// DrainIntervalSecsOrDefault returns o.DrainIntervalSecs, or
+// DefaultDrainIntervalSecs when <= 0.
+func (o OfflineConfig) DrainIntervalSecsOrDefault() int {
+	if o.DrainIntervalSecs <= 0 {
+		return DefaultDrainIntervalSecs
+	}
+	return o.DrainIntervalSecs
 }
 
 // PruneConfig configures the `prune` subcommand (branchdam#230-adjacent):
@@ -74,6 +92,25 @@ type PruneConfig struct {
 	// server already reports it verified. Defaults to 24 when Enabled is
 	// true and this is left at its zero value.
 	MinAgeHours int `yaml:"minAgeHours"`
+	// IntervalMinutes is how often the tray runs an internal/prune.Pass on
+	// its own timer (issue #32) once a tray is running, when Enabled is
+	// true -- distinct from `prune -watch`'s own -interval flag, which
+	// defaults to the same 30m but is a separate process's own loop.
+	// Defaults to 30 when <= 0.
+	IntervalMinutes int `yaml:"intervalMinutes"`
+}
+
+// DefaultPruneIntervalMinutes is PruneConfig.IntervalMinutes's fallback
+// when unset -- matching `prune -watch`'s own default -interval.
+const DefaultPruneIntervalMinutes = 30
+
+// IntervalMinutesOrDefault returns p.IntervalMinutes, or
+// DefaultPruneIntervalMinutes when <= 0.
+func (p PruneConfig) IntervalMinutesOrDefault() int {
+	if p.IntervalMinutes <= 0 {
+		return DefaultPruneIntervalMinutes
+	}
+	return p.IntervalMinutes
 }
 
 // TrayConfig configures the M1 tray shell (issue #3): the embedded
@@ -381,6 +418,12 @@ func (c Config) Validate() []Problem {
 	}
 	if c.Prune.MinAgeHours < 0 {
 		problems = append(problems, Problem{Field: "prune.minAgeHours", Message: "must not be negative"})
+	}
+	if c.Offline.DrainIntervalSecs < 0 {
+		problems = append(problems, Problem{Field: "offline.drainIntervalSecs", Message: "must not be negative"})
+	}
+	if c.Prune.IntervalMinutes < 0 {
+		problems = append(problems, Problem{Field: "prune.intervalMinutes", Message: "must not be negative"})
 	}
 
 	return problems

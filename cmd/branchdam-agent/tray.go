@@ -19,6 +19,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
+	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
@@ -139,6 +140,49 @@ func runTrayCmd(args []string) int {
 	engine := ingest.NewEngine(client, cfg.AgentID, cfg.Ingest, cfg.PathMappings)
 	runner := tray.NewRunner(engine, cfg.Ingest.CardRoots, cfg.Ingest.LocalEditRoot)
 	settings := newConfigSettings(resolvedPath, cfg, runner, dialog)
+
+	// The offline queue (issue #32) is opt-in the same way `queue-drain`/
+	// `prune` already are: a nil QueueReader/Drainer/Pruner is Runner's
+	// honest "not configured" signal (see tray.QueueStatus's doc comment),
+	// never an error. Opening queue.db here means the tray -- not
+	// `queue-drain -watch` -- is now the single long-running process that
+	// writes it; see docs/offline-queue.md's single-writer note.
+	var queueStore *queue.Store
+	if cfg.Offline.QueueDBPath != "" {
+		var qErr error
+		queueStore, qErr = queue.Open(cfg.Offline.QueueDBPath)
+		if qErr != nil {
+			slog.Warn("could not open offline queue db -- queue status and drain/prune timers are disabled this session", "path", cfg.Offline.QueueDBPath, "err", qErr)
+			queueStore = nil
+		} else {
+			defer func() { _ = queueStore.Close() }()
+
+			var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: cfg.AgentID}
+			var pruner tray.Pruner
+			if cfg.Prune.Enabled {
+				pruner = &queuePruner{client: client, store: queueStore, cfg: cfg}
+			}
+			runner.SetQueueDeps(&queueCountsReader{store: queueStore}, drainer, pruner)
+
+			// Two independent background loops, mirroring how
+			// selfUpdateAgent.Run is already started below (go
+			// updater.Run(ctx)) -- not wired into
+			// internal/tray/run_supported.go's menu-refresh select loop at
+			// all. TriggerDrain/TriggerPrune's own locking (drainMu /
+			// Runner.gate via TryLockIdle) is what keeps a timer tick and
+			// a menu click from ever racing each other into a double pass.
+			drainInterval := time.Duration(cfg.Offline.DrainIntervalSecsOrDefault()) * time.Second
+			go startPeriodic(ctx, drainInterval, periodicPassTimeout, func(pctx context.Context) {
+				runner.TriggerDrain(pctx)
+			})
+			if pruner != nil {
+				pruneInterval := time.Duration(cfg.Prune.IntervalMinutesOrDefault()) * time.Minute
+				go startPeriodic(ctx, pruneInterval, periodicPassTimeout, func(pctx context.Context) {
+					runner.TriggerPrune(pctx)
+				})
+			}
+		}
+	}
 
 	var detector *ingest.Detector
 	if len(cfg.Ingest.CardRoots) > 0 {

@@ -1,6 +1,7 @@
 package tray
 
 import (
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -41,7 +42,7 @@ func TestHandleIndexRendersStatus(t *testing.T) {
 			return Status{
 				WatchDirs:   []string{"/media/card1"},
 				ScratchNote: "/local/scratch (usage tracking not yet implemented)",
-				QueueStatus: QueueStatusStub,
+				QueueStatus: QueueStatus{Configured: true, Counts: QueueCounts{AwaitingUpload: 2, Failed: 1}},
 				LastIngest: &IngestSummary{
 					CardPath:  "/media/card1",
 					StartedAt: time.Now(),
@@ -61,7 +62,7 @@ func TestHandleIndexRendersStatus(t *testing.T) {
 		t.Fatalf("got status %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"9.9.9", "/media/card1", QueueStatusStub, "disabled", "3 submitted"} {
+	for _, want := range []string{"9.9.9", "/media/card1", "disabled", "3 submitted", "2 pending", "1 permanently failed"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("response body missing %q\n---\n%s", want, body)
 		}
@@ -70,6 +71,50 @@ func TestHandleIndexRendersStatus(t *testing.T) {
 	// localhost page but still should not become a place secrets leak to.
 	if strings.Contains(body, "apiKey") {
 		t.Error("response body must never mention apiKey")
+	}
+}
+
+// TestHandleIndexNeverFabricatesQueueNumbers is the Phase 3c regression
+// test for the invariant QueueStatusStub used to hold as a literal string:
+// an unconfigured or unreadable queue must never render as "0 pending".
+func TestHandleIndexNeverFabricatesQueueNumbers(t *testing.T) {
+	cases := []struct {
+		name string
+		st   Status
+		want []string
+		bad  []string
+	}{
+		{
+			name: "not configured",
+			st:   Status{QueueStatus: QueueStatus{Configured: false}},
+			want: []string{"not configured"},
+			bad:  []string{"0 pending"},
+		},
+		{
+			name: "read error",
+			st:   Status{QueueStatus: QueueStatus{Configured: true, Err: errors.New("queue.db: disk I/O error")}},
+			want: []string{"disk I/O error"},
+			bad:  []string{"0 pending"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &StatusServer{StatusFunc: func() Status { return tc.st }}
+			req := httptest.NewRequest("GET", "/", nil)
+			rec := httptest.NewRecorder()
+			s.handleIndex(rec, req)
+			body := rec.Body.String()
+			for _, want := range tc.want {
+				if !strings.Contains(body, want) {
+					t.Errorf("response body missing %q\n---\n%s", want, body)
+				}
+			}
+			for _, bad := range tc.bad {
+				if strings.Contains(body, bad) {
+					t.Errorf("response body must never fabricate %q\n---\n%s", bad, body)
+				}
+			}
+		})
 	}
 }
 
