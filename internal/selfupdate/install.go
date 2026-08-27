@@ -141,7 +141,15 @@ func checkWritable(dir string) error {
 		return fmt.Errorf("%w: %s: %v", ErrTargetNotWritable, dir, err)
 	}
 	name := f.Name()
-	_ = f.Close()
-	_ = os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
+
+	// The probe file is empty, so a Close failure here can't lose
+	// buffered data the way it could for a real write -- but it can
+	// still mean the filesystem rejected the write in a way CreateTemp's
+	// own open didn't catch (e.g. a quota hit), so it's still surfaced
+	// rather than silently discarded.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrTargetNotWritable, dir, err)
+	}
 	return nil
 }

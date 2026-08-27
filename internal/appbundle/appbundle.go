@@ -127,21 +127,29 @@ func Write(appDir, binPath, version string) error {
 	return nil
 }
 
-func copyExecutable(src, dst string) error {
+func copyExecutable(src, dst string) (copyErr error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", src, err)
 	}
-	defer func() { _ = in.Close() }()
+	defer func() { _ = in.Close() }() // read-only handle; a close error here can't lose data
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", dst, err)
 	}
-	defer func() { _ = out.Close() }()
+	// out is writable, so its Close error is load-bearing: data can still
+	// be buffered and not yet flushed to disk at Close time. Only surface
+	// it when nothing earlier already failed, matching io.Copy's error
+	// taking priority.
+	defer func() {
+		if closeErr := out.Close(); copyErr == nil && closeErr != nil {
+			copyErr = fmt.Errorf("close %s: %w", dst, closeErr)
+		}
+	}()
 
 	if _, err := io.Copy(out, in); err != nil {
 		return fmt.Errorf("copy %s to %s: %w", src, dst, err)
 	}
-	return out.Close()
+	return nil
 }
