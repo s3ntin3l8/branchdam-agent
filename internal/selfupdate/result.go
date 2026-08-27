@@ -2,8 +2,11 @@ package selfupdate
 
 import "fmt"
 
-// CheckResult is the outcome of a Check call -- what
-// internal/tray.UpdateStatus.Note renders.
+// CheckResult is the outcome of a Check call. Its String() is what
+// `branchdam-agent update`'s CLI output renders directly
+// (cmd/branchdam-agent/update.go); internal/tray.UpdateStatus.Note()
+// computes an equivalent but independent string from its own fields
+// rather than embedding or calling into a CheckResult.
 type CheckResult struct {
 	CurrentVersion string
 	LatestVersion  string
