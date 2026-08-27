@@ -29,7 +29,7 @@ const updateExitUpdateAvailable = 10
 // could disagree.
 func runUpdateCmd(args []string) int {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
-	configPath := fs.String("config", "config.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./config.yaml if present, else the per-user config directory)")
 	checkOnly := fs.Bool("check", false, "check for an update and report it, without applying")
 	yes := fs.Bool("yes", false, "apply without prompting for confirmation")
 	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for the check/apply network calls")
@@ -37,9 +37,14 @@ func runUpdateCmd(args []string) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	resolvedPath, err := config.ResolvePath(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent update: load config %q: %v\n", *configPath, err)
+		fmt.Fprintf(os.Stderr, "branchdam-agent update: resolve config path: %v\n", err)
+		return 1
+	}
+	cfg, err := config.Load(resolvedPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent update: load config %q: %v\n", resolvedPath, err)
 		return 1
 	}
 	if !cfg.SelfUpdate.Enabled {

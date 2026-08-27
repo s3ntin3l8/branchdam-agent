@@ -25,7 +25,7 @@ import (
 // tray, per issue #2's stated scope).
 func runIngestCmd(args []string) int {
 	fs := flag.NewFlagSet("ingest", flag.ContinueOnError)
-	configPath := fs.String("config", "config.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./config.yaml if present, else the per-user config directory)")
 	cardPath := fs.String("card", "", "path to the card's root directory (a mounted volume, or a fixture directory)")
 	timeout := fs.Duration("timeout", 10*time.Minute, "overall ingest run timeout")
 	offline := fs.Bool("offline", false, "offline mode (issue #4): write the local copy only, queue the archive copy and EVENT_NODE_CREATED in queue.db for a later `queue-drain` -- see offline.* in config and docs/offline-queue.md")
@@ -37,9 +37,14 @@ func runIngestCmd(args []string) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	resolvedPath, err := config.ResolvePath(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent ingest: load config %q: %v\n", *configPath, err)
+		fmt.Fprintf(os.Stderr, "branchdam-agent ingest: resolve config path: %v\n", err)
+		return 1
+	}
+	cfg, err := config.Load(resolvedPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent ingest: load config %q: %v\n", resolvedPath, err)
 		return 1
 	}
 	if cfg.Server.APIKey == "" {

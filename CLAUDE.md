@@ -97,8 +97,9 @@ whatever "latest" resolves to.
 | `internal/selfupdate/` | Wraps `github.com/creativeprojects/go-selfupdate` v1.6.0 behind a client that always sets a `ChecksumValidator` (`selfupdate.go`'s `Updater`, `Check`/`Apply`), refuses a non-semver running version or a non-newer release before any download (`errors.go`), and resolves what one `Apply` call replaces -- a Windows sibling `.exe`, a macOS bundle's `Info.plist` -- via `InstallLayout`/`DetectLayout`/`BundlePath` (`install.go`). Gated by `selfUpdate.enabled` (checking on by default, applying always a separate explicit action); compiled into every build, no build tag |
 | `internal/appbundle/` | Renders and assembles the macOS `.app` bundle (`RenderInfoPlist`, `BundleVersion`, `Write`) -- shared by `tools/mkbundle` (build time) and `internal/selfupdate.Apply` (update time, rewriting `Info.plist` after a binary-only swap), so the two can't drift into rendering different plists |
 | `tools/mkbundle/` | CLI wrapper over `internal/appbundle.Write`, used by `make build-darwin-app` and `release-binaries.yml`'s `build-darwin` job |
-| `internal/config/` | YAML config loader: branchDAM server URL + API key, this workstation's self-asserted `agentId`, the workstation-path -> container-path map `preflight` prints, `ingest:` -- archive/local-edit roots, the naming template, and card-detection polling -- `tray:`/`selfUpdate:` (`Enabled`, `Repo`, `CheckIntervalHours`), and `prune:` (`PruneConfig`: `enabled`, `minAgeHours`, opt-in and off by default) |
+| `internal/config/` | YAML config loader: branchDAM server URL + API key, this workstation's self-asserted `agentId`, the workstation-path -> container-path map `preflight` prints, `ingest:` -- archive/local-edit roots, the naming template, and card-detection polling -- `tray:`/`selfUpdate:` (`Enabled`, `Repo`, `CheckIntervalHours`), and `prune:` (`PruneConfig`: `enabled`, `minAgeHours`, opt-in and off by default). `config.go`'s `DefaultPath`/`ResolvePath` give every subcommand a real fallback config location (`os.UserConfigDir()/branchdam-agent/config.yaml`) instead of a CWD-relative `"config.yaml"` default, and `Validate() []Problem` centralizes the checks that apply regardless of which subcommand is running -- most importantly catching an unset `${VAR}` left as a literal placeholder (see the `expandEnv` invariant below), which otherwise passes a naive `!= ""` check and fails downstream looking like a server problem. `patch.go`'s `Patch(path, changes map[string]any)` is the only supported way to write a config change back to disk -- see the write-back invariant below |
 | `config.example.yaml` | Reference config with `${VAR}` placeholders |
+| `internal/agentlog/` | The agent's one shared logging setup: `Setup()` installs an `slog.Logger` writing to both stderr and a durable per-OS log file (`%LOCALAPPDATA%\branchDAM\logs\agent.log`, `~/Library/Logs/branchDAM/agent.log`, `$XDG_STATE_HOME/branchdam-agent/agent.log`) as the process-wide default, rotating a >5MB file to `.1` first; `SlogBridge` adapts it to the classic `Print`/`Printf` shape `github.com/creativeprojects/go-selfupdate`'s `Logger` interface expects. Not wired into every subcommand's entry point -- see its own package doc comment for why (`go test ./...` must never write outside a test's own `t.TempDir()`) |
 | `.github/workflows/` | Thin callers of the reusable workflows in `s3ntin3l8/.github`, minus the Docker jobs the template ships (no image is published from this repo), plus this repo's own `build-windows`/`build-darwin`/`build-darwin-full` jobs in `ci-cd.yml` (not covered by the shared `ci-go.yml`, which only builds for the runner's own host OS/arch) and `hermes.yml` (automated PR review, see below) |
 | `.editorconfig` | Shared editor settings (LF, UTF-8, final newline; tabs for Go) |
 | `.claude/` | `settings.json` + `hooks/session-start.sh`: a SessionStart hook that installs Go deps and tooling so [Claude Code on the web](https://code.claude.com/docs/en/claude-code-on-the-web) sessions can build, test, and lint. Runs only in the remote env |
@@ -163,6 +164,16 @@ whatever "latest" resolves to.
   limitation as the go-http-template this repo was scaffolded from (`internal/config/config.go`)
   -- captures everything between `${` and `}` as one literal environment-variable name, no
   `:-default` support.
+- **Config is written back surgically via a `yaml.Node` tree, never a `yaml.Marshal(cfg)`
+  round-trip.** `Load` expands `${VAR}` into an in-memory `Config`, so marshaling that value back
+  to disk would bake the *resolved* secret into `server.apiKey` in plaintext and destroy every
+  comment in the file. `internal/config.Patch` (`patch.go`) instead parses the raw, un-expanded
+  file into a `yaml.Node`, mutates only the scalar nodes named by its dotted-key `changes` map, and
+  re-encodes -- every untouched `${VAR}` placeholder and every comment survives, pinned by
+  `TestPatchPreservesCommentsAndUnexpandedPlaceholders`'s golden test against
+  `config.example.yaml` itself. Written atomically (temp file, mode `0600`, then rename) since a
+  tray settings menu writing `server.apiKey` from a dialog means a real secret can land on disk in
+  plaintext for the first time.
 - **Agent payload paths are server-container, absolute, symlink-free -- there is no server-side
   rewrite pass on them.** `internal/config.PathMapping` + `internal/ingest.ToContainerPath`
   (longest-prefix match) is what M1's ingest core translates a written archive path through

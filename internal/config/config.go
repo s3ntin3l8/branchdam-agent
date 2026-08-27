@@ -9,6 +9,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -249,6 +250,113 @@ func Load(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// DefaultPath returns the standard per-user location for config.yaml --
+// os.UserConfigDir()'s branchdam-agent subdirectory
+// (~/.config/branchdam-agent/config.yaml on Linux,
+// %AppData%\branchdam-agent\config.yaml on Windows,
+// ~/Library/Application Support/branchdam-agent/config.yaml on macOS).
+// Neither DefaultPath nor Load creates this file or its parent directory --
+// see the `init` subcommand for the one place that does.
+func DefaultPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("config: resolve default config directory: %w", err)
+	}
+	return filepath.Join(dir, "branchdam-agent", "config.yaml"), nil
+}
+
+// ResolvePath implements every subcommand's -config flag semantics: an
+// explicit non-empty flagValue is used as-is (back-compatible with every
+// existing invocation and script that already passes -config). An empty
+// flagValue -- the new default -- means "./config.yaml if one exists in
+// the current directory, else DefaultPath()," so a config.yaml dropped
+// next to the binary still wins (matching this project's original
+// behavior) while an operator who has never passed -config still resolves
+// to a real, documented location instead of a hardcoded "config.yaml" that
+// silently depends on the process's current working directory.
+func ResolvePath(flagValue string) (string, error) {
+	if flagValue != "" {
+		return flagValue, nil
+	}
+	if _, err := os.Stat("config.yaml"); err == nil {
+		return "config.yaml", nil
+	}
+	return DefaultPath()
+}
+
+// Problem is one thing Validate found wrong, or suspicious, about a
+// Config -- reported as data, not a fatal error, so a caller like
+// `preflight` can print every problem at once, and each subcommand
+// decides for itself which of these are blocking for what it's about to
+// do (a bare `luminar-sync` run doesn't care that ingest.archiveRoot is
+// empty; `tray` does).
+type Problem struct {
+	Field   string
+	Message string
+}
+
+// String renders p as "field: message", the form preflight and the tray's
+// startup-error surface both print.
+func (p Problem) String() string {
+	return fmt.Sprintf("%s: %s", p.Field, p.Message)
+}
+
+// Validate runs the checks that apply regardless of which subcommand is
+// running -- values that are never correct in any context -- as opposed
+// to "this subcommand additionally requires X to be set," which stays
+// each subcommand's own concern (see cmd/branchdam-agent's per-subcommand
+// requiredness checks). Its main job is catching the silent footgun
+// expandEnv's own doc comment warns about: Load leaves an unset ${VAR} as
+// the literal placeholder string, which then passes a plain `!= ""` check
+// and fails downstream in a way that looks like a server misconfiguration
+// (a 503 from a too-short apiKey) rather than a local one.
+func (c Config) Validate() []Problem {
+	var problems []Problem
+
+	checkPlaceholder := func(field, value string) {
+		if m := envVarRe.FindString(value); m != "" {
+			problems = append(problems, Problem{
+				Field:   field,
+				Message: fmt.Sprintf("still contains the unexpanded placeholder %s -- the environment variable was not set when this config was loaded", m),
+			})
+		}
+	}
+
+	checkPlaceholder("server.baseUrl", c.Server.BaseURL)
+	checkPlaceholder("server.apiKey", c.Server.APIKey)
+	checkPlaceholder("agentId", c.AgentID)
+	checkPlaceholder("ingest.archiveRoot", c.Ingest.ArchiveRoot)
+	checkPlaceholder("ingest.localEditRoot", c.Ingest.LocalEditRoot)
+	checkPlaceholder("ingest.pathTemplate", c.Ingest.PathTemplate)
+	for i, root := range c.Ingest.CardRoots {
+		checkPlaceholder(fmt.Sprintf("ingest.cardRoots[%d]", i), root)
+	}
+	checkPlaceholder("offline.queueDbPath", c.Offline.QueueDBPath)
+	checkPlaceholder("offline.tier0ContainerRoot", c.Offline.Tier0ContainerRoot)
+	checkPlaceholder("tray.statusAddr", c.Tray.StatusAddr)
+	checkPlaceholder("selfUpdate.repo", c.SelfUpdate.Repo)
+	for i, m := range c.PathMappings {
+		checkPlaceholder(fmt.Sprintf("pathMappings[%d].workstationPath", i), m.WorkstationPath)
+		checkPlaceholder(fmt.Sprintf("pathMappings[%d].containerPath", i), m.ContainerPath)
+	}
+
+	if c.Server.APIKey != "" && !envVarRe.MatchString(c.Server.APIKey) && len(c.Server.APIKey) < 32 {
+		problems = append(problems, Problem{
+			Field:   "server.apiKey",
+			Message: `under 32 characters -- the server rejects this with a 503 ("agent authentication is not configured")`,
+		})
+	}
+
+	if c.Ingest.PollIntervalSecs < 0 {
+		problems = append(problems, Problem{Field: "ingest.pollIntervalSecs", Message: "must not be negative"})
+	}
+	if c.Prune.MinAgeHours < 0 {
+		problems = append(problems, Problem{Field: "prune.minAgeHours", Message: "must not be negative"})
+	}
+
+	return problems
 }
 
 // expandEnv replaces every ${VAR} with the environment variable's value,

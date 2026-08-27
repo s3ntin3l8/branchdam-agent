@@ -64,6 +64,23 @@ func runPreflightChecks(
 	var checks []preflightCheck
 	ok := true
 
+	// 0. General config sanity -- see config.Validate's own doc comment for
+	// why this runs before anything else: an unexpanded ${VAR} placeholder
+	// passes a naive `!= ""` check and then fails downstream in a way that
+	// looks like a server misconfiguration (a 503 from a too-short
+	// apiKey), not the local one it actually is. Anything under "server."
+	// fails the report outright since it would otherwise surface as a
+	// confusing connectivity failure in check 1 below; everything else is
+	// advisory.
+	for _, p := range cfg.Validate() {
+		status := "WARN"
+		if strings.HasPrefix(p.Field, "server.") {
+			status = "FAIL"
+			ok = false
+		}
+		checks = append(checks, preflightCheck{status, p.String()})
+	}
+
 	// 1. Server reachability + auth + version. This is preflight's
 	// headline check -- the plan's M0 gate is specifically "preflight
 	// against the live server returns the server version."

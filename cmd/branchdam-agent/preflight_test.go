@@ -103,6 +103,31 @@ func TestRunPreflightChecksMissingAPIKey(t *testing.T) {
 	}
 }
 
+// TestRunPreflightChecksUnexpandedAPIKeyPlaceholder is the regression test
+// for the silent footgun config.Validate exists to catch: an unset ${VAR}
+// in server.apiKey passes a naive `!= ""` check (it's the literal
+// placeholder string, not empty) and would otherwise surface only as a
+// confusing 503 from the server. preflight must report it as its own FAIL,
+// not just fail check 1 with a dial/auth error that looks server-side.
+func TestRunPreflightChecksUnexpandedAPIKeyPlaceholder(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Server.APIKey = "${TEST_UNSET_VAR_XYZ}"
+	client := &fakeHelloCaller{err: errors.New("dial tcp: connection refused")}
+	checks, ok := runPreflightChecks(context.Background(), cfg, client, fakeLookPathFound, fakeRunVersionOK)
+	if ok {
+		t.Fatalf("expected overall ok=false, checks: %v", checks)
+	}
+	found := false
+	for _, c := range checks {
+		if c.Status == "FAIL" && strings.Contains(c.Message, "server.apiKey") && strings.Contains(c.Message, "unexpanded placeholder") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a FAIL check naming server.apiKey's unexpanded placeholder, got: %v", checks)
+	}
+}
+
 func TestRunPreflightChecksExiftoolMissingIsWarnNotFail(t *testing.T) {
 	client := &fakeHelloCaller{resp: &branchdam.HelloResponse{OK: true, Version: "0.42.0"}}
 	checks, ok := runPreflightChecks(context.Background(), baseCfg(), client, fakeLookPathMissing, fakeRunVersionOK)

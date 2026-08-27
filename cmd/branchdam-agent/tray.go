@@ -28,14 +28,20 @@ import (
 // binary for its headless subcommands.
 func runTrayCmd(args []string) int {
 	fs := flag.NewFlagSet("tray", flag.ContinueOnError)
-	configPath := fs.String("config", "config.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./config.yaml if present, else the per-user config directory)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	resolvedPath, err := config.ResolvePath(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent tray: load config %q: %v\n", *configPath, err)
+		fmt.Fprintf(os.Stderr, "branchdam-agent tray: resolve config path: %v\n", err)
+		return 1
+	}
+
+	cfg, err := config.Load(resolvedPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent tray: load config %q: %v\n", resolvedPath, err)
 		return 1
 	}
 	if cfg.Server.APIKey == "" {
@@ -60,7 +66,7 @@ func runTrayCmd(args []string) int {
 	}
 
 	if cfg.Tray.StartOnLogin {
-		if err := enableStartOnLogin(*configPath); err != nil {
+		if err := enableStartOnLogin(resolvedPath); err != nil {
 			// Non-fatal: an operator who opted in still gets a working
 			// tray this session, just without the login item registered.
 			fmt.Fprintf(os.Stderr, "branchdam-agent tray: WARN: start-on-login registration failed: %v\n", err)

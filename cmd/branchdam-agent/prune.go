@@ -35,7 +35,7 @@ const pruneNodeStatusBatchSize = 200
 // -interval between passes, mirroring queue-drain's shape.
 func runPruneCmd(args []string) int {
 	flagSet := flag.NewFlagSet("prune", flag.ContinueOnError)
-	configPath := flagSet.String("config", "config.yaml", "path to config file")
+	configPath := flagSet.String("config", "", "path to config file (default: ./config.yaml if present, else the per-user config directory)")
 	dryRun := flagSet.Bool("dry-run", false, "report what would be pruned without deleting anything")
 	watch := flagSet.Bool("watch", false, "keep pruning in a loop (Ctrl-C to stop) instead of a single pass")
 	interval := flagSet.Duration("interval", 30*time.Minute, "poll interval between passes when -watch is set")
@@ -44,9 +44,14 @@ func runPruneCmd(args []string) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	resolvedPath, err := config.ResolvePath(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent prune: load config %q: %v\n", *configPath, err)
+		fmt.Fprintf(os.Stderr, "branchdam-agent prune: resolve config path: %v\n", err)
+		return 1
+	}
+	cfg, err := config.Load(resolvedPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent prune: load config %q: %v\n", resolvedPath, err)
 		return 1
 	}
 	if !cfg.Prune.Enabled {
