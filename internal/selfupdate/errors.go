@@ -3,11 +3,11 @@ package selfupdate
 import "errors"
 
 // ErrVersionNotSemver is returned by Check/Apply when the running binary's
-// version string is not parseable semver -- "dev" for any make-built
-// binary, since the Makefile does not stamp main.version. go-selfupdate's
-// own Release.GreaterThan panics on a non-semver argument (it calls
-// semver.MustParse internally), so this check runs before any call into
-// go-selfupdate, not after.
+// version string is not parseable semver -- "dev" for a plain `go build`/
+// `make build`, or for `make build-windows`/`build-darwin-app` run without
+// an explicit VERSION=<semver>. go-selfupdate's own Release.GreaterThan
+// panics on a non-semver argument (it calls semver.MustParse internally),
+// so this check runs before any call into go-selfupdate, not after.
 var ErrVersionNotSemver = errors.New("selfupdate: running version is not a released semver version (a locally built binary reports \"dev\"; only a release build can self-update)")
 
 // ErrNotNewer is returned by Apply when the latest release is not
