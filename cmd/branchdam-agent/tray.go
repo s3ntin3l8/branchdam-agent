@@ -123,8 +123,13 @@ func runTrayCmd(args []string) int {
 	// it hasn't necessarily configured ingest yet); the tray is about to
 	// actually ingest, where a missing mapping fails downstream with a
 	// confusing ErrNoPathMapping on the first real card -- fatal here.
+	// This only checks non-emptiness, not that some entry actually covers
+	// ingest.archiveRoot -- the wizard always writes a covering entry, but
+	// a hand-authored config with an unrelated mapping still slips past
+	// this to the same downstream error; hence "at least one entry" below,
+	// not a coverage claim.
 	if len(cfg.PathMappings) == 0 {
-		return fail("pathMappings must have at least one entry covering ingest.archiveRoot")
+		return fail("pathMappings must have at least one entry -- without one covering ingest.archiveRoot, the first real card ingest will fail")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
