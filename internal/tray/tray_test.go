@@ -131,6 +131,33 @@ func TestStatusReflectsQueueCounts(t *testing.T) {
 	}
 }
 
+// fakeQueueReaderCapturesDeadline is a regression fixture for a Hermes
+// review finding: Status() used to call Counts(context.Background()), an
+// unbounded read on the 5s menu-refresh/status-page hot path that could
+// hang the whole tray on a wedged or NAS-backed queue.db. It doesn't
+// actually block (that would make this test slow); it just records
+// whether the context it was handed carries a deadline.
+type fakeQueueReaderCapturesDeadline struct {
+	gotDeadline bool
+}
+
+func (f *fakeQueueReaderCapturesDeadline) Counts(ctx context.Context) (QueueCounts, error) {
+	_, f.gotDeadline = ctx.Deadline()
+	return QueueCounts{}, nil
+}
+
+func TestStatusBoundsQueueCountsRead(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fq := &fakeQueueReaderCapturesDeadline{}
+	r.SetQueueDeps(fq, nil, nil)
+
+	r.Status(UpdateStatus{})
+
+	if !fq.gotDeadline {
+		t.Error("expected Status() to pass a context with a deadline to QueueReader.Counts, not context.Background()")
+	}
+}
+
 func TestStatusSurfacesQueueReadError(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, nil, "")
 	wantErr := errors.New("queue.db: disk I/O error")

@@ -213,7 +213,11 @@ ignore entry can be dropped.
   concurrently-running `Drain` pass with its own synchronization against `Runner`'s polled
   `Status()` calls, which is meaningfully more design surface than the Counts-based readout this
   PR shipped. `offline.drainIntervalSecs`/`prune.intervalMinutes` are also config-file-only for
-  now -- not yet exposed in the tray's settings menu.
+  now -- not yet exposed in the tray's settings menu. Note also that `Runner.Status()` performs a
+  real `queue.Store.Counts` read on every call -- the tray's 5s menu-refresh tick and every
+  status-page request -- bounded to 5s (`statusQueueReadTimeout`) so a wedged read can't hang the
+  whole tray menu, but still a real query against `queue.db` each time; this is more impactful the
+  larger or more NAS-backed-network-latency-prone `offline.queueDbPath`'s storage is.
 - **Tray-driven drain/prune passes are unverified on real hardware.** `Runner.TriggerDrain`/
   `TriggerPrune`'s locking (a dedicated mutex for drain, sharing the ingest/self-update gate for
   prune) and the two background timers (`cmd/branchdam-agent/queueagent.go`'s `startPeriodic`) are

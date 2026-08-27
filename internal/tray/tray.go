@@ -393,6 +393,10 @@ func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir s
 	r.scratchDir = scratchDir
 }
 
+// statusQueueReadTimeout bounds Status()'s QueueReader.Counts call -- see
+// that call site's comment for why this exists.
+const statusQueueReadTimeout = 5 * time.Second
+
 // Status returns a snapshot of the current state for the status page and
 // the tray tooltip. selfUpdate is passed in rather than computed here --
 // self-update's own check is async and gated by config the caller already
@@ -419,7 +423,17 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	qs := QueueStatus{PruneEnabled: pruneEnabled, LastDrain: lastDrain, LastPrune: lastPrune}
 	if queueReader != nil {
 		qs.Configured = true
-		if counts, err := queueReader.Counts(context.Background()); err != nil {
+		// Status() is called from run_supported.go's 5s menu-refresh tick
+		// and from every status-page request -- unlike TriggerDrain/
+		// TriggerPrune's own periodicPassTimeout-bounded passes, an
+		// unbounded read here would hang the whole tray menu (including
+		// Quit) on a wedged or NAS-backed queue.db, not just show a stale
+		// number. statusQueueReadTimeout matches queue.Store's own
+		// busy_timeout=5000 pragma (Hermes review finding on this PR).
+		ctx, cancel := context.WithTimeout(context.Background(), statusQueueReadTimeout)
+		counts, err := queueReader.Counts(ctx)
+		cancel()
+		if err != nil {
 			qs.Err = err
 		} else {
 			qs.Counts = counts

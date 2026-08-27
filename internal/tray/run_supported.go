@@ -104,6 +104,13 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		quitItem := systray.AddMenuItem("Quit", "Stop the branchDAM agent tray")
 
 		var applying bool
+		// drainSkipped/pruneSkipped are set by the drainDoneCh/pruneDoneCh
+		// handlers below when a menu click's TriggerDrain/TriggerPrune call
+		// reported ran=false (a pass was already running, or -- for prune
+		// -- an ingest holds Runner.gate) -- otherwise a dropped click is
+		// silent and looks identical to a successful no-op pass. refresh()
+		// shows the note for exactly one tick, then clears it.
+		var drainSkipped, pruneSkipped bool
 
 		refresh := func() {
 			us := up.Status()
@@ -138,6 +145,19 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 				pruneNow.Enable()
 			} else {
 				pruneNow.Disable()
+			}
+
+			if drainSkipped {
+				drainNow.SetTitle("Drain queue now (skipped just now -- a pass was already running)")
+				drainSkipped = false
+			} else {
+				drainNow.SetTitle("Drain queue now")
+			}
+			if pruneSkipped {
+				pruneNow.SetTitle("Prune now (skipped just now -- already running, or an ingest is in progress)")
+				pruneSkipped = false
+			} else {
+				pruneNow.SetTitle("Prune now")
 			}
 
 			sv := settings.Snapshot()
@@ -211,21 +231,21 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		// tick share TriggerDrain/TriggerPrune's own locking (drainMu /
 		// Runner.gate via TryLockIdle), so the two can never race each
 		// other into a double pass.
-		drainDoneCh := make(chan struct{}, 1)
+		drainDoneCh := make(chan bool, 1)
 		drainRequestCh := make(chan struct{}, 1)
 		go func() {
 			for range drainRequestCh {
-				r.TriggerDrain(ctx)
-				drainDoneCh <- struct{}{}
+				_, ran := r.TriggerDrain(ctx)
+				drainDoneCh <- ran
 			}
 		}()
 
-		pruneDoneCh := make(chan struct{}, 1)
+		pruneDoneCh := make(chan bool, 1)
 		pruneRequestCh := make(chan struct{}, 1)
 		go func() {
 			for range pruneRequestCh {
-				r.TriggerPrune(ctx)
-				pruneDoneCh <- struct{}{}
+				_, ran := r.TriggerPrune(ctx)
+				pruneDoneCh <- ran
 			}
 		}()
 
@@ -277,14 +297,20 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 					// a drain pass is already queued/running; drop this
 					// click rather than pile up requests.
 				}
-			case <-drainDoneCh:
+			case ran := <-drainDoneCh:
+				if !ran {
+					drainSkipped = true
+				}
 				refresh()
 			case <-pruneNow.ClickedCh:
 				select {
 				case pruneRequestCh <- struct{}{}:
 				default:
 				}
-			case <-pruneDoneCh:
+			case ran := <-pruneDoneCh:
+				if !ran {
+					pruneSkipped = true
+				}
 				refresh()
 			case err := <-settingsDoneCh:
 				sm.lastErr = err
