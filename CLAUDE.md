@@ -3,51 +3,50 @@
 The workstation agent for [branchDAM](https://github.com/s3ntin3l8/branchdam), phase 10 of the
 original spec. Scaffolded from
 [`s3ntin3l8/go-http-template`](https://github.com/s3ntin3l8/go-http-template); the template's
-HTTP-server scaffolding (`cmd/server/`, `internal/httpapi/`, `Dockerfile`) was stripped in M0
+HTTP-server scaffolding (`cmd/server/`, `internal/httpapi/`, `Dockerfile`) was stripped early on
 because this is a desktop CLI/tray binary, not a service. If you are an AI agent or developer
 working in this repo, read this first, then read branchDAM's
-`.claude/plans/can-we-walk-through-sharded-lighthouse.md` -- the approved phase-10 plan this
-whole repo implements, with far more detail than any single issue.
+[`docs/roadmap.md`](https://github.com/s3ntin3l8/branchdam/blob/main/docs/roadmap.md) and
+[`docs/agent-protocol.md`](https://github.com/s3ntin3l8/branchdam/blob/main/docs/agent-protocol.md)
+for how this repo fits into the overall project and the wire contract it implements against.
 
-## What this repo is, and isn't (yet)
+## What this does
 
-branchDAM's server side has shipped the full `/api/v1/agent/*` contract (event queue drainer,
-handshake, path rebase) since phase 8, but until this repo exists, nothing speaks it. Every new
-master currently reaches the graph only via an operator-triggered scan; SD-card ingest has no
-bit-for-bit verification or safe-eject signalling; stills lineage has no confidence-1.00 path.
-This repo closes that gap, in milestones:
+branchDAM's server side ships the full `/api/v1/agent/*` contract (event queue drainer,
+handshake, path rebase) since its own phase 8; this repo is what speaks it from a workstation. It
+ships as `v1.0.0`+ with everything below landed:
 
-- **M0** -- repo scaffold, the `internal/branchdam/` REST client, three ported pieces
-  of server logic (`FastHash`, `PerceptualHash`'s call sequence, `naming.Stem`), and a
-  `preflight` subcommand. No SQLite, no tray, no ingest.
-- **M1 (ingest-core half landed earlier; tray shell landed in this PR, issue #3)** -- SD-card
-  ingest core: card detection (poll-based), one read/two writes, BLAKE3-256 verify against a
-  cache-defeating re-read, DJI `.srt` GPS parsing, metadata extraction at promoted-column parity
-  with a server-side scan, and the headless `ingest` subcommand. This PR adds the tray shell
-  around it: `internal/tray/` (`fyne.io/systray` on windows/darwin, an embedded `net/http` status
-  page everywhere else the package builds), `internal/autostart/` (login-item registration,
-  off by default), `internal/selfupdate/` (`go-selfupdate` wiring, off by default), and the `tray`
-  subcommand. `internal/tray` still has no server/ingest-logic duplication -- it is a second, thin
-  driver over `internal/ingest.Engine`, exactly as issue #2 required when it scoped the tray out
-  of the ingest-core PR.
-- **M2 (issue #4, in progress in a separate worktree as this PR is written)** -- offline queue
-  (`modernc.org/sqlite`) + the rebase handoff.
-- **M3** -- DaVinci Resolve post-render hook (Python, `hooks/resolve/`).
-- **M4 (this PR)** -- Luminar `catalog.db` reader (`internal/luminar/`, `internal/nodeindex/`,
-  `luminar-sync` subcommand). Schema mapping is unverified -- see `docs/luminar-catalog.md`.
+- `internal/branchdam/` -- the REST client (`hello`/`handshake`/`events`/`rebase`), with DTOs
+  hand-synced to branchDAM's own `internal/agent/types.go`.
+- Three byte-for-byte ported pieces of branchDAM server logic (`FastHash`, `PerceptualHash`'s
+  call sequence, `naming.Stem`) an agent-ingested file has to reproduce exactly to stay
+  consistent with a normal server-side scan.
+- `preflight` -- checks server reachability/version, `exiftool` on `PATH`, and prints the
+  configured path mappings.
+- `ingest`/`internal/ingest/` -- the SD-card ingest core: poll-based card detection,
+  one-read/two-write dual-copy writer, a cache-defeating verified re-read, DJI `.srt` telemetry
+  parsing, metadata extraction at promoted-column parity with a server-side scan.
+- `internal/tray/`, `internal/autostart/`, `internal/selfupdate/`, the `tray` subcommand -- the
+  tray shell (windows/darwin), login-item registration, self-update wiring, all off by default
+  except the tray icon itself. See [`docs/platform-support.md`](docs/platform-support.md) for the
+  per-platform breakdown and known gaps.
+- `internal/queue/`, `queue-drain` -- the offline queue: every intended event persisted to
+  `queue.db` before any network call, so a workstation with no route to the NAS can still ingest,
+  then finish the archive copy and rebase once reconnected. See
+  [`docs/offline-queue.md`](docs/offline-queue.md).
+- `hooks/resolve/` -- a DaVinci Resolve post-render hook (Python) that writes `.dam.json`.
+- `internal/luminar/`, `internal/nodeindex/`, `luminar-sync` -- reads a Luminar `catalog.db` and
+  emits `EVENT_EDGE_ATTACHED` for edit->source pairs it can resolve. Schema mapping is unverified
+  against a real catalog -- see [`docs/luminar-catalog.md`](docs/luminar-catalog.md).
+- `prune` -- deletes an offline-ingested file's local-edit-root mirror once the server confirms
+  the Tier-3 archive copy is live and hash-verified. Not real Tier-1 NLE scratch pruning; see the
+  "`prune` never trusts a single signal" invariant below.
 
-See the plan doc for the full reasoning behind each (notably: why Go and not Rust/Tauri --
-`internal/hashing.PerceptualHash` has to be bit-identical to branchDAM's own, which only holds if
-both sides call the same `goimagehash` library).
+The milestone-by-milestone history (M0 repo scaffold through M4 Luminar reader) is in
+`CHANGELOG.md`, not repeated here -- this section describes what the code does today.
 
-## First steps after creating a repo from this template (already done for M0)
-
-1. Rename the placeholders: `module` in `go.mod`, the `# Project Name` title in `README.md`, and
-   the `module` path across `.go` files. Done: `github.com/s3ntin3l8/branchdam-agent`.
-2. `make install-hooks` -- installs pre-commit and pre-push hooks.
-3. `make build` -- verify everything compiles.
-4. Decide your CI coverage floor: `ci-cd.yml` ships `coverage-fail-under: '0'` -- ratchet it up
-   as real ingest code lands in M1+.
+Why Go and not Rust/Tauri: `internal/hashing.PerceptualHash` has to be bit-identical to
+branchDAM's own, which only holds if both sides call the same `goimagehash` library.
 
 ## Commands (Makefile)
 
@@ -258,6 +257,16 @@ whatever "latest" resolves to.
   with a `-tags selfupdate` build-tag split; that split is gone now that the input exists). Drop
   the `govulncheck-ignore` entry once `go-selfupdate` itself stops importing `openpgp`
   unconditionally.
+- **Binary publishing is chained inside the release-please run, gated on `release_created`,
+  never triggered by `on: release`.** release-please creates the GitHub Release with the default
+  `GITHUB_TOKEN`, and GitHub's Actions recursion guard means a `GITHUB_TOKEN`-created release
+  does not fire `on: release` -- `v1.0.0` shipped with zero downloadable assets for exactly this
+  reason (its `release-binaries.yml` had only ever run via manual `workflow_dispatch`).
+  `release-please.yml`'s `binaries` job now calls `release-binaries.yml` as a `workflow_call`,
+  fed `tag_name` from `release-please`'s own output, the same pattern branchDAM's own
+  `release.yml` uses to chain its image push. A reusable-workflow call's permissions come from
+  the *caller* job, so `contents: write` lives on `release-please.yml`'s `binaries:` job, not
+  (only) inside `release-binaries.yml` itself.
 - **`prune` never trusts a single signal before deleting a file -- server verification, a
   containment check, and a TOCTOU re-stat all have to agree.** `Record.Done()` alone means
   nothing about server-side truth (a permanently `RebaseStatus=FAILED` row still passes it);
@@ -279,8 +288,18 @@ whatever "latest" resolves to.
 
 Workflows here are **callers** of `s3ntin3l8/.github/.github/workflows/*.yml@main`: `ci-cd.yml`
 (`ci-go` only -- no `build-docker`, unlike the template), `codeql.yml`, `dependency-review.yml`,
-`release-please.yml` (release-please only, no Docker publish step -- a later milestone adds a
-real cross-platform release matrix for Windows/macOS packaging, not this repo's CI today).
+`release-please.yml` (release-please, no Docker publish step, plus this repo's own chained
+`binaries` job -- see below and the recursion-guard invariant above).
+
+**`release-please.yml` -> `release-binaries.yml`.** `release-please.yml` has two jobs:
+`release-please` (the shared reusable workflow) and `binaries`, gated on
+`needs.release-please.outputs.release_created == 'true'`, which calls
+`./.github/workflows/release-binaries.yml` as a `workflow_call` with `release-tag` set to
+`release-please`'s `tag_name` output. `release-binaries.yml` itself builds all three platforms
+(see "Layout"/`.github/workflows/`) and, in its `upload` job (gated on `inputs.release-tag !=
+''`, not on the trigger event), attaches the per-platform archives plus a checksums file to the
+GitHub Release. `workflow_dispatch` on `release-binaries.yml` still works standalone, for a
+build-only smoke test (empty `release-tag`) or to backfill assets onto an existing release.
 
 `ci-cd.yml` also has three jobs of its own (not from the shared `ci-go.yml`, which only builds for
 the runner's own host OS/arch), added for the tray shell (issue #3): **`build-windows`**
@@ -320,9 +339,17 @@ coverage, and govulncheck.
 
 ## Documentation map
 
-- `README.md` -- setup and usage instructions.
+- `README.md` -- setup, install, and usage instructions.
 - `CLAUDE.md` (this file) -- the live contract for how the repo is wired: layout, invariants,
-  CI/CD conventions, milestone map. Keep it in sync with the code, not with what the code used to
-  do.
-- branchDAM's `.claude/plans/can-we-walk-through-sharded-lighthouse.md` -- the approved phase-10
-  design this whole repo implements; the source of truth for anything not covered above.
+  CI/CD conventions. Keep it in sync with the code, not with what the code used to do.
+- [`docs/platform-support.md`](docs/platform-support.md) -- per-platform support matrix (tray vs.
+  headless, why Windows ships two binaries, the `fyne.io/systray` cross-compile matrix) and known
+  gaps (macOS `.app` bundle, tray queue-status stub, unvalidated Luminar schema).
+- [`docs/offline-queue.md`](docs/offline-queue.md) -- the offline queue's state machine and the
+  server-side prerequisite it depends on.
+- [`docs/luminar-catalog.md`](docs/luminar-catalog.md) -- the Luminar `catalog.db` schema
+  research, confidence level, and how to correct the query against a real catalog.
+- branchDAM's [`docs/roadmap.md`](https://github.com/s3ntin3l8/branchdam/blob/main/docs/roadmap.md)
+  and [`docs/agent-protocol.md`](https://github.com/s3ntin3l8/branchdam/blob/main/docs/agent-protocol.md)
+  -- how this repo fits into the overall project and the wire contract it implements against;
+  the source of truth for anything not covered above.
