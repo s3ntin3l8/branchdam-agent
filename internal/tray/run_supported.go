@@ -40,13 +40,15 @@ type applyResult struct {
 }
 
 // Run starts the tray icon and blocks until ctx is cancelled, the user
-// chooses Quit, or an update is installed. detector may be nil to disable
-// automatic card-insertion ingest (menu-triggered "Ingest now" against
-// watchDirs still works); statusURL is shown in the menu and opened by
-// "Open status page". up drives the "Install and restart" affordance --
-// Run itself does not know how to check for or apply updates, matching
-// Runner's own separation from the ingest core (see tray.go).
-func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL string, up SelfUpdater) (Outcome, error) {
+// chooses Quit, or an update is installed (or a settings change that
+// requires one is applied). detector may be nil to disable automatic
+// card-insertion ingest (menu-triggered "Ingest now" against watchDirs
+// still works); statusURL is shown in the menu and opened by "Open status
+// page". up drives the "Install and restart" affordance; settings drives
+// the "Settings" submenu (issue #31) -- Run itself does not know how to
+// check for updates or persist config, matching Runner's own separation
+// from the ingest core (see tray.go).
+func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL string, up SelfUpdater, settings Settings) (Outcome, error) {
 	errCh := make(chan error, 1)
 	var outcome Outcome
 
@@ -70,13 +72,30 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		watchItem.Disable()
 		ingestNow := systray.AddMenuItem("Ingest now", "Run one ingest pass over every configured watch directory")
 		systray.AddSeparator()
-		quitItem := systray.AddMenuItem("Quit", "Stop the branchDAM agent tray")
 
-		if len(r.WatchDirs) == 0 {
-			ingestNow.Disable()
-		} else {
-			watchItem.SetTitle(fmt.Sprintf("Watching %d director%s", len(r.WatchDirs), plural(len(r.WatchDirs))))
-		}
+		// Every settings action (a checkbox toggle, a free-text prompt,
+		// Reload/Open/Reveal) runs through this one worker, for the same
+		// reason ingestNow does: SetBool/SetInt/PromptAndSet/Reload all do
+		// blocking I/O (disk, a dialog subprocess, rebuilding the ingest
+		// Engine), and running any of that inline in the select loop below
+		// would freeze the whole menu, including Quit, for as long as it
+		// takes. newSettingsMenu's own dispatch goroutine feeds this
+		// channel directly (non-blocking, drops a click if one is already
+		// in flight) rather than routing through the select loop below.
+		settingsActionCh := make(chan func() error, 1)
+		settingsDoneCh := make(chan error, 1)
+		go func() {
+			for action := range settingsActionCh {
+				settingsDoneCh <- action()
+			}
+		}()
+
+		sm := newSettingsMenu(settings, settingsActionCh)
+		restartNowItem := sm.parent.AddSubMenuItem("Restart now", "Apply a change that needs a restart (status address or watch folders)")
+		restartNowItem.Hide()
+		systray.AddSeparator()
+
+		quitItem := systray.AddMenuItem("Quit", "Stop the branchDAM agent tray")
 
 		var applying bool
 
@@ -85,6 +104,25 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 			st := r.Status(us)
 			statusItem.SetTitle("Status: " + summarize(st))
 			updateItem.SetTitle("Self-update: " + us.Note())
+
+			// Watch dirs can change out from under this menu now that
+			// Reconfigure exists (issue #31's settings menu) -- re-render
+			// on every tick rather than only at startup.
+			if len(st.WatchDirs) == 0 {
+				watchItem.SetTitle("Watch directories: none configured")
+				ingestNow.Disable()
+			} else {
+				watchItem.SetTitle(fmt.Sprintf("Watching %d director%s", len(st.WatchDirs), plural(len(st.WatchDirs))))
+				ingestNow.Enable()
+			}
+
+			sv := settings.Snapshot()
+			sm.sync(sv)
+			if sv.RestartRequired {
+				restartNowItem.Show()
+			} else {
+				restartNowItem.Hide()
+			}
 
 			switch {
 			case applying:
@@ -131,7 +169,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		ingestRequestCh := make(chan struct{}, 1)
 		go func() {
 			for range ingestRequestCh {
-				for _, dir := range r.WatchDirs {
+				for _, dir := range r.WatchDirs() {
 					r.TriggerIngest(ctx, dir)
 				}
 				ingestDoneCh <- struct{}{}
@@ -179,6 +217,22 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 				}
 			case <-ingestDoneCh:
 				refresh()
+			case err := <-settingsDoneCh:
+				sm.lastErr = err
+				refresh()
+			case <-restartNowItem.ClickedCh:
+				if rel, ok := r.TryLockIdle(); ok {
+					// Belt-and-suspenders release, matching the
+					// self-update success path below: the process exits
+					// right after this select loop returns, so
+					// Runner.gate is abandoned either way, but calling
+					// this explicitly means that's never load-bearing.
+					rel()
+					outcome = Outcome{RestartRequested: true}
+					systray.Quit()
+					return
+				}
+				refresh() // still busy -- leave "Restart now" showing, try again later
 			case <-installItem.ClickedCh:
 				if applying {
 					continue

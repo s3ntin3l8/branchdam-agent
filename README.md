@@ -206,6 +206,16 @@ macOS) and, best-effort, shown as a dialog naming that log path -- see issue #30
 [`docs/platform-support.md`](docs/platform-support.md#startup-diagnostics-and-first-run-setup) for
 what's verified and what isn't yet.
 
+**Settings.** The tray menu's "Settings" submenu covers every commonly-changed field without
+hand-editing `config.yaml`: checkboxes/submenus for start-at-login, update checking (and its
+interval), and require-unbuffered-verify; dialogs for the server URL, API key, the two ingest
+roots, and the naming template. Most changes apply immediately; a change to `tray.statusAddr` or
+`ingest.cardRoots` shows "Restart now" instead, since neither can be hot-reloaded (see
+CLAUDE.md's guarded-rebuild invariant). Multi-value fields (`pathMappings`, multiple
+`ingest.cardRoots`) stay hand-edit only -- "Open config.yaml" and "Reveal config folder" are right
+there in the same submenu for exactly that. See
+[`docs/platform-support.md`](docs/platform-support.md#settings-menu) for what's verified.
+
 Self-update support is compiled into every build; no build tag is required. Checking is **on by
 default** and periodic (`selfUpdate.enabled: false` opts out entirely) but passive -- it's a
 read-only GitHub API call and never downloads or applies anything by itself. Installing is
