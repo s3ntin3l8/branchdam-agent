@@ -140,13 +140,32 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 
 		applyDoneCh := make(chan applyResult, 1)
 		var releaseGate func()
+		// quitRequested defers an in-flight ctx.Done()/Quit-click until
+		// the current apply resolves, rather than abandoning it.
+		// ApplyLatest's goroutine deliberately runs on a context
+		// decoupled from ctx (context.WithoutCancel) so a signal-derived
+		// shutdown can't interrupt a Windows sibling-then-primary swap
+		// mid-way -- but that guarantee is worthless if this select loop
+		// quits and the whole process exits out from under that goroutine
+		// regardless. Quitting is deferred, not ignored: applyDoneCh's
+		// own case still quits once the apply (bounded by its own
+		// 10-minute timeout) actually finishes.
+		var quitRequested bool
 
 		for {
 			select {
 			case <-ctx.Done():
+				if applying {
+					quitRequested = true
+					continue
+				}
 				systray.Quit()
 				return
 			case <-quitItem.ClickedCh:
+				if applying {
+					quitRequested = true
+					continue
+				}
 				systray.Quit()
 				return
 			case <-openStatus.ClickedCh:
@@ -193,8 +212,21 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 					installItem.SetTitle("Install and restart (failed -- see status page)")
 					installItem.Enable()
 					refresh()
+					if quitRequested {
+						systray.Quit()
+						return
+					}
 					continue
 				}
+				// Releasing here is belt-and-suspenders: the process is
+				// expected to exit and relaunch immediately after this
+				// select loop returns, so Runner.gate is abandoned along
+				// with everything else either way. Calling it explicitly
+				// means that guarantee is never load-bearing -- a future
+				// change to the post-success path can't turn this into a
+				// silent permanent lock.
+				releaseGate()
+				releaseGate = nil
 				outcome = Outcome{RestartRequested: true, AppliedVersion: res.version}
 				systray.Quit()
 				return
