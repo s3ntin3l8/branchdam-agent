@@ -51,6 +51,27 @@ type Engine struct {
 	// real UUIDv7 mint (google/uuid.NewV7) via NewEngine.
 	Now         func() time.Time
 	NewNodeUUID func() (string, error)
+
+	// Progress, if set, is called with byte-progress samples during a
+	// file's copy and verify phases (DualWrite/WriteLocal's copy, Verify's
+	// re-read). nil by default -- every existing caller (the headless
+	// `ingest` subcommand, every test in this package) is unaffected; this
+	// exists for a live "N of M bytes" readout (the tray's queue status,
+	// issue #32), not something the ingest core itself needs.
+	Progress func(ProgressEvent)
+}
+
+// progressOpts builds the WriteOption a DualWrite/WriteLocal/Verify call
+// needs to report progress for path/phase/total through e.Progress -- nil
+// (no options) when Progress itself is unset, so every call site stays a
+// plain, zero-overhead call in the common case.
+func (e *Engine) progressOpts(path string, phase ProgressPhase, total int64) []WriteOption {
+	if e.Progress == nil {
+		return nil
+	}
+	return []WriteOption{WithProgress(func(n int64) {
+		e.Progress(ProgressEvent{Path: path, Phase: phase, BytesDone: n, TotalBytes: total})
+	})}
 }
 
 // NewEngine builds an Engine with real clock/UUID/exiftool dependencies.
@@ -185,7 +206,7 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 		return fr
 	}
 
-	writeRes, err := DualWrite(srcPath, archivePath, localPath)
+	writeRes, err := DualWrite(srcPath, archivePath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
 	if err != nil {
 		fr.Err = fmt.Errorf("dual write: %w", err)
 		return fr
@@ -198,7 +219,7 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	_ = os.Chtimes(archivePath, e.now(), srcInfo.ModTime())
 	_ = os.Chtimes(localPath, e.now(), srcInfo.ModTime())
 
-	archiveVerify, err := Verify(archivePath, writeRes.FullHash)
+	archiveVerify, err := Verify(archivePath, writeRes.FullHash, e.progressOpts(archivePath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 	if err != nil {
 		_ = os.Remove(archivePath)
 		_ = os.Remove(localPath)
@@ -206,7 +227,7 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 		return fr
 	}
 	fr.ArchiveVerify = archiveVerify
-	localVerify, err := Verify(localPath, writeRes.FullHash)
+	localVerify, err := Verify(localPath, writeRes.FullHash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 	if err != nil {
 		_ = os.Remove(archivePath)
 		_ = os.Remove(localPath)

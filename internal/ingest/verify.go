@@ -47,7 +47,7 @@ type VerifyResult struct {
 // straight from a warm page cache would hash the bytes the client just
 // buffered, not the bytes that landed on the far side of an NFS/SMB mount,
 // which is exactly the failure mode this function exists to rule out.
-func Verify(path string, wantHash string) (VerifyResult, error) {
+func Verify(path string, wantHash string, opts ...WriteOption) (VerifyResult, error) {
 	r, method, err := openForVerify(path)
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("ingest: open %s for verify: %w", path, err)
@@ -55,7 +55,11 @@ func Verify(path string, wantHash string) (VerifyResult, error) {
 	defer func() { _ = r.Close() }()
 
 	h := blake3.New()
-	if _, err := copyAligned(h, r); err != nil {
+	var dst io.Writer = h
+	if o := applyWriteOptions(opts); o.onBytes != nil {
+		dst = io.MultiWriter(h, &progressWriter{onBytes: o.onBytes})
+	}
+	if _, err := copyAligned(dst, r); err != nil {
 		return VerifyResult{}, fmt.Errorf("ingest: read %s for verify: %w", path, err)
 	}
 	got := fmt.Sprintf("%x", h.Sum(nil))
