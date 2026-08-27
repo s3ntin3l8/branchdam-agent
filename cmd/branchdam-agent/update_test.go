@@ -42,16 +42,16 @@ func TestConfirm(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, _ = w.WriteString(input)
-		w.Close()
+		_ = w.Close()
 
 		outR, outW, err := os.Pipe()
 		if err != nil {
 			t.Fatal(err)
 		}
 		got := confirm(r, outW, "prompt: ")
-		outW.Close()
-		outR.Close()
-		r.Close()
+		_ = outW.Close()
+		_ = outR.Close()
+		_ = r.Close()
 
 		if got != want {
 			t.Errorf("confirm(%q) = %v, want %v", input, got, want)

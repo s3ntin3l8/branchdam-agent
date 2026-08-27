@@ -96,7 +96,7 @@ func runUpdateCmd(args []string) int {
 }
 
 func confirm(in *os.File, out *os.File, prompt string) bool {
-	fmt.Fprint(out, prompt)
+	_, _ = fmt.Fprint(out, prompt)
 	line, err := bufio.NewReader(in).ReadString('\n')
 	if err != nil {
 		return false

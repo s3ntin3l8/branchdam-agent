@@ -79,7 +79,7 @@ func TestListenIsTheSingleInstanceGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Listen() failed: %v", err)
 	}
-	defer ln1.Close()
+	defer func() { _ = ln1.Close() }()
 
 	s2 := NewStatusServer(ln1.Addr().String(), func() Status { return Status{} }, "1.0.0")
 	if _, err := s2.Listen(); err == nil {
