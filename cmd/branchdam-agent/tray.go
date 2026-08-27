@@ -97,6 +97,15 @@ func runTrayCmd(args []string) int {
 
 	fmt.Printf("branchdam-agent tray: status page at %s\n", statusSrv.StatusURL())
 
+	// Captured before tray.Run, not after: relaunchSelf's own doc comment
+	// requires selfExe to be resolved before any in-place swap happens,
+	// and tray.Run is exactly where that swap (if any) occurs.
+	selfExe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent tray: resolve own executable: %v\n", err)
+		return 1
+	}
+
 	var outcome tray.Outcome
 	outcome, trayErr = tray.Run(ctx, runner, detector, statusSrv.StatusURL(), updater)
 	stop() // make sure the status server's ctx.Done() fires even if tray.Run returned on its own (e.g. Quit clicked)
@@ -121,11 +130,6 @@ func runTrayCmd(args []string) int {
 	// makes relaunching here (rather than from inside tray.Run's select
 	// loop) safe.
 	if outcome.RestartRequested {
-		selfExe, err := os.Executable()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "branchdam-agent tray: updated to %s but could not resolve own executable to restart: %v\n", outcome.AppliedVersion, err)
-			return 1
-		}
 		fmt.Printf("branchdam-agent tray: updated to %s, restarting\n", outcome.AppliedVersion)
 		if err := relaunchSelf(selfExe, os.Args[1:]); err != nil {
 			fmt.Fprintf(os.Stderr, "branchdam-agent tray: updated to %s but failed to restart: %v\n", outcome.AppliedVersion, err)
