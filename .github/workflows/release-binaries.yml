@@ -1,31 +1,46 @@
 name: Release Binaries
 
-# Fires when release-please's own workflow merges a release PR and creates
-# the GitHub Release (googleapis/release-please-action@v5's default
-# behavior, not disabled here -- see release-please.yml). branchdam-agent is
-# a desktop tray/CLI binary, not a service (see release-please.yml's own
-# comment for why there's no Docker image) -- this is the actual
-# distribution path an operator uses to get it onto a workstation, since
-# nothing else in this repo publishes a downloadable artifact.
+# branchdam-agent is a desktop tray/CLI binary, not a service (see
+# release-please.yml's own comment for why there's no Docker image) -- this
+# is the actual distribution path an operator uses to get it onto a
+# workstation, since nothing else in this repo publishes a downloadable
+# artifact.
+#
+# Deliberately NOT triggered by `on: release`. release-please creates the
+# GitHub Release using the default GITHUB_TOKEN, and GitHub's Actions
+# recursion guard means a release created by GITHUB_TOKEN does NOT fire
+# `on: release` (same reasoning branchDAM's own release.yml documents for why
+# its image push can't be a separate tag-triggered workflow). v1.0.0 shipped
+# with zero assets for exactly this reason. Instead this is a `workflow_call`
+# invoked directly from release-please.yml, gated on `release_created`, fed
+# `tag_name` -- see that file.
 on:
-  release:
-    types: [published]
-  # Manual re-run for debugging the build/package steps (e.g. a cross-compile
-  # regression) without cutting a new release. The upload job stays gated to
-  # the `release` event -- see that job's `if:` -- so a manual dispatch never
-  # tries to attach assets to a release that doesn't exist for this ref.
+  workflow_call:
+    inputs:
+      release-tag:
+        description: "Tag of the GitHub Release to attach binaries to."
+        required: true
+        type: string
+  # Manual invocation for two purposes: (1) a build-only smoke test of the
+  # cross-compile steps (leave release-tag empty -- the upload job stays
+  # gated on it being non-empty, so a smoke-test dispatch never tries to
+  # attach assets to a release that may not exist for this ref), or (2)
+  # backfilling assets onto an existing release whose run predates this
+  # workflow (pass release-tag).
   workflow_dispatch:
     inputs:
+      release-tag:
+        description: "Existing release tag to backfill assets onto. Leave empty for a build-only smoke test."
+        required: false
+        type: string
+        default: ""
       version-suffix:
-        description: "Value stamped into main.version for this test build (no release is created or modified)"
+        description: "Value stamped into main.version when no release-tag is given"
         required: false
         default: "manual-test"
 
 permissions:
   contents: read
-
-env:
-  RELEASE_VERSION: ${{ github.event.release.tag_name || github.event.inputs.version-suffix }}
 
 jobs:
   # linux/amd64: native build. The tray itself is Windows/macOS-only
@@ -38,6 +53,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      RELEASE_VERSION: ${{ inputs.release-tag || inputs.version-suffix }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -71,6 +88,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      RELEASE_VERSION: ${{ inputs.release-tag || inputs.version-suffix }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -106,6 +125,8 @@ jobs:
     runs-on: macos-26
     permissions:
       contents: read
+    env:
+      RELEASE_VERSION: ${{ inputs.release-tag || inputs.version-suffix }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -127,10 +148,13 @@ jobs:
 
   # Collects the three platform artifacts and attaches them (plus a combined
   # checksum file) to the GitHub Release release-please already created --
-  # no separate tag/release creation here, only asset upload.
+  # no separate tag/release creation here, only asset upload. Gated on
+  # release-tag being non-empty, not on the trigger event: inside a
+  # workflow_call the event is the CALLER's event (push), so a
+  # github.event_name check would silently skip forever here.
   upload:
     name: attach to release
-    if: github.event_name == 'release'
+    if: inputs.release-tag != ''
     needs: [build-linux, build-windows, build-darwin]
     runs-on: ubuntu-latest
     permissions:
@@ -148,7 +172,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          gh release upload "${{ inputs.release-tag }}" \
             dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz \
             dist/windows-amd64/branchdam-agent-windows-amd64.zip \
             dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz \

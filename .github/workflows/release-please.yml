@@ -10,10 +10,23 @@ permissions: {}
 jobs:
   # branchdam-agent is a desktop CLI/tray binary, not a service -- no Docker
   # image is published, so the docker-publish job the template ships here is
-  # dropped. A later milestone adds a real cross-platform release matrix
-  # (Windows/macOS packaging), not this PR.
+  # dropped.
   release-please:
     permissions:
       contents: write
       pull-requests: write
     uses: s3ntin3l8/.github/.github/workflows/release-please.yml@main
+
+  # Chained here, in the same run, rather than triggered by release-binaries.yml's
+  # own `on: release` -- release-please creates the release with the default
+  # GITHUB_TOKEN, and GITHUB_TOKEN-created releases don't fire `on: release`
+  # (Actions recursion guard). See release-binaries.yml's header comment.
+  binaries:
+    name: Release binaries
+    needs: [release-please]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-binaries.yml
+    with:
+      release-tag: ${{ needs.release-please.outputs.tag_name }}
