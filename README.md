@@ -53,9 +53,11 @@ for the wire contract this repo implements against.
 - `internal/tray/`, `internal/autostart/`, `internal/selfupdate/`, `internal/appbundle/` -- the
   tray shell: a `fyne.io/systray` icon/menu (windows/darwin only) plus an embedded `net/http`
   status page showing watch directories, scratch-directory info, and queue status; login-item
-  registration (off by default); `go-selfupdate` wiring (off by default via config) that
-  notifies of an update and, on a menu click (or headless via the `update` subcommand),
-  checksum-verifies, downloads, and applies it, then restarts the tray -- see
+  registration (off by default); `go-selfupdate` wiring (update *checks* on by default -- a
+  read-only GitHub API call, `selfUpdate.enabled: false` opts out -- but *applying* one is
+  always a separate explicit action) that notifies of an update and, on a menu click (or
+  headless via the `update` subcommand), checksum-verifies, downloads, and applies it, then
+  restarts the tray -- see
   [`docs/platform-support.md`](docs/platform-support.md) for the per-platform details and known
   gaps (including the queue-status stub). `internal/appbundle` assembles the macOS `.app`
   bundle both the release pipeline (`tools/mkbundle`) and self-update's `Info.plist` rewrite
@@ -183,11 +185,13 @@ On Linux, `tray` builds and runs, but immediately returns an error (`tray: unsup
 platform`) -- the tray is scoped to Windows/macOS; a Linux workstation still has the fully-tested
 headless `ingest` path.
 
-Self-update support (off by default -- see `selfUpdate.enabled`) is compiled into every build; no
-build tag is required. Checking is periodic and passive (never downloads or applies anything by
-itself); installing is a menu click ("Install and restart") that checksum-verifies against the
-release's `SHA256SUMS.txt`, applies, and restarts the tray. Headless hosts (Linux, or a
-Windows/macOS console-only install) get the same thing via `branchdam-agent update -config
+Self-update support is compiled into every build; no build tag is required. Checking is **on by
+default** and periodic (`selfUpdate.enabled: false` opts out entirely) but passive -- it's a
+read-only GitHub API call and never downloads or applies anything by itself. Installing is
+always a separate, explicit action: a menu click ("Install and restart") that
+checksum-verifies against the release's `SHA256SUMS.txt`, applies, and restarts the tray.
+Headless hosts (Linux, or a Windows/macOS console-only install) get the same thing via
+`branchdam-agent update -config
 config.yaml [-check] [-yes]`. See [`docs/platform-support.md`](docs/platform-support.md) for the
 full per-platform breakdown (why Windows ships two `.exe`s, the `fyne.io/systray` cross-compile
 matrix, login-item registration, and known gaps like the unverified macOS Dock-icon behavior and

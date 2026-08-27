@@ -27,11 +27,12 @@ ships as `v1.0.0`+ with everything below landed:
   one-read/two-write dual-copy writer, a cache-defeating verified re-read, DJI `.srt` telemetry
   parsing, metadata extraction at promoted-column parity with a server-side scan.
 - `internal/tray/`, `internal/autostart/`, `internal/selfupdate/`, `internal/appbundle/`, the
-  `tray` and `update` subcommands -- the tray shell (windows/darwin), login-item registration,
-  checksum-verified self-update (check on by opt-in, apply only on explicit confirmation: a tray
-  menu click or the headless `update` subcommand), the macOS `.app` bundle, all off by default
-  except the tray icon itself. See [`docs/platform-support.md`](docs/platform-support.md) for the
-  per-platform breakdown and known gaps.
+  `tray` and `update` subcommands -- the tray shell (windows/darwin), login-item registration
+  (off by default), checksum-verified self-update (checking on by default -- a read-only GitHub
+  API call; applying always requires explicit confirmation: a tray menu click or the headless
+  `update` subcommand), the macOS `.app` bundle. See
+  [`docs/platform-support.md`](docs/platform-support.md) for the per-platform breakdown and known
+  gaps.
 - `internal/queue/`, `queue-drain` -- the offline queue: every intended event persisted to
   `queue.db` before any network call, so a workstation with no route to the NAS can still ingest,
   then finish the archive copy and rebase once reconnected. See
@@ -251,14 +252,23 @@ whatever "latest" resolves to.
   split, importing `internal/tray` from `cmd/branchdam-agent` would either force cgo everywhere or
   break Linux CI outright. Verified locally before writing any tray code, not assumed from the
   plan doc's Windows/darwin framing (which says nothing about Linux).
-- **Both login-item registration and self-update are off by default, and this binary never
-  contacts GitHub unless `selfUpdate.enabled` is true.** `tray.startOnLogin: false` and
-  `selfUpdate.enabled: false` in `config.example.yaml`; `cmd/branchdam-agent/tray.go` reads both
-  directly off `config.Config`. `branchdam-agent update`'s explicit invocation is itself an
-  operator's consent to *apply* an update, but it is not a separate switch that bypasses the
-  config flag -- `runUpdateCmd` refuses outright when `selfUpdate.enabled` is false, so there is
-  exactly one thing controlling whether the binary is willing to reach GitHub at all, checked the
-  same way from both the tray's background check and this subcommand.
+- **Login-item registration is off by default; self-update *checking* is on by default, but
+  self-update *applying* is never automatic regardless of that flag.** `tray.startOnLogin:
+  false` stays off-by-default (it registers this binary with the OS's own login-item mechanism,
+  a system-integration change an operator should opt into). `selfUpdate.enabled` defaults to
+  `true` in both `internal/config.defaultConfig()` and `config.example.yaml` -- deliberately
+  different from every other opt-in flag in this repo, because a Check is a read-only GitHub API
+  call, never a download or a write, and an operator who never learns a release exists can't act
+  on it. `cmd/branchdam-agent/tray.go` reads `selfUpdate.enabled` directly off `config.Config`.
+  `branchdam-agent update`'s explicit invocation is itself an operator's consent to *apply* an
+  update, but it is not a separate switch that bypasses the config flag -- `runUpdateCmd` refuses
+  outright when `selfUpdate.enabled` is false, so there is exactly one thing controlling whether
+  the binary is willing to reach GitHub at all, checked the same way from both the tray's
+  background check and this subcommand. Any config fixture used in a test that reaches
+  `newSelfUpdateAgent`/`runUpdateCmd` and does not want a real network call must set
+  `selfUpdate.enabled: false` explicitly -- see `cmd/branchdam-agent/tray_test.go`'s
+  `TestRunTrayUnsupportedOnLinux` fixture for why (its self-update check goroutine is
+  fire-and-forget, joined via `ctx` cancellation, not a `WaitGroup`).
 - **`internal/selfupdate`'s real implementation is compiled into every build, no build tag
   required.** `go-selfupdate` v1.6.0's top-level package (`validate.go`) imports
   `golang.org/x/crypto/openpgp` unconditionally (regardless of which `Validator` you actually

@@ -89,6 +89,11 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 }
 
+// TestTrayAndSelfUpdateDefaults checks the bare Go zero value of Config,
+// not what Load() actually hands an operator -- see
+// TestLoadSelfUpdateEnabledByDefault for that. The zero value keeping
+// SelfUpdate.Enabled false is just ordinary Go struct semantics: it's
+// defaultConfig(), not the zero value, that turns checks on by default.
 func TestTrayAndSelfUpdateDefaults(t *testing.T) {
 	var cfg Config
 	if got := cfg.Tray.StatusAddrOrDefault(); got != DefaultStatusAddr {
@@ -101,7 +106,47 @@ func TestTrayAndSelfUpdateDefaults(t *testing.T) {
 		t.Error("StartOnLogin must default to false")
 	}
 	if cfg.SelfUpdate.Enabled {
-		t.Error("SelfUpdate.Enabled must default to false")
+		t.Error("the zero-value Config's SelfUpdate.Enabled must be false")
+	}
+}
+
+// TestLoadSelfUpdateEnabledByDefault pins the operator-visible default:
+// a config file that never mentions selfUpdate at all still gets update
+// CHECKS on (a read-only GitHub API call, never a download or a binary
+// write) -- only APPLYING an update is gated behind an always-explicit
+// action (a tray menu click, or `update`'s confirmation/-yes), which this
+// flag does not by itself authorize. An operator who wants zero outbound
+// GitHub traffic sets selfUpdate.enabled: false explicitly.
+func TestLoadSelfUpdateEnabledByDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("agentId: test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SelfUpdate.Enabled {
+		t.Error("SelfUpdate.Enabled must default to true when the config file doesn't mention selfUpdate at all")
+	}
+}
+
+func TestLoadSelfUpdateExplicitlyDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "selfUpdate:\n  enabled: false\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SelfUpdate.Enabled {
+		t.Error("an explicit selfUpdate.enabled: false in config must override the on-by-default check")
 	}
 }
 

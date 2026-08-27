@@ -12,7 +12,12 @@ import (
 // on. On Linux -- the only platform CI actually tests, per
 // .github/workflows/ci-cd.yml -- tray.Run returns tray.ErrUnsupported
 // immediately, so this also proves runTrayCmd doesn't hang or leak the
-// status server's goroutine waiting for it.
+// status server's goroutine waiting for it. selfUpdate.enabled is
+// explicitly false: selfUpdate.enabled now defaults to true (see
+// internal/config.defaultConfig), and newSelfUpdateAgent's Run goroutine
+// is fire-and-forget (joined via ctx cancellation, not a WaitGroup) -- a
+// fixture that left it enabled would make this unit test perform a real
+// network call to GitHub on every run.
 func TestRunTrayUnsupportedOnLinux(t *testing.T) {
 	dir := t.TempDir()
 	archiveRoot := filepath.Join(dir, "archive")
@@ -28,7 +33,9 @@ func TestRunTrayUnsupportedOnLinux(t *testing.T) {
 		"  archiveRoot: \"" + archiveRoot + "\"\n" +
 		"  localEditRoot: \"" + localRoot + "\"\n" +
 		"tray:\n" +
-		"  statusAddr: \"127.0.0.1:0\"\n"
+		"  statusAddr: \"127.0.0.1:0\"\n" +
+		"selfUpdate:\n" +
+		"  enabled: false\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

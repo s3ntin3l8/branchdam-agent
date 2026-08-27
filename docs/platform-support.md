@@ -78,18 +78,23 @@ preferred.
 
 ## Self-update
 
-Gated by `selfUpdate.enabled: true` in config -- no build tag required, compiled into every
-build. `internal/selfupdate.Updater` always configures a `ChecksumValidator` against the
-release's `SHA256SUMS.txt`; nothing in this repo's release pipeline is code-signed or
-notarized, so that checksum check is the *only* integrity control before a downloaded binary is
-written to disk.
+Checking for an update is **on by default** (`selfUpdate.enabled: true` is the Go-level and
+`config.example.yaml` default) -- no build tag required, compiled into every build. Checking is
+a read-only GitHub API call; it never downloads or writes anything. Set `selfUpdate.enabled:
+false` for zero outbound GitHub traffic. `internal/selfupdate.Updater` always configures a
+`ChecksumValidator` against the release's `SHA256SUMS.txt`; nothing in this repo's release
+pipeline is code-signed or notarized, so that checksum check is the *only* integrity control
+before a downloaded binary is written to disk.
 
 Notify-and-confirm, never unattended: the tray checks on startup and periodically thereafter
 (`selfUpdate.checkIntervalHours`, default 24h) and shows "Install and restart" once an update is
 found, but nothing downloads or applies until that menu item is clicked (or, on a headless host,
-`branchdam-agent update` is run and confirmed). The install refuses while an ingest is in
-flight, for the whole duration of the download and apply, not just at the moment the click is
-handled -- `internal/tray.Runner.TryLockIdle` holds the same gate `TriggerIngest` does.
+`branchdam-agent update` is run and confirmed) -- `selfUpdate.enabled` gates whether the binary
+may contact GitHub at all, not whether an update, once found, gets applied automatically; that
+second gate is always a separate, explicit action regardless of this flag. The install refuses
+while an ingest is in flight, for the whole duration of the download and apply, not just at the
+moment the click is handled -- `internal/tray.Runner.TryLockIdle` holds the same gate
+`TriggerIngest` does.
 
 **Self-update requires a per-user install location.** Applying writes a replacement binary next
 to the running one, which needs write permission on the containing directory --

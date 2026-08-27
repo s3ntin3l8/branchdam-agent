@@ -215,6 +215,16 @@ func defaultConfig() Config {
 		Server: ServerConfig{
 			BaseURL: "http://localhost:8080",
 		},
+		// Checking for an update is on by default -- it's a read-only
+		// GitHub API call, never a download or a binary write, and an
+		// operator who never learns a release exists can't act on it.
+		// Applying one is a separate, always-explicit decision (a tray
+		// menu click, or `update`'s confirmation prompt / -yes) that
+		// this flag does not by itself authorize -- see
+		// internal/selfupdate's doc comment and CLAUDE.md's self-update
+		// invariants. An operator who wants zero outbound GitHub traffic
+		// sets selfUpdate.enabled: false explicitly.
+		SelfUpdate: SelfUpdateConfig{Enabled: true},
 	}
 }
 
