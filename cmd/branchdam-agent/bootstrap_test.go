@@ -62,10 +62,11 @@ func TestBootstrapConfigInteractiveHappyPath(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 
 	answers := map[string]string{
-		"server.baseUrl":       "https://branchdam.example.com",
-		"server.apiKey":        "0123456789abcdef0123456789abcdef",
-		"ingest.archiveRoot":   "/archive",
-		"ingest.localEditRoot": "/edit",
+		"server.baseUrl":        "https://branchdam.example.com",
+		"server.apiKey":         "0123456789abcdef0123456789abcdef",
+		"ingest.archiveRoot":    "/archive",
+		"ingest.localEditRoot":  "/edit",
+		pathMappingContainerKey: "/storage/archive",
 	}
 	var promptedKinds []string
 	run := func(args ...string) (string, int, error) {
@@ -109,6 +110,11 @@ func TestBootstrapConfigInteractiveHappyPath(t *testing.T) {
 	}
 	if cfg.Ingest.LocalEditRoot != answers["ingest.localEditRoot"] {
 		t.Errorf("ingest.localEditRoot = %q, want %q", cfg.Ingest.LocalEditRoot, answers["ingest.localEditRoot"])
+	}
+	if len(cfg.PathMappings) != 1 ||
+		cfg.PathMappings[0].WorkstationPath != answers["ingest.archiveRoot"] ||
+		cfg.PathMappings[0].ContainerPath != answers[pathMappingContainerKey] {
+		t.Errorf("pathMappings = %+v, want one entry %s -> %s", cfg.PathMappings, answers["ingest.archiveRoot"], answers[pathMappingContainerKey])
 	}
 }
 

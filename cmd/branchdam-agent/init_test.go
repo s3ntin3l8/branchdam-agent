@@ -27,6 +27,14 @@ func TestRunInitCmdWritesStarterConfig(t *testing.T) {
 	if problems := cfg.Validate(); len(problems) != 0 {
 		t.Errorf("starter config should have no Validate() problems, got %v", problems)
 	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("expected mode 0600 (an operator may hand-edit a real secret into this file), got %o", perm)
+	}
 }
 
 func TestRunInitCmdRefusesToOverwriteWithoutForce(t *testing.T) {

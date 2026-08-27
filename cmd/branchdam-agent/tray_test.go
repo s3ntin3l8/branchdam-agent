@@ -67,6 +67,9 @@ func TestRunTrayUnsupportedOnLinux(t *testing.T) {
 		"ingest:\n" +
 		"  archiveRoot: \"" + archiveRoot + "\"\n" +
 		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"pathMappings:\n" +
+		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"    containerPath: \"/storage/archive\"\n" +
 		"tray:\n" +
 		"  statusAddr: \"127.0.0.1:0\"\n" +
 		"selfUpdate:\n" +
@@ -105,6 +108,28 @@ func TestRunTrayMissingIngestRoots(t *testing.T) {
 	}
 	if got := run([]string{"tray", "-config", cfgPath}); got != 1 {
 		t.Errorf("run([tray]) with no ingest roots = %d, want 1", got)
+	}
+}
+
+// TestRunTrayMissingPathMappings pins the gap Hermes review caught on this
+// PR: ingest.archiveRoot/localEditRoot alone being non-empty isn't enough
+// -- a tray with no pathMappings entry launches fine but fails the first
+// real card with a confusing ErrNoPathMapping (internal/ingest/pathmap.go)
+// deep inside ingest, not at startup. Must fail fast instead.
+func TestRunTrayMissingPathMappings(t *testing.T) {
+	stubTrayDialog(t, nil)
+
+	dir := t.TempDir()
+	archiveRoot := filepath.Join(dir, "archive")
+	localRoot := filepath.Join(dir, "local")
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "server:\n  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"ingest:\n  archiveRoot: \"" + archiveRoot + "\"\n  localEditRoot: \"" + localRoot + "\"\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := run([]string{"tray", "-config", cfgPath}); got != 1 {
+		t.Errorf("run([tray]) with no pathMappings = %d, want 1", got)
 	}
 }
 
@@ -154,10 +179,11 @@ func TestRunTrayMissingConfigFileBootstrapsThenFails(t *testing.T) {
 // bootstrapConfigInteractive in isolation (see bootstrap_test.go for that).
 func TestRunTrayFirstRunBootstrapAppliesAnswers(t *testing.T) {
 	answers := map[string]string{
-		"server.baseUrl":       "https://branchdam.example.com",
-		"server.apiKey":        "0123456789abcdef0123456789abcdef",
-		"ingest.archiveRoot":   "/archive",
-		"ingest.localEditRoot": "/edit",
+		"server.baseUrl":        "https://branchdam.example.com",
+		"server.apiKey":         "0123456789abcdef0123456789abcdef",
+		"ingest.archiveRoot":    "/archive",
+		"ingest.localEditRoot":  "/edit",
+		pathMappingContainerKey: "/storage/archive",
 	}
 	stubTrayDialog(t, func(args ...string) (string, int, error) {
 		var title string
@@ -197,5 +223,8 @@ func TestRunTrayFirstRunBootstrapAppliesAnswers(t *testing.T) {
 	}
 	if cfg.Ingest.ArchiveRoot != answers["ingest.archiveRoot"] {
 		t.Errorf("ingest.archiveRoot = %q, want %q", cfg.Ingest.ArchiveRoot, answers["ingest.archiveRoot"])
+	}
+	if len(cfg.PathMappings) != 1 || cfg.PathMappings[0].ContainerPath != answers[pathMappingContainerKey] {
+		t.Errorf("pathMappings = %+v, want one entry with containerPath %q", cfg.PathMappings, answers[pathMappingContainerKey])
 	}
 }

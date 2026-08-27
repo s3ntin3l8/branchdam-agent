@@ -119,6 +119,13 @@ func runTrayCmd(args []string) int {
 	if cfg.Ingest.ArchiveRoot == "" || cfg.Ingest.LocalEditRoot == "" {
 		return fail("ingest.archiveRoot and ingest.localEditRoot must both be set in config")
 	}
+	// preflight only WARNs on an empty pathMappings (an operator running
+	// it hasn't necessarily configured ingest yet); the tray is about to
+	// actually ingest, where a missing mapping fails downstream with a
+	// confusing ErrNoPathMapping on the first real card -- fatal here.
+	if len(cfg.PathMappings) == 0 {
+		return fail("pathMappings must have at least one entry covering ingest.archiveRoot")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

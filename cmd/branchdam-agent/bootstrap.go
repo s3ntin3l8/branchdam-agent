@@ -98,28 +98,43 @@ type bootstrapPrompt struct {
 	def   string // pre-filled default, entry/password only
 }
 
+// pathMappingContainerKey is bootstrapPrompts' one synthetic key: it is
+// never passed to config.Patch directly (pathMappings is a list, not a
+// scalar leaf), only used to look the answer back up in
+// bootstrapConfigInteractive once every prompt has been walked -- see
+// that function for how it becomes the wizard's one PathMapping entry.
+const pathMappingContainerKey = "pathMapping.containerPath"
+
 // bootstrapPrompts is the first-run wizard's fixed question order: server
-// URL, API key, then the two ingest roots preflight and the tray both
-// require. Package-level so tests can assert its shape without invoking
-// any dialog.
+// URL, API key, the two ingest roots, and the server-container path the
+// archive root maps to. That last prompt exists because a completed
+// wizard with no pathMappings entry would otherwise launch a tray whose
+// first real ingest fails with ErrNoPathMapping (internal/ingest/pathmap.go)
+// -- a confusing downstream error that would undercut this whole feature's
+// "works out of the box" premise. Package-level so tests can assert its
+// shape without invoking any dialog.
 var bootstrapPrompts = []bootstrapPrompt{
-	{"server.baseUrl", "entry", "branchDAM Agent Setup (1/4)", "branchDAM server URL:", "http://localhost:8080"},
-	{"server.apiKey", "password", "branchDAM Agent Setup (2/4)", "Agent API key (from your branchDAM server, 32+ characters):", ""},
-	{"ingest.archiveRoot", "directory", "branchDAM Agent Setup (3/4) -- select the archive (NAS) folder", "", ""},
-	{"ingest.localEditRoot", "directory", "branchDAM Agent Setup (4/4) -- select the local edit (scratch) folder", "", ""},
+	{"server.baseUrl", "entry", "branchDAM Agent Setup (1/5)", "branchDAM server URL:", "http://localhost:8080"},
+	{"server.apiKey", "password", "branchDAM Agent Setup (2/5)", "Agent API key (from your branchDAM server, 32+ characters):", ""},
+	{"ingest.archiveRoot", "directory", "branchDAM Agent Setup (3/5)", "Select the archive (NAS) folder:", ""},
+	{"ingest.localEditRoot", "directory", "branchDAM Agent Setup (4/5)", "Select the local edit (scratch) folder:", ""},
+	{pathMappingContainerKey, "entry", "branchDAM Agent Setup (5/5)", "Server-container path for the archive folder just selected (e.g. /storage/archive):", "/storage/archive"},
 }
 
 // bootstrapConfigInteractive writes a starter config to path (see
 // writeStarterConfig, shared with `init`), then walks bootstrapPrompts via
-// run, applying every answer with a single config.Patch call at the end.
-// Returns errBootstrapCanceled if the operator dismissed any prompt; any
-// other error means a dialog itself failed to render.
+// run, applying every answer with a single config.Patch call at the end --
+// including a pathMappings entry built from the archive root and container
+// path answers together, since PathMapping is a struct, not a scalar leaf
+// any single prompt's dotted key can address directly. Returns
+// errBootstrapCanceled if the operator dismissed any prompt; any other
+// error means a dialog itself failed to render.
 func bootstrapConfigInteractive(run dialogRunner, path string) error {
 	if err := writeStarterConfig(path); err != nil {
 		return err
 	}
 
-	changes := make(map[string]any, len(bootstrapPrompts))
+	answers := make(map[string]string, len(bootstrapPrompts))
 	for _, p := range bootstrapPrompts {
 		args := []string{"-kind", p.kind, "-title", p.title}
 		if p.msg != "" {
@@ -134,7 +149,7 @@ func bootstrapConfigInteractive(run dialogRunner, path string) error {
 		}
 		switch exitCode {
 		case dialogExitOK:
-			changes[p.key] = value
+			answers[p.key] = value
 		case dialogExitCanceled:
 			return errBootstrapCanceled
 		default:
@@ -142,6 +157,16 @@ func bootstrapConfigInteractive(run dialogRunner, path string) error {
 		}
 	}
 
+	changes := map[string]any{
+		"server.baseUrl":       answers["server.baseUrl"],
+		"server.apiKey":        answers["server.apiKey"],
+		"ingest.archiveRoot":   answers["ingest.archiveRoot"],
+		"ingest.localEditRoot": answers["ingest.localEditRoot"],
+		"pathMappings": []config.PathMapping{{
+			WorkstationPath: answers["ingest.archiveRoot"],
+			ContainerPath:   answers[pathMappingContainerKey],
+		}},
+	}
 	if err := config.Patch(path, changes); err != nil {
 		return fmt.Errorf("save setup answers: %w", err)
 	}

@@ -253,10 +253,16 @@ whatever "latest" resolves to.
   `docs/platform-support.md`'s Known gaps for what's unverified on real hardware as a result.
 - **A missing config is no longer fatal for `tray` -- it triggers first-run bootstrap, not exit
   1.** `writeStarterConfig` (shared with `init`) plus a short zenity wizard collect
-  `server.baseUrl`/`apiKey`/`ingest.archiveRoot`/`localEditRoot`, applied via `config.Patch` in one
-  call. The starter config is left on disk even if the wizard is canceled or a dialog fails
-  partway (`errBootstrapCanceled` vs. any other error) -- there is always something to hand-edit
-  afterward, mirroring `init`'s own guarantee.
+  `server.baseUrl`/`apiKey`/`ingest.archiveRoot`/`localEditRoot`, **and** a `pathMappings` entry
+  (the wizard's fifth prompt) applied via `config.Patch` in one call. The `pathMappings` prompt
+  exists because the tray fails fast on an empty `pathMappings` the same way it does on an empty
+  ingest root -- without it, a completed wizard would launch a tray whose first real card ingest
+  fails deep inside `internal/ingest` with a confusing `ErrNoPathMapping` instead of at startup.
+  The starter config is left on disk even if the wizard is canceled or a dialog fails partway
+  (`errBootstrapCanceled` vs. any other error) -- there is always something to hand-edit
+  afterward, mirroring `init`'s own guarantee. Both write at mode `0600`, matching `config.Patch`'s
+  policy -- an operator who runs `init` and later hand-edits a real `apiKey` into the file should
+  never find it world-readable.
 - **The status page binds loopback-only by construction, not by convention.**
   `tray.normalizeLoopback` rewrites a bare `":port"` (which `net/http` would otherwise bind to
   every interface) to `"127.0.0.1:port"` before `ListenAndServe` ever runs -- CodeQL is a required

@@ -65,12 +65,15 @@ func runInitCmd(args []string) int {
 
 // writeStarterConfig creates path's parent directory (config.Load and
 // config.DefaultPath deliberately never do this themselves -- see
-// DefaultPath's doc comment) and writes starterConfigYAML to it.
+// DefaultPath's doc comment) and writes starterConfigYAML to it at mode
+// 0600, matching config.Patch's policy: an operator who runs `init` and
+// then hand-edits a real server.apiKey into the same file should never
+// find it world-readable just because it started out with no secret in it.
 func writeStarterConfig(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config directory %s: %w", filepath.Dir(path), err)
 	}
-	if err := os.WriteFile(path, starterConfigYAML, 0o644); err != nil {
+	if err := os.WriteFile(path, starterConfigYAML, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil

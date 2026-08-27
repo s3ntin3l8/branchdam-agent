@@ -42,7 +42,7 @@ require (
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	gitlab.com/gitlab-org/api/client-go v1.46.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
-	golang.org/x/image v0.44.0 // indirect
+	golang.org/x/image v0.45.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	modernc.org/libc v1.74.4 // indirect
