@@ -102,8 +102,18 @@ tray:
   startOnLogin: false
 
 # github.com/creativeprojects/go-selfupdate, wired but OFF by default. Set
-# enabled: true only once you're deliberately shipping releases from
-# server.repo and want the tray to check for and apply them automatically.
+# enabled: true only once you're deliberately shipping releases from repo
+# and want the tray to check for updates and offer to install them.
+# Checking never downloads or applies anything by itself -- installing
+# still requires an explicit "Install and restart" click in the tray menu
+# or `branchdam-agent update` on a headless host. Requires a per-user
+# install location (~/Applications, %LOCALAPPDATA%\Programs\...) -- a
+# system-wide install can't write its own replacement binary without
+# elevation; see docs/platform-support.md's Self-update section.
 selfUpdate:
   enabled: false
   repo: "s3ntin3l8/branchdam-agent"
+  # How often the tray re-checks after its initial startup check. 0 (the
+  # default) means every 24h; a negative value disables re-checking (the
+  # tray still checks once at startup).
+  checkIntervalHours: 24

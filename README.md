@@ -50,12 +50,16 @@ for the wire contract this repo implements against.
   `nodeUuid`s. Luminar's schema is undocumented -- see
   [`docs/luminar-catalog.md`](docs/luminar-catalog.md) for the research, confidence level, and how
   to correct the query against a real catalog.
-- `internal/tray/`, `internal/autostart/`, `internal/selfupdate/` -- the tray shell: a
-  `fyne.io/systray` icon/menu (windows/darwin only) plus an embedded `net/http` status page
-  showing watch directories, scratch-directory info, and queue status; login-item registration
-  (off by default); `go-selfupdate` wiring (off by default via config) -- see
+- `internal/tray/`, `internal/autostart/`, `internal/selfupdate/`, `internal/appbundle/` -- the
+  tray shell: a `fyne.io/systray` icon/menu (windows/darwin only) plus an embedded `net/http`
+  status page showing watch directories, scratch-directory info, and queue status; login-item
+  registration (off by default); `go-selfupdate` wiring (off by default via config) that
+  notifies of an update and, on a menu click (or headless via the `update` subcommand),
+  checksum-verifies, downloads, and applies it, then restarts the tray -- see
   [`docs/platform-support.md`](docs/platform-support.md) for the per-platform details and known
-  gaps (including the queue-status stub).
+  gaps (including the queue-status stub). `internal/appbundle` assembles the macOS `.app`
+  bundle both the release pipeline (`tools/mkbundle`) and self-update's `Info.plist` rewrite
+  share.
 
 ## Install
 
@@ -67,12 +71,20 @@ against the release's `SHA256SUMS.txt`:
 |---|---|---|
 | Linux (amd64) | `branchdam-agent-linux-amd64.tar.gz` | `branchdam-agent` -- headless subcommands only, no tray |
 | Windows (amd64) | `branchdam-agent-windows-amd64.zip` | `branchdam-agent.exe` (console, for CLI use) + `branchdam-agent-tray.exe` (no console, for the tray/login-item launch path) |
-| macOS (Apple Silicon) | `branchdam-agent-darwin-arm64.tar.gz` | `branchdam-agent` -- includes the tray |
+| macOS (Apple Silicon) | `branchdam-agent-darwin-arm64.tar.gz` | `branchdam-agent.app` -- includes the tray; the CLI subcommands also work invoked directly at `branchdam-agent.app/Contents/MacOS/branchdam-agent` |
 
 ```sh
-tar -xzf branchdam-agent-<platform>.tar.gz    # linux/darwin
+tar -xzf branchdam-agent-<platform>.tar.gz    # linux/darwin/macOS
 sha256sum -c SHA256SUMS.txt                    # verify
 ```
+
+Extracting with `tar` in a terminal (rather than a browser download + Archive Utility) avoids
+macOS's quarantine attribute and the App Translocation it can trigger -- see
+[`docs/platform-support.md`](docs/platform-support.md#macos-app-bundle). **On macOS, move
+`branchdam-agent.app` to `/Applications` or `~/Applications`** before first launch; self-update
+additionally requires a per-user install location (`~/Applications`, or
+`%LOCALAPPDATA%\Programs\branchDAM\` on Windows) since it writes its own replacement binary --
+see [`docs/platform-support.md`](docs/platform-support.md#self-update).
 
 Binaries are unsigned -- see "Releases" below. See
 [`docs/platform-support.md`](docs/platform-support.md) for the full support matrix, including
@@ -172,8 +184,12 @@ platform`) -- the tray is scoped to Windows/macOS; a Linux workstation still has
 headless `ingest` path.
 
 Self-update support (off by default -- see `selfUpdate.enabled`) is compiled into every build; no
-build tag is required. See [`docs/platform-support.md`](docs/platform-support.md) for the full
-per-platform breakdown (why Windows ships two `.exe`s, the `fyne.io/systray` cross-compile
+build tag is required. Checking is periodic and passive (never downloads or applies anything by
+itself); installing is a menu click ("Install and restart") that checksum-verifies against the
+release's `SHA256SUMS.txt`, applies, and restarts the tray. Headless hosts (Linux, or a
+Windows/macOS console-only install) get the same thing via `branchdam-agent update -config
+config.yaml [-check] [-yes]`. See [`docs/platform-support.md`](docs/platform-support.md) for the
+full per-platform breakdown (why Windows ships two `.exe`s, the `fyne.io/systray` cross-compile
 matrix, login-item registration, and known gaps like the unverified macOS Dock-icon behavior and
 the queue-status stub).
 
