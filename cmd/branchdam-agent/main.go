@@ -53,6 +53,13 @@ func run(args []string) int {
 		return runTrayCmd(args[1:])
 	case "update":
 		return runUpdateCmd(args[1:])
+	case "init":
+		return runInitCmd(args[1:])
+	case "dialog":
+		// Hidden -- see dialog.go's doc comment. Deliberately absent from
+		// usage() below: this exists only to be re-exec'd by this same
+		// binary, never invoked directly by an operator.
+		return runDialogCmd(args[1:], realDialogFuncs)
 	case "-h", "--help", "help":
 		usage()
 		return 0
@@ -77,6 +84,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  prune         delete offline-ingested files' LocalEditRoot mirror once the server confirms them verified (-dry-run to preview)")
 	fmt.Fprintln(os.Stderr, "  tray          run the tray-resident shell (windows/darwin only) over the same ingest core")
 	fmt.Fprintln(os.Stderr, "  update        check for (and optionally apply) a newer release (-check, -yes; requires selfUpdate.enabled)")
+	fmt.Fprintln(os.Stderr, "  init          write a starter config.yaml to get started (-force to overwrite an existing one)")
 	fmt.Fprintln(os.Stderr, "  version       print the agent's own version")
 }
 

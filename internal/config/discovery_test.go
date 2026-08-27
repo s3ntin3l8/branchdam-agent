@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -113,10 +114,41 @@ server:
 	for _, p := range problems {
 		if p.Field == "server.apiKey" {
 			found = true
+			// server.apiKey is the one field checkPlaceholder redacts --
+			// CodeQL's go/clear-text-logging flagged the unredacted form
+			// once a Problem's message started reaching slog (the tray),
+			// not just fmt.Fprintln (preflight): the matched substring is
+			// safe when the value really is the literal placeholder, but
+			// nothing here can prove that for every possible apiKey
+			// value, so the placeholder text itself must never appear in
+			// the message for this field.
+			if strings.Contains(p.Message, "TEST_UNSET_VAR_XYZ") {
+				t.Errorf("server.apiKey's problem message must not echo the matched placeholder text, got %q", p.Message)
+			}
 		}
 	}
 	if !found {
 		t.Errorf("expected Validate to flag server.apiKey's unexpanded placeholder, got %v", problems)
+	}
+}
+
+// TestValidateNonSensitiveFieldNamesThePlaceholder is the flip side of the
+// redaction above: for a field that isn't a secret, naming the actual
+// unresolved ${VAR} is useful diagnostic information and must survive.
+func TestValidateNonSensitiveFieldNamesThePlaceholder(t *testing.T) {
+	cfg := Config{Ingest: IngestConfig{ArchiveRoot: "${TEST_UNSET_VAR_XYZ}"}}
+	problems := cfg.Validate()
+	found := false
+	for _, p := range problems {
+		if p.Field == "ingest.archiveRoot" {
+			found = true
+			if !strings.Contains(p.Message, "${TEST_UNSET_VAR_XYZ}") {
+				t.Errorf("expected ingest.archiveRoot's message to name the placeholder, got %q", p.Message)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected Validate to flag ingest.archiveRoot's unexpanded placeholder, got %v", problems)
 	}
 }
 

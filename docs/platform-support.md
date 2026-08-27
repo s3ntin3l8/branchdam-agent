@@ -36,6 +36,34 @@ stub for every other `GOOS`, including Linux, where CI actually builds/tests/lin
 and why the darwin binary is built natively on `macos-26` (both in CI's `build-darwin-full` job
 and in `release-binaries.yml`) rather than cross-compiled.
 
+## Startup diagnostics and first-run setup
+
+Issue #30: a tray launched with no console (`branchdam-agent-tray.exe`, or the macOS `.app` via
+LaunchAgent/Dock double-click) had zero user-visible feedback if it failed to start. Two
+independent fixes, deliberately not one:
+
+- **A durable log file always lands**, regardless of whether anything can be displayed:
+  `internal/agentlog.Setup()` installs an `slog.Logger` writing to both stderr and
+  `%LOCALAPPDATA%\branchDAM\logs\agent.log` (Windows), `~/Library/Logs/branchDAM/agent.log`
+  (macOS), or `$XDG_STATE_HOME/branchdam-agent/agent.log` (Linux, headless subcommands only --
+  the tray itself never runs there). Rotates an existing file past 5MB to a `.1` sibling on next
+  start; never blocks startup if it can't be created (falls back to stderr-only).
+- **A best-effort error dialog on top**, naming that log path. Rendered by re-exec'ing this same
+  binary as the hidden `branchdam-agent dialog` subcommand (`github.com/ncruces/zenity` --
+  Win32-native on Windows, `osascript` on macOS, no cgo on any platform) rather than calling
+  zenity in-process from the tray -- isolates two platform-specific unknowns neither of which
+  could be verified from Linux development: whether a Win32 dialog renders correctly from a
+  `-H windowsgui`-linked process before systray's own message pump has started, and whatever
+  process-state assumptions a macOS `.app` launched by launchd carries. **Unverified on real
+  hardware** -- see Known gaps below.
+
+The same first-run path also covers a *missing* config, not just a broken one: `tray` no longer
+exits on a missing `config.yaml`. It writes a starter config (also available headlessly via
+`branchdam-agent init`) and, if a dialog backend is available, walks a short setup wizard (server
+URL, API key, the two ingest roots) before proceeding. The starter config is left on disk even if
+the wizard is canceled or a dialog fails partway, so there is always something to hand-edit
+afterward.
+
 ## Login-item registration
 
 `internal/autostart/` implements login-item registration for both tray platforms --
@@ -130,6 +158,14 @@ ignore entry can be dropped.
   both unverified end-to-end** -- `internal/selfupdate`'s archive-entry-selection and checksum
   logic are pinned by tests that run on Linux CI (see that package's tests), but a full
   download-verify-swap-relaunch cycle has not been exercised on real Windows or macOS hardware.
+- **The startup-error dialog (issue #30) is unverified on real hardware.** Does it actually appear
+  when re-exec'd from `branchdam-agent-tray.exe` (a `-H windowsgui`-linked process with no
+  console, before systray's own message pump has started), and from the `.app` bundle launched by
+  launchd? `dialog.go`'s flag parsing, exit-code mapping, and the first-run wizard's prompt/cancel
+  logic are all pinned by tests that run on Linux CI, substituting a fake for the actual
+  `zenity` call -- but nothing here has exercised a real Win32 dialog or a real launchd-spawned
+  `osascript` call. The durable log file (`internal/agentlog`) is independent of this and does not
+  share the gap.
 - **Tray status page's queue field is a stub.** The embedded status page
   (`http://127.0.0.1:38080/` by default, loopback-only) shows queue status as
   `tray.QueueStatusStub`, a literal placeholder string, not a real count -- the offline queue

@@ -316,6 +316,23 @@ func (p Problem) String() string {
 func (c Config) Validate() []Problem {
 	var problems []Problem
 
+	// checkPlaceholder's message names the matched placeholder (e.g.
+	// "${BRANCHDAM_AGENT_API_KEY}") -- genuinely useful for an operator
+	// scanning several fields at once, and safe for every field here
+	// except server.apiKey, which goes through checkSecretPlaceholder
+	// instead: a *structurally separate* function, not a boolean flag on
+	// this one. A shared function with a redact-after-the-fact branch
+	// still has a code path where the matched substring is interpolated
+	// into a string before being overwritten -- CodeQL's
+	// go/clear-text-logging (a taint tracker, not a value-flow-sensitive
+	// one) flagged exactly that path once Validate()'s problems started
+	// reaching slog (tray.go), not just fmt.Fprintln (preflight.go, a
+	// sink that query doesn't cover), even though the overwrite always
+	// wins at runtime. checkSecretPlaceholder never extracts or
+	// interpolates any substring of value at all -- only a bool
+	// (envVarRe.MatchString) crosses from the sensitive field into the
+	// message -- so there is no data-flow path left for the tool to
+	// follow, not just one that happens to be dead at runtime.
 	checkPlaceholder := func(field, value string) {
 		if m := envVarRe.FindString(value); m != "" {
 			problems = append(problems, Problem{
@@ -325,8 +342,17 @@ func (c Config) Validate() []Problem {
 		}
 	}
 
+	checkSecretPlaceholder := func(field, value string) {
+		if envVarRe.MatchString(value) {
+			problems = append(problems, Problem{
+				Field:   field,
+				Message: "still contains an unexpanded placeholder (value withheld) -- the environment variable was not set when this config was loaded",
+			})
+		}
+	}
+
 	checkPlaceholder("server.baseUrl", c.Server.BaseURL)
-	checkPlaceholder("server.apiKey", c.Server.APIKey)
+	checkSecretPlaceholder("server.apiKey", c.Server.APIKey)
 	checkPlaceholder("agentId", c.AgentID)
 	checkPlaceholder("ingest.archiveRoot", c.Ingest.ArchiveRoot)
 	checkPlaceholder("ingest.localEditRoot", c.Ingest.LocalEditRoot)
