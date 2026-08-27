@@ -2,15 +2,13 @@
 
 `internal/luminar` reads Skylum Luminar's `catalog.db` to recover edit→source relationships and
 emit them to branchDAM as `EVENT_EDGE_ATTACHED`. This document records what was actually
-established during research for issue #6, at what confidence, and exactly where the guessed
+established during research for this reader, at what confidence, and exactly where the guessed
 schema lives in code so it's easy to correct once someone can validate it against a real catalog.
 
 **Read this before trusting anything downstream of `internal/luminar/query.go`.** The schema
 mapping below is a best-effort reconstruction from indirect evidence, not a verified fact. That's
 why every edge this reader emits lands at `tier: 2, confidence: 0.89` — strictly below branchDAM's
-tier-2 auto-accept threshold (0.90) — in the human audit queue, not auto-committed. See issue #6
-and `branchdam`'s `.claude/plans/can-we-walk-through-sharded-lighthouse.md` (M4 section) for the
-full reasoning behind that choice.
+tier-2 auto-accept threshold (0.90) — in the human audit queue, not auto-committed.
 
 ## What was and wasn't found
 
