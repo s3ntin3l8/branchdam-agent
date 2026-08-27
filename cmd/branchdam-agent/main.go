@@ -5,10 +5,12 @@
 // reconnect), `prune` (branchdam#230-adjacent -- deletes an offline-ingested
 // file's LocalEditRoot mirror once the server confirms the Tier-3 copy is
 // live and hash-verified; see internal/config.PruneConfig's doc comment for
-// scope), and `tray` (M1's tray shell, issue #3 -- a thin driver over
+// scope), `tray` (M1's tray shell, issue #3 -- a thin driver over
 // the same internal/ingest.Engine `ingest` uses; see internal/tray's doc
-// comment). See docs/roadmap.md in the branchdam repo and this repo's
-// CLAUDE.md.
+// comment), and `update` (the headless equivalent of the tray's
+// "Install and restart" menu item, for hosts that never run a tray; see
+// internal/selfupdate's doc comment). See docs/roadmap.md in the
+// branchdam repo and this repo's CLAUDE.md.
 package main
 
 import (
@@ -49,6 +51,8 @@ func run(args []string) int {
 		return runPruneCmd(args[1:])
 	case "tray":
 		return runTrayCmd(args[1:])
+	case "update":
+		return runUpdateCmd(args[1:])
 	case "-h", "--help", "help":
 		usage()
 		return 0
@@ -72,6 +76,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  queue-drain   drain queue.db on reconnect: submit queued events, copy archive bytes, rebase to Tier-3")
 	fmt.Fprintln(os.Stderr, "  prune         delete offline-ingested files' LocalEditRoot mirror once the server confirms them verified (-dry-run to preview)")
 	fmt.Fprintln(os.Stderr, "  tray          run the tray-resident shell (windows/darwin only) over the same ingest core")
+	fmt.Fprintln(os.Stderr, "  update        check for (and optionally apply) a newer release (-check, -yes; requires selfUpdate.enabled)")
 	fmt.Fprintln(os.Stderr, "  version       print the agent's own version")
 }
 
