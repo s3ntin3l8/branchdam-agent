@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/autostart"
@@ -28,6 +27,19 @@ type configSettings struct {
 	runner *tray.Runner
 	dialog dialogRunner
 
+	// appliedStatusAddr/appliedCardRoots are what THIS PROCESS actually
+	// bound/started watching at launch -- fixed for the whole process
+	// lifetime, unlike s.cfg below (which reload() overwrites on every
+	// call). RestartRequired is derived by diffing the current config
+	// against these two, not against the previous s.cfg snapshot: a Hermes
+	// review finding on this PR caught that diffing against the mutable
+	// snapshot made the flag latch permanently after the first reload,
+	// even if an operator reverted a hand-edit back to the original value
+	// on a second reload -- the "previous" snapshot by then was already
+	// the changed one, so the diff against it saw nothing.
+	appliedStatusAddr string
+	appliedCardRoots  []string
+
 	mu              sync.Mutex
 	cfg             config.Config
 	restartRequired bool
@@ -37,7 +49,14 @@ type configSettings struct {
 // (runTrayCmd's own startup load -- avoids reading config.yaml twice
 // before anything has changed).
 func newConfigSettings(path string, cfg config.Config, runner *tray.Runner, dialog dialogRunner) *configSettings {
-	return &configSettings{path: path, cfg: cfg, runner: runner, dialog: dialog}
+	return &configSettings{
+		path:              path,
+		cfg:               cfg,
+		runner:            runner,
+		dialog:            dialog,
+		appliedStatusAddr: cfg.Tray.StatusAddrOrDefault(),
+		appliedCardRoots:  append([]string(nil), cfg.Ingest.CardRoots...),
+	}
 }
 
 func (s *configSettings) Snapshot() tray.SettingsView {
@@ -60,6 +79,9 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 }
 
 func (s *configSettings) SetBool(key string, v bool) error {
+	if err := s.validateBoolChange(key, v); err != nil {
+		return err
+	}
 	if err := config.Patch(s.path, map[string]any{key: v}); err != nil {
 		return fmt.Errorf("save %s: %w", key, err)
 	}
@@ -83,10 +105,75 @@ func (s *configSettings) SetBool(key string, v bool) error {
 }
 
 func (s *configSettings) SetInt(key string, v int) error {
+	if err := s.validateIntChange(key, v); err != nil {
+		return err
+	}
 	if err := config.Patch(s.path, map[string]any{key: v}); err != nil {
 		return fmt.Errorf("save %s: %w", key, err)
 	}
 	return s.reload()
+}
+
+// validateBoolChange/validateIntChange/validateStringChange each build a
+// copy of the current config with one field hypothetically changed and
+// run Validate() against it -- entirely in memory, before config.Patch
+// ever touches disk. Without this, a bad value (an unexpanded ${VAR}
+// placeholder typed into a dialog, a too-short API key) would be
+// persisted to config.yaml by Patch and only THEN rejected by reload(),
+// leaving the file and the running tray's in-memory config permanently
+// diverged -- a Hermes review finding on this PR. Validating the
+// hypothetical change first means an invalid value never reaches disk at
+// all.
+func (s *configSettings) validateBoolChange(key string, v bool) error {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	switch key {
+	case "tray.startOnLogin":
+		cfg.Tray.StartOnLogin = v
+	case "selfUpdate.enabled":
+		cfg.SelfUpdate.Enabled = v
+	case "ingest.requireUnbuffered":
+		cfg.Ingest.RequireUnbuffered = v
+	}
+	return firstValidateProblem(cfg)
+}
+
+func (s *configSettings) validateIntChange(key string, v int) error {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	switch key {
+	case "selfUpdate.checkIntervalHours":
+		cfg.SelfUpdate.CheckIntervalHours = v
+	}
+	return firstValidateProblem(cfg)
+}
+
+func (s *configSettings) validateStringChange(key, v string) error {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	switch key {
+	case "server.baseUrl":
+		cfg.Server.BaseURL = v
+	case "server.apiKey":
+		cfg.Server.APIKey = v
+	case "ingest.archiveRoot":
+		cfg.Ingest.ArchiveRoot = v
+	case "ingest.localEditRoot":
+		cfg.Ingest.LocalEditRoot = v
+	case "ingest.pathTemplate":
+		cfg.Ingest.PathTemplate = v
+	}
+	return firstValidateProblem(cfg)
+}
+
+func firstValidateProblem(cfg config.Config) error {
+	if problems := cfg.Validate(); len(problems) > 0 {
+		return fmt.Errorf("config problem: %s", problems[0])
+	}
+	return nil
 }
 
 // settingsPrompt describes one PromptAndSet field's dialog.
@@ -165,6 +252,9 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 		return false, fmt.Errorf("settings dialog for %s failed (exit %d)", prompt.key, exitCode)
 	}
 
+	if err := s.validateStringChange(prompt.key, value); err != nil {
+		return false, err
+	}
 	if err := config.Patch(s.path, map[string]any{prompt.key: value}); err != nil {
 		return false, fmt.Errorf("save %s: %w", prompt.key, err)
 	}
@@ -173,30 +263,39 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 
 // reload re-reads config.yaml, rebuilds the branchdam.Client and
 // ingest.Engine it feeds, and applies them via Runner.Reconfigure.
-// RestartRequired is re-derived by diffing the two restart-only fields
-// against the previous snapshot on every call -- deliberately not tracked
-// per-key, so a hand-edit followed by "Reload config" is caught exactly
-// the same way a menu-driven change is.
+//
+// Rejects on ANY Validate() problem, not just a server.*-prefixed one:
+// unlike runTrayCmd's own startup gate (which only treats server.* as
+// fatal, since non-server fields are advisory-only there, matching
+// preflight's WARN treatment), every field this menu can edit via dialog
+// (ingest.archiveRoot/localEditRoot/pathTemplate included) is something a
+// typo could hit, and this is a live config-mutation path specifically
+// trying to keep bad values out -- a Hermes review finding on this PR.
+// This is really a backstop for a hand-edited config.yaml reaching
+// "Reload config": SetBool/SetInt/PromptAndSet already validate their
+// specific change before ever calling config.Patch, so a menu-driven
+// change should never reach this rejection in practice.
+//
+// RestartRequired is re-derived by diffing against appliedStatusAddr/
+// appliedCardRoots (fixed at construction -- what THIS PROCESS actually
+// has bound/running), not against the mutable previous s.cfg snapshot --
+// see those fields' own doc comment for why that distinction matters.
 func (s *configSettings) reload() error {
 	newCfg, err := config.Load(s.path)
 	if err != nil {
 		return fmt.Errorf("reload config %q: %w", s.path, err)
 	}
-	for _, p := range newCfg.Validate() {
-		if strings.HasPrefix(p.Field, "server.") {
-			return fmt.Errorf("config problem: %s", p)
-		}
+	if problems := newCfg.Validate(); len(problems) > 0 {
+		return fmt.Errorf("config problem: %s", problems[0])
 	}
 
 	client := branchdam.New(newCfg.Server.BaseURL, newCfg.Server.APIKey)
 	engine := ingest.NewEngine(client, newCfg.AgentID, newCfg.Ingest, newCfg.PathMappings)
 
 	s.mu.Lock()
-	oldCfg := s.cfg
 	s.cfg = newCfg
-	s.restartRequired = s.restartRequired ||
-		oldCfg.Tray.StatusAddrOrDefault() != newCfg.Tray.StatusAddrOrDefault() ||
-		!slices.Equal(oldCfg.Ingest.CardRoots, newCfg.Ingest.CardRoots)
+	s.restartRequired = s.appliedStatusAddr != newCfg.Tray.StatusAddrOrDefault() ||
+		!slices.Equal(s.appliedCardRoots, newCfg.Ingest.CardRoots)
 	s.mu.Unlock()
 
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)

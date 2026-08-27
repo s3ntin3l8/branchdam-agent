@@ -237,3 +237,87 @@ func TestConfigSettingsReloadRefusesUnexpandedAPIKeyPlaceholder(t *testing.T) {
 		t.Fatal("expected Reload to refuse an unexpanded ${VAR} placeholder in server.apiKey")
 	}
 }
+
+// TestConfigSettingsReloadRefusesNonServerPlaceholder is a regression test
+// for the first Hermes-flagged bug on this PR: reload() used to only treat
+// a server.*-prefixed Validate() problem as fatal (mirroring runTrayCmd's
+// startup gate), silently hot-applying everything else -- including
+// ingest.archiveRoot, a field this very menu edits via a folder-picker
+// dialog. A hand-edit (or a dialog mistake bypassing validateStringChange
+// some other way) leaving an unexpanded ${VAR} there must be rejected too.
+func TestConfigSettingsReloadRefusesNonServerPlaceholder(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	editConfigFile(t, path, cfg.Ingest.ArchiveRoot, "${TEST_UNSET_ARCHIVE_ROOT}")
+
+	if err := s.Reload(); err == nil {
+		t.Fatal("expected Reload to refuse an unexpanded ${VAR} placeholder in ingest.archiveRoot, a non-server.* field")
+	}
+	if s.Snapshot().ArchiveRoot != cfg.Ingest.ArchiveRoot {
+		t.Error("expected the in-memory config to keep its last-good value after a rejected reload")
+	}
+}
+
+// TestConfigSettingsRestartRequiredClearsWhenReverted is a regression test
+// for the second half of the restart-required diffing bug: RestartRequired
+// must be re-derived from the fixed appliedStatusAddr/appliedCardRoots
+// baseline on every reload, not OR-accreted against the mutable previous
+// snapshot -- otherwise once true it can never go back to false, even after
+// an operator reverts a hand-edit back to the value this process actually
+// has bound.
+func TestConfigSettingsRestartRequiredClearsWhenReverted(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	editConfigFile(t, path, "127.0.0.1:38080", "127.0.0.1:9999")
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload (changed): %v", err)
+	}
+	if !s.Snapshot().RestartRequired {
+		t.Fatal("expected RestartRequired=true after tray.statusAddr changed via hand-edit")
+	}
+
+	editConfigFile(t, path, "127.0.0.1:9999", "127.0.0.1:38080")
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload (reverted): %v", err)
+	}
+	if s.Snapshot().RestartRequired {
+		t.Error("expected RestartRequired=false once tray.statusAddr is reverted back to what this process actually bound")
+	}
+}
+
+// TestConfigSettingsPromptAndSetRejectsInvalidValueBeforePersisting is a
+// regression test for the second Hermes-flagged bug: config.Patch used to
+// run before validation, so a rejected value was still written to disk --
+// this process's in-memory config and config.yaml would then silently
+// diverge. validateStringChange (called from PromptAndSet before
+// config.Patch) must reject a too-short API key without ever touching the
+// file.
+func TestConfigSettingsPromptAndSetRejectsInvalidValueBeforePersisting(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dialog := func(args ...string) (string, int, error) {
+		return "too-short", dialogExitOK, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+
+	ok, err := s.PromptAndSet(tray.FieldServerAPIKey)
+	if err == nil {
+		t.Fatal("expected PromptAndSet to reject an under-32-char API key")
+	}
+	if ok {
+		t.Error("expected ok=false when validation rejects the value")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("expected config.yaml to be byte-for-byte unchanged when validation rejects the value before config.Patch ever runs")
+	}
+}
