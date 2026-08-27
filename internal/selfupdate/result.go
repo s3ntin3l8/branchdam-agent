@@ -2,14 +2,11 @@ package selfupdate
 
 import "fmt"
 
-// CheckResult is the outcome of a Check call -- what
-// internal/tray.Status.SelfUpdateNote renders. Deliberately untagged (no
-// //go:build selfupdate) so it -- and TestCheckResultString -- compile and
-// run identically whether or not the real implementation
-// (selfupdate.go, //go:build selfupdate) or the stub
-// (selfupdate_stub.go, //go:build !selfupdate) is what's actually linked
-// in. See selfupdate.go's doc comment for why this package is split this
-// way at all.
+// CheckResult is the outcome of a Check call. Its String() is what
+// `branchdam-agent update`'s CLI output renders directly
+// (cmd/branchdam-agent/update.go); internal/tray.UpdateStatus.Note()
+// computes an equivalent but independent string from its own fields
+// rather than embedding or calling into a CheckResult.
 type CheckResult struct {
 	CurrentVersion string
 	LatestVersion  string

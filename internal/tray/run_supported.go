@@ -33,16 +33,22 @@ import (
 // ingested and a self-update note that changed since the tray started.
 const menuRefreshInterval = 5 * time.Second
 
-// Run starts the tray icon and blocks until ctx is cancelled or the user
-// chooses Quit from the menu. detector may be nil to disable automatic
-// card-insertion ingest (menu-triggered "Ingest now" against watchDirs
-// still works); statusURL is shown in the menu and opened by "Open status
-// page". selfUpdateNote is a short, pre-computed status line (e.g. "up to
-// date" / "disabled" / "update available: vX.Y.Z") -- Run does not itself
-// know how to check for updates, matching Runner.Status's own separation
-// (see tray.go).
-func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL string, selfUpdateNote func() string) error {
+// applyResult is what the install goroutine feeds back to the select loop.
+type applyResult struct {
+	version string
+	err     error
+}
+
+// Run starts the tray icon and blocks until ctx is cancelled, the user
+// chooses Quit, or an update is installed. detector may be nil to disable
+// automatic card-insertion ingest (menu-triggered "Ingest now" against
+// watchDirs still works); statusURL is shown in the menu and opened by
+// "Open status page". up drives the "Install and restart" affordance --
+// Run itself does not know how to check for or apply updates, matching
+// Runner's own separation from the ingest core (see tray.go).
+func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL string, up SelfUpdater) (Outcome, error) {
 	errCh := make(chan error, 1)
+	var outcome Outcome
 
 	onReady := func() {
 		systray.SetIcon(buildTrayIcon())
@@ -52,6 +58,12 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		statusItem := systray.AddMenuItem("Status: starting...", "Current tray status")
 		statusItem.Disable()
 		openStatus := systray.AddMenuItem("Open status page", statusURL)
+		systray.AddSeparator()
+
+		updateItem := systray.AddMenuItem("Self-update: checking...", "Self-update status")
+		updateItem.Disable()
+		installItem := systray.AddMenuItem("Install and restart", "Download and apply the latest release, then restart")
+		installItem.Hide()
 		systray.AddSeparator()
 
 		watchItem := systray.AddMenuItem("Watch directories: none configured", "Directories polled for inserted cards")
@@ -66,9 +78,30 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 			watchItem.SetTitle(fmt.Sprintf("Watching %d director%s", len(r.WatchDirs), plural(len(r.WatchDirs))))
 		}
 
+		var applying bool
+
 		refresh := func() {
-			st := r.Status(selfUpdateNote())
+			us := up.Status()
+			st := r.Status(us)
 			statusItem.SetTitle("Status: " + summarize(st))
+			updateItem.SetTitle("Self-update: " + us.Note())
+
+			switch {
+			case applying:
+				// Left as "Installing..." by the click handler; don't
+				// stomp it with a stale UpdateFound-driven title.
+			case us.UpdateFound:
+				installItem.Show()
+				if st.Busy {
+					installItem.SetTitle(fmt.Sprintf("Install and restart (waiting for ingest of %s to finish)", st.BusyCard))
+					installItem.Disable()
+				} else {
+					installItem.SetTitle("Install and restart")
+					installItem.Enable()
+				}
+			default:
+				installItem.Hide()
+			}
 		}
 		refresh()
 
@@ -88,21 +121,115 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 			}()
 		}
 
+		// ingestNow's click used to call r.TriggerIngest inline in this
+		// select loop. Now that TriggerIngest blocks on Runner.gate for
+		// its whole duration (see tray.go), doing that here would freeze
+		// the entire menu -- including Quit -- for as long as a
+		// concurrent card-detector ingest takes. Run it in a goroutine
+		// and report back via ingestDoneCh instead.
+		ingestDoneCh := make(chan struct{}, 1)
+		ingestRequestCh := make(chan struct{}, 1)
+		go func() {
+			for range ingestRequestCh {
+				for _, dir := range r.WatchDirs {
+					r.TriggerIngest(ctx, dir)
+				}
+				ingestDoneCh <- struct{}{}
+			}
+		}()
+
+		applyDoneCh := make(chan applyResult, 1)
+		var releaseGate func()
+		// quitRequested defers an in-flight ctx.Done()/Quit-click until
+		// the current apply resolves, rather than abandoning it.
+		// ApplyLatest's goroutine deliberately runs on a context
+		// decoupled from ctx (context.WithoutCancel) so a signal-derived
+		// shutdown can't interrupt a Windows sibling-then-primary swap
+		// mid-way -- but that guarantee is worthless if this select loop
+		// quits and the whole process exits out from under that goroutine
+		// regardless. Quitting is deferred, not ignored: applyDoneCh's
+		// own case still quits once the apply (bounded by its own
+		// 10-minute timeout) actually finishes.
+		var quitRequested bool
+
 		for {
 			select {
 			case <-ctx.Done():
+				if applying {
+					quitRequested = true
+					continue
+				}
 				systray.Quit()
 				return
 			case <-quitItem.ClickedCh:
+				if applying {
+					quitRequested = true
+					continue
+				}
 				systray.Quit()
 				return
 			case <-openStatus.ClickedCh:
 				_ = openBrowser(statusURL)
 			case <-ingestNow.ClickedCh:
-				for _, dir := range r.WatchDirs {
-					r.TriggerIngest(ctx, dir)
+				select {
+				case ingestRequestCh <- struct{}{}:
+				default:
+					// an ingest request is already queued/running; drop
+					// this click rather than pile up requests.
 				}
+			case <-ingestDoneCh:
 				refresh()
+			case <-installItem.ClickedCh:
+				if applying {
+					continue
+				}
+				rel, ok := r.TryLockIdle()
+				if !ok {
+					refresh()
+					continue
+				}
+				releaseGate = rel
+				applying = true
+				installItem.Disable()
+				installItem.SetTitle("Installing...")
+				go func() {
+					// A signal-derived ctx cancelling mid-apply could
+					// leave a Windows sibling pair at different
+					// versions (see internal/selfupdate.Apply's doc
+					// comment) -- give the apply its own bounded
+					// lifetime independent of ctx's cancellation, while
+					// still respecting ctx.Done() as a deadline source.
+					applyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+					defer cancel()
+					version, err := up.ApplyLatest(applyCtx)
+					applyDoneCh <- applyResult{version: version, err: err}
+				}()
+			case res := <-applyDoneCh:
+				applying = false
+				if res.err != nil {
+					releaseGate()
+					releaseGate = nil
+					installItem.SetTitle("Install and restart (failed -- see status page)")
+					installItem.Enable()
+					refresh()
+					if quitRequested {
+						systray.Quit()
+						return
+					}
+					continue
+				}
+				// Releasing here is belt-and-suspenders: the process is
+				// expected to exit and relaunch immediately after this
+				// select loop returns, so Runner.gate is abandoned along
+				// with everything else either way. Calling it explicitly
+				// means that guarantee is never load-bearing -- a future
+				// change to the post-success path can't turn this into a
+				// silent permanent lock.
+				releaseGate()
+				releaseGate = nil
+				outcome = Outcome{RestartRequested: true, AppliedVersion: res.version}
+				systray.Quit()
+				return
 			case <-ticker.C:
 				refresh()
 			case err := <-detectorErrCh:
@@ -122,14 +249,17 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 	select {
 	case err, ok := <-errCh:
 		if ok {
-			return err
+			return outcome, err
 		}
 	default:
 	}
-	return nil
+	return outcome, nil
 }
 
 func summarize(st Status) string {
+	if st.Busy {
+		return fmt.Sprintf("ingesting %s...", st.BusyCard)
+	}
 	if st.LastIngest == nil {
 		return "idle, no ingest run yet"
 	}

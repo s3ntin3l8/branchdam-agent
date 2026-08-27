@@ -138,8 +138,21 @@ jobs:
           go build -trimpath \
             -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" \
             -o dist/branchdam-agent ./cmd/branchdam-agent
+      # Assembles dist/branchdam-agent.app around the binary just built and
+      # tars ONLY the bundle -- shipping a bare binary alongside it would
+      # put two archive entries with the base name "branchdam-agent" in
+      # the same tar, and go-selfupdate's unarchiveTar returns whichever
+      # one it reads first (see internal/selfupdate's doc comment and
+      # docs/platform-support.md's Self-update section). The CLI
+      # subcommands (preflight/ingest/etc.) work fine invoked directly at
+      # branchdam-agent.app/Contents/MacOS/branchdam-agent -- no separate
+      # console binary is needed the way Windows needs one (macOS has no
+      # link-time GUI/console split; LSUIElement is a bundle property, not
+      # a linker flag).
       - name: Package
-        run: tar -C dist -czf branchdam-agent-darwin-arm64.tar.gz branchdam-agent
+        run: |
+          go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -version "$RELEASE_VERSION"
+          tar -C dist -czf branchdam-agent-darwin-arm64.tar.gz branchdam-agent.app
       - uses: actions/upload-artifact@v7
         with:
           name: darwin-arm64
@@ -163,11 +176,20 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+      # Written to ../SHA256SUMS.txt (outside dist/, before the traversal
+      # rather than after) and sorted, so the file doesn't include its own
+      # SHA-256 line and its line order is reproducible. A prior version
+      # of this step wrote into dist/ before traversing it, which produced
+      # a bogus "e3b0c442... ./SHA256SUMS.txt" line (the hash of the empty
+      # file) -- harmless to go-selfupdate's ChecksumValidator, which
+      # skips non-matching lines, but it broke the `sha256sum -c` command
+      # this repo's README tells operators to run.
       - name: Checksums
         run: |
           cd dist
-          find . -maxdepth 2 -type f -exec sha256sum {} \; | sed 's#\./[^/]*/##' > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          find . -mindepth 2 -maxdepth 2 -type f -printf '%p\n' | sort \
+            | xargs sha256sum | sed 's#\./[^/]*/##' > ../SHA256SUMS.txt
+          cat ../SHA256SUMS.txt
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -176,5 +198,5 @@ jobs:
             dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz \
             dist/windows-amd64/branchdam-agent-windows-amd64.zip \
             dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz \
-            dist/SHA256SUMS.txt \
+            SHA256SUMS.txt \
             --repo "${{ github.repository }}" --clobber

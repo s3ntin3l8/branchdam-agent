@@ -48,7 +48,7 @@ func TestHandleIndexRendersStatus(t *testing.T) {
 					Submitted: 3,
 					Skipped:   1,
 				},
-				SelfUpdateNote: "disabled",
+				SelfUpdate: UpdateStatus{Enabled: false},
 			}
 		},
 	}
@@ -70,6 +70,20 @@ func TestHandleIndexRendersStatus(t *testing.T) {
 	// localhost page but still should not become a place secrets leak to.
 	if strings.Contains(body, "apiKey") {
 		t.Error("response body must never mention apiKey")
+	}
+}
+
+func TestListenIsTheSingleInstanceGuard(t *testing.T) {
+	s1 := NewStatusServer("127.0.0.1:0", func() Status { return Status{} }, "1.0.0")
+	ln1, err := s1.Listen()
+	if err != nil {
+		t.Fatalf("first Listen() failed: %v", err)
+	}
+	defer func() { _ = ln1.Close() }()
+
+	s2 := NewStatusServer(ln1.Addr().String(), func() Status { return Status{} }, "1.0.0")
+	if _, err := s2.Listen(); err == nil {
+		t.Error("expected a second Listen() on the same address to fail -- this is the single-instance guard a self-update relaunch relies on")
 	}
 }
 

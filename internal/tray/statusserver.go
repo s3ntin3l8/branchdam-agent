@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -66,22 +67,33 @@ func normalizeLoopback(addr string) string {
 	return addr
 }
 
-// ListenAndServe starts the status page and blocks until ctx is cancelled,
-// then shuts down gracefully. Returns nil on a clean ctx-triggered
-// shutdown, matching net/http.Server.Shutdown's own contract.
-func (s *StatusServer) ListenAndServe(ctx context.Context) error {
+// Listen binds s.Addr and returns the listener without serving anything
+// yet. Split out from ListenAndServe/Serve so a caller can treat the bind
+// itself as a single-instance guard: call Listen before starting anything
+// else, and a bind failure ("address already in use") means another tray
+// process already holds this port. This is also what makes a self-update
+// relaunch safe -- the successor cannot bind here until this listener is
+// closed by Serve's shutdown, so a caller must not spawn the successor
+// until Serve has returned.
+func (s *StatusServer) Listen() (net.Listener, error) {
+	return net.Listen("tcp", s.Addr)
+}
+
+// Serve runs the status page on ln and blocks until ctx is cancelled, then
+// shuts down gracefully. Returns nil on a clean ctx-triggered shutdown,
+// matching net/http.Server.Shutdown's own contract.
+func (s *StatusServer) Serve(ctx context.Context, ln net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 
 	s.srv = &http.Server{
-		Addr:              s.Addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- s.srv.ListenAndServe()
+		errCh <- s.srv.Serve(ln)
 	}()
 
 	select {
@@ -98,6 +110,17 @@ func (s *StatusServer) ListenAndServe(ctx context.Context) error {
 		}
 		return err
 	}
+}
+
+// ListenAndServe binds s.Addr and serves until ctx is cancelled -- a thin
+// wrapper over Listen+Serve for callers (and existing tests) that don't
+// need the single-instance guard split out.
+func (s *StatusServer) ListenAndServe(ctx context.Context) error {
+	ln, err := s.Listen()
+	if err != nil {
+		return err
+	}
+	return s.Serve(ctx, ln)
 }
 
 func (s *StatusServer) handleIndex(w http.ResponseWriter, r *http.Request) {

@@ -93,16 +93,28 @@ type TrayConfig struct {
 	StartOnLogin bool `yaml:"startOnLogin"`
 }
 
-// SelfUpdateConfig gates github.com/creativeprojects/go-selfupdate. Off by
-// default per the plan/issue -- an operator must opt in explicitly before
-// the tray ever checks GitHub for a newer release, let alone replaces its
-// own binary.
+// SelfUpdateConfig gates github.com/creativeprojects/go-selfupdate.
+// Checking is on by default (see defaultConfig()) -- it's a read-only
+// GitHub API call, never a download or a binary write. Applying an
+// update found by a check is a separate, always-explicit action (a tray
+// menu click, or `update`'s confirmation/-yes) that this flag does not
+// by itself authorize; see CLAUDE.md's self-update invariants.
 type SelfUpdateConfig struct {
-	// Enabled turns self-update checks on. Default false.
+	// Enabled turns self-update checks on. Default true (see
+	// defaultConfig()) -- set to false explicitly for zero outbound
+	// GitHub traffic.
 	Enabled bool `yaml:"enabled"`
 	// Repo is the "owner/name" GitHub repository slug releases are
 	// published from. Defaults to "s3ntin3l8/branchdam-agent" when empty.
 	Repo string `yaml:"repo"`
+	// CheckIntervalHours is how often the tray re-checks for a new
+	// release after its initial startup check. Defaults to 24 when zero;
+	// a negative value disables re-checking (the tray still checks once
+	// at startup). A tray can run for weeks, so a one-shot check would
+	// never surface a release cut after startup -- unauthenticated
+	// GitHub API is 60 req/hr per IP, so even an hourly check is nowhere
+	// near that limit.
+	CheckIntervalHours int `yaml:"checkIntervalHours"`
 }
 
 // DefaultStatusAddr is TrayConfig.StatusAddr's fallback when empty.
@@ -110,6 +122,10 @@ const DefaultStatusAddr = "127.0.0.1:38080"
 
 // DefaultSelfUpdateRepo is SelfUpdateConfig.Repo's fallback when empty.
 const DefaultSelfUpdateRepo = "s3ntin3l8/branchdam-agent"
+
+// DefaultSelfUpdateCheckIntervalHours is SelfUpdateConfig.CheckIntervalHours's
+// fallback when zero.
+const DefaultSelfUpdateCheckIntervalHours = 24
 
 // StatusAddrOrDefault returns t.StatusAddr, or DefaultStatusAddr when unset.
 func (t TrayConfig) StatusAddrOrDefault() string {
@@ -125,6 +141,15 @@ func (s SelfUpdateConfig) RepoOrDefault() string {
 		return DefaultSelfUpdateRepo
 	}
 	return s.Repo
+}
+
+// CheckIntervalHoursOrDefault returns s.CheckIntervalHours, or
+// DefaultSelfUpdateCheckIntervalHours when unset (zero).
+func (s SelfUpdateConfig) CheckIntervalHoursOrDefault() int {
+	if s.CheckIntervalHours == 0 {
+		return DefaultSelfUpdateCheckIntervalHours
+	}
+	return s.CheckIntervalHours
 }
 
 // IngestConfig configures M1's SD-card ingest core: where the two copies
@@ -194,6 +219,16 @@ func defaultConfig() Config {
 		Server: ServerConfig{
 			BaseURL: "http://localhost:8080",
 		},
+		// Checking for an update is on by default -- it's a read-only
+		// GitHub API call, never a download or a binary write, and an
+		// operator who never learns a release exists can't act on it.
+		// Applying one is a separate, always-explicit decision (a tray
+		// menu click, or `update`'s confirmation prompt / -yes) that
+		// this flag does not by itself authorize -- see
+		// internal/selfupdate's doc comment and CLAUDE.md's self-update
+		// invariants. An operator who wants zero outbound GitHub traffic
+		// sets selfUpdate.enabled: false explicitly.
+		SelfUpdate: SelfUpdateConfig{Enabled: true},
 	}
 }
 

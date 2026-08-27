@@ -62,7 +62,16 @@
 
   <section>
     <h2>Self-update</h2>
-    <p>{{.Status.SelfUpdateNote}}</p>
+    <p>{{.Status.SelfUpdate.Note}}</p>
+  </section>
+
+  <section>
+    <h2>Ingest status</h2>
+    {{if .Status.Busy}}
+    <p>busy: ingesting <code>{{.Status.BusyCard}}</code></p>
+    {{else}}
+    <p>idle</p>
+    {{end}}
   </section>
 </body>
 </html>

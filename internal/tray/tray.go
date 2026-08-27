@@ -49,16 +49,85 @@ func (s IngestSummary) OK() bool {
 	return s.Err == nil && s.Failed == 0
 }
 
+// Outcome is why Run returned -- specifically, whether the operator asked
+// for an update to be installed. Untagged (unlike Run itself) so both
+// run_supported.go and run_unsupported.go's stub can share the type.
+type Outcome struct {
+	RestartRequested bool
+	AppliedVersion   string
+}
+
+// SelfUpdater is the subset of the self-update subsystem the tray drives:
+// an interface, like Ingester, so this package's only dependency stays
+// internal/ingest and it remains unit-testable on any host with no
+// network and no go-selfupdate import -- internal/selfupdate pulls in
+// golang.org/x/crypto/openpgp transitively (see that package's doc
+// comment), which this package has no reason to carry.
+type SelfUpdater interface {
+	Status() UpdateStatus
+	ApplyLatest(ctx context.Context) (string, error)
+}
+
+// UpdateStatus is a structured snapshot of the self-update subsystem's
+// state -- what used to be collapsed into a single Status.SelfUpdateNote
+// string. Structured so the tray menu can show/hide and enable/disable
+// "Install and restart" on UpdateFound directly, rather than parsing
+// prose.
+type UpdateStatus struct {
+	Enabled        bool
+	Checked        bool
+	CheckedAt      time.Time
+	CurrentVersion string
+	LatestVersion  string
+	UpdateFound    bool
+	// Unavailable is set once the running version is not semver (e.g. a
+	// locally built "dev" binary) -- self-update is structurally
+	// impossible for such a build, so callers should stop re-checking.
+	Unavailable bool
+	Err         error
+	// Applied is set to the version string once ApplyLatest has
+	// succeeded this session.
+	Applied string
+}
+
+// Note renders UpdateStatus as the one-line string the status page shows
+// -- the same text startSelfUpdateCheck used to compute directly before
+// this type existed.
+func (u UpdateStatus) Note() string {
+	switch {
+	case !u.Enabled:
+		return "disabled (selfUpdate.enabled: false in config)"
+	case u.Applied != "":
+		return fmt.Sprintf("updated to %s -- restarting", u.Applied)
+	case u.Unavailable:
+		return "unavailable (not a released build)"
+	case u.Err != nil:
+		return fmt.Sprintf("check failed: %v", u.Err)
+	case !u.Checked:
+		return "checking..."
+	case u.UpdateFound:
+		return fmt.Sprintf("update available: %s -> %s", u.CurrentVersion, u.LatestVersion)
+	default:
+		return fmt.Sprintf("up to date (%s)", u.CurrentVersion)
+	}
+}
+
 // Status is the full snapshot the embedded status page and the tray menu
 // both render from. QueueStatus is a stub -- deliberately literal text, not
 // a fabricated number, per the issue's explicit instruction not to show
 // fake numbers.
 type Status struct {
-	WatchDirs      []string
-	ScratchNote    string
-	QueueStatus    string
-	LastIngest     *IngestSummary
-	SelfUpdateNote string
+	WatchDirs   []string
+	ScratchNote string
+	QueueStatus string
+	LastIngest  *IngestSummary
+	SelfUpdate  UpdateStatus
+	// Busy and BusyCard reflect Runner.Busy() -- shown on the status page
+	// and used by the tray menu to disable "Install and restart" while an
+	// ingest is running (see Runner.TryLockIdle for the actual gate this
+	// only mirrors for display).
+	Busy     bool
+	BusyCard string
 }
 
 // QueueStatusStub is Status.QueueStatus's placeholder. M2's offline queue
@@ -78,8 +147,23 @@ type Runner struct {
 	WatchDirs  []string
 	ScratchDir string // LocalEditRoot -- described, not measured; see Status().
 
-	mu   sync.Mutex
-	last *IngestSummary
+	// gate is held for the ENTIRE duration of an IngestCard call. It
+	// serializes the tray's two ingest paths (a menu click and the
+	// card-detection watch loop) -- nothing did before this field
+	// existed, and two concurrent IngestCard runs over the same card
+	// root race internal/ingest's destination-collision resolution and
+	// can mint spurious "_2" copies, a real bug independent of
+	// self-update. It also doubles as the self-update gate: TryLockIdle
+	// below acquires this same mutex without blocking, so "Install and
+	// restart" can refuse outright while a card is mid-copy instead of
+	// queuing behind it.
+	gate sync.Mutex
+
+	mu        sync.Mutex // guards last/busy/busyCard/busySince only
+	last      *IngestSummary
+	busy      bool
+	busyCard  string
+	busySince time.Time
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -93,9 +177,16 @@ func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner
 // Engine the headless `ingest` subcommand uses, records the outcome, and
 // returns it. Safe to call from a menu-click handler or from the
 // card-detection watch loop -- both paths in run_supported.go go through
-// this single method so there is exactly one place that talks to the
-// ingest core.
+// this single method, and it now also serializes them: a call blocks
+// until any other in-flight ingest (from either path) has finished, via
+// gate.
 func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSummary {
+	r.gate.Lock()
+	defer r.gate.Unlock()
+
+	r.setBusy(true, cardPath)
+	defer r.setBusy(false, "")
+
 	summary := IngestSummary{CardPath: cardPath, StartedAt: time.Now()}
 
 	result, err := r.Ingester.IngestCard(ctx, cardPath)
@@ -122,14 +213,52 @@ func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSumma
 	return summary
 }
 
+func (r *Runner) setBusy(busy bool, cardPath string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.busy = busy
+	r.busyCard = cardPath
+	if busy {
+		r.busySince = time.Now()
+	}
+}
+
+// Busy reports whether an ingest is in flight right now, without waiting
+// for it -- cheap enough for the tray's 5s menu-refresh tick and the
+// status page's per-request render.
+func (r *Runner) Busy() (cardPath string, since time.Time, busy bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.busyCard, r.busySince, r.busy
+}
+
+// TryLockIdle acquires the same gate TriggerIngest holds, WITHOUT
+// blocking -- ok is false when an ingest is currently in flight. The
+// caller MUST call the returned release func exactly once when done, and
+// should hold it for the entire duration of whatever must not race a
+// concurrent ingest (self-update's whole download-and-apply window, not
+// just the instant of the check): sampling Busy() before a multi-minute
+// download would still let a card inserted mid-download start an ingest
+// that a binary swap then writes underneath. Holding gate for that whole
+// window is what makes the invariant actually hold rather than merely be
+// checked.
+func (r *Runner) TryLockIdle() (release func(), ok bool) {
+	if !r.gate.TryLock() {
+		return nil, false
+	}
+	return r.gate.Unlock, true
+}
+
 // Status returns a snapshot of the current state for the status page and
-// the tray tooltip. selfUpdateNote is passed in rather than computed here
-// -- self-update's own check is async and gated by config the caller
-// already has (internal/selfupdate), so Runner stays a pure ingest-facing
-// type rather than reaching into an unrelated subsystem.
-func (r *Runner) Status(selfUpdateNote string) Status {
+// the tray tooltip. selfUpdate is passed in rather than computed here --
+// self-update's own check is async and gated by config the caller already
+// has, so Runner stays a pure ingest-facing type rather than reaching
+// into an unrelated subsystem.
+func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	r.mu.Lock()
 	last := r.last
+	busy := r.busy
+	busyCard := r.busyCard
 	r.mu.Unlock()
 
 	scratchNote := "not configured"
@@ -138,10 +267,12 @@ func (r *Runner) Status(selfUpdateNote string) Status {
 	}
 
 	return Status{
-		WatchDirs:      append([]string(nil), r.WatchDirs...),
-		ScratchNote:    scratchNote,
-		QueueStatus:    QueueStatusStub,
-		LastIngest:     last,
-		SelfUpdateNote: selfUpdateNote,
+		WatchDirs:   append([]string(nil), r.WatchDirs...),
+		ScratchNote: scratchNote,
+		QueueStatus: QueueStatusStub,
+		LastIngest:  last,
+		SelfUpdate:  selfUpdate,
+		Busy:        busy,
+		BusyCard:    busyCard,
 	}
 }

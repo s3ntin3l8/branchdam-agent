@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,7 +15,6 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
-	"github.com/s3ntin3l8/branchdam-agent/internal/selfupdate"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
@@ -68,11 +67,23 @@ func runTrayCmd(args []string) int {
 		}
 	}
 
-	selfUpdateNote := startSelfUpdateCheck(ctx, cfg, version)
+	updater := newSelfUpdateAgent(cfg, version)
 
 	statusSrv := tray.NewStatusServer(cfg.Tray.StatusAddrOrDefault(), func() tray.Status {
-		return runner.Status(selfUpdateNote())
+		return runner.Status(updater.Status())
 	}, version)
+
+	// Listen (not ListenAndServe) is called before tray.Run starts, so
+	// the bind itself acts as this tray's single-instance guard: a
+	// second tray process (including one a KeepAlive=false LaunchAgent's
+	// RunAtLoad might start while a self-update relaunch is still
+	// spinning up its own status server) fails here rather than silently
+	// running two trays side by side.
+	statusLn, err := statusSrv.Listen()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent tray: cannot bind %s (another branchdam-agent tray may already be running): %v\n", statusSrv.Addr, err)
+		return 1
+	}
 
 	var wg sync.WaitGroup
 	var statusErr, trayErr error
@@ -80,12 +91,23 @@ func runTrayCmd(args []string) int {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		statusErr = statusSrv.ListenAndServe(ctx)
+		statusErr = statusSrv.Serve(ctx, statusLn)
 	}()
+	go updater.Run(ctx)
 
 	fmt.Printf("branchdam-agent tray: status page at %s\n", statusSrv.StatusURL())
 
-	trayErr = tray.Run(ctx, runner, detector, statusSrv.StatusURL(), selfUpdateNote)
+	// Captured before tray.Run, not after: relaunchSelf's own doc comment
+	// requires selfExe to be resolved before any in-place swap happens,
+	// and tray.Run is exactly where that swap (if any) occurs.
+	selfExe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent tray: resolve own executable: %v\n", err)
+		return 1
+	}
+
+	var outcome tray.Outcome
+	outcome, trayErr = tray.Run(ctx, runner, detector, statusSrv.StatusURL(), updater)
 	stop() // make sure the status server's ctx.Done() fires even if tray.Run returned on its own (e.g. Quit clicked)
 	wg.Wait()
 
@@ -101,49 +123,38 @@ func runTrayCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "branchdam-agent tray: status page: %v\n", statusErr)
 		return 1
 	}
+
+	// The successor process cannot bind statusSrv.Addr until this
+	// process's listener is fully released -- wg.Wait() above already
+	// guarantees Serve's graceful Shutdown completed, which is what
+	// makes relaunching here (rather than from inside tray.Run's select
+	// loop) safe.
+	if outcome.RestartRequested {
+		fmt.Printf("branchdam-agent tray: updated to %s, restarting\n", outcome.AppliedVersion)
+		if err := relaunchSelf(selfExe, os.Args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "branchdam-agent tray: updated to %s but failed to restart: %v\n", outcome.AppliedVersion, err)
+			return 1
+		}
+	}
+
 	return 0
 }
 
 // enableStartOnLogin registers this binary (with the same -config flag it
 // was launched with) as a per-user login item. Best-effort by design --
 // see internal/autostart's platform files for what "best-effort" means on
-// each OS.
+// each OS. configPath is resolved to an absolute path first: launchd and
+// HKCU\...\Run both invoke the login item with an unspecified working
+// directory, so a relative "-config config.yaml" (the flag's own default)
+// would silently fail to find the file on next login.
 func enableStartOnLogin(configPath string) error {
 	execPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve own executable path: %w", err)
 	}
-	return autostart.Enable(execPath, []string{"tray", "-config", configPath})
-}
-
-// startSelfUpdateCheck kicks off one background go-selfupdate check (never
-// applies anything -- see internal/selfupdate's Check/Apply split) when
-// cfg.SelfUpdate.Enabled, and returns a function that reads the latest
-// known result. Returns a func reporting "disabled" immediately when the
-// config flag is off, so the status page/tray menu still have something
-// truthful to show without ever contacting GitHub.
-func startSelfUpdateCheck(ctx context.Context, cfg config.Config, currentVersion string) func() string {
-	if !cfg.SelfUpdate.Enabled {
-		return func() string { return "disabled (selfUpdate.enabled: false in config)" }
+	absConfigPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("resolve config path %q: %w", configPath, err)
 	}
-
-	var note atomic.Value
-	note.Store("checking...")
-
-	go func() {
-		result, err := selfupdate.Check(ctx, cfg.SelfUpdate.RepoOrDefault(), currentVersion)
-		if err != nil {
-			note.Store(fmt.Sprintf("check failed: %v", err))
-			return
-		}
-		note.Store(result.String())
-	}()
-
-	return func() string {
-		v := note.Load()
-		if v == nil {
-			return "checking..."
-		}
-		return v.(string)
-	}
+	return autostart.Enable(execPath, []string{"tray", "-config", absConfigPath})
 }
