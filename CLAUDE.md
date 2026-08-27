@@ -99,7 +99,7 @@ whatever "latest" resolves to.
 | `tools/mkbundle/` | CLI wrapper over `internal/appbundle.Write`, used by `make build-darwin-app` and `release-binaries.yml`'s `build-darwin` job |
 | `internal/config/` | YAML config loader: branchDAM server URL + API key, this workstation's self-asserted `agentId`, the workstation-path -> container-path map `preflight` prints, `ingest:` -- archive/local-edit roots, the naming template, and card-detection polling -- `tray:`/`selfUpdate:` (`Enabled`, `Repo`, `CheckIntervalHours`), and `prune:` (`PruneConfig`: `enabled`, `minAgeHours`, opt-in and off by default) |
 | `config.example.yaml` | Reference config with `${VAR}` placeholders |
-| `.github/workflows/` | Thin callers of the reusable workflows in `s3ntin3l8/.github`, minus the Docker jobs the template ships (no image is published from this repo), plus this repo's own `build-windows`/`build-darwin`/`build-darwin-full` jobs in `ci-cd.yml` (not covered by the shared `ci-go.yml`, which only builds for the runner's own host OS/arch) |
+| `.github/workflows/` | Thin callers of the reusable workflows in `s3ntin3l8/.github`, minus the Docker jobs the template ships (no image is published from this repo), plus this repo's own `build-windows`/`build-darwin`/`build-darwin-full` jobs in `ci-cd.yml` (not covered by the shared `ci-go.yml`, which only builds for the runner's own host OS/arch) and `hermes.yml` (automated PR review, see below) |
 | `.editorconfig` | Shared editor settings (LF, UTF-8, final newline; tabs for Go) |
 | `.claude/` | `settings.json` + `hooks/session-start.sh`: a SessionStart hook that installs Go deps and tooling so [Claude Code on the web](https://code.claude.com/docs/en/claude-code-on-the-web) sessions can build, test, and lint. Runs only in the remote env |
 
@@ -372,7 +372,24 @@ whatever "latest" resolves to.
 Workflows here are **callers** of `s3ntin3l8/.github/.github/workflows/*.yml@main`: `ci-cd.yml`
 (`ci-go` only -- no `build-docker`, unlike the template), `codeql.yml`, `dependency-review.yml`,
 `release-please.yml` (release-please, no Docker publish step, plus this repo's own chained
-`binaries` job -- see below and the recursion-guard invariant above).
+`binaries` job -- see below and the recursion-guard invariant above), and `hermes.yml`
+(automated PR review by the `s3ntin3l8-hermes[bot]` GitHub App, via the shared
+`s3ntin3l8/.github/.github/workflows/hermes-review.yml@main` reusable workflow). The
+`hermes-review.yml` reusable workflow requires `runs-on: self-hosted` -- unlike every other
+workflow in this repo, it does not run on a GitHub-hosted runner, because the runner only relays
+the request to a Hermes API server reachable over the LAN (hermes-01), which is where the agent
+actually executes and posts the review back to GitHub itself. This mirrors branchDAM's own
+`hermes.yml` (s3ntin3l8/branchdam#76) byte-for-byte except for the header comment's repo-specific
+runner name; both jobs (`auto-review` on `opened`/`ready_for_review`, `on-demand-review` on an
+`@s3ntin3l8-hermes` mention via `issue_comment`) pin `mention-trigger: s3ntin3l8-hermes`, since
+the reusable workflow's own default (`hermes`) won't match the App's actual slug. Requires,
+per-repo, a self-hosted runner registered against *this* repo (self-hosted runner registrations
+are repo-scoped on a personal GitHub account -- there is no org-wide pool to fall back on), the
+`s3ntin3l8-hermes` GitHub App installed on this repo, and the `HERMES_APP_ID`/
+`HERMES_APP_PRIVATE_KEY`/`HERMES_API_KEY` repo secrets set (`gh secret set <name> --repo
+s3ntin3l8/branchdam-agent`) -- none of which this file can assert are actually done; check the
+repo's Settings -> Actions -> Runners and Settings -> Secrets before relying on this workflow
+firing.
 
 **`release-please.yml` -> `release-binaries.yml`.** `release-please.yml` has two jobs:
 `release-please` (the shared reusable workflow) and `binaries`, gated on
@@ -419,6 +436,12 @@ coverage, and govulncheck.
 - **Secrets:** never commit real credentials; `detect-secrets` runs in pre-commit and CI against
   `.secrets.baseline` (regenerate with `detect-secrets scan > .secrets.baseline` after vetting
   new detections -- expect this after adding a fixture containing a 32+ char test API key).
+- **Addressing review feedback (Hermes or human).** Fixing the code alone is not enough --
+  always reply to and resolve the inline conversation too, same convention as branchDAM's own
+  CLAUDE.md. Ask for another Hermes pass at any point, including after addressing feedback, by
+  commenting `@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue).
+  Auto-review only fires once per PR, on `opened`/`ready_for_review` and only for PRs from this
+  repo, not forks -- see `hermes.yml`'s own comments for why.
 
 ## Documentation map
 
