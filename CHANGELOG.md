@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.0.0...v1.0.1) (2026-08-27)
+
+
+### Bug Fixes
+
+* **ci:** publish release binaries from the release-please run ([#26](https://github.com/s3ntin3l8/branchdam-agent/issues/26)) ([0620ce2](https://github.com/s3ntin3l8/branchdam-agent/commit/0620ce25ee2a23978e398f57a44b2b1edcbe8432))
+
 ## 1.0.0 (2026-08-22)
 
 
