@@ -49,7 +49,7 @@ type WriteResult struct {
 // before retrying -- O_EXCL means a stray leftover file blocks the retry
 // with "file exists" rather than silently overwriting it, which is the
 // safer failure mode of the two.
-func DualWrite(srcPath, archivePath, localPath string) (result WriteResult, err error) {
+func DualWrite(srcPath, archivePath, localPath string, opts ...WriteOption) (result WriteResult, err error) {
 	var created []string
 	defer func() {
 		if err != nil {
@@ -88,7 +88,11 @@ func DualWrite(srcPath, archivePath, localPath string) (result WriteResult, err 
 	fullHasher := blake3.New()
 	fastHasher := hashing.NewStreamingFastHasher(size)
 
-	mw := io.MultiWriter(archiveFile, localFile, fullHasher, fastHasher)
+	writers := []io.Writer{archiveFile, localFile, fullHasher, fastHasher}
+	if o := applyWriteOptions(opts); o.onBytes != nil {
+		writers = append(writers, &progressWriter{onBytes: o.onBytes})
+	}
+	mw := io.MultiWriter(writers...)
 	n, copyErr := io.Copy(mw, src)
 	if copyErr != nil {
 		return WriteResult{}, fmt.Errorf("ingest: copy %s: %w", srcPath, copyErr)

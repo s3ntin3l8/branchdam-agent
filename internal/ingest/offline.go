@@ -208,14 +208,14 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		_ = os.Remove(localPath)
 	}
 
-	writeRes, err := WriteLocal(srcPath, localPath)
+	writeRes, err := WriteLocal(srcPath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
 	if err != nil {
 		fr.Err = fmt.Errorf("write local copy: %w", err)
 		return fr
 	}
 	_ = os.Chtimes(localPath, e.now(), srcInfo.ModTime())
 
-	localVerify, err := Verify(localPath, writeRes.FullHash)
+	localVerify, err := Verify(localPath, writeRes.FullHash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 	if err != nil {
 		_ = os.Remove(localPath)
 		fr.Err = fmt.Errorf("verify local copy: %w", err)

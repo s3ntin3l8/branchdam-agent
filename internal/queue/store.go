@@ -292,14 +292,21 @@ func (s *Store) ByLocalPath(ctx context.Context, localPath string) (Record, bool
 	return rec, true, nil
 }
 
+// terminalSQL is the row-level predicate matching Record.Done(): every
+// step this record needs has reached a terminal state, including FAILED
+// (permanently broken, but no longer something Drain -- or Pending's
+// caller -- should keep retrying). Shared by Pending's WHERE NOT(...) and
+// Counts' aggregate below, rather than each re-deriving it, so the two
+// can't drift out of sync the way Record.Done() and Pending's own
+// previously-inline SQL already had (a real duplication found while
+// building Counts).
+const terminalSQL = `archive_copy_status = 'DONE' AND rebase_status IN ('DONE', 'SKIPPED', 'FAILED')`
+
 // Pending returns every row not yet Done(), oldest first -- the set Drain
 // works through on each pass.
 func (s *Store) Pending(ctx context.Context) ([]Record, error) {
 	rows, err := s.db.QueryContext(ctx, selectCols+`
-WHERE NOT (
-	archive_copy_status = 'DONE'
-	AND rebase_status IN ('DONE', 'SKIPPED', 'FAILED')
-)
+WHERE NOT (`+terminalSQL+`)
 ORDER BY id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list pending: %w", err)
@@ -336,6 +343,64 @@ func (s *Store) All(ctx context.Context) ([]Record, error) {
 		out = append(out, rec)
 	}
 	return out, rows.Err()
+}
+
+// Counts is a cheap, aggregate-only readout of queue_nodes -- unlike
+// Pending/All, it never materializes a row's full payload JSON or error
+// strings, so a tray polling this on a timer over a large backlog isn't
+// paying to scan and marshal thousands of rows just to show a badge.
+//
+// Failed is reported separately from Done on purpose: Record.Done() (and
+// terminalSQL above) treats a permanently FAILED rebase as terminal so
+// Pending() stops returning it, but that is not the same as success --
+// a badge driven off "Pending() is empty, so we're done" would read
+// green while rows sit permanently broken. Done here means genuinely
+// succeeded (archive_copy DONE, rebase DONE or SKIPPED); Failed means
+// rebase_status = FAILED, whichever else is true of the row.
+type Counts struct {
+	// AwaitingUpload counts rows whose archive copy hasn't started
+	// (archive_copy_status = PENDING) -- MEDIA and SIDECAR rows alike.
+	AwaitingUpload int
+	// AwaitingRebase counts MEDIA rows whose archive copy is done but
+	// rebase hasn't happened yet. A SIDECAR row's rebase_status is
+	// SKIPPED from insert (see InsertPending), so it never appears here.
+	AwaitingRebase int
+	// Failed counts rows with a permanently failed (terminal) rebase --
+	// see the type doc comment for why this is never folded into Done.
+	Failed int
+	// Done counts rows that genuinely completed: archive copy done and
+	// rebase done or skipped -- explicitly NOT failed.
+	Done int
+	// PendingBytes sums SizeBytes over AwaitingUpload rows -- the backlog
+	// still waiting to be copied to the archive, in bytes.
+	PendingBytes int64
+}
+
+// Pending is the total row count still needing some action --
+// AwaitingUpload plus AwaitingRebase. Named as a method, not a field, so
+// it can never independently drift from the two counts it's built from.
+func (c Counts) Pending() int {
+	return c.AwaitingUpload + c.AwaitingRebase
+}
+
+// Counts runs one aggregate query over queue_nodes -- see the Counts type
+// doc comment for why this exists instead of len(Pending()) or bucketing
+// All() in Go.
+func (s *Store) Counts(ctx context.Context) (Counts, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT
+	COALESCE(SUM(CASE WHEN archive_copy_status = 'PENDING' THEN 1 ELSE 0 END), 0),
+	COALESCE(SUM(CASE WHEN archive_copy_status = 'DONE' AND rebase_status = 'PENDING' THEN 1 ELSE 0 END), 0),
+	COALESCE(SUM(CASE WHEN rebase_status = 'FAILED' THEN 1 ELSE 0 END), 0),
+	COALESCE(SUM(CASE WHEN (`+terminalSQL+`) AND rebase_status != 'FAILED' THEN 1 ELSE 0 END), 0),
+	COALESCE(SUM(CASE WHEN archive_copy_status = 'PENDING' THEN size_bytes ELSE 0 END), 0)
+FROM queue_nodes`)
+
+	var c Counts
+	if err := row.Scan(&c.AwaitingUpload, &c.AwaitingRebase, &c.Failed, &c.Done, &c.PendingBytes); err != nil {
+		return Counts{}, fmt.Errorf("queue: counts: %w", err)
+	}
+	return c, nil
 }
 
 // MarkNodeCreatedSubmitted records that EVENT_NODE_CREATED was accepted

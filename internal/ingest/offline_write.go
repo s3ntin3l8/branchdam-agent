@@ -16,7 +16,7 @@ import (
 // destination isn't reachable (issue #4's "write the local edit copy
 // immediately, unconditionally" step). Same O_EXCL/fsync/close discipline as
 // DualWrite, so the two are interchangeable inputs to Verify.
-func WriteLocal(srcPath, localPath string) (result WriteResult, err error) {
+func WriteLocal(srcPath, localPath string, opts ...WriteOption) (result WriteResult, err error) {
 	var created string
 	defer func() {
 		if err != nil && created != "" {
@@ -46,7 +46,11 @@ func WriteLocal(srcPath, localPath string) (result WriteResult, err error) {
 	fullHasher := blake3.New()
 	fastHasher := hashing.NewStreamingFastHasher(size)
 
-	mw := io.MultiWriter(localFile, fullHasher, fastHasher)
+	writers := []io.Writer{localFile, fullHasher, fastHasher}
+	if o := applyWriteOptions(opts); o.onBytes != nil {
+		writers = append(writers, &progressWriter{onBytes: o.onBytes})
+	}
+	mw := io.MultiWriter(writers...)
 	n, copyErr := io.Copy(mw, src)
 	if copyErr != nil {
 		return WriteResult{}, fmt.Errorf("ingest: copy %s: %w", srcPath, copyErr)
@@ -100,7 +104,14 @@ func tempArchiveName(archivePath string) string {
 //     resume: any leftover temp file from a previous killed attempt is
 //     unconditionally removed before starting, since by definition it never
 //     got renamed into place and is therefore incomplete.
-func CopyToArchive(localPath, archivePath, wantFullHash string) error {
+//
+// opts applies only to the copy itself, never to either of the two
+// internal Verify calls above -- those are this function's own idempotency
+// safety net (see the doc comment above), a distinct phase from "copying"
+// that a caller-supplied byte-count callback can't be relabeled as after
+// the fact. A caller wanting verify-phase progress for the archive
+// destination should call Verify directly.
+func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOption) error {
 	if existing, err := os.Stat(archivePath); err == nil && !existing.IsDir() {
 		vr, verr := Verify(archivePath, wantFullHash)
 		if verr == nil && vr.Verified {
@@ -125,7 +136,11 @@ func CopyToArchive(localPath, archivePath, wantFullHash string) error {
 		return fmt.Errorf("ingest: create archive temp dest %s: %w", tmpPath, err)
 	}
 
-	if _, err := io.Copy(dst, src); err != nil {
+	var dstW io.Writer = dst
+	if o := applyWriteOptions(opts); o.onBytes != nil {
+		dstW = io.MultiWriter(dst, &progressWriter{onBytes: o.onBytes})
+	}
+	if _, err := io.Copy(dstW, src); err != nil {
 		_ = dst.Close()
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("ingest: copy %s to archive: %w", localPath, err)

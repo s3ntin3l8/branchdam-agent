@@ -92,10 +92,11 @@ type DrainStats struct {
 // row never aborts the pass for the others -- matching the same "log and
 // continue" spirit as branchDAM's own scan pipeline and this repo's
 // IngestCard.
-func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID string, now func() time.Time) (DrainStats, error) {
+func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID string, now func() time.Time, opts ...DrainOption) (DrainStats, error) {
 	if now == nil {
 		now = time.Now
 	}
+	drainOpts := applyDrainOptions(opts)
 	var stats DrainStats
 
 	if hs, err := client.Handshake(ctx, branchdam.HandshakeRequest{AgentID: agentID}); err != nil {
@@ -151,7 +152,13 @@ func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID 
 		if r.ArchiveCopyNextAttemptUnix > nowT.Unix() {
 			continue
 		}
-		if err := CopyToArchive(r.LocalPath, r.ArchivePath, r.FullHash); err != nil {
+		var copyOpts []WriteOption
+		if drainOpts.progress != nil {
+			copyOpts = []WriteOption{WithProgress(func(n int64) {
+				drainOpts.progress(ProgressEvent{Path: r.ArchivePath, Phase: ProgressPhaseCopying, BytesDone: n, TotalBytes: r.SizeBytes})
+			})}
+		}
+		if err := CopyToArchive(r.LocalPath, r.ArchivePath, r.FullHash, copyOpts...); err != nil {
 			_ = store.MarkArchiveCopyAttempt(ctx, r.NodeUUID, err.Error(), backoffFor(r.ArchiveCopyAttempts+1, nowT))
 			continue
 		}

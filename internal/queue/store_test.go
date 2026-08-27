@@ -174,6 +174,98 @@ func TestPendingExcludesFullyDoneRows(t *testing.T) {
 	}
 }
 
+func TestCountsOnEmptyStore(t *testing.T) {
+	s := openTestStore(t)
+	got, err := s.Counts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Counts{}
+	if got != want {
+		t.Errorf("Counts() on an empty store = %+v, want zero value (COALESCE must avoid NULL, not just zero rows)", got)
+	}
+	if got.Pending() != 0 {
+		t.Errorf("Pending() = %d, want 0", got.Pending())
+	}
+}
+
+// TestCountsBuckets seeds one row per bucket Counts reports and asserts
+// each lands in exactly the bucket its state implies -- most importantly
+// that a FAILED rebase counts as Failed, never as Done, matching the type
+// doc comment's "a badge must never read green over a permanently broken
+// row" requirement.
+func TestCountsBuckets(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	awaitingUpload := sampleRecord("uuid-awaiting-upload", "a.jpg")
+	awaitingUpload.SizeBytes = 1000
+	if err := s.InsertPending(ctx, awaitingUpload); err != nil {
+		t.Fatal(err)
+	}
+
+	awaitingRebase := sampleRecord("uuid-awaiting-rebase", "b.jpg")
+	awaitingRebase.SizeBytes = 2000
+	if err := s.InsertPending(ctx, awaitingRebase); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkArchiveCopyDone(ctx, "uuid-awaiting-rebase"); err != nil {
+		t.Fatal(err)
+	}
+
+	done := sampleRecord("uuid-done", "c.jpg")
+	if err := s.InsertPending(ctx, done); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkArchiveCopyDone(ctx, "uuid-done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkRebaseDone(ctx, "uuid-done"); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := sampleRecord("uuid-failed", "d.jpg")
+	if err := s.InsertPending(ctx, failed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkArchiveCopyDone(ctx, "uuid-failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkRebaseFailed(ctx, "uuid-failed", "node is archived"); err != nil {
+		t.Fatal(err)
+	}
+
+	sidecar := sampleRecord("uuid-sidecar-done", "e.xmp")
+	sidecar.Kind = KindSidecar
+	sidecar.NodeCreatedPayloadJSON = ""
+	sidecar.Tier0ContainerPath = ""
+	if err := s.InsertPending(ctx, sidecar); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkArchiveCopyDone(ctx, "uuid-sidecar-done"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Counts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := Counts{
+		AwaitingUpload: 1,
+		AwaitingRebase: 1,
+		Failed:         1,
+		Done:           2, // uuid-done and the sidecar (rebase SKIPPED, not PENDING)
+		PendingBytes:   1000,
+	}
+	if got != want {
+		t.Errorf("Counts() = %+v, want %+v", got, want)
+	}
+	if got.Pending() != 2 {
+		t.Errorf("Pending() = %d, want 2 (AwaitingUpload + AwaitingRebase)", got.Pending())
+	}
+}
+
 func TestMarkTransitions(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -282,6 +374,9 @@ func TestQueryAndExecErrorBranchesOnClosedStore(t *testing.T) {
 	}
 	if _, err := s.All(ctx); err == nil {
 		t.Error("All on a closed store: expected an error")
+	}
+	if _, err := s.Counts(ctx); err == nil {
+		t.Error("Counts on a closed store: expected an error")
 	}
 	if err := s.InsertPending(ctx, NewRecord{NodeUUID: "x", Kind: KindMedia}); err == nil {
 		t.Error("InsertPending on a closed store: expected an error")
