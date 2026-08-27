@@ -77,11 +77,13 @@ func DetectLayout(execPath string) (InstallLayout, error) {
 	if runtime.GOOS == "windows" {
 		layout.Siblings = windowsSiblings(resolved)
 	}
-	// macAppInfoPlist is a pure path-shape check (does resolved sit at
+	// BundlePath is a pure path-shape check (does resolved sit at
 	// .../Foo.app/Contents/MacOS/binary?), not gated on runtime.GOOS, so
 	// it stays exercised by Linux CI rather than only ever running on a
 	// darwin host.
-	layout.InfoPlist = macAppInfoPlist(resolved)
+	if bundle := BundlePath(resolved); bundle != "" {
+		layout.InfoPlist = filepath.Join(bundle, "Contents", "Info.plist")
+	}
 
 	return layout, nil
 }
@@ -104,9 +106,12 @@ func windowsSiblings(resolved string) []string {
 	return []string{siblingPath}
 }
 
-// macAppInfoPlist returns the enclosing bundle's Info.plist path when
-// execPath is .../Foo.app/Contents/MacOS/binary, else "".
-func macAppInfoPlist(execPath string) string {
+// BundlePath returns the enclosing .app bundle's path when execPath is
+// .../Foo.app/Contents/MacOS/binary, else "". Exported so
+// cmd/branchdam-agent's relaunch step can detect a bundled tray and
+// restart it via "open -a" instead of exec'ing the inner binary directly
+// -- see that package's relaunchSelf.
+func BundlePath(execPath string) string {
 	macOS := filepath.Dir(execPath)
 	if filepath.Base(macOS) != "MacOS" {
 		return ""
@@ -119,7 +124,7 @@ func macAppInfoPlist(execPath string) string {
 	if !strings.HasSuffix(appDir, ".app") {
 		return ""
 	}
-	return filepath.Join(contents, "Info.plist")
+	return appDir
 }
 
 func isTranslocated(path string) bool {

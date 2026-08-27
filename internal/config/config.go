@@ -103,6 +103,14 @@ type SelfUpdateConfig struct {
 	// Repo is the "owner/name" GitHub repository slug releases are
 	// published from. Defaults to "s3ntin3l8/branchdam-agent" when empty.
 	Repo string `yaml:"repo"`
+	// CheckIntervalHours is how often the tray re-checks for a new
+	// release after its initial startup check. Defaults to 24 when zero;
+	// a negative value disables re-checking (the tray still checks once
+	// at startup). A tray can run for weeks, so a one-shot check would
+	// never surface a release cut after startup -- unauthenticated
+	// GitHub API is 60 req/hr per IP, so even an hourly check is nowhere
+	// near that limit.
+	CheckIntervalHours int `yaml:"checkIntervalHours"`
 }
 
 // DefaultStatusAddr is TrayConfig.StatusAddr's fallback when empty.
@@ -110,6 +118,10 @@ const DefaultStatusAddr = "127.0.0.1:38080"
 
 // DefaultSelfUpdateRepo is SelfUpdateConfig.Repo's fallback when empty.
 const DefaultSelfUpdateRepo = "s3ntin3l8/branchdam-agent"
+
+// DefaultSelfUpdateCheckIntervalHours is SelfUpdateConfig.CheckIntervalHours's
+// fallback when zero.
+const DefaultSelfUpdateCheckIntervalHours = 24
 
 // StatusAddrOrDefault returns t.StatusAddr, or DefaultStatusAddr when unset.
 func (t TrayConfig) StatusAddrOrDefault() string {
@@ -125,6 +137,15 @@ func (s SelfUpdateConfig) RepoOrDefault() string {
 		return DefaultSelfUpdateRepo
 	}
 	return s.Repo
+}
+
+// CheckIntervalHoursOrDefault returns s.CheckIntervalHours, or
+// DefaultSelfUpdateCheckIntervalHours when unset (zero).
+func (s SelfUpdateConfig) CheckIntervalHoursOrDefault() int {
+	if s.CheckIntervalHours == 0 {
+		return DefaultSelfUpdateCheckIntervalHours
+	}
+	return s.CheckIntervalHours
 }
 
 // IngestConfig configures M1's SD-card ingest core: where the two copies
