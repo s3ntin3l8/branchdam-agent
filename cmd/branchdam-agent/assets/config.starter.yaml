@@ -1,0 +1,18 @@
+# branchdam-agent starter config, written by `branchdam-agent init` or the
+# tray's first-run setup. Deliberately NOT config.example.yaml -- that file's
+# ${VAR} placeholders would immediately trip config.Validate's unexpanded-
+# placeholder check, which is meant to catch a real misconfiguration, not a
+# freshly bootstrapped one. Fill in the empty fields below, or let the tray's
+# first-run setup wizard fill them in for you.
+server:
+  baseUrl: "http://localhost:8080"
+  apiKey: ""
+
+agentId: "workstation-01"
+
+pathMappings: []
+
+ingest:
+  archiveRoot: ""
+  localEditRoot: ""
+  cardRoots: []

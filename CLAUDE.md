@@ -75,11 +75,14 @@ whatever "latest" resolves to.
 
 | Path | Responsibility |
 |---|---|
-| `cmd/branchdam-agent/main.go` | Entrypoint + subcommand dispatch (`preflight`, `luminar-sync`, `ingest`, `tray`, `update`, `version`) |
-| `cmd/branchdam-agent/preflight.go` | `preflight`'s checks (server reachability/version, `exiftool` on `PATH`, path mappings), factored out of `main.go` so it's testable without capturing stdout |
+| `cmd/branchdam-agent/main.go` | Entrypoint + subcommand dispatch (`preflight`, `luminar-sync`, `ingest`, `tray`, `update`, `init`, `dialog` (hidden, see below), `version`) |
+| `cmd/branchdam-agent/preflight.go` | `preflight`'s checks (server reachability/version, `exiftool` on `PATH`, path mappings, `config.Validate()`'s problems), factored out of `main.go` so it's testable without capturing stdout |
 | `cmd/branchdam-agent/luminarsync.go` | `luminar-sync`'s flag parsing and orchestration (open catalog, load node index, run `luminar.Syncer`, print a summary); `--dump-schema` mode for recovering a real catalog's schema |
 | `cmd/branchdam-agent/ingest.go` | `ingest --card <path> --config <path>`: the headless driver over `internal/ingest.Engine`, and the report printer that decides the process exit code / "safe to eject" line |
-| `cmd/branchdam-agent/tray.go` | `tray -config <path>`: builds the same `ingest.Engine` `ingest.go` does, wires `internal/tray.Runner`, the status server (`Listen()` before `tray.Run` starts, as the tray's single-instance guard), `selfUpdateAgent`, and optional login-item registration, then calls `tray.Run` and, if it returns `Outcome.RestartRequested`, `relaunchSelf` once the status listener is confirmed released |
+| `cmd/branchdam-agent/init.go` | `init [-config <path>] [-force]` (issue #30): writes the embedded starter config (`assets/config.starter.yaml`, literal empty required fields -- never `config.example.yaml`, whose `${VAR}` placeholders would immediately trip `Validate()`) to `config.ResolvePath`'s resolved location; refuses to overwrite an existing file without `-force` |
+| `cmd/branchdam-agent/dialog.go` | The hidden `dialog -kind <error\|entry\|password\|directory>` subcommand (issue #30) -- omitted from `usage()`, meant only to be re-exec'd by this same binary, never invoked directly. Wraps `github.com/ncruces/zenity` (no cgo on any platform; Win32-native on Windows, `osascript` on macOS, the `zenity`/`matedialog`/`qarma` binary on Linux) behind an injectable `dialogFuncs`, so its flag parsing and exit-code contract (`dialogExitOK`/`Failed`/`Canceled`) are unit-tested without a real display |
+| `cmd/branchdam-agent/bootstrap.go` | `notifyStartupFailure` (a best-effort error dialog naming the log path) and `bootstrapConfigInteractive` (the first-run setup wizard: server URL, API key, the two ingest roots, applied via `config.Patch`) -- both re-exec `dialog` through an injectable `dialogRunner` rather than calling zenity in-process; see the tray invariant below for why |
+| `cmd/branchdam-agent/tray.go` | `tray -config <path>`: resolves a `dialogRunner` and `selfExe` up front (`trayDialogSetup`), sets up `internal/agentlog`, runs first-run bootstrap on a missing config, builds the same `ingest.Engine` `ingest.go` does, wires `internal/tray.Runner`, the status server (`Listen()` before `tray.Run` starts, as the tray's single-instance guard), `selfUpdateAgent`, and optional login-item registration, then calls `tray.Run` and, if it returns `Outcome.RestartRequested`, `relaunchSelf` once the status listener is confirmed released. Every failure path goes through a local `fail()` closure that logs and shows a best-effort dialog -- see the startup-diagnostics invariant below |
 | `cmd/branchdam-agent/selfupdateagent.go` | `selfUpdateAgent`: implements `tray.SelfUpdater` over a configured `internal/selfupdate.Updater` -- the initial check plus a periodic re-check (`selfUpdate.checkIntervalHours`), stopping permanently once a check reports `ErrVersionNotSemver` |
 | `cmd/branchdam-agent/relaunch.go` | `relaunchSelf`: spawn-then-exit restart after a successful self-update, on every platform (never `syscall.Exec` -- see the "relaunch happens after..." invariant below); detects a macOS `.app` bundle and restarts it via `open -n -a` instead of a bare `exec.Command` |
 | `cmd/branchdam-agent/update.go` | `update -config <path> [-check] [-yes]`: the headless equivalent of the tray's "Install and restart" menu item, gated on `selfUpdate.enabled` exactly like the tray's background check |
@@ -238,6 +241,22 @@ whatever "latest" resolves to.
   (holds `Runner.gate` for its whole duration) -- nothing did before self-update needed a gate to
   hold, and two concurrent `IngestCard` runs over the same card root would otherwise race
   `internal/ingest`'s destination-collision resolution.
+- **Every dialog the tray shows (a startup-error notification, the first-run setup wizard) renders
+  in a re-exec'd `dialog` subprocess, never by calling `github.com/ncruces/zenity` in-process from
+  `runTrayCmd`.** This isolates two platform-specific unknowns that couldn't be verified from this
+  repo's Linux-only development/CI environment: whether a Win32 dialog renders correctly from a
+  `-H windowsgui`-linked process before systray's own message pump has started, and whatever
+  process-state assumptions a macOS `.app` launched by launchd carries. `dialogRunner` (a func
+  type, `cmd/branchdam-agent/dialog.go`) is the indirection every caller (`notifyStartupFailure`,
+  `bootstrapConfigInteractive`) goes through -- both are unit-tested against a fake runner, since
+  neither the dialog rendering itself nor the re-exec plumbing can be exercised on Linux CI. See
+  `docs/platform-support.md`'s Known gaps for what's unverified on real hardware as a result.
+- **A missing config is no longer fatal for `tray` -- it triggers first-run bootstrap, not exit
+  1.** `writeStarterConfig` (shared with `init`) plus a short zenity wizard collect
+  `server.baseUrl`/`apiKey`/`ingest.archiveRoot`/`localEditRoot`, applied via `config.Patch` in one
+  call. The starter config is left on disk even if the wizard is canceled or a dialog fails
+  partway (`errBootstrapCanceled` vs. any other error) -- there is always something to hand-edit
+  afterward, mirroring `init`'s own guarantee.
 - **The status page binds loopback-only by construction, not by convention.**
   `tray.normalizeLoopback` rewrites a bare `":port"` (which `net/http` would otherwise bind to
   every interface) to `"127.0.0.1:port"` before `ListenAndServe` ever runs -- CodeQL is a required

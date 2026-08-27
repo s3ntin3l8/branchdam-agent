@@ -115,6 +115,11 @@ cp config.example.yaml config.yaml
 go run ./cmd/branchdam-agent preflight -config config.yaml
 ```
 
+Or skip hand-copying the example: `branchdam-agent init` writes a starter config with empty
+required fields (never `config.example.yaml`'s `${VAR}` placeholders, which would immediately trip
+`preflight`'s validation) to the same default location described below, and prints what to edit
+next. Refuses to overwrite an existing file unless `-force` is passed.
+
 Every example below passes `-config` explicitly, which always takes precedence. Omitting it
 entirely also works: every subcommand then falls back to `./config.yaml` if one exists in the
 current directory, else the per-user config directory (`~/.config/branchdam-agent/config.yaml` on
@@ -191,6 +196,15 @@ menu's "Ingest now" and its automatic card-insertion trigger both call the same
 On Linux, `tray` builds and runs, but immediately returns an error (`tray: unsupported on this
 platform`) -- the tray is scoped to Windows/macOS; a Linux workstation still has the fully-tested
 headless `ingest` path.
+
+**First run.** If no config exists yet, the tray no longer just exits: it writes a starter config
+(same one `init` writes) and, where a dialog backend is available, walks a short setup wizard
+(server URL, API key, the two ingest roots) before continuing. Every startup failure -- a broken
+config, a bind conflict, an update that failed to restart -- is both logged to a durable per-OS log
+file (`%LOCALAPPDATA%\branchDAM\logs\agent.log` on Windows, `~/Library/Logs/branchDAM/agent.log` on
+macOS) and, best-effort, shown as a dialog naming that log path -- see issue #30 and
+[`docs/platform-support.md`](docs/platform-support.md#startup-diagnostics-and-first-run-setup) for
+what's verified and what isn't yet.
 
 Self-update support is compiled into every build; no build tag is required. Checking is **on by
 default** and periodic (`selfUpdate.enabled: false` opts out entirely) but passive -- it's a

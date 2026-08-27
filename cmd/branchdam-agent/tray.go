@@ -2,21 +2,37 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam-agent/internal/agentlog"
 	"github.com/s3ntin3l8/branchdam-agent/internal/autostart"
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
+
+// trayDialogSetup constructs runTrayCmd's dialogRunner plus the resolved
+// selfExe path relaunchSelf later needs. A package-level var -- like
+// preflight.go's lookPathFunc/runVersionFunc indirections -- so tests never
+// re-exec the actual test binary as `dialog ...`, which would spawn `go
+// test`'s own binary with nonsense flags instead of a real
+// branchdam-agent. selfDialogRunner("") already fails fast and safely when
+// os.Executable errs, so production code needs no separate nil check.
+var trayDialogSetup = func() (run dialogRunner, selfExe string, err error) {
+	selfExe, err = os.Executable()
+	return selfDialogRunner(selfExe), selfExe, err
+}
 
 // runTrayCmd implements `branchdam-agent tray -config <path>`: the
 // tray-resident shell around internal/ingest.Engine (issue #3). It drives
@@ -26,6 +42,13 @@ import (
 // immediately; this is reported as a normal (non-zero-exit) error, not a
 // panic, since a Linux workstation is a legitimate place to run this
 // binary for its headless subcommands.
+//
+// Every failure path below goes through fail(), not a bare
+// fmt.Fprintf(os.Stderr, ...): a `-H windowsgui`-linked tray.exe has no
+// console for stderr to reach, and a macOS .app launched by launchd has
+// none either -- see issue #30. fail() logs (agentlog, both stderr and the
+// durable log file), and shows a best-effort error dialog naming the log
+// path, before returning the exit code that failure has always used.
 func runTrayCmd(args []string) int {
 	fs := flag.NewFlagSet("tray", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config file (default: ./config.yaml if present, else the per-user config directory)")
@@ -33,24 +56,68 @@ func runTrayCmd(args []string) int {
 		return 2
 	}
 
+	dialog, selfExe, exeErr := trayDialogSetup()
+
+	logPath, closeLog, logErr := agentlog.Setup()
+	defer func() { _ = closeLog() }()
+	if logErr != nil {
+		// Non-fatal: agentlog.Setup already fell back to an stderr-only
+		// default logger. A tray that can't write its own log file should
+		// still try to run rather than refuse to start entirely.
+		slog.Warn("could not set up durable logging", "err", logErr)
+	}
+	if exeErr != nil {
+		slog.Warn("could not resolve own executable path; startup-error dialogs are disabled", "err", exeErr)
+	}
+
+	fail := func(format string, a ...any) int {
+		msg := fmt.Sprintf(format, a...)
+		slog.Error(msg)
+		notifyStartupFailure(dialog, msg, logPath)
+		return 1
+	}
+
 	resolvedPath, err := config.ResolvePath(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent tray: resolve config path: %v\n", err)
-		return 1
+		return fail("resolve config path: %v", err)
+	}
+
+	// First-run bootstrap (issue #30): a missing config is no longer a
+	// hard failure. writeStarterConfig plus a short setup wizard (server
+	// URL, API key, the two ingest roots) via zenity, applied with
+	// config.Patch -- see bootstrap.go. The starter config it wrote stays
+	// on disk even if the wizard is canceled or a dialog fails partway,
+	// so there is always something to hand-edit afterward.
+	if _, statErr := os.Stat(resolvedPath); errors.Is(statErr, os.ErrNotExist) {
+		slog.Info("no config found, starting first-run setup", "path", resolvedPath)
+		if err := bootstrapConfigInteractive(dialog, resolvedPath); err != nil {
+			if errors.Is(err, errBootstrapCanceled) {
+				return fail("first-run setup canceled -- a starter config was written to %s; edit it by hand and relaunch", resolvedPath)
+			}
+			return fail("first-run setup failed: %v -- a starter config was written to %s; edit it by hand and relaunch", err, resolvedPath)
+		}
 	}
 
 	cfg, err := config.Load(resolvedPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent tray: load config %q: %v\n", resolvedPath, err)
-		return 1
+		return fail("load config %q: %v", resolvedPath, err)
+	}
+	// Catches the unexpanded-${VAR}-placeholder footgun (see
+	// config.Validate's doc comment) for the tray the same way PR1 wired
+	// it into preflight: a server.*-prefixed problem is fatal (it would
+	// otherwise surface as a confusing auth failure once ingest actually
+	// tries to talk to the server), anything else is advisory.
+	for _, p := range cfg.Validate() {
+		if strings.HasPrefix(p.Field, "server.") {
+			return fail("config problem: %s", p)
+		}
+		slog.Warn("config problem", "field", p.Field, "message", p.Message)
 	}
 	if cfg.Server.APIKey == "" {
-		fmt.Fprintln(os.Stderr, "branchdam-agent tray: server.apiKey is empty in config")
-		return 1
+		return fail("server.apiKey is empty in config")
 	}
 	if cfg.Ingest.ArchiveRoot == "" || cfg.Ingest.LocalEditRoot == "" {
-		fmt.Fprintln(os.Stderr, "branchdam-agent tray: ingest.archiveRoot and ingest.localEditRoot must both be set in config")
-		return 1
+		return fail("ingest.archiveRoot and ingest.localEditRoot must both be set in config")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -69,6 +136,7 @@ func runTrayCmd(args []string) int {
 		if err := enableStartOnLogin(resolvedPath); err != nil {
 			// Non-fatal: an operator who opted in still gets a working
 			// tray this session, just without the login item registered.
+			slog.Warn("start-on-login registration failed", "err", err)
 			fmt.Fprintf(os.Stderr, "branchdam-agent tray: WARN: start-on-login registration failed: %v\n", err)
 		}
 	}
@@ -87,8 +155,7 @@ func runTrayCmd(args []string) int {
 	// running two trays side by side.
 	statusLn, err := statusSrv.Listen()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent tray: cannot bind %s (another branchdam-agent tray may already be running): %v\n", statusSrv.Addr, err)
-		return 1
+		return fail("cannot bind %s (another branchdam-agent tray may already be running): %v", statusSrv.Addr, err)
 	}
 
 	var wg sync.WaitGroup
@@ -101,15 +168,18 @@ func runTrayCmd(args []string) int {
 	}()
 	go updater.Run(ctx)
 
+	slog.Info("tray started", "statusURL", statusSrv.StatusURL())
 	fmt.Printf("branchdam-agent tray: status page at %s\n", statusSrv.StatusURL())
 
-	// Captured before tray.Run, not after: relaunchSelf's own doc comment
-	// requires selfExe to be resolved before any in-place swap happens,
-	// and tray.Run is exactly where that swap (if any) occurs.
-	selfExe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent tray: resolve own executable: %v\n", err)
-		return 1
+	// selfExe was resolved at the very top (trayDialogSetup), before
+	// tray.Run -- and therefore before any in-place self-update swap --
+	// ever runs; relaunchSelf's own doc comment requires that ordering.
+	// exeErr is only checked as fatal here, matching where this check has
+	// always lived: earlier failure paths above can proceed with a
+	// disabled dialogRunner (selfDialogRunner("") fails safely), but
+	// nothing after this point can relaunch without a real selfExe.
+	if exeErr != nil {
+		return fail("resolve own executable: %v", exeErr)
 	}
 
 	var outcome tray.Outcome
@@ -122,12 +192,10 @@ func runTrayCmd(args []string) int {
 		// reported the same way as any other tray error -- see this
 		// function's doc comment for why that's a normal exit, not a
 		// panic.
-		fmt.Fprintf(os.Stderr, "branchdam-agent tray: %v\n", trayErr)
-		return 1
+		return fail("%v", trayErr)
 	}
 	if statusErr != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent tray: status page: %v\n", statusErr)
-		return 1
+		return fail("status page: %v", statusErr)
 	}
 
 	// The successor process cannot bind statusSrv.Addr until this
@@ -136,10 +204,10 @@ func runTrayCmd(args []string) int {
 	// makes relaunching here (rather than from inside tray.Run's select
 	// loop) safe.
 	if outcome.RestartRequested {
+		slog.Info("self-update applied, restarting", "version", outcome.AppliedVersion)
 		fmt.Printf("branchdam-agent tray: updated to %s, restarting\n", outcome.AppliedVersion)
 		if err := relaunchSelf(selfExe, os.Args[1:]); err != nil {
-			fmt.Fprintf(os.Stderr, "branchdam-agent tray: updated to %s but failed to restart: %v\n", outcome.AppliedVersion, err)
-			return 1
+			return fail("updated to %s but failed to restart: %v", outcome.AppliedVersion, err)
 		}
 	}
 
