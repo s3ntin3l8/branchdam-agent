@@ -316,45 +316,57 @@ func (p Problem) String() string {
 func (c Config) Validate() []Problem {
 	var problems []Problem
 
-	// checkPlaceholder's message normally names the matched placeholder
-	// (e.g. "${BRANCHDAM_AGENT_API_KEY}") -- genuinely useful for an
-	// operator scanning several fields at once, and safe for every field
-	// here except one. redact drops that substring instead: server.apiKey
-	// is the one field where "the matched text is exactly the substring
-	// between literal ${ and }" stops being a safe assumption the moment
-	// the value is ever a REAL secret rather than a placeholder (a
-	// pathological but not impossible API key containing literal "${...}"
-	// characters) -- CodeQL's go/clear-text-logging flagged exactly this
-	// path once Validate()'s problems started reaching slog (tray.go), not
-	// just fmt.Fprintln (preflight.go, a sink that query doesn't cover).
-	checkPlaceholder := func(field, value string, redact bool) {
-		m := envVarRe.FindString(value)
-		if m == "" {
-			return
+	// checkPlaceholder's message names the matched placeholder (e.g.
+	// "${BRANCHDAM_AGENT_API_KEY}") -- genuinely useful for an operator
+	// scanning several fields at once, and safe for every field here
+	// except server.apiKey, which goes through checkSecretPlaceholder
+	// instead: a *structurally separate* function, not a boolean flag on
+	// this one. A shared function with a redact-after-the-fact branch
+	// still has a code path where the matched substring is interpolated
+	// into a string before being overwritten -- CodeQL's
+	// go/clear-text-logging (a taint tracker, not a value-flow-sensitive
+	// one) flagged exactly that path once Validate()'s problems started
+	// reaching slog (tray.go), not just fmt.Fprintln (preflight.go, a
+	// sink that query doesn't cover), even though the overwrite always
+	// wins at runtime. checkSecretPlaceholder never extracts or
+	// interpolates any substring of value at all -- only a bool
+	// (envVarRe.MatchString) crosses from the sensitive field into the
+	// message -- so there is no data-flow path left for the tool to
+	// follow, not just one that happens to be dead at runtime.
+	checkPlaceholder := func(field, value string) {
+		if m := envVarRe.FindString(value); m != "" {
+			problems = append(problems, Problem{
+				Field:   field,
+				Message: fmt.Sprintf("still contains the unexpanded placeholder %s -- the environment variable was not set when this config was loaded", m),
+			})
 		}
-		msg := fmt.Sprintf("still contains the unexpanded placeholder %s -- the environment variable was not set when this config was loaded", m)
-		if redact {
-			msg = "still contains an unexpanded placeholder (value withheld) -- the environment variable was not set when this config was loaded"
-		}
-		problems = append(problems, Problem{Field: field, Message: msg})
 	}
 
-	checkPlaceholder("server.baseUrl", c.Server.BaseURL, false)
-	checkPlaceholder("server.apiKey", c.Server.APIKey, true)
-	checkPlaceholder("agentId", c.AgentID, false)
-	checkPlaceholder("ingest.archiveRoot", c.Ingest.ArchiveRoot, false)
-	checkPlaceholder("ingest.localEditRoot", c.Ingest.LocalEditRoot, false)
-	checkPlaceholder("ingest.pathTemplate", c.Ingest.PathTemplate, false)
-	for i, root := range c.Ingest.CardRoots {
-		checkPlaceholder(fmt.Sprintf("ingest.cardRoots[%d]", i), root, false)
+	checkSecretPlaceholder := func(field, value string) {
+		if envVarRe.MatchString(value) {
+			problems = append(problems, Problem{
+				Field:   field,
+				Message: "still contains an unexpanded placeholder (value withheld) -- the environment variable was not set when this config was loaded",
+			})
+		}
 	}
-	checkPlaceholder("offline.queueDbPath", c.Offline.QueueDBPath, false)
-	checkPlaceholder("offline.tier0ContainerRoot", c.Offline.Tier0ContainerRoot, false)
-	checkPlaceholder("tray.statusAddr", c.Tray.StatusAddr, false)
-	checkPlaceholder("selfUpdate.repo", c.SelfUpdate.Repo, false)
+
+	checkPlaceholder("server.baseUrl", c.Server.BaseURL)
+	checkSecretPlaceholder("server.apiKey", c.Server.APIKey)
+	checkPlaceholder("agentId", c.AgentID)
+	checkPlaceholder("ingest.archiveRoot", c.Ingest.ArchiveRoot)
+	checkPlaceholder("ingest.localEditRoot", c.Ingest.LocalEditRoot)
+	checkPlaceholder("ingest.pathTemplate", c.Ingest.PathTemplate)
+	for i, root := range c.Ingest.CardRoots {
+		checkPlaceholder(fmt.Sprintf("ingest.cardRoots[%d]", i), root)
+	}
+	checkPlaceholder("offline.queueDbPath", c.Offline.QueueDBPath)
+	checkPlaceholder("offline.tier0ContainerRoot", c.Offline.Tier0ContainerRoot)
+	checkPlaceholder("tray.statusAddr", c.Tray.StatusAddr)
+	checkPlaceholder("selfUpdate.repo", c.SelfUpdate.Repo)
 	for i, m := range c.PathMappings {
-		checkPlaceholder(fmt.Sprintf("pathMappings[%d].workstationPath", i), m.WorkstationPath, false)
-		checkPlaceholder(fmt.Sprintf("pathMappings[%d].containerPath", i), m.ContainerPath, false)
+		checkPlaceholder(fmt.Sprintf("pathMappings[%d].workstationPath", i), m.WorkstationPath)
+		checkPlaceholder(fmt.Sprintf("pathMappings[%d].containerPath", i), m.ContainerPath)
 	}
 
 	if c.Server.APIKey != "" && !envVarRe.MatchString(c.Server.APIKey) && len(c.Server.APIKey) < 32 {
