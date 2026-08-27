@@ -27,7 +27,7 @@ import (
 // mount that's still down -- Drain itself is stateless across calls.
 func runQueueDrainCmd(args []string) int {
 	fs := flag.NewFlagSet("queue-drain", flag.ContinueOnError)
-	configPath := fs.String("config", "config.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./config.yaml if present, else the per-user config directory)")
 	watch := fs.Bool("watch", false, "keep draining in a loop (Ctrl-C to stop) instead of a single pass")
 	interval := fs.Duration("interval", 5*time.Second, "poll interval between passes when -watch is set")
 	timeout := fs.Duration("timeout", 2*time.Minute, "per-pass timeout")
@@ -35,9 +35,14 @@ func runQueueDrainCmd(args []string) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	resolvedPath, err := config.ResolvePath(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent queue-drain: load config %q: %v\n", *configPath, err)
+		fmt.Fprintf(os.Stderr, "branchdam-agent queue-drain: resolve config path: %v\n", err)
+		return 1
+	}
+	cfg, err := config.Load(resolvedPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent queue-drain: load config %q: %v\n", resolvedPath, err)
 		return 1
 	}
 	if cfg.Offline.QueueDBPath == "" {

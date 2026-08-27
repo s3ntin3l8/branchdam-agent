@@ -26,7 +26,7 @@ import (
 // audit queue rather than auto-committing a possibly-wrong schema read.
 func runLuminarSyncCmd(args []string) int {
 	fs := flag.NewFlagSet("luminar-sync", flag.ContinueOnError)
-	configPath := fs.String("config", "config.yaml", "path to branchdam-agent config file")
+	configPath := fs.String("config", "", "path to branchdam-agent config file (default: ./config.yaml if present, else the per-user config directory)")
 	catalogPath := fs.String("catalog", "", "path to Luminar's catalog.db (required, unless -dump-schema)")
 	nodeIndexPath := fs.String("node-index", "", "path to the node-index JSON file mapping file paths to nodeUuids (required, unless -dump-schema)")
 	queryFile := fs.String("query-file", "", "path to a SQL file overriding the built-in (unverified) edit-source query")
@@ -77,17 +77,22 @@ func runLuminarSyncCmd(args []string) int {
 		return 1
 	}
 
-	cfg, err := config.Load(*configPath)
+	resolvedPath, err := config.ResolvePath(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent luminar-sync: resolve config path: %v\n", err)
+		return 1
+	}
+	cfg, err := config.Load(resolvedPath)
 	if err != nil {
 		if !*dryRun {
-			fmt.Fprintf(os.Stderr, "branchdam-agent luminar-sync: load config %q: %v\n", *configPath, err)
+			fmt.Fprintf(os.Stderr, "branchdam-agent luminar-sync: load config %q: %v\n", resolvedPath, err)
 			return 1
 		}
 		// -dry-run never contacts the server, so a missing/unreadable
 		// config is a warning, not a hard failure -- an operator should be
 		// able to try a dry run against a catalog before config.yaml even
 		// exists.
-		fmt.Fprintf(os.Stderr, "branchdam-agent luminar-sync: warning: load config %q: %v (continuing, -dry-run needs no server config)\n", *configPath, err)
+		fmt.Fprintf(os.Stderr, "branchdam-agent luminar-sync: warning: load config %q: %v (continuing, -dry-run needs no server config)\n", resolvedPath, err)
 	}
 	if !*dryRun && cfg.Server.APIKey == "" {
 		fmt.Fprintln(os.Stderr, "branchdam-agent luminar-sync: server.apiKey is empty in config (use -dry-run to skip the server entirely)")

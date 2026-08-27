@@ -115,6 +115,13 @@ cp config.example.yaml config.yaml
 go run ./cmd/branchdam-agent preflight -config config.yaml
 ```
 
+Every example below passes `-config` explicitly, which always takes precedence. Omitting it
+entirely also works: every subcommand then falls back to `./config.yaml` if one exists in the
+current directory, else the per-user config directory (`~/.config/branchdam-agent/config.yaml` on
+Linux, `~/Library/Application Support/branchdam-agent/config.yaml` on macOS,
+`%AppData%\branchdam-agent\config.yaml` on Windows) -- so a config placed there is found
+automatically without a flag on every invocation.
+
 ### 4. Ingest an SD card, including offline
 
 ```sh

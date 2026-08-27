@@ -82,7 +82,7 @@ func usage() {
 
 func runPreflightCmd(args []string) int {
 	fs := flag.NewFlagSet("preflight", flag.ContinueOnError)
-	configPath := fs.String("config", "config.yaml", "path to config file")
+	configPath := fs.String("config", "", "path to config file (default: ./config.yaml if present, else the per-user config directory)")
 	timeout := fs.Duration("timeout", 10*time.Second, "server request timeout")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -90,9 +90,15 @@ func runPreflightCmd(args []string) int {
 
 	start := time.Now()
 
-	cfg, err := config.Load(*configPath)
+	resolvedPath, err := config.ResolvePath(*configPath)
 	if err != nil {
-		fmt.Printf("branchdam-agent preflight\n=========================\n[FAIL] load config %q: %v\n", *configPath, err)
+		fmt.Printf("branchdam-agent preflight\n=========================\n[FAIL] resolve config path: %v\n", err)
+		return 1
+	}
+
+	cfg, err := config.Load(resolvedPath)
+	if err != nil {
+		fmt.Printf("branchdam-agent preflight\n=========================\n[FAIL] load config %q: %v\n", resolvedPath, err)
 		return 1
 	}
 
@@ -105,7 +111,7 @@ func runPreflightCmd(args []string) int {
 	defer cancel()
 
 	checks, ok := runPreflightChecks(ctx, cfg, client, defaultLookPath, defaultRunVersion)
-	printPreflightReport(os.Stdout, *configPath, checks, ok, time.Since(start))
+	printPreflightReport(os.Stdout, resolvedPath, checks, ok, time.Since(start))
 
 	if !ok {
 		return 1
