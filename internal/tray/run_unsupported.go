@@ -23,6 +23,6 @@ import (
 var ErrUnsupported = errors.New("tray: unsupported on this platform (windows and darwin only); use `branchdam-agent ingest` instead")
 
 // Run always returns ErrUnsupported on this platform.
-func Run(_ context.Context, _ *Runner, _ *ingest.Detector, _ string, _ SelfUpdater) (Outcome, error) {
+func Run(_ context.Context, _ *Runner, _ *ingest.Detector, _ string, _ SelfUpdater, _ Settings) (Outcome, error) {
 	return Outcome{}, ErrUnsupported
 }

@@ -138,6 +138,7 @@ func runTrayCmd(args []string) int {
 	client := branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
 	engine := ingest.NewEngine(client, cfg.AgentID, cfg.Ingest, cfg.PathMappings)
 	runner := tray.NewRunner(engine, cfg.Ingest.CardRoots, cfg.Ingest.LocalEditRoot)
+	settings := newConfigSettings(resolvedPath, cfg, runner, dialog)
 
 	var detector *ingest.Detector
 	if len(cfg.Ingest.CardRoots) > 0 {
@@ -195,7 +196,7 @@ func runTrayCmd(args []string) int {
 	}
 
 	var outcome tray.Outcome
-	outcome, trayErr = tray.Run(ctx, runner, detector, statusSrv.StatusURL(), updater)
+	outcome, trayErr = tray.Run(ctx, runner, detector, statusSrv.StatusURL(), updater, settings)
 	stop() // make sure the status server's ctx.Done() fires even if tray.Run returned on its own (e.g. Quit clicked)
 	wg.Wait()
 
@@ -216,10 +217,18 @@ func runTrayCmd(args []string) int {
 	// makes relaunching here (rather than from inside tray.Run's select
 	// loop) safe.
 	if outcome.RestartRequested {
-		slog.Info("self-update applied, restarting", "version", outcome.AppliedVersion)
-		fmt.Printf("branchdam-agent tray: updated to %s, restarting\n", outcome.AppliedVersion)
+		// AppliedVersion is empty for a settings-driven restart (issue #31:
+		// tray.statusAddr or ingest.cardRoots changed, neither
+		// hot-reloadable -- see Runner.Reconfigure's doc comment) as
+		// opposed to a successful self-update.
+		reason := "a settings change that requires a restart"
+		if outcome.AppliedVersion != "" {
+			reason = fmt.Sprintf("updated to %s", outcome.AppliedVersion)
+		}
+		slog.Info("restarting", "reason", reason)
+		fmt.Printf("branchdam-agent tray: %s, restarting\n", reason)
 		if err := relaunchSelf(selfExe, os.Args[1:]); err != nil {
-			return fail("updated to %s but failed to restart: %v", outcome.AppliedVersion, err)
+			return fail("%s but failed to restart: %v", reason, err)
 		}
 	}
 

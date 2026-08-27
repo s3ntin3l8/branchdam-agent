@@ -36,6 +36,36 @@ stub for every other `GOOS`, including Linux, where CI actually builds/tests/lin
 and why the darwin binary is built natively on `macos-26` (both in CI's `build-darwin-full` job
 and in `release-binaries.yml`) rather than cross-compiled.
 
+## Settings menu
+
+Issue #31: every tray config change used to require hand-editing `config.yaml` and a full restart.
+The tray menu now has a "Settings" submenu, split by what systray itself can render natively
+versus what needs an external dialog:
+
+- **Native checkboxes/submenus** (no dialog, no restart): start at login, check for updates, the
+  update check interval (1 hour / 24 hours / never), require unbuffered verify.
+- **Free-text fields, via a `github.com/ncruces/zenity` dialog** (re-exec'd through the same hidden
+  `dialog` subcommand issue #30's startup-error notification uses -- see that section below):
+  server URL, API key (a password-style prompt; the current key is never pre-filled or otherwise
+  placed in a subprocess's argv), the archive root and local edit root (folder pickers), and the
+  naming template.
+- **Hand-edit only, on purpose** -- `pathMappings` and `ingest.cardRoots` are both multi-value
+  list fields; adding a dialog for editing a list is real additional UI work this PR didn't take
+  on. "Open config.yaml" and "Reveal config folder" menu items exist specifically so this path
+  never requires knowing where the file lives.
+
+Every change applies through one mechanism, `Runner.Reconfigure` -- see CLAUDE.md's own
+"guarded-rebuild" invariant for the full explanation. Two fields can't be hot-reloaded and instead
+mark the menu's "Restart now" item visible: `tray.statusAddr` (the status page's bind is this
+tray's single-instance guard, already committed to by the time a reload could run) and
+`ingest.cardRoots` (the card-detection watch goroutine isn't restartable from inside the running
+menu). **Unverified on real hardware**, same caveat as issue #30's dialog work below -- the
+settings dialogs share the same re-exec'd `dialog` subcommand.
+
+The embedded status page itself is unchanged by this PR (still the `<meta http-equiv="refresh">`
+HTML page from issue #3) -- a `/status.json` route and a smoother live-refresh loop are deferred to
+issue #32's tray-timer work, which is already touching this file for the real queue-depth readout.
+
 ## Startup diagnostics and first-run setup
 
 Issue #30: a tray launched with no console (`branchdam-agent-tray.exe`, or the macOS `.app` via
@@ -166,6 +196,14 @@ ignore entry can be dropped.
   `zenity` call -- but nothing here has exercised a real Win32 dialog or a real launchd-spawned
   `osascript` call. The durable log file (`internal/agentlog`) is independent of this and does not
   share the gap.
+- **The settings menu's dialogs (issue #31) share the startup-error dialog's exact unverified
+  status**, for the same reason -- they go through the same re-exec'd `dialog` subcommand. What's
+  additionally unverified: whether a Win32 dialog renders correctly while systray's own message
+  pump is *already running* (the startup-error dialog fires before `systray.Run` starts;
+  settings dialogs fire from a running tray's click handler -- a materially different scenario the
+  original design doc flagged and this PR did not spike separately). `configSettings`'s own logic
+  (persistence, reload, restart-required diffing) is pinned by tests substituting a fake
+  `dialogRunner`; the dialogs' actual rendering is not.
 - **Tray status page's queue field is a stub.** The embedded status page
   (`http://127.0.0.1:38080/` by default, loopback-only) shows queue status as
   `tray.QueueStatusStub`, a literal placeholder string, not a real count -- the offline queue

@@ -93,7 +93,7 @@ func TestStatusWatchDirsIsACopy(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, dirs, "")
 	st := r.Status(UpdateStatus{})
 	st.WatchDirs[0] = "mutated"
-	if r.WatchDirs[0] != "/media/a" {
+	if got := r.WatchDirs(); got[0] != "/media/a" {
 		t.Error("Status() must return a copy of WatchDirs, not the live slice")
 	}
 }
@@ -139,6 +139,55 @@ func TestTriggerIngestSerializesConcurrentCalls(t *testing.T) {
 	}
 }
 
+func TestReconfigureSwapsIngesterWatchDirsAndScratch(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, []string{"/old"}, "/old-scratch")
+
+	newIngester := &fakeIngester{}
+	r.Reconfigure(newIngester, []string{"/new-a", "/new-b"}, "/new-scratch")
+
+	if got := r.WatchDirs(); len(got) != 2 || got[0] != "/new-a" || got[1] != "/new-b" {
+		t.Errorf("WatchDirs() after Reconfigure = %v, want [/new-a /new-b]", got)
+	}
+	st := r.Status(UpdateStatus{})
+	if !strings.Contains(st.ScratchNote, "/new-scratch") {
+		t.Errorf("ScratchNote after Reconfigure = %q, want it to mention /new-scratch", st.ScratchNote)
+	}
+
+	r.TriggerIngest(context.Background(), "/new-a")
+	if len(newIngester.calls) != 1 || newIngester.calls[0] != "/new-a" {
+		t.Errorf("expected TriggerIngest to call the reconfigured ingester, got calls=%v", newIngester.calls)
+	}
+}
+
+func TestReconfigureWaitsForInFlightIngest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, []string{"/old"}, "")
+
+	go r.TriggerIngest(context.Background(), "/old")
+	<-started
+
+	done := make(chan struct{})
+	go func() {
+		r.Reconfigure(&fakeIngester{}, []string{"/new"}, "")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("Reconfigure returned while an ingest was still in flight -- it must block on the same gate TriggerIngest holds")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(release)
+	<-done
+
+	if got := r.WatchDirs(); len(got) != 1 || got[0] != "/new" {
+		t.Errorf("WatchDirs() after Reconfigure = %v, want [/new]", got)
+	}
+}
+
 // fakeSelfUpdater is a no-op SelfUpdater shared by tests across build
 // tags (run_unsupported_test.go's Linux stub test and, eventually,
 // run_supported_test.go's windows/darwin ones).
@@ -146,6 +195,18 @@ type fakeSelfUpdater struct{}
 
 func (fakeSelfUpdater) Status() UpdateStatus                          { return UpdateStatus{} }
 func (fakeSelfUpdater) ApplyLatest(_ context.Context) (string, error) { return "", nil }
+
+// fakeSettings is a no-op Settings shared by tests across build tags, the
+// same way fakeSelfUpdater is.
+type fakeSettings struct{}
+
+func (fakeSettings) Snapshot() SettingsView                     { return SettingsView{} }
+func (fakeSettings) SetBool(_ string, _ bool) error             { return nil }
+func (fakeSettings) SetInt(_ string, _ int) error               { return nil }
+func (fakeSettings) PromptAndSet(_ SettingsField) (bool, error) { return false, nil }
+func (fakeSettings) Reload() error                              { return nil }
+func (fakeSettings) OpenConfigFile() error                      { return nil }
+func (fakeSettings) RevealConfigFolder() error                  { return nil }
 
 type blockingIngester struct {
 	started chan struct{}

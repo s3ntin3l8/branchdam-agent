@@ -143,10 +143,6 @@ const QueueStatusStub = "offline queue exists (M2) but is not yet wired into the
 // the most recent ingest run. It has no UI imports -- run_supported.go
 // wraps one in the actual systray.Run(...) call.
 type Runner struct {
-	Ingester   Ingester
-	WatchDirs  []string
-	ScratchDir string // LocalEditRoot -- described, not measured; see Status().
-
 	// gate is held for the ENTIRE duration of an IngestCard call. It
 	// serializes the tray's two ingest paths (a menu click and the
 	// card-detection watch loop) -- nothing did before this field
@@ -156,21 +152,40 @@ type Runner struct {
 	// self-update. It also doubles as the self-update gate: TryLockIdle
 	// below acquires this same mutex without blocking, so "Install and
 	// restart" can refuse outright while a card is mid-copy instead of
-	// queuing behind it.
+	// queuing behind it. Reconfigure holds it too, for the same reason:
+	// ingester/watchDirs/scratchDir must never change out from under a
+	// card mid-copy.
 	gate sync.Mutex
 
-	mu        sync.Mutex // guards last/busy/busyCard/busySince only
-	last      *IngestSummary
-	busy      bool
-	busyCard  string
-	busySince time.Time
+	// mu guards every field below, including ingester/watchDirs/
+	// scratchDir -- unlike before issue #31's settings menu, these are no
+	// longer set once at construction and left alone; Reconfigure can
+	// swap them at any time the tray is running.
+	mu         sync.Mutex
+	ingester   Ingester
+	watchDirs  []string
+	scratchDir string // LocalEditRoot -- described, not measured; see Status().
+	last       *IngestSummary
+	busy       bool
+	busyCard   string
+	busySince  time.Time
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
 // the configured ingest.cardRoots) and scratchDir (ingest.localEditRoot)
 // in the status snapshot.
 func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner {
-	return &Runner{Ingester: ingester, WatchDirs: watchDirs, ScratchDir: scratchDir}
+	return &Runner{ingester: ingester, watchDirs: watchDirs, scratchDir: scratchDir}
+}
+
+// WatchDirs returns a defensive copy of the directories currently
+// described as watched -- run_supported.go's menu rendering and its
+// "Ingest now" worker both read this rather than a raw field, since
+// Reconfigure can change it while the tray is running.
+func (r *Runner) WatchDirs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.watchDirs...)
 }
 
 // TriggerIngest runs one IngestCard pass over cardPath through the same
@@ -187,9 +202,13 @@ func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSumma
 	r.setBusy(true, cardPath)
 	defer r.setBusy(false, "")
 
+	r.mu.Lock()
+	ingester := r.ingester
+	r.mu.Unlock()
+
 	summary := IngestSummary{CardPath: cardPath, StartedAt: time.Now()}
 
-	result, err := r.Ingester.IngestCard(ctx, cardPath)
+	result, err := ingester.IngestCard(ctx, cardPath)
 	summary.Elapsed = time.Since(summary.StartedAt)
 	if err != nil {
 		summary.Err = err
@@ -249,6 +268,33 @@ func (r *Runner) TryLockIdle() (release func(), ok bool) {
 	return r.gate.Unlock, true
 }
 
+// Reconfigure swaps in a freshly built Ingester plus the watch/scratch
+// description it should report going forward -- the guarded-rebuild
+// mechanism issue #31's settings menu applies every hot-reloadable config
+// change through, rather than giving each individual field (server URL,
+// API key, archive/local roots, naming template, requireUnbuffered) its
+// own bespoke hot-patch path. Blocks until no ingest is in flight (reuses
+// TriggerIngest's own gate), so a config reload can never race a card
+// mid-copy the way swapping these fields without synchronization would.
+//
+// Two fields are deliberately NOT reconfigurable this way and are the
+// caller's responsibility to treat as restart-required instead:
+// tray.statusAddr (the embedded HTTP server's Listen() call already
+// happened and is this tray's single-instance guard -- there's nothing to
+// swap it into) and ingest.cardRoots (internal/ingest.Detector's Watch
+// call is a one-shot goroutine over the roots it started with, not
+// restartable from inside a running select loop).
+func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir string) {
+	r.gate.Lock()
+	defer r.gate.Unlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ingester = ingester
+	r.watchDirs = append([]string(nil), watchDirs...)
+	r.scratchDir = scratchDir
+}
+
 // Status returns a snapshot of the current state for the status page and
 // the tray tooltip. selfUpdate is passed in rather than computed here --
 // self-update's own check is async and gated by config the caller already
@@ -259,15 +305,17 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	last := r.last
 	busy := r.busy
 	busyCard := r.busyCard
+	watchDirs := append([]string(nil), r.watchDirs...)
+	scratchDir := r.scratchDir
 	r.mu.Unlock()
 
 	scratchNote := "not configured"
-	if r.ScratchDir != "" {
-		scratchNote = fmt.Sprintf("%s (usage tracking not yet implemented)", r.ScratchDir)
+	if scratchDir != "" {
+		scratchNote = fmt.Sprintf("%s (usage tracking not yet implemented)", scratchDir)
 	}
 
 	return Status{
-		WatchDirs:   append([]string(nil), r.WatchDirs...),
+		WatchDirs:   watchDirs,
 		ScratchNote: scratchNote,
 		QueueStatus: QueueStatusStub,
 		LastIngest:  last,
