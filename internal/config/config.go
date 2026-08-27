@@ -93,12 +93,16 @@ type TrayConfig struct {
 	StartOnLogin bool `yaml:"startOnLogin"`
 }
 
-// SelfUpdateConfig gates github.com/creativeprojects/go-selfupdate. Off by
-// default per the plan/issue -- an operator must opt in explicitly before
-// the tray ever checks GitHub for a newer release, let alone replaces its
-// own binary.
+// SelfUpdateConfig gates github.com/creativeprojects/go-selfupdate.
+// Checking is on by default (see defaultConfig()) -- it's a read-only
+// GitHub API call, never a download or a binary write. Applying an
+// update found by a check is a separate, always-explicit action (a tray
+// menu click, or `update`'s confirmation/-yes) that this flag does not
+// by itself authorize; see CLAUDE.md's self-update invariants.
 type SelfUpdateConfig struct {
-	// Enabled turns self-update checks on. Default false.
+	// Enabled turns self-update checks on. Default true (see
+	// defaultConfig()) -- set to false explicitly for zero outbound
+	// GitHub traffic.
 	Enabled bool `yaml:"enabled"`
 	// Repo is the "owner/name" GitHub repository slug releases are
 	// published from. Defaults to "s3ntin3l8/branchdam-agent" when empty.
