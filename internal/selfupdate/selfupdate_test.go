@@ -20,9 +20,10 @@ func TestCheckResultString(t *testing.T) {
 
 // TestCheckNonSemverDoesNotPanic pins the fix for a live crash:
 // go-selfupdate's Release.GreaterThan calls semver.MustParse internally,
-// which panics on a non-semver argument -- "dev", the default (and, since
-// the Makefile never stamps it, the ONLY) value main.version takes for a
-// locally built binary. Check must reject that before ever reaching
+// which panics on a non-semver argument -- "dev", the default main.version
+// takes for a plain `go build`/`make build`, and still the default even
+// for `make build-windows`/`build-darwin-app` unless VERSION=<semver> is
+// passed explicitly. Check must reject that before ever reaching
 // go-selfupdate, and it must do so without making a network call (this
 // test never contacts GitHub -- if it did, it would hang or fail in a
 // sandboxed CI run rather than exercising the gate).
