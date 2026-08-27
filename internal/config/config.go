@@ -258,7 +258,8 @@ func Load(path string) (Config, error) {
 // %AppData%\branchdam-agent\config.yaml on Windows,
 // ~/Library/Application Support/branchdam-agent/config.yaml on macOS).
 // Neither DefaultPath nor Load creates this file or its parent directory --
-// see the `init` subcommand for the one place that does.
+// a first-run bootstrap command that does is planned as follow-on work
+// (issue #30), not part of this package.
 func DefaultPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
