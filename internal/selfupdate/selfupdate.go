@@ -1,7 +1,10 @@
 // Package selfupdate wraps github.com/creativeprojects/go-selfupdate
 // v1.6.0 behind a small surface, gated entirely by config's
-// SelfUpdateConfig.Enabled (default false -- see the tray's own gating in
-// cmd/branchdam-agent/tray.go).
+// SelfUpdateConfig.Enabled (default true -- a read-only GitHub API call,
+// never a download or a write; see the tray's own gating in
+// cmd/branchdam-agent/tray.go). Applying an update found by a check is a
+// separate, always-explicit action this flag does not by itself
+// authorize.
 //
 // Every download this package makes is verified against the release's
 // SHA256SUMS.txt via a su.ChecksumValidator, which is why Updater always
