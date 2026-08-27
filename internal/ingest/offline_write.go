@@ -104,9 +104,16 @@ func tempArchiveName(archivePath string) string {
 //     resume: any leftover temp file from a previous killed attempt is
 //     unconditionally removed before starting, since by definition it never
 //     got renamed into place and is therefore incomplete.
+//
+// opts applies only to the copy itself, never to either of the two
+// internal Verify calls above -- those are this function's own idempotency
+// safety net (see the doc comment above), a distinct phase from "copying"
+// that a caller-supplied byte-count callback can't be relabeled as after
+// the fact. A caller wanting verify-phase progress for the archive
+// destination should call Verify directly.
 func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOption) error {
 	if existing, err := os.Stat(archivePath); err == nil && !existing.IsDir() {
-		vr, verr := Verify(archivePath, wantFullHash, opts...)
+		vr, verr := Verify(archivePath, wantFullHash)
 		if verr == nil && vr.Verified {
 			return nil
 		}
@@ -153,7 +160,7 @@ func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOpt
 		return fmt.Errorf("ingest: rename %s to %s: %w", tmpPath, archivePath, err)
 	}
 
-	vr, err := Verify(archivePath, wantFullHash, opts...)
+	vr, err := Verify(archivePath, wantFullHash)
 	if err != nil {
 		return fmt.Errorf("ingest: verify archive copy %s: %w", archivePath, err)
 	}

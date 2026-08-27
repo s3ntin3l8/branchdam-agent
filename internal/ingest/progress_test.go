@@ -135,6 +135,12 @@ func TestCopyToArchiveReportsProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// opts must apply only to CopyToArchive's own copy loop, never to its
+	// two internal Verify calls (its own idempotency safety net) -- a
+	// Hermes review finding on this PR: those verify-phase re-reads must
+	// never be mislabeled as "copying" by a caller like Drain that wraps
+	// this callback in a ProgressPhaseCopying event. With that fixed, this
+	// is a single monotonic pass exactly like DualWrite/WriteLocal/Verify.
 	var samples []int64
 	err = CopyToArchive(localPath, archivePath, writeRes.FullHash, WithProgress(func(n int64) {
 		samples = append(samples, n)
@@ -142,25 +148,38 @@ func TestCopyToArchiveReportsProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CopyToArchive: %v", err)
 	}
-	if len(samples) == 0 {
-		t.Fatal("expected at least one progress sample")
+	assertMonotonicProgress(t, samples, 2*1024*1024)
+}
+
+// TestCopyToArchiveAlreadyVerifiedReportsNoProgress locks in the fix
+// above from the other direction: when archivePath already exists and
+// verifies (the idempotent-resume fast path), CopyToArchive's own internal
+// Verify call must not emit any progress at all -- opts is scoped to the
+// copy loop, which this path never reaches.
+func TestCopyToArchiveAlreadyVerifiedReportsNoProgress(t *testing.T) {
+	dir := t.TempDir()
+	src := writeSourceFile(t, dir, 64*1024)
+	localPath := filepath.Join(dir, "local", "photo.bin")
+	archivePath := filepath.Join(dir, "archive", "photo.bin")
+
+	writeRes, err := WriteLocal(src, localPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// CopyToArchive's opts thread through both its own copy AND its
-	// pre/post Verify calls (three separate byte-count sequences over the
-	// same file, each its own pass) -- so unlike the single-pass cases
-	// above, only the final sample of the LAST pass is guaranteed to
-	// reach the full size, and the overall sequence need not be
-	// monotonic across pass boundaries. Assert the weaker, still
-	// meaningful property: every individual sample is in [1, size], and
-	// the last one recorded reaches size (CopyToArchive's own final
-	// Verify is always the last pass to run).
-	for _, s := range samples {
-		if s < 1 || s > 2*1024*1024 {
-			t.Fatalf("sample %d out of range [1, %d]", s, 2*1024*1024)
-		}
+	// Pre-populate archivePath with matching content, simulating a
+	// previous successful copy.
+	if err := CopyToArchive(localPath, archivePath, writeRes.FullHash); err != nil {
+		t.Fatal(err)
 	}
-	if last := samples[len(samples)-1]; last != 2*1024*1024 {
-		t.Errorf("final sample = %d, want %d (the closing Verify pass)", last, 2*1024*1024)
+
+	var samples []int64
+	if err := CopyToArchive(localPath, archivePath, writeRes.FullHash, WithProgress(func(n int64) {
+		samples = append(samples, n)
+	})); err != nil {
+		t.Fatalf("CopyToArchive (already verified): %v", err)
+	}
+	if len(samples) != 0 {
+		t.Errorf("expected no progress samples on the already-verified fast path, got %v", samples)
 	}
 }
 
