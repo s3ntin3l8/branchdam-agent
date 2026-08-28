@@ -170,6 +170,12 @@ func restoreOne(target string) error {
 	if err := suUpdate.Apply(f, suUpdate.Options{TargetPath: target, OldSavePath: discardPath}); err != nil {
 		return err
 	}
-	_ = os.Remove(discardPath)
+	// Best-effort, same reasoning and logging as Rollback's own cleanup
+	// removes: the swap itself already succeeded, so a failure here just
+	// leaves a throwaway discarded-binary file behind, not an
+	// inconsistent state.
+	if err := os.Remove(discardPath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("selfupdate: rollback: could not remove discarded binary", "path", discardPath, "err", err)
+	}
 	return nil
 }
