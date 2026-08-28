@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.1.0...v1.1.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **luminar:** rebuild catalog reader against a real Luminar Neo schema ([#49](https://github.com/s3ntin3l8/branchdam-agent/issues/49)) ([df5b27a](https://github.com/s3ntin3l8/branchdam-agent/commit/df5b27a478c37501d82acbf47681096c33d287e4))
+
 ## [1.1.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.0.1...v1.1.0) (2026-08-28)
 
 
