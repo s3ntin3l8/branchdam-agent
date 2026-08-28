@@ -54,12 +54,11 @@ versus what needs an external dialog:
   on. "Open config.yaml" and "Reveal config folder" menu items exist specifically so this path
   never requires knowing where the file lives.
 
-Every change applies through one mechanism, `Runner.Reconfigure` -- see CLAUDE.md's own
-"guarded-rebuild" invariant for the full explanation. Two fields can't be hot-reloaded and instead
-mark the menu's "Restart now" item visible: `tray.statusAddr` (the status page's bind is this
-tray's single-instance guard, already committed to by the time a reload could run) and
-`ingest.cardRoots` (the card-detection watch goroutine isn't restartable from inside the running
-menu). **Unverified on real hardware**, same caveat as issue #30's dialog work below -- the
+Every change applies through one mechanism, `Runner.Reconfigure` -- it rebuilds the
+affected components (`branchdam.Client`, `ingest.Engine`) and applies them atomically under a
+mutex lock. A field that requires a restart (`tray.statusAddr`, `ingest.cardRoots`) is caught
+by a snapshot diff in `SettingsView`, which shows "Restart now" instead of applying immediately.
+**Unverified on real hardware**, same caveat as issue #30's dialog work below -- the
 settings dialogs share the same re-exec'd `dialog` subcommand.
 
 The embedded status page itself is unchanged by this PR (still the `<meta http-equiv="refresh">`
