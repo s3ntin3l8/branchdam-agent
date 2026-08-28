@@ -40,6 +40,17 @@ func (f *fakeAttacher) PostEdgeAttached(_ context.Context, agentID string, paylo
 	return &branchdam.EventResponse{EventID: "evt-" + agentID}, nil
 }
 
+// The fixture (createFixtureCatalog, catalog_test.go) has 3 real pairs
+// (image ids 101->102, 103->104, 105->106), 1 ambiguous candidate (109), 1
+// no-source candidate (110), and 1 path-unresolvable pair (111->112). Every
+// sync_test.go test below resolves at most the 101->102 pair through the
+// node index, so the other candidates consistently land as "found but not
+// emitted" rather than accidentally emitted.
+const (
+	sourcePath = "/Users/test/Pictures/IMG_1000.jpeg"
+	editPath   = "/Users/test/Pictures/IMG_1000_upscale.jpg"
+)
+
 func TestSyncEmitsOnlyWhenBothEndpointsResolve(t *testing.T) {
 	dir := t.TempDir()
 	path := createFixtureCatalog(t, dir)
@@ -51,12 +62,9 @@ func TestSyncEmitsOnlyWhenBothEndpointsResolve(t *testing.T) {
 	}
 	defer func() { _ = cat.Close() }()
 
-	// Only the fixture's one exported-edit pair
-	// (/masters/DSC_0001.NEF -> /exports/DSC_0001-edit.jpg) is a candidate;
-	// resolve both sides.
 	idx := fakeIndex{
-		"/masters/DSC_0001.NEF":      "source-uuid-1",
-		"/exports/DSC_0001-edit.jpg": "target-uuid-1",
+		sourcePath: "source-uuid-1",
+		editPath:   "target-uuid-1",
 	}
 	attacher := &fakeAttacher{}
 
@@ -72,14 +80,26 @@ func TestSyncEmitsOnlyWhenBothEndpointsResolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	if stats.PairsFound != 1 {
-		t.Errorf("PairsFound = %d, want 1", stats.PairsFound)
+	if stats.PairsFound != 3 {
+		t.Errorf("PairsFound = %d, want 3", stats.PairsFound)
+	}
+	if stats.Ambiguous != 1 {
+		t.Errorf("Ambiguous = %d, want 1", stats.Ambiguous)
+	}
+	if stats.NoSourceInCatalog != 1 {
+		t.Errorf("NoSourceInCatalog = %d, want 1", stats.NoSourceInCatalog)
+	}
+	if stats.PathUnresolvable != 1 {
+		t.Errorf("PathUnresolvable = %d, want 1", stats.PathUnresolvable)
 	}
 	if stats.Emitted != 1 {
 		t.Errorf("Emitted = %d, want 1", stats.Emitted)
 	}
-	if stats.SourceUnresolved != 0 || stats.EditUnresolved != 0 {
-		t.Errorf("expected no unresolved pairs, got source=%d edit=%d", stats.SourceUnresolved, stats.EditUnresolved)
+	// The panorama and trashed-source pairs are also PairsFound but have no
+	// node-index entries, so they land as unresolved, not emitted.
+	if stats.SourceUnresolved+stats.EditUnresolved != 2 {
+		t.Errorf("SourceUnresolved+EditUnresolved = %d, want 2 (the other 2 real pairs, unresolved)",
+			stats.SourceUnresolved+stats.EditUnresolved)
 	}
 
 	if len(attacher.calls) != 1 {
@@ -118,8 +138,20 @@ func TestSyncEmitsOnlyWhenBothEndpointsResolve(t *testing.T) {
 	if ev.SchemaMapping != SchemaMappingVersion {
 		t.Errorf("evidence.SchemaMapping = %q, want %q", ev.SchemaMapping, SchemaMappingVersion)
 	}
-	if ev.SourceRowID != "1" || ev.EditRowID != "1" {
-		t.Errorf("evidence row ids = (%q, %q), want (1, 1)", ev.SourceRowID, ev.EditRowID)
+	if ev.SourceRowID != "101" || ev.EditRowID != "102" {
+		t.Errorf("evidence row ids = (%q, %q), want (101, 102)", ev.SourceRowID, ev.EditRowID)
+	}
+	if ev.MatchRule != "filename-suffix" {
+		t.Errorf("evidence.MatchRule = %q, want filename-suffix", ev.MatchRule)
+	}
+	if ev.Suffix != "_upscale" {
+		t.Errorf("evidence.Suffix = %q, want _upscale", ev.Suffix)
+	}
+	if !ev.CameraModelMatch {
+		t.Error("evidence.CameraModelMatch = false, want true")
+	}
+	if !ev.CaptureTimeMatch {
+		t.Error("evidence.CaptureTimeMatch = false, want true")
 	}
 }
 
@@ -135,8 +167,10 @@ func TestSyncSkipsWhenSourceUnresolved(t *testing.T) {
 	defer func() { _ = cat.Close() }()
 
 	idx := fakeIndex{
-		// source path missing; only the edit output is known
-		"/exports/DSC_0001-edit.jpg": "target-uuid-1",
+		// source path missing; only the edit output is known. The fixture's
+		// other 2 real pairs (panorama, trashed-source) have neither
+		// endpoint in the index either, so all 3 land as source-unresolved.
+		editPath: "target-uuid-1",
 	}
 	attacher := &fakeAttacher{}
 	syncer := &Syncer{Catalog: cat, Index: idx, Client: attacher, AgentID: "a", CatalogPath: path}
@@ -145,11 +179,17 @@ func TestSyncSkipsWhenSourceUnresolved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	if stats.SourceUnresolved != 1 {
-		t.Errorf("SourceUnresolved = %d, want 1", stats.SourceUnresolved)
+	if stats.SourceUnresolved != 3 {
+		t.Errorf("SourceUnresolved = %d, want 3", stats.SourceUnresolved)
 	}
-	if stats.Emitted != 0 || len(attacher.calls) != 0 {
-		t.Errorf("expected no edges emitted when the source master is unresolved, got %d calls", len(attacher.calls))
+	// The real invariant under test -- an unresolved source never emits --
+	// doesn't move if the fixture grows a new unrelated pair; SourceUnresolved
+	// above does, so both are asserted.
+	if stats.Emitted != 0 {
+		t.Errorf("Emitted = %d, want 0 when the source master is unresolved", stats.Emitted)
+	}
+	if len(attacher.calls) != 0 {
+		t.Errorf("expected no edges emitted when the 101->102 source master is unresolved, got %d calls", len(attacher.calls))
 	}
 }
 
@@ -168,7 +208,7 @@ func TestSyncSkipsWhenEditUnresolved(t *testing.T) {
 		// edit path missing; only the source master is known -- this is the
 		// realistic "master ingested, Luminar export was scanned normally
 		// and its nodeUuid isn't known to the agent" case.
-		"/masters/DSC_0001.NEF": "source-uuid-1",
+		sourcePath: "source-uuid-1",
 	}
 	attacher := &fakeAttacher{}
 	syncer := &Syncer{Catalog: cat, Index: idx, Client: attacher, AgentID: "a", CatalogPath: path}
@@ -180,8 +220,11 @@ func TestSyncSkipsWhenEditUnresolved(t *testing.T) {
 	if stats.EditUnresolved != 1 {
 		t.Errorf("EditUnresolved = %d, want 1", stats.EditUnresolved)
 	}
-	if stats.Emitted != 0 || len(attacher.calls) != 0 {
-		t.Errorf("expected no edges emitted when the edit output is unresolved, got %d calls", len(attacher.calls))
+	if stats.Emitted != 0 {
+		t.Errorf("Emitted = %d, want 0 when the edit output is unresolved", stats.Emitted)
+	}
+	if len(attacher.calls) != 0 {
+		t.Errorf("expected no edges emitted when the 101->102 edit output is unresolved, got %d calls", len(attacher.calls))
 	}
 }
 
@@ -197,8 +240,8 @@ func TestSyncDryRunNeverCallsClient(t *testing.T) {
 	defer func() { _ = cat.Close() }()
 
 	idx := fakeIndex{
-		"/masters/DSC_0001.NEF":      "source-uuid-1",
-		"/exports/DSC_0001-edit.jpg": "target-uuid-1",
+		sourcePath: "source-uuid-1",
+		editPath:   "target-uuid-1",
 	}
 	attacher := &fakeAttacher{}
 	syncer := &Syncer{Catalog: cat, Index: idx, Client: attacher, AgentID: "a", CatalogPath: path, DryRun: true}
@@ -227,8 +270,8 @@ func TestSyncCountsClientErrors(t *testing.T) {
 	defer func() { _ = cat.Close() }()
 
 	idx := fakeIndex{
-		"/masters/DSC_0001.NEF":      "source-uuid-1",
-		"/exports/DSC_0001-edit.jpg": "target-uuid-1",
+		sourcePath: "source-uuid-1",
+		editPath:   "target-uuid-1",
 	}
 	attacher := &fakeAttacher{failOn: "target-uuid-1"}
 	syncer := &Syncer{Catalog: cat, Index: idx, Client: attacher, AgentID: "a", CatalogPath: path}
@@ -275,9 +318,9 @@ func TestSyncUsesQueryOverride(t *testing.T) {
 	defer func() { _ = cat.Close() }()
 
 	// An override query that returns zero rows should short-circuit Sync
-	// with PairsFound=0, proving Query actually replaces
-	// DefaultEditSourceQuery rather than being ignored.
-	override := `SELECT '' , '', '', '' WHERE 0`
+	// with PairsFound=0, proving Query actually replaces DefaultCatalogQuery
+	// rather than being ignored.
+	override := `SELECT '', '', '', '', 0, '', 0 WHERE 0`
 	syncer := &Syncer{Catalog: cat, Index: fakeIndex{}, Client: &fakeAttacher{}, AgentID: "a", CatalogPath: path, Query: override}
 
 	stats, err := syncer.Sync(ctx)
@@ -286,5 +329,51 @@ func TestSyncUsesQueryOverride(t *testing.T) {
 	}
 	if stats.PairsFound != 0 {
 		t.Errorf("PairsFound = %d, want 0 with the override query", stats.PairsFound)
+	}
+}
+
+// TestSyncUsesDerivativeSuffixesOverride proves DerivativeSuffixes actually
+// replaces DefaultDerivativeSuffixes: an override query exposing a single
+// _hdr-suffixed pair the default suffix list would never match.
+func TestSyncUsesDerivativeSuffixesOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := createFixtureCatalog(t, dir)
+	ctx := context.Background()
+
+	cat, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = cat.Close() }()
+
+	override := `
+SELECT '1', '/mnt', 'p', 'IMG_0001.jpeg', 0, '', 0
+UNION ALL
+SELECT '2', '/mnt', 'p', 'IMG_0001_hdr.jpg', 0, '', 0
+`
+	idx := fakeIndex{
+		"/mnt/p/IMG_0001.jpeg":    "source-uuid",
+		"/mnt/p/IMG_0001_hdr.jpg": "target-uuid",
+	}
+	attacher := &fakeAttacher{}
+	syncer := &Syncer{
+		Catalog:            cat,
+		Index:              idx,
+		Client:             attacher,
+		AgentID:            "a",
+		CatalogPath:        path,
+		Query:              override,
+		DerivativeSuffixes: []string{"_hdr"},
+	}
+
+	stats, err := syncer.Sync(ctx)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if stats.PairsFound != 1 || stats.Emitted != 1 {
+		t.Fatalf("stats = %+v, want PairsFound=1 Emitted=1", stats)
+	}
+	if len(attacher.calls) != 1 {
+		t.Fatalf("expected exactly 1 PostEdgeAttached call, got %d", len(attacher.calls))
 	}
 }

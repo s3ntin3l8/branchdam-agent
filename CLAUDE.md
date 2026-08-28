@@ -36,7 +36,7 @@ make build-darwin-app# Assembles macOS .app bundle via tools/mkbundle
 | `internal/queue` | Local SQLite queue (`queue.db`) persisting ingest records and retry states for offline field operation |
 | `internal/tray` | Menu bar / system tray companion (Windows/macOS) with loopback HTTP status server (`localhost:52419`) |
 | `internal/selfupdate` | Checksum-validated self-update (`go-selfupdate`) with atomic apply and instant rollback |
-| `internal/luminar` | Read-only SQLite parser (`catalog.db`) generating Tier-2 lineage edges for Luminar Neo |
+| `internal/luminar` | Read-only Luminar Neo catalog parser (schema verified against `db_version 155`) generating Tier-2 lineage edges from filename-inferred pairing -- see `docs/luminar-catalog.md` |
 | `internal/nodeindex` | File path to `nodeUuid` lookup resolver |
 | `internal/hashing` | Ported xxHash64 `FastHash`, `StreamingFastHasher`, BLAKE3 `FullHash`, and `PerceptualHash` |
 | `internal/config` | YAML config loader with environment expansion and surgical `yaml.Node` atomic patcher |

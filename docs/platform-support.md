@@ -273,10 +273,13 @@ the cost. See Known gaps.
   prune) and the two background timers (`cmd/branchdam-agent/queueagent.go`'s `startPeriodic`) are
   pinned by unit tests with fake `Drainer`/`Pruner`s, but nothing here has exercised a real
   drain/prune pass running concurrently with a real card ingest on Windows or macOS.
-- **The Luminar `catalog.db` query is unvalidated against a real catalog.** Luminar's schema is
-  undocumented; see [`luminar-catalog.md`](luminar-catalog.md) for the research behind the
-  built-in query, its confidence level, and `--dump-schema` for correcting it against your own
-  catalog.
+- **The Luminar Neo catalog query is verified against exactly one catalog version.** Checked
+  against `db_version 155` (see [`luminar-catalog.md`](luminar-catalog.md) for the full record);
+  a different Luminar Neo version's schema is unconfirmed. More importantly, Luminar Neo itself
+  stores no relational edit->source lineage at all -- pairing is inferred from filename
+  convention (`_upscale`/`_panorama`), not read from the catalog. Use `--dump-schema` /
+  `-query-file` to correct row extraction against a different version, and
+  `-derivative-suffixes` to correct the pairing heuristic without a code change.
 - **`prune` is not real Tier-1 NLE scratch pruning.** It only ever considers files ingested via
   `ingest -offline` (rows in `queue.db`) -- a plain online `ingest` has no durable local-path
   ledger to prune against. Real Tier-1 `LOCAL_SCRATCH` pruning stays architecturally blocked on
