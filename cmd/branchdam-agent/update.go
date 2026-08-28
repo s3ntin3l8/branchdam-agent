@@ -31,10 +31,15 @@ func runUpdateCmd(args []string) int {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config file (default: ./config.yaml if present, else the per-user config directory)")
 	checkOnly := fs.Bool("check", false, "check for an update and report it, without applying")
-	yes := fs.Bool("yes", false, "apply without prompting for confirmation")
+	yes := fs.Bool("yes", false, "apply (or roll back) without prompting for confirmation")
+	rollback := fs.Bool("rollback", false, "restore the previously applied version, without checking for or applying any new update")
 	timeout := fs.Duration("timeout", 5*time.Minute, "timeout for the check/apply network calls")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	if *rollback {
+		return runUpdateRollbackCmd(*yes)
 	}
 
 	resolvedPath, err := config.ResolvePath(*configPath)
@@ -104,6 +109,47 @@ func runUpdateCmd(args []string) int {
 	}
 
 	fmt.Printf("branchdam-agent update: applied %s\n", appliedVersion)
+	return 0
+}
+
+// runUpdateRollbackCmd implements `branchdam-agent update -rollback`: the
+// headless equivalent of the tray's "Roll back to vX" menu item.
+// Deliberately independent of selfUpdate.enabled and config entirely --
+// unlike Check/Apply, Rollback makes no network call (it restores from a
+// local ".previous" backup a prior Apply left on disk), so there is no
+// config to load and nothing here needs to be gated by that flag. See
+// selfupdateagent.go's RollbackAvailable/Rollback doc comments for the
+// same reasoning on the tray side.
+func runUpdateRollbackCmd(yes bool) int {
+	execPath, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent update -rollback: resolve own executable: %v\n", err)
+		return 1
+	}
+	layout, err := selfupdate.DetectLayout(execPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent update -rollback: %v\n", err)
+		return 1
+	}
+
+	version, err := selfupdate.PreviousVersion(layout)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "branchdam-agent update -rollback: no previous version to roll back to")
+		return 1
+	}
+
+	if !yes && !confirm(os.Stdin, os.Stdout, fmt.Sprintf("Roll back to %s? [y/N] ", version)) {
+		fmt.Println("branchdam-agent update -rollback: not rolling back")
+		return 0
+	}
+
+	applied, err := selfupdate.Rollback(layout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent update -rollback: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("branchdam-agent update: rolled back to %s\n", applied)
 	return 0
 }
 

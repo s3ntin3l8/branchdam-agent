@@ -111,6 +111,28 @@ func (u *Updater) Check(ctx context.Context, currentVersion string) (CheckResult
 // bundle's inner binary, never the bundle itself, so nothing else keeps
 // CFBundleVersion in sync.
 //
+// Each target is applied through its OWN go-selfupdate Updater instance,
+// configured with an OldSavePath of "<target>.previous" -- go-selfupdate's
+// own su.Config.OldSavePath is a single fixed string per Updater, and this
+// package's single shared u.up Updater is reused across every target in
+// layout, so setting it there would make a Windows install's second
+// UpdateTo call (the primary exe) silently overwrite the sibling exe's
+// just-saved backup at the same path. A fresh per-target Updater (cheap:
+// no network, just a struct) sidesteps that without needing a shared
+// mutable field. This does mean the release archive is still downloaded
+// and checksum-validated once per target (twice on Windows) -- accepted
+// as a known cost rather than reimplementing go-selfupdate's unexported
+// download/validate pipeline ourselves, which would move this repo's only
+// integrity control (see this file's own doc comment) out of the
+// library's hands and into a hand-rolled copy that silently stops
+// tracking upstream if the configured Validator ever changes. See
+// docs/platform-support.md's Known gaps.
+//
+// The version being replaced (currentVersion) is recorded in a sidecar
+// file next to layout.Primary's own backup once every target has
+// succeeded -- see rollback.go's PreviousVersion/HasRollback/Rollback for
+// how that sidecar is used.
+//
 // ctx should not be tied to a signal-derived cancellation for the whole
 // call: a cancel landing between the sibling apply and the primary apply
 // would leave the two at different versions. Callers should use
@@ -136,9 +158,20 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 	}
 
 	for _, target := range layout.orderedTargets() {
-		if err := u.up.UpdateTo(ctx, release, target); err != nil {
+		targetUpdater, err := su.NewUpdater(su.Config{
+			Validator:   &su.ChecksumValidator{UniqueFilename: ChecksumAsset},
+			OldSavePath: target + rollbackSuffix,
+		})
+		if err != nil {
+			return "", fmt.Errorf("selfupdate: configure updater for %s: %w", target, err)
+		}
+		if err := targetUpdater.UpdateTo(ctx, release, target); err != nil {
 			return "", fmt.Errorf("selfupdate: apply %s to %s: %w", release.Version(), target, err)
 		}
+	}
+
+	if err := os.WriteFile(layout.Primary+rollbackVersionSuffix, []byte(currentVersion), 0o600); err != nil {
+		return "", fmt.Errorf("selfupdate: record previous version for rollback: %w", err)
 	}
 
 	if layout.InfoPlist != "" {

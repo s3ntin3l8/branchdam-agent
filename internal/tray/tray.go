@@ -50,11 +50,17 @@ func (s IngestSummary) OK() bool {
 }
 
 // Outcome is why Run returned -- specifically, whether the operator asked
-// for an update to be installed. Untagged (unlike Run itself) so both
-// run_supported.go and run_unsupported.go's stub can share the type.
+// for an update to be installed or a previous one rolled back. Untagged
+// (unlike Run itself) so both run_supported.go and run_unsupported.go's
+// stub can share the type.
 type Outcome struct {
 	RestartRequested bool
 	AppliedVersion   string
+	// RolledBack distinguishes a successful "Roll back to vX" from a
+	// forward self-update -- both set AppliedVersion (the version now
+	// running after the restart), but the caller's log line should say
+	// "rolled back to" rather than "updated to".
+	RolledBack bool
 }
 
 // SelfUpdater is the subset of the self-update subsystem the tray drives:
@@ -66,6 +72,15 @@ type Outcome struct {
 type SelfUpdater interface {
 	Status() UpdateStatus
 	ApplyLatest(ctx context.Context) (string, error)
+	// RollbackAvailable reports whether a previously applied version can
+	// be restored right now, and if so, which one -- a cheap local
+	// filesystem check (internal/selfupdate.HasRollback/PreviousVersion),
+	// safe to call on every menu-refresh tick, never a network call.
+	RollbackAvailable() (version string, ok bool)
+	// Rollback restores the previously applied version. Mirrors
+	// ApplyLatest's own contract: the caller is responsible for holding
+	// Runner.TryLockIdle for the call's entire duration.
+	Rollback(ctx context.Context) (string, error)
 }
 
 // UpdateStatus is a structured snapshot of the self-update subsystem's

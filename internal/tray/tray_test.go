@@ -428,6 +428,8 @@ type fakeSelfUpdater struct{}
 
 func (fakeSelfUpdater) Status() UpdateStatus                          { return UpdateStatus{} }
 func (fakeSelfUpdater) ApplyLatest(_ context.Context) (string, error) { return "", nil }
+func (fakeSelfUpdater) RollbackAvailable() (string, bool)             { return "", false }
+func (fakeSelfUpdater) Rollback(_ context.Context) (string, error)    { return "", nil }
 
 // fakeSettings is a no-op Settings shared by tests across build tags, the
 // same way fakeSelfUpdater is.

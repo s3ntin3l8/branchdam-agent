@@ -177,6 +177,43 @@ newest tag). The `test-go / lint-and-test` check suppresses that specific findin
 `s3ntin3l8/.github/ci-go.yml`'s `govulncheck-ignore` input. See tracked issue #14 for when the
 ignore entry can be dropped.
 
+### Rollback (issue #33)
+
+Every target `Apply` touches is replaced through its own `go-selfupdate` `Updater` instance,
+configured with `OldSavePath: "<target>.previous"` -- go-selfupdate's own `su.Config.OldSavePath`
+is a single fixed string per `Updater`, and this package's shared `Updater` is reused across every
+target in a layout, so setting it there would make a Windows install's second target (the primary
+exe) silently overwrite the sibling exe's just-saved backup at the same path. A fresh per-target
+`Updater` is cheap (no network, just a struct) and sidesteps that. Once every target succeeds, the
+version being replaced is recorded in a sidecar file next to the primary's own backup
+(`<primary>.previous.version`) -- `internal/selfupdate.HasRollback`/`PreviousVersion` read it to
+report whether a rollback is available and to which version, and `Rollback` uses it to restore
+every target from its own `.previous` file (via go-selfupdate's exported `update.Apply`, reused in
+the reverse direction) and to rewrite a macOS bundle's `Info.plist` back to the rolled-back
+version. Rollback applies to targets in the *same* order `Apply` does -- siblings first, the
+running exe last -- for the identical safety reason: a failure on a sibling aborts before the
+running binary is touched. On success, every `.previous` backup and the version sidecar are
+removed, so the tray's "Roll back to vX" menu item (and `update -rollback`) disappear again until
+the next `Apply` creates a fresh one.
+
+Rollback makes no network call at all -- it is deliberately **not** gated by `selfUpdate.enabled`,
+unlike Check/Apply. An operator who has since disabled self-update checking can still undo an
+update they applied while it was enabled. `update -rollback [-yes]` is the headless equivalent of
+the tray's "Roll back to vX" menu item; both prompt for confirmation unless `-yes`/an explicit
+click bypasses it, mirroring Apply's own confirm-unless-`-yes` shape.
+
+**The per-target `Updater` construction does not fix the pre-existing double download on
+Windows.** Each target still calls its own `UpdateTo`, which downloads and checksum-validates the
+release archive independently -- twice on Windows, once for each binary, exactly as before this
+PR. Genuinely downloading once and applying to N targets would require calling
+`go-selfupdate`'s unexported `download`/`validate` methods indirectly (there is no exported
+"fetch once, apply many" entry point), which would mean reimplementing this repo's *only*
+integrity control (see this section's opening paragraph) as a hand-maintained copy that silently
+stops tracking upstream if the configured `Validator` ever changes -- e.g. to a chained
+`PatternValidator` for a future PGP-over-SHA256SUMS check. That is a strictly worse trade than one
+extra ~10MB download on one platform, so this PR keeps calling `UpdateTo` per target and accepts
+the cost. See Known gaps.
+
 ## Known gaps
 
 - **`LSUIElement=1` Dock-suppression is unverified on real hardware**, as is whether AppKit's
@@ -184,10 +221,17 @@ ignore entry can be dropped.
   than opening the `.app` -- see the macOS `.app` bundle section above.
 - **The exact Gatekeeper prompt wording, and whether App Translocation actually triggers the way
   described above, are unverified** without a macOS host to observe them directly.
-- **The Windows two-binary self-update apply and the macOS relaunch-via-`open -n -a` path are
-  both unverified end-to-end** -- `internal/selfupdate`'s archive-entry-selection and checksum
-  logic are pinned by tests that run on Linux CI (see that package's tests), but a full
-  download-verify-swap-relaunch cycle has not been exercised on real Windows or macOS hardware.
+- **The Windows two-binary self-update apply, the macOS relaunch-via-`open -n -a` path, and
+  rollback (issue #33) are all unverified end-to-end** -- `internal/selfupdate`'s archive-entry-
+  selection, checksum, and rollback-restore logic are pinned by tests that run on Linux CI (see
+  that package's tests, including `rollback_test.go` against fabricated `InstallLayout`s), but a
+  full download-verify-swap-relaunch cycle, and a subsequent roll-back, have not been exercised on
+  real Windows or macOS hardware. See the Hardware verification checklist below.
+- **The release archive is still downloaded and checksum-validated once per target -- twice on
+  Windows -- even after issue #33's rollback work.** Accepted cost, not fixed: see the Rollback
+  subsection above for why a genuine single-download fix would mean reimplementing
+  `go-selfupdate`'s unexported download/validate pipeline by hand, moving this repo's only
+  integrity control out of the library's hands.
 - **The startup-error dialog (issue #30) is unverified on real hardware.** Does it actually appear
   when re-exec'd from `branchdam-agent-tray.exe` (a `-H windowsgui`-linked process with no
   console, before systray's own message pump has started), and from the `.app` bundle launched by
@@ -232,3 +276,62 @@ ignore entry can be dropped.
   ledger to prune against. Real Tier-1 `LOCAL_SCRATCH` pruning stays architecturally blocked on
   branchDAM's side (branchDAM issues #230, #266): nothing can mint a `storage_location_id` for
   an unmounted tier without breaking that invariant.
+
+## Hardware verification checklist
+
+Everything above marked "unverified on real hardware" needs a real Windows 11 machine and a real
+macOS (Apple Silicon) machine to check off -- nothing in this list can be exercised from this
+repo's Linux-only development/CI environment. Run through this after any change to
+`internal/tray`, `internal/selfupdate`, or `internal/appbundle`; check off what passes, and file
+an issue (with what actually happened) for what doesn't, rather than silently updating this list
+to say "verified."
+
+**Windows:**
+
+1. First-run bootstrap: delete `%AppData%\branchdam-agent\config.yaml`, launch
+   `branchdam-agent-tray.exe` directly (not via a console) -- confirm the setup wizard's dialogs
+   (server URL, API key, archive/local roots, path mapping) render as native Win32 dialogs, not a
+   silent failure, and that a starter config is left on disk if you cancel partway.
+2. Startup-error dialog: hand-edit `config.yaml` to something `Validate()` rejects (e.g. an
+   unexpanded `${VAR}` in `server.apiKey`), launch `branchdam-agent-tray.exe` -- confirm an error
+   dialog appears (before systray's own message pump has started) naming the log path at
+   `%LOCALAPPDATA%\branchDAM\logs\agent.log`.
+3. Settings menu dialogs: with a config already in place, open the tray's Settings submenu and
+   trigger each free-text prompt (server URL, API key, naming template, the two folder pickers) --
+   confirm each renders correctly while systray's own message pump is *already running* (a
+   materially different scenario from item 2's pre-`systray.Run` dialog).
+4. Full self-update cycle: publish (or point `selfUpdate.repo` at) a test release one patch version
+   above the running build, click "Install and restart" -- confirm both `branchdam-agent.exe` and
+   `branchdam-agent-tray.exe` end up at the new version, the tray relaunches cleanly, and
+   `%LOCALAPPDATA%\branchDAM\logs\agent.log` shows no partial-apply errors.
+5. Rollback: immediately after step 4, click "Roll back to vX" (or run
+   `branchdam-agent update -rollback`) -- confirm both `.exe`s are restored to the pre-update
+   version, the tray relaunches, and a second "Roll back" attempt correctly reports nothing left
+   to roll back to.
+6. Tray-driven queue: with `offline.queueDbPath` and `prune.enabled: true` set, ingest a card
+   offline, then let the tray's own drain/prune timers run (or use "Drain queue now"/"Prune now")
+   -- confirm the status page's queue counts update and a card ingest started while a drain/prune
+   pass is in flight is never blocked or corrupted.
+
+**macOS (Apple Silicon):**
+
+1. `LSUIElement=1` Dock suppression: launch `branchdam-agent.app` from `/Applications` -- confirm
+   no Dock tile and no Cmd-Tab entry appear, both when opened normally (`open -a`) and via a
+   LaunchAgent (`tray.startOnLogin: true`, which execs the bundle's inner binary rather than
+   opening the bundle -- confirm AppKit's Dock-suppression still applies in that path too).
+2. Gatekeeper/quarantine: download the release archive via a browser (not `curl`), extract, and
+   launch `branchdam-agent.app` from `~/Downloads` without moving it first -- confirm it either
+   triggers App Translocation (and `internal/selfupdate.DetectLayout` refuses with
+   `ErrTranslocated`, surfaced as a startup-error dialog, not a crash) or exhibits whatever the
+   actual Gatekeeper prompt wording turns out to be. Then move it to `/Applications` and confirm
+   translocation clears.
+3. Startup-error dialog and settings dialogs: same two checks as Windows items 2-3 above, but
+   confirm the `osascript`-backed dialog renders correctly when the bundle is launched by launchd
+   (a LaunchAgent `RunAtLoad`), not just from Finder.
+4. Full self-update cycle: same as Windows item 4 -- confirm go-selfupdate replaces only
+   `branchdam-agent.app/Contents/MacOS/branchdam-agent` (never the bundle itself), `Info.plist`'s
+   `CFBundleVersion` is rewritten to match, and the relaunch (`open -n -a`, not a bare `exec`)
+   produces exactly one running tray process, not two.
+5. Rollback: same as Windows item 5 -- additionally confirm `Info.plist`'s `CFBundleVersion` is
+   rewritten back to the rolled-back version, not left at the version being rolled back FROM.
+6. Tray-driven queue: same as Windows item 6.
