@@ -156,6 +156,7 @@ func runTrayCmd(args []string) int {
 			queueStore = nil
 		} else {
 			defer func() { _ = queueStore.Close() }()
+			settings.SetQueueStore(queueStore)
 
 			var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: cfg.AgentID}
 			var pruner tray.Pruner

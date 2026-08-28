@@ -33,6 +33,13 @@ import (
 // ingested and a self-update note that changed since the tray started.
 const menuRefreshInterval = 5 * time.Second
 
+// drainPruneClickTimeout bounds a menu-triggered "Drain queue now"/"Prune
+// now" pass -- the tray's own background timer path
+// (cmd/branchdam-agent/queueagent.go's periodicPassTimeout) already bounds
+// every automatic pass to the same duration; a manual click went unbounded
+// until a Hermes review finding on this PR caught the inconsistency.
+const drainPruneClickTimeout = 2 * time.Minute
+
 // applyResult is what the install goroutine feeds back to the select loop.
 type applyResult struct {
 	version string
@@ -235,7 +242,9 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		drainRequestCh := make(chan struct{}, 1)
 		go func() {
 			for range drainRequestCh {
-				_, ran := r.TriggerDrain(ctx)
+				dctx, cancel := context.WithTimeout(ctx, drainPruneClickTimeout)
+				_, ran := r.TriggerDrain(dctx)
+				cancel()
 				drainDoneCh <- ran
 			}
 		}()
@@ -244,7 +253,9 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		pruneRequestCh := make(chan struct{}, 1)
 		go func() {
 			for range pruneRequestCh {
-				_, ran := r.TriggerPrune(ctx)
+				pctx, cancel := context.WithTimeout(ctx, drainPruneClickTimeout)
+				_, ran := r.TriggerPrune(pctx)
+				cancel()
 				pruneDoneCh <- ran
 			}
 		}()
