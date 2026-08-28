@@ -13,6 +13,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
+	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
@@ -43,6 +44,18 @@ type configSettings struct {
 	mu              sync.Mutex
 	cfg             config.Config
 	restartRequired bool
+	// queueStore is set once via SetQueueStore, right after runTrayCmd
+	// opens queue.db (nil when offline.queueDbPath isn't configured).
+	// reload() uses it to rebuild queueDrainer/queuePruner against the
+	// freshly reloaded client/config on every settings change -- without
+	// this, changing server.baseUrl or rotating server.apiKey from the
+	// Settings menu would leave the drain/prune timers silently using the
+	// stale client indefinitely (a Hermes review finding on this PR: the
+	// queue.db *path* genuinely can't be hot-reloaded, per
+	// Runner.SetQueueDeps' own doc comment, but the client/config the
+	// Drainer/Pruner built from it captured at startup very much can go
+	// stale).
+	queueStore *queue.Store
 }
 
 // newConfigSettings builds a configSettings over the already-loaded cfg
@@ -57,6 +70,17 @@ func newConfigSettings(path string, cfg config.Config, runner *tray.Runner, dial
 		appliedStatusAddr: cfg.Tray.StatusAddrOrDefault(),
 		appliedCardRoots:  append([]string(nil), cfg.Ingest.CardRoots...),
 	}
+}
+
+// SetQueueStore wires the queue.db handle reload() needs to rebuild
+// queueDrainer/queuePruner against a fresh client/config on every settings
+// change. Called once from runTrayCmd, after queue.Open succeeds -- left
+// nil (the zero value) when offline.queueDbPath isn't configured, in
+// which case reload() leaves Runner's queue deps alone, same as today.
+func (s *configSettings) SetQueueStore(store *queue.Store) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.queueStore = store
 }
 
 func (s *configSettings) Snapshot() tray.SettingsView {
@@ -262,7 +286,15 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 }
 
 // reload re-reads config.yaml, rebuilds the branchdam.Client and
-// ingest.Engine it feeds, and applies them via Runner.Reconfigure.
+// ingest.Engine it feeds, applies them via Runner.Reconfigure, and --
+// when SetQueueStore wired a queue.db handle -- also rebuilds
+// queueDrainer/queuePruner against the same fresh client/config and
+// re-applies them via Runner.SetQueueDeps. Without this second half, a
+// server.baseUrl/server.apiKey change from the Settings menu would leave
+// the tray's drain/prune timers using the stale client indefinitely (a
+// Hermes review finding on this PR) -- TriggerDrain/TriggerPrune read
+// Runner's drainer/pruner fields fresh on every call, so the very next
+// timer tick picks up the rebuilt ones automatically.
 //
 // Rejects on ANY Validate() problem, not just a server.*-prefixed one:
 // unlike runTrayCmd's own startup gate (which only treats server.* as
@@ -296,9 +328,19 @@ func (s *configSettings) reload() error {
 	s.cfg = newCfg
 	s.restartRequired = s.appliedStatusAddr != newCfg.Tray.StatusAddrOrDefault() ||
 		!slices.Equal(s.appliedCardRoots, newCfg.Ingest.CardRoots)
+	queueStore := s.queueStore
 	s.mu.Unlock()
 
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
+
+	if queueStore != nil {
+		var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: newCfg.AgentID}
+		var pruner tray.Pruner
+		if newCfg.Prune.Enabled {
+			pruner = &queuePruner{client: client, store: queueStore, cfg: newCfg}
+		}
+		s.runner.SetQueueDeps(&queueCountsReader{store: queueStore}, drainer, pruner)
+	}
 	return nil
 }
 

@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
@@ -319,5 +323,77 @@ func TestConfigSettingsPromptAndSetRejectsInvalidValueBeforePersisting(t *testin
 	}
 	if string(after) != string(before) {
 		t.Error("expected config.yaml to be byte-for-byte unchanged when validation rejects the value before config.Patch ever runs")
+	}
+}
+
+// TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange is a
+// regression test for a Hermes review finding: queueDrainer/queuePruner
+// captured *branchdam.Client by value at construction, so a
+// server.baseUrl (or apiKey) change applied through the Settings menu
+// left the tray's drain/prune timers silently talking to the OLD server
+// forever, even though the ingest engine itself picked up the new one via
+// Runner.Reconfigure. reload() must rebuild the Drainer/Pruner too,
+// whenever SetQueueStore has wired a queue.db handle.
+func TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange(t *testing.T) {
+	var hitOld, hitNew int32
+	handshakeOK := func(hits *int32, version string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(hits, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"serverVersion":"` + version + `","serverTimeUnix":1,"pendingEventsCount":0}`))
+		}
+	}
+	oldSrv := httptest.NewServer(handshakeOK(&hitOld, "old"))
+	defer oldSrv.Close()
+	newSrv := httptest.NewServer(handshakeOK(&hitNew, "new"))
+	defer newSrv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"" + oldSrv.URL + "\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
+		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
+	queueStore := openTestQueueStore(t)
+
+	dialog := func(args ...string) (string, int, error) {
+		return newSrv.URL, dialogExitOK, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+	s.SetQueueStore(queueStore)
+	runner.SetQueueDeps(
+		&queueCountsReader{store: queueStore},
+		&queueDrainer{client: branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey), store: queueStore, agentID: cfg.AgentID},
+		nil,
+	)
+
+	if _, ran := runner.TriggerDrain(context.Background()); !ran {
+		t.Fatal("expected the initial TriggerDrain to run")
+	}
+	if atomic.LoadInt32(&hitOld) != 1 {
+		t.Fatalf("expected the initial drainer to hit the old server, hitOld=%d", hitOld)
+	}
+
+	if _, err := s.PromptAndSet(tray.FieldServerBaseURL); err != nil {
+		t.Fatalf("PromptAndSet: %v", err)
+	}
+
+	if _, ran := runner.TriggerDrain(context.Background()); !ran {
+		t.Fatal("expected the post-reload TriggerDrain to run")
+	}
+	if atomic.LoadInt32(&hitNew) != 1 {
+		t.Errorf("expected the rebuilt drainer to hit the new server after a server.baseUrl change, hitNew=%d -- stale-client regression", hitNew)
 	}
 }

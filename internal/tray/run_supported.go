@@ -33,6 +33,13 @@ import (
 // ingested and a self-update note that changed since the tray started.
 const menuRefreshInterval = 5 * time.Second
 
+// drainPruneClickTimeout bounds a menu-triggered "Drain queue now"/"Prune
+// now" pass -- the tray's own background timer path
+// (cmd/branchdam-agent/queueagent.go's periodicPassTimeout) already bounds
+// every automatic pass to the same duration; a manual click went unbounded
+// until a Hermes review finding on this PR caught the inconsistency.
+const drainPruneClickTimeout = 2 * time.Minute
+
 // applyResult is what the install goroutine feeds back to the select loop.
 type applyResult struct {
 	version string
@@ -73,6 +80,12 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		ingestNow := systray.AddMenuItem("Ingest now", "Run one ingest pass over every configured watch directory")
 		systray.AddSeparator()
 
+		queueItem := systray.AddMenuItem("Queue: not configured", "Offline queue backlog (offline.queueDbPath)")
+		queueItem.Disable()
+		drainNow := systray.AddMenuItem("Drain queue now", "Submit pending events, copy pending archive bytes, and rebase eligible rows")
+		pruneNow := systray.AddMenuItem("Prune now", "Delete verified local-edit-root mirrors eligible for cleanup")
+		systray.AddSeparator()
+
 		// Every settings action (a checkbox toggle, a free-text prompt,
 		// Reload/Open/Reveal) runs through this one worker, for the same
 		// reason ingestNow does: SetBool/SetInt/PromptAndSet/Reload all do
@@ -98,6 +111,13 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		quitItem := systray.AddMenuItem("Quit", "Stop the branchDAM agent tray")
 
 		var applying bool
+		// drainSkipped/pruneSkipped are set by the drainDoneCh/pruneDoneCh
+		// handlers below when a menu click's TriggerDrain/TriggerPrune call
+		// reported ran=false (a pass was already running, or -- for prune
+		// -- an ingest holds Runner.gate) -- otherwise a dropped click is
+		// silent and looks identical to a successful no-op pass. refresh()
+		// shows the note for exactly one tick, then clears it.
+		var drainSkipped, pruneSkipped bool
 
 		refresh := func() {
 			us := up.Status()
@@ -114,6 +134,37 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 			} else {
 				watchItem.SetTitle(fmt.Sprintf("Watching %d director%s", len(st.WatchDirs), plural(len(st.WatchDirs))))
 				ingestNow.Enable()
+			}
+
+			qs := st.QueueStatus
+			switch {
+			case !qs.Configured:
+				queueItem.SetTitle("Queue: not configured")
+				drainNow.Disable()
+			case qs.Err != nil:
+				queueItem.SetTitle(fmt.Sprintf("Queue: error (%v)", qs.Err))
+				drainNow.Enable()
+			default:
+				queueItem.SetTitle(fmt.Sprintf("Queue: %d pending, %d failed", qs.Counts.Pending(), qs.Counts.Failed))
+				drainNow.Enable()
+			}
+			if qs.Configured && qs.PruneEnabled {
+				pruneNow.Enable()
+			} else {
+				pruneNow.Disable()
+			}
+
+			if drainSkipped {
+				drainNow.SetTitle("Drain queue now (skipped just now -- a pass was already running)")
+				drainSkipped = false
+			} else {
+				drainNow.SetTitle("Drain queue now")
+			}
+			if pruneSkipped {
+				pruneNow.SetTitle("Prune now (skipped just now -- already running, or an ingest is in progress)")
+				pruneSkipped = false
+			} else {
+				pruneNow.SetTitle("Prune now")
 			}
 
 			sv := settings.Snapshot()
@@ -176,6 +227,39 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 			}
 		}()
 
+		// "Drain queue now" and "Prune now" follow the exact same
+		// non-blocking-request / worker-goroutine shape as ingestNow above,
+		// for the same reason: TriggerDrain/TriggerPrune do blocking I/O
+		// (network, disk), and running either inline in the select loop
+		// would freeze the whole menu, including Quit, for as long as a
+		// pass takes. This is on top of, not instead of, the tray's own
+		// background timers (cmd/branchdam-agent/tray.go) that call the
+		// same Runner methods on a schedule -- a manual click and a timer
+		// tick share TriggerDrain/TriggerPrune's own locking (drainMu /
+		// Runner.gate via TryLockIdle), so the two can never race each
+		// other into a double pass.
+		drainDoneCh := make(chan bool, 1)
+		drainRequestCh := make(chan struct{}, 1)
+		go func() {
+			for range drainRequestCh {
+				dctx, cancel := context.WithTimeout(ctx, drainPruneClickTimeout)
+				_, ran := r.TriggerDrain(dctx)
+				cancel()
+				drainDoneCh <- ran
+			}
+		}()
+
+		pruneDoneCh := make(chan bool, 1)
+		pruneRequestCh := make(chan struct{}, 1)
+		go func() {
+			for range pruneRequestCh {
+				pctx, cancel := context.WithTimeout(ctx, drainPruneClickTimeout)
+				_, ran := r.TriggerPrune(pctx)
+				cancel()
+				pruneDoneCh <- ran
+			}
+		}()
+
 		applyDoneCh := make(chan applyResult, 1)
 		var releaseGate func()
 		// quitRequested defers an in-flight ctx.Done()/Quit-click until
@@ -216,6 +300,28 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 					// this click rather than pile up requests.
 				}
 			case <-ingestDoneCh:
+				refresh()
+			case <-drainNow.ClickedCh:
+				select {
+				case drainRequestCh <- struct{}{}:
+				default:
+					// a drain pass is already queued/running; drop this
+					// click rather than pile up requests.
+				}
+			case ran := <-drainDoneCh:
+				if !ran {
+					drainSkipped = true
+				}
+				refresh()
+			case <-pruneNow.ClickedCh:
+				select {
+				case pruneRequestCh <- struct{}{}:
+				default:
+				}
+			case ran := <-pruneDoneCh:
+				if !ran {
+					pruneSkipped = true
+				}
 				refresh()
 			case err := <-settingsDoneCh:
 				sm.lastErr = err

@@ -64,15 +64,248 @@ func TestTriggerIngestEngineError(t *testing.T) {
 	}
 }
 
-func TestStatusQueueStatusIsAlwaysTheStub(t *testing.T) {
+func TestStatusQueueStatusNotConfiguredByDefault(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, nil, "")
 	st := r.Status(UpdateStatus{Enabled: true, Checked: true, CurrentVersion: "1.0.0"})
-	if st.QueueStatus != QueueStatusStub {
-		t.Errorf("got %q, want the literal stub -- never a fabricated number before M2", st.QueueStatus)
+	if st.QueueStatus.Configured {
+		t.Error("expected QueueStatus.Configured=false when SetQueueDeps was never called -- never a fabricated number")
+	}
+	if st.QueueStatus.Counts != (QueueCounts{}) {
+		t.Errorf("expected a zero-value Counts when not configured, got %+v", st.QueueStatus.Counts)
 	}
 	if st.SelfUpdate.Note() != "up to date (1.0.0)" {
 		t.Errorf("got %q", st.SelfUpdate.Note())
 	}
+}
+
+// fakeQueueReader/fakeDrainer/fakePruner substitute the real internal/queue
+// and internal/prune wiring for Runner tests -- same pattern as
+// fakeIngester.
+type fakeQueueReader struct {
+	counts QueueCounts
+	err    error
+}
+
+func (f *fakeQueueReader) Counts(_ context.Context) (QueueCounts, error) {
+	return f.counts, f.err
+}
+
+type fakeDrainer struct {
+	summary DrainSummary
+	err     error
+	started chan struct{}
+	release chan struct{}
+	calls   int
+}
+
+func (f *fakeDrainer) Drain(_ context.Context) (DrainSummary, error) {
+	f.calls++
+	if f.started != nil {
+		close(f.started)
+		<-f.release
+	}
+	return f.summary, f.err
+}
+
+type fakePruner struct {
+	summary PruneSummary
+	err     error
+	calls   int
+}
+
+func (f *fakePruner) Prune(_ context.Context) (PruneSummary, error) {
+	f.calls++
+	return f.summary, f.err
+}
+
+func TestStatusReflectsQueueCounts(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetQueueDeps(&fakeQueueReader{counts: QueueCounts{AwaitingUpload: 3, Failed: 1}}, nil, nil)
+
+	st := r.Status(UpdateStatus{})
+	if !st.QueueStatus.Configured {
+		t.Fatal("expected Configured=true once SetQueueDeps is called with a non-nil reader")
+	}
+	if st.QueueStatus.Counts.Pending() != 3 || st.QueueStatus.Counts.Failed != 1 {
+		t.Errorf("got %+v", st.QueueStatus.Counts)
+	}
+}
+
+// fakeQueueReaderCapturesDeadline is a regression fixture for a Hermes
+// review finding: Status() used to call Counts(context.Background()), an
+// unbounded read on the 5s menu-refresh/status-page hot path that could
+// hang the whole tray on a wedged or NAS-backed queue.db. It doesn't
+// actually block (that would make this test slow); it just records
+// whether the context it was handed carries a deadline.
+type fakeQueueReaderCapturesDeadline struct {
+	gotDeadline bool
+}
+
+func (f *fakeQueueReaderCapturesDeadline) Counts(ctx context.Context) (QueueCounts, error) {
+	_, f.gotDeadline = ctx.Deadline()
+	return QueueCounts{}, nil
+}
+
+func TestStatusBoundsQueueCountsRead(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fq := &fakeQueueReaderCapturesDeadline{}
+	r.SetQueueDeps(fq, nil, nil)
+
+	r.Status(UpdateStatus{})
+
+	if !fq.gotDeadline {
+		t.Error("expected Status() to pass a context with a deadline to QueueReader.Counts, not context.Background()")
+	}
+}
+
+func TestStatusSurfacesQueueReadError(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	wantErr := errors.New("queue.db: disk I/O error")
+	r.SetQueueDeps(&fakeQueueReader{err: wantErr}, nil, nil)
+
+	st := r.Status(UpdateStatus{})
+	if !st.QueueStatus.Configured {
+		t.Fatal("expected Configured=true -- a read error is not the same as unconfigured")
+	}
+	if !errors.Is(st.QueueStatus.Err, wantErr) {
+		t.Errorf("got Err=%v, want %v -- an unreadable queue.db must surface as an error, never a fabricated 0", st.QueueStatus.Err, wantErr)
+	}
+	if st.QueueStatus.Counts != (QueueCounts{}) {
+		t.Error("expected zero Counts alongside a read error, not a stale or fabricated value")
+	}
+}
+
+func TestTriggerDrainRunsAndRecordsLastDrain(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 2, RebasesDone: 1}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	summary, ran := r.TriggerDrain(context.Background())
+	if !ran {
+		t.Fatal("expected TriggerDrain to run when a Drainer is configured and idle")
+	}
+	if summary.NodeCreatedSent != 2 || summary.RebasesDone != 1 {
+		t.Errorf("got %+v", summary)
+	}
+	if summary.At.IsZero() {
+		t.Error("expected TriggerDrain to stamp At, not leave it to the Drainer")
+	}
+
+	st := r.Status(UpdateStatus{})
+	if st.QueueStatus.LastDrain == nil || st.QueueStatus.LastDrain.NodeCreatedSent != 2 {
+		t.Errorf("expected Status to reflect the last drain, got %+v", st.QueueStatus.LastDrain)
+	}
+}
+
+func TestTriggerDrainSkipsWhenNotConfigured(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	_, ran := r.TriggerDrain(context.Background())
+	if ran {
+		t.Error("expected TriggerDrain to report ran=false when no Drainer is wired")
+	}
+}
+
+func TestTriggerDrainSkipsConcurrentPass(t *testing.T) {
+	fd := &fakeDrainer{started: make(chan struct{}), release: make(chan struct{})}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetQueueDeps(nil, fd, nil)
+
+	done := make(chan struct{})
+	go func() {
+		r.TriggerDrain(context.Background())
+		close(done)
+	}()
+	<-fd.started
+
+	if _, ran := r.TriggerDrain(context.Background()); ran {
+		t.Error("expected a second TriggerDrain to skip (ran=false) while a pass is already running, not queue behind it")
+	}
+
+	close(fd.release)
+	<-done
+	if fd.calls != 1 {
+		t.Errorf("expected exactly 1 Drain call, got %d", fd.calls)
+	}
+}
+
+func TestTriggerDrainNeverBlocksOnIngestGate(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	go r.TriggerIngest(context.Background(), "/media/a")
+	<-started
+
+	done := make(chan struct{})
+	go func() {
+		_, ran := r.TriggerDrain(context.Background())
+		if !ran {
+			t.Error("expected TriggerDrain to run even while an ingest holds Runner.gate -- drainMu is a separate lock")
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("TriggerDrain appears to be blocked on Runner.gate -- it must use its own drainMu")
+	}
+
+	close(release)
+}
+
+func TestTriggerPruneRunsAndRecordsLastPrune(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fp := &fakePruner{summary: PruneSummary{Pruned: 4, FreedBytes: 1024}}
+	r.SetQueueDeps(nil, nil, fp)
+
+	summary, ran := r.TriggerPrune(context.Background())
+	if !ran {
+		t.Fatal("expected TriggerPrune to run when a Pruner is configured and idle")
+	}
+	if summary.Pruned != 4 || summary.FreedBytes != 1024 {
+		t.Errorf("got %+v", summary)
+	}
+
+	st := r.Status(UpdateStatus{})
+	if !st.QueueStatus.PruneEnabled {
+		t.Error("expected PruneEnabled=true once a Pruner is wired")
+	}
+	if st.QueueStatus.LastPrune == nil || st.QueueStatus.LastPrune.Pruned != 4 {
+		t.Errorf("expected Status to reflect the last prune, got %+v", st.QueueStatus.LastPrune)
+	}
+}
+
+func TestTriggerPruneSkipsWhenNotConfigured(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	_, ran := r.TriggerPrune(context.Background())
+	if ran {
+		t.Error("expected TriggerPrune to report ran=false when no Pruner is wired")
+	}
+	if r.Status(UpdateStatus{}).QueueStatus.PruneEnabled {
+		t.Error("expected PruneEnabled=false when no Pruner is wired")
+	}
+}
+
+func TestTriggerPruneSharesGateWithIngest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, nil, "")
+	fp := &fakePruner{summary: PruneSummary{Pruned: 1}}
+	r.SetQueueDeps(nil, nil, fp)
+
+	go r.TriggerIngest(context.Background(), "/media/a")
+	<-started
+
+	if _, ran := r.TriggerPrune(context.Background()); ran {
+		t.Error("expected TriggerPrune to skip (ran=false) while an ingest holds Runner.gate -- prune deletes from LocalEditRoot while ingest writes into it")
+	}
+
+	close(release)
 }
 
 func TestStatusScratchNote(t *testing.T) {

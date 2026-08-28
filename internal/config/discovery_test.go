@@ -185,11 +185,30 @@ func TestValidateShortAPIKey(t *testing.T) {
 
 func TestValidateNegativeIntervals(t *testing.T) {
 	cfg := Config{
-		Ingest: IngestConfig{PollIntervalSecs: -1},
-		Prune:  PruneConfig{MinAgeHours: -1},
+		Ingest:  IngestConfig{PollIntervalSecs: -1},
+		Prune:   PruneConfig{MinAgeHours: -1, IntervalMinutes: -1},
+		Offline: OfflineConfig{DrainIntervalSecs: -1},
 	}
 	problems := cfg.Validate()
-	if len(problems) != 2 {
-		t.Errorf("expected 2 problems, got %v", problems)
+	if len(problems) != 4 {
+		t.Errorf("expected 4 problems, got %v", problems)
+	}
+}
+
+func TestDrainIntervalSecsOrDefault(t *testing.T) {
+	if got := (OfflineConfig{}).DrainIntervalSecsOrDefault(); got != DefaultDrainIntervalSecs {
+		t.Errorf("got %d, want the default %d for a zero value", got, DefaultDrainIntervalSecs)
+	}
+	if got := (OfflineConfig{DrainIntervalSecs: 30}).DrainIntervalSecsOrDefault(); got != 30 {
+		t.Errorf("got %d, want the explicit 30", got)
+	}
+}
+
+func TestPruneIntervalMinutesOrDefault(t *testing.T) {
+	if got := (PruneConfig{}).IntervalMinutesOrDefault(); got != DefaultPruneIntervalMinutes {
+		t.Errorf("got %d, want the default %d for a zero value", got, DefaultPruneIntervalMinutes)
+	}
+	if got := (PruneConfig{IntervalMinutes: 10}).IntervalMinutesOrDefault(); got != 10 {
+		t.Errorf("got %d, want the explicit 10", got)
 	}
 }

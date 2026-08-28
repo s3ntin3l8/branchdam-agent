@@ -72,6 +72,12 @@ offline:
   # deployment -- see docs/offline-queue.md's "server-side prerequisite"
   # section before relying on -offline in production.
   tier0ContainerRoot: "/storage/staging/workstation-01"
+  # How often the tray (branchdam-agent tray) runs a drain pass on its own
+  # timer, in seconds (issue #32) -- separate from `queue-drain -watch`'s
+  # own -interval flag, which is a different process's own loop. Defaults
+  # to 5 if left unset. Not yet editable from the tray's settings menu --
+  # config-file only.
+  drainIntervalSecs: 5
 
 # The `prune` subcommand (branchdam#230-adjacent -- NOT real Tier-1
 # LOCAL_SCRATCH/NLE-cache pruning, which stays architecturally blocked; see
@@ -88,6 +94,11 @@ prune:
   # cacheTtlHours basis) before it becomes prune-eligible, even once the
   # server reports it verified. Defaults to 24 if left unset while enabled.
   minAgeHours: 24
+  # How often the tray runs a prune pass on its own timer, in minutes
+  # (issue #32), when enabled is true above -- separate from
+  # `prune -watch`'s own -interval flag. Defaults to 30 if left unset. Not
+  # yet editable from the tray's settings menu -- config-file only.
+  intervalMinutes: 30
 
 # The tray shell (branchdam-agent tray). Both sub-sections are additive --
 # the headless preflight/ingest/luminar-sync subcommands never read this.
