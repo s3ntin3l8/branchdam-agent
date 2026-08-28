@@ -51,3 +51,16 @@ compose.override.yml
 
 # Pre-commit
 .pre-commit-config.yaml.backup
+
+# Claude Code project state (plans, worktrees, local settings) -- mirrors
+# branchDAM's own .gitignore. .claude/settings.json and
+# .claude/hooks/session-start.sh are intentionally committed (see
+# CLAUDE.md's SessionStart hook doc) and stay tracked regardless of this
+# pattern -- gitignore never untracks a file already in the index, it only
+# keeps everything else under .claude/ (plans, scheduled-task state,
+# worktrees) from showing up as untracked clutter.
+.claude/
+
+# Agent workspace (superpowers plans, scratch) -- mirrors branchDAM's own
+# .gitignore; no such directory exists in this repo yet.
+/docs/superpowers/
