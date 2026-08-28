@@ -238,7 +238,7 @@ hand-editing `config.yaml`: checkboxes/submenus for start-at-login, update check
 interval), and require-unbuffered-verify; dialogs for the server URL, API key, the two ingest
 roots, and the naming template. Most changes apply immediately; a change to `tray.statusAddr` or
 `ingest.cardRoots` shows "Restart now" instead, since neither can be hot-reloaded (see
-CLAUDE.md's guarded-rebuild invariant). Multi-value fields (`pathMappings`, multiple
+[`docs/platform-support.md`](docs/platform-support.md)). Multi-value fields (`pathMappings`, multiple
 `ingest.cardRoots`) stay hand-edit only -- "Open config.yaml" and "Reveal config folder" are right
 there in the same submenu for exactly that. See
 [`docs/platform-support.md`](docs/platform-support.md#settings-menu) for what's verified.
@@ -263,21 +263,9 @@ full per-platform breakdown (why Windows ships two `.exe`s, the `fyne.io/systray
 matrix, login-item registration, and known gaps like the unverified macOS Dock-icon behavior and
 the queue-status stub).
 
-## Commands
+## Development & Contributing
 
-| Command | Does |
-|---------|------|
-| `make install-hooks` | Install pre-commit + pre-push hooks. |
-| `make test` | Run Go tests with race detection and coverage. |
-| `make lint` | Run pre-commit on all files. |
-| `make fmt` | Format Go code. |
-| `make vet` | Run go vet. |
-| `make tidy` | Run go mod tidy. |
-| `make vulncheck` | Check for known vulnerabilities. |
-| `make build` | Build all packages (host OS/arch). |
-| `make build-windows` | Cross-compile both Windows binaries into `dist/` -- see [`docs/platform-support.md`](docs/platform-support.md). |
-| `make build-darwin` | Build-only check for darwin/arm64, excluding `internal/tray`/`cmd/branchdam-agent` -- see [`docs/platform-support.md`](docs/platform-support.md). |
-| `make clean` | Remove build artifacts and caches. |
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local development setup, testing (`make test`), linting (`make lint`), cross-compiling for Windows/macOS, and pull request guidelines.
 
 ## Security
 
