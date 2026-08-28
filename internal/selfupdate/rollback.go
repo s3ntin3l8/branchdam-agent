@@ -3,6 +3,7 @@ package selfupdate
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -109,7 +110,16 @@ func Rollback(layout InstallLayout) (string, error) {
 		if err := restoreOne(target); err != nil {
 			return "", fmt.Errorf("selfupdate: rollback %s: %w", target, err)
 		}
-		_ = os.Remove(target + rollbackSuffix)
+		// Best-effort: the restore itself already succeeded, so a
+		// failure here doesn't put the binary in an inconsistent state
+		// -- it just means this target's backup outlives its usefulness
+		// (RollbackInfo would then see a stale backup for a version
+		// that's now already live). Logged, not swallowed silently, so
+		// it's diagnosable rather than a Hermes review finding waiting
+		// to happen again.
+		if err := os.Remove(target + rollbackSuffix); err != nil && !os.IsNotExist(err) {
+			slog.Warn("selfupdate: rollback: could not remove consumed backup", "path", target+rollbackSuffix, "err", err)
+		}
 	}
 
 	if layout.InfoPlist != "" {
@@ -119,7 +129,11 @@ func Rollback(layout InstallLayout) (string, error) {
 		}
 	}
 
-	_ = os.Remove(layout.Primary + rollbackVersionSuffix)
+	// Best-effort, same reasoning as the per-target backup removal above:
+	// the rollback itself already fully succeeded by this point.
+	if err := os.Remove(layout.Primary + rollbackVersionSuffix); err != nil && !os.IsNotExist(err) {
+		slog.Warn("selfupdate: rollback: could not remove version sidecar", "path", layout.Primary+rollbackVersionSuffix, "err", err)
+	}
 
 	return prevVersion, nil
 }
