@@ -117,12 +117,13 @@ func (a *selfUpdateAgent) check(ctx context.Context) (unavailable bool) {
 
 // RollbackAvailable reports whether a previously applied version can be
 // restored right now -- a cheap local filesystem check
-// (selfupdate.HasRollback/PreviousVersion), never a network call, so it's
-// safe on every menu-refresh tick. Deliberately NOT gated on a.enabled:
-// Rollback itself never contacts GitHub (it restores from the
-// ".previous" backup a prior Apply left on disk), so disabling
-// self-update checking shouldn't also hide an operator's ability to undo
-// an update they already applied while it was enabled.
+// (selfupdate.RollbackInfo, one combined call so a hot menu-refresh tick
+// never stats the backup and reads the version sidecar twice), never a
+// network call. Deliberately NOT gated on a.enabled: Rollback itself
+// never contacts GitHub (it restores from the ".previous" backup a prior
+// Apply left on disk), so disabling self-update checking shouldn't also
+// hide an operator's ability to undo an update they already applied
+// while it was enabled.
 func (a *selfUpdateAgent) RollbackAvailable() (string, bool) {
 	execPath, err := os.Executable()
 	if err != nil {
@@ -132,14 +133,7 @@ func (a *selfUpdateAgent) RollbackAvailable() (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if !selfupdate.HasRollback(layout) {
-		return "", false
-	}
-	version, err := selfupdate.PreviousVersion(layout)
-	if err != nil {
-		return "", false
-	}
-	return version, true
+	return selfupdate.RollbackInfo(layout)
 }
 
 // Rollback restores the previously applied version via

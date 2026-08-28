@@ -37,6 +37,10 @@ func runUpdateCmd(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "branchdam-agent update: unexpected argument(s) %v\n", fs.Args())
+		return 2
+	}
 
 	if *rollback {
 		return runUpdateRollbackCmd(*yes)

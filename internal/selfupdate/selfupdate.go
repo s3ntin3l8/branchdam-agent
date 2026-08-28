@@ -157,6 +157,20 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 		return "", ErrNotNewer
 	}
 
+	// Written BEFORE any target is touched, deliberately -- a Hermes
+	// review finding on this PR caught that writing it only after every
+	// UpdateTo succeeded meant a sidecar-write failure (e.g. a transient
+	// disk error) returned an error even though every target was already
+	// live on the new version, orphaning their just-created ".previous"
+	// backups with HasRollback permanently false until the next Apply.
+	// Writing it first is safe: HasRollback/RollbackInfo require BOTH the
+	// sidecar AND layout.Primary's own backup to exist, so a sidecar that
+	// briefly exists before any backup does (e.g. the very first target's
+	// UpdateTo then fails) still correctly reports no rollback available.
+	if err := os.WriteFile(layout.Primary+rollbackVersionSuffix, []byte(currentVersion), 0o600); err != nil {
+		return "", fmt.Errorf("selfupdate: record previous version for rollback: %w", err)
+	}
+
 	for _, target := range layout.orderedTargets() {
 		targetUpdater, err := su.NewUpdater(su.Config{
 			Validator:   &su.ChecksumValidator{UniqueFilename: ChecksumAsset},
@@ -168,10 +182,6 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 		if err := targetUpdater.UpdateTo(ctx, release, target); err != nil {
 			return "", fmt.Errorf("selfupdate: apply %s to %s: %w", release.Version(), target, err)
 		}
-	}
-
-	if err := os.WriteFile(layout.Primary+rollbackVersionSuffix, []byte(currentVersion), 0o600); err != nil {
-		return "", fmt.Errorf("selfupdate: record previous version for rollback: %w", err)
 	}
 
 	if layout.InfoPlist != "" {

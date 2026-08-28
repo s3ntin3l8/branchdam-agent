@@ -184,17 +184,24 @@ configured with `OldSavePath: "<target>.previous"` -- go-selfupdate's own `su.Co
 is a single fixed string per `Updater`, and this package's shared `Updater` is reused across every
 target in a layout, so setting it there would make a Windows install's second target (the primary
 exe) silently overwrite the sibling exe's just-saved backup at the same path. A fresh per-target
-`Updater` is cheap (no network, just a struct) and sidesteps that. Once every target succeeds, the
-version being replaced is recorded in a sidecar file next to the primary's own backup
-(`<primary>.previous.version`) -- `internal/selfupdate.HasRollback`/`PreviousVersion` read it to
-report whether a rollback is available and to which version, and `Rollback` uses it to restore
-every target from its own `.previous` file (via go-selfupdate's exported `update.Apply`, reused in
-the reverse direction) and to rewrite a macOS bundle's `Info.plist` back to the rolled-back
-version. Rollback applies to targets in the *same* order `Apply` does -- siblings first, the
-running exe last -- for the identical safety reason: a failure on a sibling aborts before the
-running binary is touched. On success, every `.previous` backup and the version sidecar are
-removed, so the tray's "Roll back to vX" menu item (and `update -rollback`) disappear again until
-the next `Apply` creates a fresh one.
+`Updater` is cheap (no network, just a struct) and sidesteps that. Before any target is touched,
+the version being replaced is recorded in a sidecar file next to the primary's own backup
+(`<primary>.previous.version`) -- written first, deliberately, so a sidecar-write failure can
+never orphan an already-successful target's backup with rollback silently unavailable.
+`internal/selfupdate.RollbackInfo`/`PreviousVersion` read it to report whether a rollback is
+available and to which version, and `Rollback` uses it to restore every target from its own
+`.previous` file (via go-selfupdate's exported `update.Apply`, reused in the reverse direction --
+never re-validating the backup's checksum, since it was already checksum-validated once, by
+`Apply`, at the point it was written) and to rewrite a macOS bundle's `Info.plist` back to the
+rolled-back version. Rollback applies to targets in the *same* order `Apply` does -- siblings
+first, the running exe last -- for the identical safety reason: a failure on a sibling aborts
+before the running binary is touched. Each target's own `.previous` backup is removed immediately
+after that target is restored (not batched at the end), and the version sidecar only after a
+successful `Info.plist` rewrite -- so a mid-rollback failure leaves exactly the still-pending
+state in place (safe to retry: an already-consumed backup is treated as an idempotent no-op, not
+an error) rather than either advertising a stale rollback or losing the ability to retry a failed
+`Info.plist` write. Once everything succeeds, the tray's "Roll back to vX" menu item (and
+`update -rollback`) disappear again until the next `Apply` creates a fresh one.
 
 Rollback makes no network call at all -- it is deliberately **not** gated by `selfUpdate.enabled`,
 unlike Check/Apply. An operator who has since disabled self-update checking can still undo an

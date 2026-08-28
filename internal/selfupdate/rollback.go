@@ -1,6 +1,7 @@
 package selfupdate
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -26,18 +27,32 @@ const rollbackSuffix = ".previous"
 const rollbackVersionSuffix = ".previous.version"
 
 // HasRollback reports whether layout has a previous version to roll back
-// to -- both layout.Primary's .previous backup and its version sidecar
-// must exist. false is the normal, expected state before any Apply has
-// ever succeeded, or after a Rollback has already consumed the backup --
-// not an error condition, so callers (the tray menu, `update -rollback`)
-// use this to decide whether to offer the affordance at all rather than
-// attempt it and handle failure.
+// to. See RollbackInfo for a version that also returns the version
+// string in the same call -- prefer that on a hot path (the tray's
+// menu-refresh tick) where both are needed, to avoid statting the backup
+// and reading the sidecar twice.
 func HasRollback(layout InstallLayout) bool {
+	_, ok := RollbackInfo(layout)
+	return ok
+}
+
+// RollbackInfo reports whether layout has a previous version to roll
+// back to, and if so, what it is -- both layout.Primary's .previous
+// backup and its version sidecar must exist. ok=false is the normal,
+// expected state before any Apply has ever succeeded, or after a
+// Rollback has already consumed the backup -- not an error condition, so
+// callers (the tray menu, `update -rollback`) use this to decide whether
+// to offer the affordance at all rather than attempt it and handle
+// failure.
+func RollbackInfo(layout InstallLayout) (version string, ok bool) {
 	if _, err := os.Stat(layout.Primary + rollbackSuffix); err != nil {
-		return false
+		return "", false
 	}
-	_, err := PreviousVersion(layout)
-	return err == nil
+	v, err := PreviousVersion(layout)
+	if err != nil {
+		return "", false
+	}
+	return v, true
 }
 
 // PreviousVersion returns the version string layout would roll back to,
@@ -58,15 +73,26 @@ func PreviousVersion(layout InstallLayout) (string, error) {
 // reason: a failure on a sibling rollback aborts before the running
 // binary is touched, rather than leaving the pair at different versions.
 // Every target's directory is checked for writability before anything is
-// touched, same as Apply. When layout.InfoPlist is set, it is rewritten
-// to the rolled-back version afterward, exactly as Apply does for the
-// version it applies -- go-selfupdate only ever replaces a bundle's inner
-// binary, so nothing else keeps CFBundleVersion in sync.
+// touched, same as Apply.
 //
-// On success, every target's .previous backup and the version sidecar
-// are removed (best-effort): once rolled back, that state has been fully
-// consumed, and leaving it in place would let HasRollback keep advertising
-// a rollback to the exact version the binary is already running.
+// Each target's own .previous backup is removed immediately after that
+// target's restore succeeds, not batched at the end -- a Hermes review
+// finding on this PR caught that batching left every backup (including
+// ones already fully consumed) in place after a mid-loop failure,
+// advertising "Roll back to vX" for a state that was actually only
+// partially rolled back. restoreOne treats an already-missing backup as
+// a no-op success rather than an error specifically so a retry after
+// such a failure can re-run this same loop safely: whichever targets
+// already succeeded are skipped, and whichever didn't are retried.
+//
+// When layout.InfoPlist is set, it is rewritten to the rolled-back
+// version once every target has been restored, exactly as Apply does for
+// the version it applies. This happens BEFORE the version sidecar is
+// removed (the loop's own per-target backup removal already happened by
+// this point) -- another Hermes finding: if the plist write itself
+// fails, the sidecar staying in place means PreviousVersion/HasRollback
+// still work on a retry, even though every binary is already correctly
+// rolled back by then.
 func Rollback(layout InstallLayout) (string, error) {
 	prevVersion, err := PreviousVersion(layout)
 	if err != nil {
@@ -83,12 +109,8 @@ func Rollback(layout InstallLayout) (string, error) {
 		if err := restoreOne(target); err != nil {
 			return "", fmt.Errorf("selfupdate: rollback %s: %w", target, err)
 		}
-	}
-
-	for _, target := range layout.orderedTargets() {
 		_ = os.Remove(target + rollbackSuffix)
 	}
-	_ = os.Remove(layout.Primary + rollbackVersionSuffix)
 
 	if layout.InfoPlist != "" {
 		plist := appbundle.RenderInfoPlist(prevVersion)
@@ -97,20 +119,43 @@ func Rollback(layout InstallLayout) (string, error) {
 		}
 	}
 
+	_ = os.Remove(layout.Primary + rollbackVersionSuffix)
+
 	return prevVersion, nil
 }
 
 // restoreOne swaps target's current content for its own .previous backup
 // via go-selfupdate's exported update.Apply -- the same safe
 // create-new/rename-aside/rename-into-place mechanics Apply itself relies
-// on for a running executable, reused here for the reverse direction. No
-// OldSavePath is set on this call: the (bad) binary being replaced is
-// simply discarded, matching an operator's intent when rolling back.
+// on for a running executable, reused here for the reverse direction.
+// A missing backup is treated as an already-completed no-op (see
+// Rollback's own doc comment on why that makes a retry after a
+// mid-rollback failure safe), not an error.
+//
+// discardPath is used as this call's OWN OldSavePath rather than leaving
+// it unset: go-selfupdate's default behavior for an unset OldSavePath is
+// to try removing the binary being replaced (the bad version rollback is
+// discarding) and, on Windows, fall back to hiding it as a
+// ".<basename>.old" file when that remove fails (a running exe can't be
+// deleted) -- a stray artifact a Hermes review suggestion on this PR
+// flagged. Giving the swap an explicit, throwaway OldSavePath and
+// removing it ourselves right after avoids depending on that
+// hide-on-Windows fallback at all.
 func restoreOne(target string) error {
-	f, err := os.Open(target + rollbackSuffix)
+	backupPath := target + rollbackSuffix
+	f, err := os.Open(backupPath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return fmt.Errorf("open backup: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	return suUpdate.Apply(f, suUpdate.Options{TargetPath: target})
+
+	discardPath := target + ".rollback-discard"
+	if err := suUpdate.Apply(f, suUpdate.Options{TargetPath: target, OldSavePath: discardPath}); err != nil {
+		return err
+	}
+	_ = os.Remove(discardPath)
+	return nil
 }
