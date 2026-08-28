@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/img/logo.svg" alt="branchdam-agent logo" width="64" height="64">
+</p>
+
 # branchdam-agent
 
 The workstation companion agent for [branchDAM](https://github.com/s3ntin3l8/branchdam) — a cross-platform desktop application and CLI that handles SD card media ingestion, dual-copy verified storage writes, offline queueing, and catalog synchronization.
