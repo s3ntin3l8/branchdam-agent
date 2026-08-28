@@ -73,6 +73,8 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		updateItem.Disable()
 		installItem := systray.AddMenuItem("Install and restart", "Download and apply the latest release, then restart")
 		installItem.Hide()
+		rollbackItem := systray.AddMenuItem("Roll back", "Restore the previously applied version")
+		rollbackItem.Hide()
 		systray.AddSeparator()
 
 		watchItem := systray.AddMenuItem("Watch directories: none configured", "Directories polled for inserted cards")
@@ -110,7 +112,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 
 		quitItem := systray.AddMenuItem("Quit", "Stop the branchDAM agent tray")
 
-		var applying bool
+		var applying, rollingBack bool
 		// drainSkipped/pruneSkipped are set by the drainDoneCh/pruneDoneCh
 		// handlers below when a menu click's TriggerDrain/TriggerPrune call
 		// reported ran=false (a pass was already running, or -- for prune
@@ -181,7 +183,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 				// stomp it with a stale UpdateFound-driven title.
 			case us.UpdateFound:
 				installItem.Show()
-				if st.Busy {
+				if st.Busy || rollingBack {
 					installItem.SetTitle(fmt.Sprintf("Install and restart (waiting for ingest of %s to finish)", st.BusyCard))
 					installItem.Disable()
 				} else {
@@ -190,6 +192,25 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 				}
 			default:
 				installItem.Hide()
+			}
+
+			switch {
+			case rollingBack:
+				// Left as "Rolling back..." by the click handler; don't
+				// stomp it with a stale RollbackAvailable-driven title.
+			default:
+				if rbVersion, ok := up.RollbackAvailable(); ok {
+					rollbackItem.Show()
+					if st.Busy || applying {
+						rollbackItem.SetTitle(fmt.Sprintf("Roll back to %s (waiting for ingest of %s to finish)", rbVersion, st.BusyCard))
+						rollbackItem.Disable()
+					} else {
+						rollbackItem.SetTitle(fmt.Sprintf("Roll back to %s", rbVersion))
+						rollbackItem.Enable()
+					}
+				} else {
+					rollbackItem.Hide()
+				}
 			}
 		}
 		refresh()
@@ -261,6 +282,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		}()
 
 		applyDoneCh := make(chan applyResult, 1)
+		rollbackDoneCh := make(chan applyResult, 1)
 		var releaseGate func()
 		// quitRequested defers an in-flight ctx.Done()/Quit-click until
 		// the current apply resolves, rather than abandoning it.
@@ -277,14 +299,14 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		for {
 			select {
 			case <-ctx.Done():
-				if applying {
+				if applying || rollingBack {
 					quitRequested = true
 					continue
 				}
 				systray.Quit()
 				return
 			case <-quitItem.ClickedCh:
-				if applying {
+				if applying || rollingBack {
 					quitRequested = true
 					continue
 				}
@@ -340,7 +362,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 				}
 				refresh() // still busy -- leave "Restart now" showing, try again later
 			case <-installItem.ClickedCh:
-				if applying {
+				if applying || rollingBack {
 					continue
 				}
 				rel, ok := r.TryLockIdle()
@@ -388,6 +410,50 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 				releaseGate()
 				releaseGate = nil
 				outcome = Outcome{RestartRequested: true, AppliedVersion: res.version}
+				systray.Quit()
+				return
+			case <-rollbackItem.ClickedCh:
+				if applying || rollingBack {
+					continue
+				}
+				rel, ok := r.TryLockIdle()
+				if !ok {
+					refresh()
+					continue
+				}
+				releaseGate = rel
+				rollingBack = true
+				rollbackItem.Disable()
+				rollbackItem.SetTitle("Rolling back...")
+				go func() {
+					// Rollback itself makes no network call (it restores
+					// from a local ".previous" backup), but it still gets
+					// a bounded, ctx-decoupled lifetime for the same
+					// reason ApplyLatest does: a signal-derived shutdown
+					// landing mid-swap on a Windows sibling pair would
+					// leave the two at different versions.
+					rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+					defer cancel()
+					version, err := up.Rollback(rbCtx)
+					rollbackDoneCh <- applyResult{version: version, err: err}
+				}()
+			case res := <-rollbackDoneCh:
+				rollingBack = false
+				if res.err != nil {
+					releaseGate()
+					releaseGate = nil
+					rollbackItem.SetTitle("Roll back (failed -- see status page)")
+					rollbackItem.Enable()
+					refresh()
+					if quitRequested {
+						systray.Quit()
+						return
+					}
+					continue
+				}
+				releaseGate()
+				releaseGate = nil
+				outcome = Outcome{RestartRequested: true, AppliedVersion: res.version, RolledBack: true}
 				systray.Quit()
 				return
 			case <-ticker.C:

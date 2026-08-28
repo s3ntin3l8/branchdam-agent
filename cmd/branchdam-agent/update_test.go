@@ -27,6 +27,30 @@ func TestRunUpdateMissingConfigFile(t *testing.T) {
 	}
 }
 
+// TestRunUpdateRejectsUnexpectedArgs is a regression test for a Hermes
+// review suggestion: an update invocation with stray positional
+// arguments (a typo'd flag, a misplaced value) used to be silently
+// ignored rather than reported.
+func TestRunUpdateRejectsUnexpectedArgs(t *testing.T) {
+	if got := run([]string{"update", "unexpected-arg"}); got != 2 {
+		t.Errorf("run([update unexpected-arg]) = %d, want 2", got)
+	}
+}
+
+// TestRunUpdateRollbackNeedsNoConfig proves -rollback is independent of
+// selfUpdate.enabled and config entirely (unlike Check/Apply, Rollback
+// makes no network call) -- it never even reaches config.ResolvePath, so
+// a config path that doesn't exist has no effect on the outcome. The
+// real go test binary naturally has no ".previous.version" sidecar next
+// to it, so this exercises the "no rollback available" refusal path
+// without writing anything near the test binary itself.
+func TestRunUpdateRollbackNeedsNoConfig(t *testing.T) {
+	got := run([]string{"update", "-rollback", "-yes", "-config", "/nonexistent/config.yaml"})
+	if got != 1 {
+		t.Errorf("run([update -rollback]) with no previous version available = %d, want 1", got)
+	}
+}
+
 func TestConfirm(t *testing.T) {
 	cases := map[string]bool{
 		"y\n":   true,

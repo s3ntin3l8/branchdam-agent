@@ -265,9 +265,13 @@ func runTrayCmd(args []string) int {
 		// AppliedVersion is empty for a settings-driven restart (issue #31:
 		// tray.statusAddr or ingest.cardRoots changed, neither
 		// hot-reloadable -- see Runner.Reconfigure's doc comment) as
-		// opposed to a successful self-update.
+		// opposed to a successful self-update or rollback (issue #33) --
+		// RolledBack distinguishes the latter two from each other.
 		reason := "a settings change that requires a restart"
-		if outcome.AppliedVersion != "" {
+		switch {
+		case outcome.RolledBack:
+			reason = fmt.Sprintf("rolled back to %s", outcome.AppliedVersion)
+		case outcome.AppliedVersion != "":
 			reason = fmt.Sprintf("updated to %s", outcome.AppliedVersion)
 		}
 		slog.Info("restarting", "reason", reason)

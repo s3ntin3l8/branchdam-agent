@@ -115,6 +115,52 @@ func (a *selfUpdateAgent) check(ctx context.Context) (unavailable bool) {
 	return false
 }
 
+// RollbackAvailable reports whether a previously applied version can be
+// restored right now -- a cheap local filesystem check
+// (selfupdate.RollbackInfo, one combined call so a hot menu-refresh tick
+// never stats the backup and reads the version sidecar twice), never a
+// network call. Deliberately NOT gated on a.enabled: Rollback itself
+// never contacts GitHub (it restores from the ".previous" backup a prior
+// Apply left on disk), so disabling self-update checking shouldn't also
+// hide an operator's ability to undo an update they already applied
+// while it was enabled.
+func (a *selfUpdateAgent) RollbackAvailable() (string, bool) {
+	execPath, err := os.Executable()
+	if err != nil {
+		return "", false
+	}
+	layout, err := selfupdate.DetectLayout(execPath)
+	if err != nil {
+		return "", false
+	}
+	return selfupdate.RollbackInfo(layout)
+}
+
+// Rollback restores the previously applied version via
+// selfupdate.Rollback and records it in Status() on success, the same
+// way ApplyLatest does for a forward update. See RollbackAvailable's doc
+// comment for why this isn't gated on a.enabled.
+func (a *selfUpdateAgent) Rollback(_ context.Context) (string, error) {
+	execPath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("self-update: resolve own executable: %w", err)
+	}
+	layout, err := selfupdate.DetectLayout(execPath)
+	if err != nil {
+		return "", err
+	}
+
+	version, err := selfupdate.Rollback(layout)
+	if err != nil {
+		return "", err
+	}
+
+	a.mu.Lock()
+	a.st.Applied = version
+	a.mu.Unlock()
+	return version, nil
+}
+
 // ApplyLatest downloads and applies the latest release to this
 // installation's InstallLayout (see internal/selfupdate.DetectLayout) and
 // records the applied version in Status() on success.

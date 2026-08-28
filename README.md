@@ -232,7 +232,15 @@ always a separate, explicit action: a menu click ("Install and restart") that
 checksum-verifies against the release's `SHA256SUMS.txt`, applies, and restarts the tray.
 Headless hosts (Linux, or a Windows/macOS console-only install) get the same thing via
 `branchdam-agent update -config
-config.yaml [-check] [-yes]`. See [`docs/platform-support.md`](docs/platform-support.md) for the
+config.yaml [-check] [-yes]`.
+
+**Rollback.** A successful apply keeps the version it replaced (a `.previous` backup next to each
+binary, plus a version sidecar). The tray menu shows "Roll back to vX.Y.Z" whenever one is
+available; the headless equivalent is `branchdam-agent update -rollback [-yes]`. Rollback makes no
+network call at all, so it works even with `selfUpdate.enabled: false`. Once used (or once a new
+`Apply` succeeds), the backup is consumed and the affordance disappears until the next update.
+
+See [`docs/platform-support.md`](docs/platform-support.md) for the
 full per-platform breakdown (why Windows ships two `.exe`s, the `fyne.io/systray` cross-compile
 matrix, login-item registration, and known gaps like the unverified macOS Dock-icon behavior and
 the queue-status stub).
