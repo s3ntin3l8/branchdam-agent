@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -14,22 +15,24 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/nodeindex"
 )
 
-// runLuminarSyncCmd implements `branchdam-agent luminar-sync`. See issue #6
-// and docs/luminar-catalog.md: this reads a Luminar catalog.db read-only,
-// recovers edit->source pairs using a schema mapping that is explicitly
-// UNVERIFIED (no real catalog.db or published schema was available -- see
-// the doc's confidence section), resolves both endpoints against a local
-// node index (see internal/nodeindex's doc comment for why: there is no
+// runLuminarSyncCmd implements `branchdam-agent luminar-sync`. See issue #34
+// and docs/luminar-catalog.md: this reads a Luminar Neo catalog read-only
+// with a row-extraction query VERIFIED against a real catalog (db_version
+// 155), infers edit->source pairs from filename convention (the catalog
+// itself stores no relational lineage to read directly -- see
+// internal/luminar/query.go), resolves both endpoints against a local node
+// index (see internal/nodeindex's doc comment for why: there is no
 // agent-reachable lookup-by-path endpoint on branchDAM today), and emits
 // EVENT_EDGE_ATTACHED at tier 2 / confidence 0.89 -- deliberately below
 // branchDAM's tier-2 auto-accept threshold, so every edge lands in the human
-// audit queue rather than auto-committing a possibly-wrong schema read.
+// audit queue rather than auto-committing a filename-inferred pairing.
 func runLuminarSyncCmd(args []string) int {
 	fs := flag.NewFlagSet("luminar-sync", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to branchdam-agent config file (default: ./config.yaml if present, else the per-user config directory)")
-	catalogPath := fs.String("catalog", "", "path to Luminar's catalog.db (required, unless -dump-schema)")
+	catalogPath := fs.String("catalog", "", "path to Luminar's catalog file (required, unless -dump-schema)")
 	nodeIndexPath := fs.String("node-index", "", "path to the node-index JSON file mapping file paths to nodeUuids (required, unless -dump-schema)")
-	queryFile := fs.String("query-file", "", "path to a SQL file overriding the built-in (unverified) edit-source query")
+	queryFile := fs.String("query-file", "", "path to a SQL file overriding the built-in catalog row-extraction query")
+	derivativeSuffixes := fs.String("derivative-suffixes", "", "comma-separated derivative-filename suffixes overriding the built-in default (_upscale,_panorama); empty means use the default, not match nothing")
 	dryRun := fs.Bool("dry-run", false, "resolve and log what would be emitted without contacting the server")
 	dumpSchema := fs.Bool("dump-schema", false, "print the catalog's sqlite_master schema and exit, instead of syncing")
 	timeout := fs.Duration("timeout", 30*time.Second, "overall command timeout")
@@ -104,20 +107,31 @@ func runLuminarSyncCmd(args []string) int {
 		client = branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
 	}
 
+	var suffixes []string
+	if *derivativeSuffixes != "" {
+		for _, s := range strings.Split(*derivativeSuffixes, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				suffixes = append(suffixes, s)
+			}
+		}
+	}
+
 	syncer := &luminar.Syncer{
-		Catalog:     catalog,
-		Index:       index,
-		Client:      client,
-		AgentID:     cfg.AgentID,
-		CatalogPath: *catalogPath,
-		Query:       query,
-		DryRun:      *dryRun,
+		Catalog:            catalog,
+		Index:              index,
+		Client:             client,
+		AgentID:            cfg.AgentID,
+		CatalogPath:        *catalogPath,
+		Query:              query,
+		DerivativeSuffixes: suffixes,
+		DryRun:             *dryRun,
 	}
 
 	stats, err := syncer.Sync(ctx)
 	fmt.Printf(
-		"luminar-sync: %d pair(s) found, %d emitted, %d skipped (source unresolved), %d skipped (edit unresolved), %d error(s)\n",
-		stats.PairsFound, stats.Emitted, stats.SourceUnresolved, stats.EditUnresolved, stats.Errors,
+		"luminar-sync: %d pair(s) found (%d ambiguous, %d no source, %d unresolvable path), %d emitted, %d skipped (source unresolved), %d skipped (edit unresolved), %d error(s)\n",
+		stats.PairsFound, stats.Ambiguous, stats.NoSourceInCatalog, stats.PathUnresolvable,
+		stats.Emitted, stats.SourceUnresolved, stats.EditUnresolved, stats.Errors,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "branchdam-agent luminar-sync: %v\n", err)

@@ -78,7 +78,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "subcommands:")
 	fmt.Fprintln(os.Stderr, "  preflight     check server connectivity, exiftool, and path mappings")
-	fmt.Fprintln(os.Stderr, "  luminar-sync  read a Luminar catalog.db and emit EVENT_EDGE_ATTACHED for edit->source pairs")
+	fmt.Fprintln(os.Stderr, "  luminar-sync  read a Luminar Neo catalog and emit EVENT_EDGE_ATTACHED for filename-inferred edit->source pairs")
 	fmt.Fprintln(os.Stderr, "  ingest        ingest a card's contents: dual-copy verified write + submit (-offline for issue #4's offline queue flow)")
 	fmt.Fprintln(os.Stderr, "  queue-drain   drain queue.db on reconnect: submit queued events, copy archive bytes, rebase to Tier-3")
 	fmt.Fprintln(os.Stderr, "  prune         delete offline-ingested files' LocalEditRoot mirror once the server confirms them verified (-dry-run to preview)")

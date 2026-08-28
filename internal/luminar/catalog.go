@@ -1,25 +1,28 @@
-// Package luminar reads Skylum Luminar's catalog.db to recover edit->source
+// Package luminar reads Luminar Neo's catalog file to recover edit->source
 // relationships and emits them to branchDAM as EVENT_EDGE_ATTACHED events.
 //
-// Luminar's catalog schema is not publicly documented (see
-// docs/luminar-catalog.md for the research trail and confidence level), so
-// the query used to extract edit->source pairs is deliberately isolated in
-// query.go and overridable at runtime via --query-file, rather than baked in
-// as a confident constant. Everything in this file is schema-agnostic: it
-// only knows how to open the database safely and run whatever query it is
-// given.
+// The row-extraction query is verified against a real Luminar Neo catalog
+// (db_version 155 -- see docs/luminar-catalog.md) but the catalog itself
+// stores NO relational edit->source lineage; a derived file is only ever
+// recoverable by filename convention (derive.go's PairDerivatives). The
+// query is still isolated in query.go and overridable at runtime via
+// --query-file, so a schema difference in another Luminar Neo version can be
+// corrected without a code change. Everything in this file only knows the
+// fixed 7-column row shape Images requires, never which real tables/columns
+// produce it -- that stays in query.go.
 package luminar
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path"
 	"strings"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
 
-// Catalog is a read-only handle on a Luminar catalog.db.
+// Catalog is a read-only handle on a Luminar Neo catalog file.
 type Catalog struct {
 	db *sql.DB
 }
@@ -80,11 +83,11 @@ type SchemaObject struct {
 }
 
 // DumpSchema returns every object in the catalog's sqlite_master table. This
-// backs `luminar-sync --dump-schema`: since Luminar's schema is
-// undocumented, the fastest way for an operator with a real catalog.db to
-// correct query.go's guessed query is to run --dump-schema against their own
-// catalog and compare the real table/column names against
-// DefaultEditSourceQuery.
+// backs `luminar-sync --dump-schema`: the fastest way for an operator to
+// confirm DefaultCatalogQuery still matches their own Luminar Neo version
+// (or to build a --query-file override if it doesn't) is to run
+// --dump-schema against their own catalog and diff the real table/column
+// names against query.go.
 func (c *Catalog) DumpSchema(ctx context.Context) ([]SchemaObject, error) {
 	rows, err := c.db.QueryContext(ctx, `SELECT type, name, COALESCE(sql, '') FROM sqlite_master ORDER BY type, name`)
 	if err != nil {
@@ -106,31 +109,46 @@ func (c *Catalog) DumpSchema(ctx context.Context) ([]SchemaObject, error) {
 	return out, nil
 }
 
-// EditSourcePair is one edit->source relationship recovered from the
-// catalog: SourcePath is the original/master image Luminar imported,
-// EditPath is the path of the edited/exported output derived from it, and
-// SourceRowID is the catalog's own row identifier for the source side
-// (whatever query.go's query aliased as source_row_id), stamped into the
-// emitted edge's evidenceJson so a future data-correction migration (see
-// docs/luminar-catalog.md) can find every edge produced by a given schema
-// mapping version.
-type EditSourcePair struct {
-	SourcePath  string
-	EditPath    string
-	SourceRowID string
-	EditRowID   string
+// CatalogImage is one row of DefaultCatalogQuery's output: everything known
+// about a single catalog image, before any edit->source inference happens.
+// Pairing (derive.go's PairDerivatives) works entirely off these values --
+// the catalog itself carries no relational lineage, see query.go's doc
+// comment.
+type CatalogImage struct {
+	ImageID     string // the catalog's own row identifier (images._id_int_64)
+	VolumeMount string // filesystem mount point; empty if unresolvable
+	DirPath     string // containing directory, relative to VolumeMount
+	FileName    string // bare filename -- never a path in this schema
+	Trashed     bool
+	CameraModel string
+	CaptureTime int64
 }
 
-// EditSourcePairs runs query against the catalog and scans the result into
-// EditSourcePair values. query must select exactly four columns in this
-// order: source_path, edit_path, source_row_id, edit_row_id (see
-// DefaultEditSourceQuery in query.go for the reference shape). Row
-// identifiers are read as text via a generic scan so this works whether the
-// catalog's primary keys are integers or strings.
-func (c *Catalog) EditSourcePairs(ctx context.Context, query string) ([]EditSourcePair, error) {
+// FullPath joins VolumeMount, DirPath, and FileName into an absolute path in
+// the same slash-separated form nodeindex.Resolve expects to match verbatim
+// (internal/nodeindex.Resolve does no normalization). ok is false when
+// VolumeMount is empty -- no absolute path can be built, so nodeindex could
+// never match it regardless.
+//
+// Only macOS path assembly (a POSIX volume mount plus '/'-joined
+// sub-paths) has been verified against a real catalog; a Windows Luminar
+// Neo catalog's volumes.info_wide_ch shape is unobserved and may need a
+// different join here.
+func (c CatalogImage) FullPath() (string, bool) {
+	if c.VolumeMount == "" {
+		return "", false
+	}
+	return path.Join(c.VolumeMount, c.DirPath, c.FileName), true
+}
+
+// Images runs query against the catalog and scans the result into
+// CatalogImage values. query must select exactly 7 columns in the order
+// DefaultCatalogQuery documents: image_id, volume_mount, dir_path,
+// file_name, trashed, camera_model, capture_time.
+func (c *Catalog) Images(ctx context.Context, query string) ([]CatalogImage, error) {
 	rows, err := c.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("luminar: run edit-source query: %w", err)
+		return nil, fmt.Errorf("luminar: run catalog query: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -138,27 +156,36 @@ func (c *Catalog) EditSourcePairs(ctx context.Context, query string) ([]EditSour
 	if err != nil {
 		return nil, fmt.Errorf("luminar: read result columns: %w", err)
 	}
-	if len(cols) != 4 {
-		return nil, fmt.Errorf("luminar: edit-source query must select exactly 4 columns (source_path, edit_path, source_row_id, edit_row_id), got %d: %v", len(cols), cols)
+	if len(cols) != 7 {
+		return nil, fmt.Errorf("luminar: catalog query must select exactly 7 columns (image_id, volume_mount, dir_path, file_name, trashed, camera_model, capture_time), got %d: %v", len(cols), cols)
 	}
 
-	var out []EditSourcePair
+	var out []CatalogImage
 	for rows.Next() {
-		var p EditSourcePair
-		if err := rows.Scan(&p.SourcePath, &p.EditPath, &p.SourceRowID, &p.EditRowID); err != nil {
-			return nil, fmt.Errorf("luminar: scan edit-source row: %w", err)
+		var (
+			img         CatalogImage
+			trashed     sql.NullInt64
+			volumeMount sql.NullString
+			cameraModel sql.NullString
+			captureTime sql.NullInt64
+		)
+		if err := rows.Scan(&img.ImageID, &volumeMount, &img.DirPath, &img.FileName, &trashed, &cameraModel, &captureTime); err != nil {
+			return nil, fmt.Errorf("luminar: scan catalog row: %w", err)
 		}
-		if p.SourcePath == "" || p.EditPath == "" {
-			// A query that returns an empty path is almost certainly
-			// selecting the wrong column against the guessed schema --
-			// surfacing it loudly here is cheaper than a silently-skipped
-			// pair three layers up in the syncer.
-			return nil, fmt.Errorf("luminar: edit-source query returned an empty source_path or edit_path (row source_row_id=%q edit_row_id=%q) -- likely a schema mismatch, see docs/luminar-catalog.md", p.SourceRowID, p.EditRowID)
+		if img.FileName == "" {
+			// An empty filename is almost certainly the wrong column against
+			// a changed schema -- surfacing it loudly here is cheaper than a
+			// silently-mispaired image three layers up in the syncer.
+			return nil, fmt.Errorf("luminar: catalog query returned an empty file_name (row image_id=%q) -- likely a schema mismatch, see docs/luminar-catalog.md", img.ImageID)
 		}
-		out = append(out, p)
+		img.VolumeMount = volumeMount.String
+		img.Trashed = trashed.Int64 != 0
+		img.CameraModel = cameraModel.String
+		img.CaptureTime = captureTime.Int64
+		out = append(out, img)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("luminar: iterate edit-source rows: %w", err)
+		return nil, fmt.Errorf("luminar: iterate catalog rows: %w", err)
 	}
 	return out, nil
 }

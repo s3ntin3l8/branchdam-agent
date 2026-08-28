@@ -1,108 +1,191 @@
-# Luminar `catalog.db` — schema mapping and confidence
+# Luminar Neo catalog — schema mapping and verification record
 
-`internal/luminar` reads Skylum Luminar's `catalog.db` to recover edit→source relationships and
-emit them to branchDAM as `EVENT_EDGE_ATTACHED`. This document records what was actually
-established during research for this reader, at what confidence, and exactly where the guessed
-schema lives in code so it's easy to correct once someone can validate it against a real catalog.
+`internal/luminar` reads a Luminar Neo catalog to recover edit→source relationships and emit them
+to branchDAM as `EVENT_EDGE_ATTACHED`. This document records what was actually established
+against a real catalog (issue #34), replacing an earlier version built entirely on unverified
+CoreData-based guesswork.
 
-**Read this before trusting anything downstream of `internal/luminar/query.go`.** The schema
-mapping below is a best-effort reconstruction from indirect evidence, not a verified fact. That's
-why every edge this reader emits lands at `tier: 2, confidence: 0.89` — strictly below branchDAM's
-tier-2 auto-accept threshold (0.90) — in the human audit queue, not auto-committed.
+## Verification record
 
-## What was and wasn't found
+Checked 2026-08-28 against a real Luminar Neo catalog:
 
-No real Luminar `catalog.db` file was available during development of this reader, and no
-authoritative schema documentation exists publicly. Specifically checked and ruled out:
+| | |
+|---|---|
+| App version | Luminar Neo, `settings.main_app_version = 6` |
+| Catalog schema version | `settings.db_version = 155` |
+| Platform | macOS |
+| Catalog size | 995 images |
+| Derivative pairs found | 2 (`_upscale`, `_panorama`) |
 
-- **Skylum's own support docs** (`support.skylum.com/how-to-use-luminar-neo/catalog/...` and the
-  equivalent `-for-desktop` pages) describe the Catalog only at a user-facing level: it's a folder
-  (not a single file) created automatically on first install, containing "a database of your
-  images and their locations, thumbnails ... and a history of adjustments." Edits are described as
-  non-destructive, stored "as instructions in a database rather than changing the actual files."
-  No table names, column names, file names, or format (SQLite vs. something else) are stated on
-  these pages for Luminar Neo specifically.
-- **No published plugin, export, or developer API** describes Luminar's data model. Searches for a
-  Luminar Neo SDK / plugin API surfaced only end-user integration docs (the Lightroom plugin, the
-  general plugin *installation* process) — nothing that documents an internal schema.
-- **No GitHub repository, forensic write-up, or community post** was found that dumps or documents
-  Luminar Neo's `catalog.db` table structure specifically.
-- **The legacy Luminar 4 catalog format IS attested, indirectly**, by third-party file-format
-  reference sites (fileinfo.com, serptools.github.io's `.luminar` page): a Luminar 4 catalog
-  (`Luminar Catalog.luminar`) is stated to be "a SQLite database" used "to retrieve the TIFF and
-  STATE files stored within a catalog and associate them with one another, so edited images appear
-  correctly." This confirms the *shape* of the problem (a SQLite catalog associating an original
-  with a derived edit-state file) for a related, earlier product generation, but is not a
-  Luminar-Neo-specific schema and predates at least one full rewrite (Luminar 4 → Neo).
-- **Luminar's history as a CoreData-backed macOS app** (the product originated as Macphun's Luminar
-  for macOS, later ported to Windows and rewritten as Neo) is general background knowledge, not
-  something re-verified against a specific build during this research pass. CoreData's SQLite
-  store has a well-known naming convention — entity tables and attribute columns prefixed `Z`
-  (`ZASSET`, `ZFILEPATH`, ...), a synthetic `Z_PK` integer primary key, and `Z_ENT`/`Z_PRIMARYKEY`
-  bookkeeping tables — which is what `DefaultEditSourceQuery` (below) is built against, on the
-  theory that Luminar kept its original CoreData-shaped schema across the Windows port and the Neo
-  rewrite. **This is the single weakest link in the whole mapping**: it is plausible, not
-  confirmed, and Luminar Neo (as opposed to legacy Luminar) may not even use CoreData at all.
+The catalog file itself is a bare SQLite database (`user_version` set, WAL journal mode), named
+`*.luminarneo` (e.g. `Luminar Neo Catalog.luminarneo`), not a `catalog.db` inside a bundle
+directory as Skylum's own support docs describe for the on-disk layout.
 
-**Bottom line confidence: LOW.** Treat every identifier in the query below as a hypothesis.
+**If you validate against a different Luminar Neo version, add a row to the table above (or a new
+one) and update `SchemaMappingVersion` below** rather than overwriting this record — the whole
+point of stamping a version into every edge's `evidenceJson` is being able to tell which schema
+guess produced which edge later.
 
-## The schema mapping (`internal/luminar/query.go`)
+## The load-bearing finding: Luminar Neo stores no relational edit→source lineage
 
-`DefaultEditSourceQuery` is the *only* place this guessed schema knowledge lives:
+This is the finding that shapes everything below, not just a corrected list of table names.
+Checked directly against the real catalog:
+
+- `image_user_attributes.origin_path_wide_ch` — **empty on all 995 rows**.
+- `image_virtual_copy` (a non-destructive virtual-copy link table) — **0 rows**, and a virtual
+  copy is not a second file on disk regardless.
+- `img_history_states.data_wide_ch` (the non-destructive edit-instruction blob) — **length 0 on
+  every row**; actual edit state lives in external `.arc`/`.tid`/`.msk`/`.lnp` resource files
+  (`resources` table, `img_history_states_resources` join table), which are Luminar-internal
+  sidecars, not user-facing output files branchDAM's graph could link to.
+- No join table anywhere associates a derived file with its source image.
+
+So a derived file that exists as a separate file on disk — the only kind branchDAM's graph can
+link — is recoverable **only by filename convention**, never by reading a relationship out of the
+catalog. This replaces an earlier query built on an Apple CoreData (`ZASSET`/`ZEDIT`/
+`ZEXPORTPATH`) hypothesis that doesn't exist in Luminar Neo's real schema at all: that query
+failed at SQL-prepare time against every real catalog, it never just returned wrong rows.
+
+### Observed but deliberately unused signals
+
+Recorded here so a future investigation doesn't re-derive and then re-discard the same three
+things:
+
+- **`img_history_states.name_wide_ch = "Sync with <filename>"`** — a localized UI string Luminar
+  writes when its Sync feature links two originals (e.g. a DJI drone photo to its matching video
+  frame). It links two *sources*, not an edit to its output, has no stable machine-readable form,
+  and isn't a file-level relationship branchDAM's graph models. Not used.
+- **A shared `.lnp` preset resource across `img_history_states_resources`** — several images'
+  history states reference the same `.lnp` (Luminar preset) resource ID. This means "these edits
+  used the same preset," not "these files are related." Not used.
+- **`image_virtual_copy`** — 0 rows in this catalog, and even populated, a virtual copy is a
+  non-destructive variant of the *same* file, not a second file on disk. Not used.
+
+## The row-extraction query (`internal/luminar/query.go`)
+
+`DefaultCatalogQuery` reads one row per (non-deleted) catalog image — it does **not** return
+pairs, because the catalog doesn't store them:
 
 ```sql
 SELECT
-    asset.ZFILEPATH   AS source_path,
-    edit.ZEXPORTPATH  AS edit_path,
-    CAST(asset.Z_PK AS TEXT) AS source_row_id,
-    CAST(edit.Z_PK  AS TEXT) AS edit_row_id
-FROM ZEDIT edit
-JOIN ZASSET asset ON asset.Z_PK = edit.ZASSET
-WHERE edit.ZEXPORTPATH IS NOT NULL AND edit.ZEXPORTPATH != ''
+    CAST(i._id_int_64 AS TEXT)                                                             AS image_id,
+    COALESCE(json_extract(NULLIF(v.info_wide_ch, ''), '$.kMountPointSerializationKey'), '') AS volume_mount,
+    p.path_wide_ch                                                                          AS dir_path,
+    i.path_wide_ch                                                                          AS file_name,
+    COALESCE(ua.trash_bool, 0)                                                              AS trashed,
+    COALESCE(x.camera_model_wide_ch, '')                                                    AS camera_model,
+    COALESCE(NULLIF(x.date_time_int_64, 0), i.creation_date_int_64)                         AS capture_time
+FROM images i
+JOIN paths_images pi ON pi._val_id_int_64 = i._id_int_64
+JOIN paths p         ON p._id_int_64      = pi._key_id_int_64
+JOIN volumes v       ON v._id_int_64      = p.volume_id_int_64
+LEFT JOIN image_user_attributes ua ON ua._out_id_int_64 = i._id_int_64
+LEFT JOIN image_exiv_attributes x  ON x._out_id_int_64  = i._id_int_64
+WHERE i.marked_to_delete_bool = 0
+  AND i.deleted_at_int_64     = 0
+  AND p.marked_to_delete_bool = 0
+  AND v.marked_to_delete_bool = 0
+ORDER BY i._id_int_64
 ```
 
-Assumed shape:
+Verified column shape (real schema, `_id_int_64`/`_wide_ch` convention, not CoreData's `Z`-prefix):
 
-| Table | Assumed column | Assumed meaning |
+| Table | Column | Meaning |
 |---|---|---|
-| `ZASSET` | `Z_PK` | Integer primary key of an imported master/original image |
-| `ZASSET` | `ZFILEPATH` | Absolute path to the original file on disk |
-| `ZEDIT` | `Z_PK` | Integer primary key of one non-destructive edit/version |
-| `ZEDIT` | `ZASSET` | Foreign key back to `ZASSET.Z_PK` — the edit's source image |
-| `ZEDIT` | `ZEXPORTPATH` | Absolute path of the *exported* output file, if the edit has ever been exported; `NULL`/empty if the edit exists only as in-app adjustment instructions with no file on disk yet |
+| `images` | `_id_int_64` | Integer primary key |
+| `images` | `path_wide_ch` | **Bare filename only** — never a path in this schema |
+| `paths` | `path_wide_ch` | The image's containing directory, relative to its volume's mount point |
+| `paths_images` | `_key_id_int_64` / `_val_id_int_64` | Join: directory → image (1:1 in this catalog — every image has exactly one path row, never zero or two) |
+| `volumes` | `info_wide_ch` | JSON blob; `kMountPointSerializationKey` is the filesystem mount point (`/`, `/Volumes/Untitled`, ...) |
+| `image_user_attributes` | `trash_bool` | 1 if the image is in Luminar's trash |
+| `image_exiv_attributes` | `camera_model_wide_ch`, `date_time_int_64` | EXIF camera model and capture timestamp |
 
-Only edits with a non-empty `ZEXPORTPATH` are selected — an edit that has never been exported has
-no second file for branchDAM's graph (which links files, not in-catalog edit state) to attach an
-edge to.
+Gotchas hit during verification, each worth knowing before touching this query again:
 
-### How to correct this once a real catalog is available
+- **`NULLIF(v.info_wide_ch, '')` is required.** The real catalog's own volume row 1 has an empty
+  `info_wide_ch`; a bare `json_extract` on it raises `malformed JSON` and aborts the whole query.
+- **Path assembly is Go's job, not SQL's.** Naive concatenation of mount (`/`) + directory
+  (`Users/...`) yields `//Users/...`. `CatalogImage.FullPath()` (`internal/luminar/catalog.go`)
+  uses `path.Join`.
+- Only **macOS** path assembly (a POSIX mount point plus `/`-joined sub-paths) has been verified.
+  A Windows Luminar Neo catalog's `volumes.info_wide_ch` shape is unobserved.
 
-This query is deliberately isolated and runtime-overridable, not hardcoded as unavoidable:
+## Pairing derived files (`internal/luminar/derive.go`)
 
-1. Run `branchdam-agent luminar-sync --catalog <path to a real catalog.db> --dump-schema` against
-   a real Luminar catalog. This prints every object in `sqlite_master` (table/index/view/trigger
-   name plus its original `CREATE` statement) — the actual table and column names, whatever they
-   turn out to be.
-2. Compare that output against `DefaultEditSourceQuery` above.
-3. Either fix `internal/luminar/query.go`'s `DefaultEditSourceQuery` directly (bump
-   `luminar.SchemaMappingVersion` alongside it — see below), or write a corrected query to a file
-   and pass `--query-file <path>` without touching Go code or cutting a release at all.
+Since the catalog carries no lineage, pairing is inferred entirely from filename convention, in
+Go (`PairDerivatives`), not SQL — this makes the heuristic unit-testable and lets it reuse
+ordinary string logic instead of encoding a guess inside a query no test can isolate.
 
-No other file needs to change to correct the schema mapping — `internal/luminar/catalog.go`'s
-`EditSourcePairs` only requires the query to return exactly four columns in order (`source_path`,
-`edit_path`, `source_row_id`, `edit_row_id`); it has no other schema knowledge.
+An image whose stem ends in a known suffix is a **candidate**; if stripping the suffix produces a
+stem matching **exactly one** other image in the catalog, that's the pair. Zero matches or more
+than one is reported (`Ambiguity`, `Stats.NoSourceInCatalog`/`Stats.Ambiguous`) and never emitted
+— pairing is a guess either way, but an *unambiguous* guess is a different risk profile from a
+guess among multiple candidates.
+
+`DefaultDerivativeSuffixes = ["_upscale", "_panorama"]` — the only two suffixes confirmed against
+the real catalog, both written by Luminar Neo features that produce a **new file** added back to
+the library:
+
+| derived | source |
+|---|---|
+| `IMG_1767_upscale.jpg` (9216×16380) | `IMG_1767.jpeg` (1536×2730) |
+| `DJI_20260824170503_0008_D_PANORAMA.tiff` | `DJI_20260824170503_0008_D.JPG` |
+
+**Zero-false-positive measurement.** Run across all 995 images in the real catalog with a
+deliberately *wider* candidate list than what ships (also including `_hdr`, `_enhanced`,
+`_denoise`, `_sky-enhance`, `_relight`, `_sharpen`, `_composite`, `_merge`, `_stack`), exactly
+these 2 candidates matched, each resolving to exactly 1 unambiguous source: **zero false
+positives, zero stem collisions across the whole catalog.** This measurement is what justifies
+holding `Confidence` at 0.89 (see below) rather than lowering it now that pairing is
+filename-inferred instead of read from the catalog.
+
+EXIF (camera model, capture time) is corroboration recorded as `cameraModelMatch`/
+`captureTimeMatch` in `evidenceJson`, **never a pairing gate**: the upscale pair agrees on both
+camera and capture time, but the panorama pair agrees only on camera — Neo finalizes a stitched
+panorama well after the source shots were taken. Gating on capture-time agreement would have
+silently dropped a true pair.
+
+`PairDerivatives` deliberately does **not** call `internal/naming.Stem`. That package is a
+byte-for-byte port of branchDAM's own `naming.Stem` under an explicit invariant (see this repo's
+CLAUDE.md); its role-suffix pattern has no `_upscale`/`_panorama` and must never gain
+Luminar-specific suffixes just because this package needs something similar-shaped. `derive.go`
+has its own small, local `stem` helper instead.
+
+Trashed images are **not** filtered out of pairing or emission: the real upscale pair's edit side
+(`IMG_1767_upscale.jpg`) is trashed in Luminar, and the underlying file may well still exist on
+disk. If it doesn't, `nodeindex` simply fails to resolve it and the pair lands in
+`Stats.EditUnresolved` like any other missing file — `sourceTrashed`/`editTrashed` ride along in
+`evidenceJson` so this is visible, not silent.
+
+### How to correct this against a different catalog
+
+Two independent knobs now, not one, because pairing moved out of SQL:
+
+1. **Row extraction** (`DefaultCatalogQuery`): run
+   `branchdam-agent luminar-sync -catalog <path> -dump-schema` against your catalog, diff the
+   real table/column names against the table above, and either edit `query.go` directly (bump
+   `SchemaMappingVersion` alongside it) or write a corrected query to a file and pass
+   `-query-file <path>` — no code change or release required.
+2. **Derivative pairing** (`DefaultDerivativeSuffixes`): if your catalog's Luminar Neo version
+   writes derived files with a different suffix, pass
+   `-derivative-suffixes "_yoursuffix,_another"` — also no code change or release required. This
+   is deliberately separate from `-query-file`: it corrects only the suffix list, not row
+   extraction, and speculative suffixes stay out of the shipped default on purpose (see the
+   zero-false-positive measurement above — it was run to justify exactly two, not more).
 
 ## Evidence stamping and the tier-1 promotion path
 
-Every emitted edge's `evidenceJson` includes `schemaMapping: "v1-unverified"`
-(`luminar.SchemaMappingVersion`), the catalog path, both file paths, and both catalog row IDs. This
-exists so that if this schema guess turns out to be wrong for some or all catalogs, every edge it
-produced can be found and corrected later — the same pattern as branchDAM's own `#132`/`00006`
-migration for a different resolver's mis-tuned matcher. Per issue #6 and the plan: promoting this
-resolver to `tier: 1, confidence: 1.00` is **out of scope for this PR**, and should only happen
-after a period of the tier-2 edges being reviewed and consistently confirmed correct in branchDAM's
-audit queue — with its own data-correction migration on the `branchdam` side for edges already
-written at the lower tier, not a silent confidence bump.
+Every emitted edge's `evidenceJson` includes `schemaMapping: "neo-db155"` (`luminar.SchemaMappingVersion`
+— **not** `"verified"` unqualified: lineage itself is inferred from filenames, not read from the
+catalog, and only one Luminar Neo version has been checked), the catalog path, both file paths,
+both catalog row IDs, `matchRule: "filename-suffix"`, the matched `suffix`, `cameraModelMatch`/
+`captureTimeMatch`, and `sourceTrashed`/`editTrashed`. This exists so that if this pairing rule
+turns out to be wrong for some catalog, every edge it produced can be found and corrected later —
+the same pattern as branchDAM's own `#132`/`00006` migration for a different resolver's mis-tuned
+matcher. Per issue #6/#34 and the plan: promoting this resolver to `tier: 1, confidence: 1.00` is
+**out of scope**, and should only happen after a period of the tier-2 edges being reviewed and
+consistently confirmed correct in branchDAM's audit queue — with its own data-correction migration
+on the `branchdam` side for edges already written at the lower tier, not a silent confidence bump.
 
 ## Node resolution scope (issue #6's required decision)
 
@@ -112,25 +195,20 @@ branchDAM's actual `applyEdgeAttached` (`internal/agent/drainer.go`): it resolve
 `sourceNodeUuid` and `targetNodeUuid` via `GetMediaNodeByUUID`, and an unresolvable node ID is not
 classified as a fatal error by `internal/branchdam/errors.go`'s fatal/transient substring
 matching — it would silently burn the full retry budget and land the event `FAILED`, with no
-feedback channel back to the agent (`branchdam-agent`'s plan, contract gap 3).
+feedback channel back to the agent.
 
 **The actual v1 scope: an edge is only emitted when BOTH the source master's path and the edit
 output's path resolve to a known `nodeUuid`.** In practice that means both files must have been
 agent-ingested (or otherwise recorded) — a Luminar edit whose export lands somewhere only a normal
 branchDAM server scan will ever see is silently *not* a candidate today, since nothing agent-side
-knows that scan's resulting `nodeUuid`. This is the real, narrower version of the "no
-agent-reachable lookup-by-path endpoint" gap the plan documents as prerequisite P5.
+knows that scan's resulting `nodeUuid`.
 
 `internal/nodeindex` is the seam this is built behind: a `Resolver` interface
 (`Resolve(path) (nodeUuid string, ok bool, err error)`) with one implementation today, `FileIndex`
 — a flat, hand-editable/script-generated JSON file mapping absolute file paths to `nodeUuid`
-strings. This exists because `branchdam-agent`'s M1 (SD-card ingest core) and M2 (offline
-`queue.db`) milestones, which are the eventual real source of this mapping (an agent always knows
-the `nodeUuid` it minted for its own ingested files), had not landed when this reader was built.
-Once `queue.db` exists, it becomes a second `Resolver` implementation with the same one-method
-interface — nothing above `internal/nodeindex` needs to change. A pair with either endpoint
-unresolved is skipped, not silently dropped: `luminar-sync` logs every skip and reports
-skip counts in its summary line, so "0 edges emitted" is distinguishable from "N pairs found, all
+strings. A pair with either endpoint unresolved is skipped, not silently dropped: `luminar-sync`
+logs every skip and reports skip counts (plus ambiguous/no-source/unresolvable-path candidate
+counts) in its summary line, so "0 edges emitted" is distinguishable from "N pairs found, all
 skipped."
 
 ## Why `?mode=ro`, never `?immutable=1`

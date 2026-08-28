@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -18,9 +19,9 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/luminar"
 )
 
-// createTestCatalog builds a minimal catalog.db shaped like
-// internal/luminar.DefaultEditSourceQuery's guessed schema, with exactly one
-// exported edit.
+// createTestCatalog builds a minimal catalog on Luminar Neo's real schema
+// (see internal/luminar.DefaultCatalogQuery / docs/luminar-catalog.md), with
+// exactly one image pair: a source and its _upscale derivative.
 func createTestCatalog(t *testing.T, dir string) string {
 	t.Helper()
 	path := filepath.Join(dir, "catalog.db")
@@ -31,10 +32,27 @@ func createTestCatalog(t *testing.T, dir string) string {
 	defer func() { _ = db.Close() }()
 
 	stmts := []string{
-		`CREATE TABLE ZASSET (Z_PK INTEGER PRIMARY KEY, ZFILEPATH TEXT)`,
-		`CREATE TABLE ZEDIT (Z_PK INTEGER PRIMARY KEY, ZASSET INTEGER, ZEXPORTPATH TEXT)`,
-		`INSERT INTO ZASSET (Z_PK, ZFILEPATH) VALUES (1, '/masters/DSC_0001.NEF')`,
-		`INSERT INTO ZEDIT (Z_PK, ZASSET, ZEXPORTPATH) VALUES (1, 1, '/exports/DSC_0001-edit.jpg')`,
+		`CREATE TABLE volumes (_id_int_64 INTEGER PRIMARY KEY, marked_to_delete_bool INTEGER NOT NULL DEFAULT 0, guid_wide_ch TEXT NOT NULL DEFAULT '', info_wide_ch TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE paths (_id_int_64 INTEGER PRIMARY KEY, marked_to_delete_bool INTEGER NOT NULL DEFAULT 0, volume_id_int_64 INTEGER NOT NULL, path_wide_ch TEXT NOT NULL)`,
+		`CREATE TABLE images (_id_int_64 INTEGER PRIMARY KEY, guid_wide_ch TEXT NOT NULL UNIQUE, path_wide_ch TEXT NOT NULL, creation_date_int_64 INTEGER NOT NULL DEFAULT 0, marked_to_delete_bool INTEGER NOT NULL DEFAULT 0, deleted_at_int_64 INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE paths_images (_key_id_int_64 INTEGER NOT NULL, _val_id_int_64 INTEGER NOT NULL, PRIMARY KEY (_key_id_int_64, _val_id_int_64))`,
+		`CREATE TABLE image_user_attributes (_id_int_64 INTEGER PRIMARY KEY, _out_id_int_64 INTEGER NOT NULL UNIQUE, trash_bool INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE image_exiv_attributes (_id_int_64 INTEGER PRIMARY KEY, _out_id_int_64 INTEGER NOT NULL UNIQUE, camera_model_wide_ch TEXT, date_time_int_64 INTEGER NOT NULL DEFAULT 0)`,
+
+		`INSERT INTO volumes (_id_int_64, guid_wide_ch, info_wide_ch) VALUES (1, 'v1', '{"kMountPointSerializationKey":"/masters"}')`,
+		`INSERT INTO paths (_id_int_64, volume_id_int_64, path_wide_ch) VALUES (10, 1, '')`,
+		`INSERT INTO images (_id_int_64, guid_wide_ch, path_wide_ch) VALUES (1, 'g1', 'DSC_0001.NEF')`,
+		`INSERT INTO images (_id_int_64, guid_wide_ch, path_wide_ch) VALUES (2, 'g2', 'DSC_0001_upscale.jpg')`,
+		`INSERT INTO paths_images (_key_id_int_64, _val_id_int_64) VALUES (10, 1)`,
+		`INSERT INTO paths_images (_key_id_int_64, _val_id_int_64) VALUES (10, 2)`,
+		// A second pair using a suffix ("_hdr") NOT in the built-in default
+		// list -- exists purely so a -derivative-suffixes test can prove the
+		// flag actually ADDS a non-default suffix through the CLI, not just
+		// that it can narrow the default list.
+		`INSERT INTO images (_id_int_64, guid_wide_ch, path_wide_ch) VALUES (3, 'g3', 'DSC_0002.NEF')`,
+		`INSERT INTO images (_id_int_64, guid_wide_ch, path_wide_ch) VALUES (4, 'g4', 'DSC_0002_hdr.jpg')`,
+		`INSERT INTO paths_images (_key_id_int_64, _val_id_int_64) VALUES (10, 3)`,
+		`INSERT INTO paths_images (_key_id_int_64, _val_id_int_64) VALUES (10, 4)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -49,7 +67,7 @@ func writeNodeIndexFile(t *testing.T, dir string) string {
 	path := filepath.Join(dir, "node-index.json")
 	content := `{
 		"/masters/DSC_0001.NEF": "0198f2c1-2e3a-7c9e-8b1a-000000000001",
-		"/exports/DSC_0001-edit.jpg": "0198f2c1-2e3a-7c9e-8b1a-000000000002"
+		"/masters/DSC_0001_upscale.jpg": "0198f2c1-2e3a-7c9e-8b1a-000000000002"
 	}`
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write node index: %v", err)
@@ -90,11 +108,11 @@ func TestRunLuminarSyncDryRun(t *testing.T) {
 }
 
 // TestRunLuminarSyncAgainstRealHTTPServer exercises the full stack end to
-// end -- catalog read, node-index resolution, JSON marshalling, and the real
-// branchdam.Client.PostEdgeAttached over HTTP -- against a fake
-// /api/v1/agent/events handler that decodes the double-encoded payload and
-// asserts tier/confidence/relationshipType/resolver exactly as branchDAM's
-// applyEdgeAttached would read them.
+// end -- catalog read, derivative pairing, node-index resolution, JSON
+// marshalling, and the real branchdam.Client.PostEdgeAttached over HTTP --
+// against a fake /api/v1/agent/events handler that decodes the
+// double-encoded payload and asserts tier/confidence/relationshipType/
+// resolver exactly as branchDAM's applyEdgeAttached would read them.
 func TestRunLuminarSyncAgainstRealHTTPServer(t *testing.T) {
 	var gotEnvelope branchdam.EventEnvelope
 	var gotPayload branchdam.EdgeAttachedPayload
@@ -170,24 +188,28 @@ func TestRunLuminarSyncAgainstRealHTTPServer(t *testing.T) {
 // TestRunLuminarSyncQueryFileOverride proves -query-file actually threads
 // through runLuminarSyncCmd into the syncer, not just Syncer.Query in
 // isolation (sync_test.go covers that half already). The override query
-// below intentionally ignores the fixture catalog's real ZASSET/ZEDIT rows
-// and returns a different, hardcoded pair with different column aliases --
-// if the flag weren't wired up, DefaultEditSourceQuery's real pair would be
-// emitted instead and this assertion would catch it.
+// below intentionally ignores the fixture catalog's real rows and returns a
+// different, hardcoded row with different column aliases -- if the flag
+// weren't wired up, DefaultCatalogQuery's real row would be read instead and
+// this assertion would catch it.
 func TestRunLuminarSyncQueryFileOverride(t *testing.T) {
 	dir := t.TempDir()
 	catalogPath := createTestCatalog(t, dir)
 
 	queryFilePath := filepath.Join(dir, "override.sql")
-	overrideQuery := `SELECT '/masters/OVERRIDE.NEF' AS whatever_source, '/exports/OVERRIDE.jpg' AS whatever_edit, 'override-src-id' AS src_id, 'override-edit-id' AS edit_id`
+	overrideQuery := `
+SELECT '10' AS whatever_id, '/override' AS whatever_mount, 'dir' AS whatever_dir, 'OVERRIDE.NEF' AS whatever_file, 0 AS whatever_trash, '' AS whatever_cam, 0 AS whatever_time
+UNION ALL
+SELECT '11', '/override', 'dir', 'OVERRIDE_upscale.jpg', 0, '', 0
+`
 	if err := os.WriteFile(queryFilePath, []byte(overrideQuery), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	nodeIndexPath := filepath.Join(dir, "node-index.json")
 	nodeIndexContent := `{
-		"/masters/OVERRIDE.NEF": "0198f2c1-2e3a-7c9e-8b1a-0000000000aa",
-		"/exports/OVERRIDE.jpg": "0198f2c1-2e3a-7c9e-8b1a-0000000000bb"
+		"/override/dir/OVERRIDE.NEF": "0198f2c1-2e3a-7c9e-8b1a-0000000000aa",
+		"/override/dir/OVERRIDE_upscale.jpg": "0198f2c1-2e3a-7c9e-8b1a-0000000000bb"
 	}`
 	if err := os.WriteFile(nodeIndexPath, []byte(nodeIndexContent), 0o600); err != nil {
 		t.Fatal(err)
@@ -232,6 +254,75 @@ func TestRunLuminarSyncQueryFileOverride(t *testing.T) {
 	}
 	if gotPayload.TargetNodeUUID != "0198f2c1-2e3a-7c9e-8b1a-0000000000bb" {
 		t.Errorf("TargetNodeUUID = %q, want the override query's uuid -- -query-file did not take effect", gotPayload.TargetNodeUUID)
+	}
+}
+
+// TestRunLuminarSyncDerivativeSuffixesNarrowsDefault proves
+// -derivative-suffixes threads through into the syncer in the "remove a
+// default" direction: the fixture's DSC_0001 pair uses "_upscale", the
+// built-in default, so overriding with a list that excludes it must find 0
+// pairs. This alone wouldn't catch a broken flag (a no-op override falls
+// back to DefaultDerivativeSuffixes, which still includes "_upscale" and
+// would also produce >0 pairs) -- paired with
+// TestRunLuminarSyncDerivativeSuffixesAddsSuffix below, which proves the
+// opposite direction, a broken split/threading path fails at least one.
+func TestRunLuminarSyncDerivativeSuffixesNarrowsDefault(t *testing.T) {
+	dir := t.TempDir()
+	catalogPath := createTestCatalog(t, dir)
+	nodeIndexPath := writeNodeIndexFile(t, dir)
+
+	var got int
+	stdout := captureStdout(t, func() {
+		got = run([]string{
+			"luminar-sync",
+			"-catalog", catalogPath,
+			"-node-index", nodeIndexPath,
+			"-derivative-suffixes", "_panorama",
+			"-dry-run",
+		})
+	})
+	if got != 0 {
+		t.Fatalf("run([luminar-sync -derivative-suffixes]) = %d, want 0", got)
+	}
+
+	if !strings.Contains(stdout, "0 pair(s) found") {
+		t.Errorf("stdout = %q, want it to report 0 pairs found (the fixture's DSC_0001 pair uses _upscale, not in the override list)", stdout)
+	}
+}
+
+// TestRunLuminarSyncDerivativeSuffixesAddsSuffix proves the flag can ADD a
+// suffix the built-in default list does NOT contain -- the actual
+// justification for the flag existing. Uses the fixture's DSC_0002/_hdr
+// pair, which no default-suffix run would ever find.
+func TestRunLuminarSyncDerivativeSuffixesAddsSuffix(t *testing.T) {
+	dir := t.TempDir()
+	catalogPath := createTestCatalog(t, dir)
+
+	nodeIndexPath := filepath.Join(dir, "node-index.json")
+	nodeIndexContent := `{
+		"/masters/DSC_0002.NEF": "0198f2c1-2e3a-7c9e-8b1a-000000000003",
+		"/masters/DSC_0002_hdr.jpg": "0198f2c1-2e3a-7c9e-8b1a-000000000004"
+	}`
+	if err := os.WriteFile(nodeIndexPath, []byte(nodeIndexContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var got int
+	stdout := captureStdout(t, func() {
+		got = run([]string{
+			"luminar-sync",
+			"-catalog", catalogPath,
+			"-node-index", nodeIndexPath,
+			"-derivative-suffixes", "_hdr",
+			"-dry-run",
+		})
+	})
+	if got != 0 {
+		t.Fatalf("run([luminar-sync -derivative-suffixes]) = %d, want 0", got)
+	}
+
+	if !strings.Contains(stdout, "1 pair(s) found") || !strings.Contains(stdout, "1 emitted") {
+		t.Errorf("stdout = %q, want 1 pair found and 1 emitted -- -derivative-suffixes did not add _hdr", stdout)
 	}
 }
 

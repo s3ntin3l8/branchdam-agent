@@ -10,7 +10,7 @@ The workstation companion agent for [branchDAM](https://github.com/s3ntin3l8/bra
 - **Offline Field Ingest**: Ingest media on the go without network access to your NAS or server. Events and local files are safely recorded in a local SQLite queue (`queue.db`), then automatically copied to the archive and rebased upon reconnecting to your LAN.
 - **System Tray & GUI (Windows & macOS)**: Lightweight menu bar / system tray companion providing auto card-detection, real-time queue status, and a native Settings UI for paths and server credentials.
 - **Catalog & NLE Synchronization**:
-  - **Skylum Luminar Neo**: `luminar-sync` reads local `catalog.db` files and links exported edits back to source RAW masters.
+  - **Skylum Luminar Neo**: `luminar-sync` reads a local `.luminarneo` catalog and infers derived-file->source links from filename convention.
   - **DaVinci Resolve**: Post-render Python hook (`hooks/resolve/`) writes `.dam.json` sidecars for confidence-1.00 timeline-to-export lineage.
   - **Local Mirror Pruning**: `prune` safely reclaims local edit scratch space once branchDAM confirms the master archive copy is hash-verified.
 
@@ -62,12 +62,14 @@ The agent communicates with the branchDAM server via its `/api/v1/agent/*` REST 
   online `ingest` has no durable local-path ledger to prune against. Two independent safety
   checks run before any deletion: a symlink-aware containment check against `LocalEditRoot`, and
   a size/mtime re-stat against what was recorded at ingest time.
-- `internal/luminar/`, `internal/nodeindex/` -- a `luminar-sync` subcommand: reads a Luminar
-  `catalog.db` read-only (`?mode=ro`, never `?immutable=1`) and emits `EVENT_EDGE_ATTACHED` at
-  `tier: 2, confidence: 0.89` for each edit->source pair it finds and can resolve to known
-  `nodeUuid`s. Luminar's schema is undocumented -- see
-  [`docs/luminar-catalog.md`](docs/luminar-catalog.md) for the research, confidence level, and how
-  to correct the query against a real catalog.
+- `internal/luminar/`, `internal/nodeindex/` -- a `luminar-sync` subcommand: reads a Luminar Neo
+  catalog read-only (`?mode=ro`, never `?immutable=1`; row extraction verified against a real
+  catalog, `db_version 155`), infers edit->source pairs from filename convention -- the catalog
+  itself stores no relational lineage to read directly -- and emits `EVENT_EDGE_ATTACHED` at
+  `tier: 2, confidence: 0.89` for each pair it can resolve to known `nodeUuid`s. See
+  [`docs/luminar-catalog.md`](docs/luminar-catalog.md) for the verification record, the
+  zero-false-positive pairing measurement, and how to correct the query or the suffix heuristic
+  against a different catalog.
 - `internal/tray/`, `internal/autostart/`, `internal/selfupdate/`, `internal/appbundle/` -- the
   tray shell: a `fyne.io/systray` icon/menu (windows/darwin only) plus an embedded `net/http`
   status page showing watch directories, scratch-directory info, and queue status; login-item
@@ -169,13 +171,13 @@ against a real deployment.
 
 ```sh
 # Dry run first -- resolves and logs what would be emitted, never contacts the server:
-go run ./cmd/branchdam-agent luminar-sync -catalog /path/to/catalog.db -node-index node-index.json -dry-run
+go run ./cmd/branchdam-agent luminar-sync -catalog /path/to/catalog.luminarneo -node-index node-index.json -dry-run
 
-# Recover a real catalog's actual schema (see docs/luminar-catalog.md before trusting the
-# built-in query against your own catalog):
-go run ./cmd/branchdam-agent luminar-sync -catalog /path/to/catalog.db -dump-schema
+# Confirm a real catalog's schema still matches the built-in query (see docs/luminar-catalog.md
+# for the verification record before trusting it against a different Luminar Neo version):
+go run ./cmd/branchdam-agent luminar-sync -catalog /path/to/catalog.luminarneo -dump-schema
 
-go run ./cmd/branchdam-agent luminar-sync -config config.yaml -catalog /path/to/catalog.db -node-index node-index.json
+go run ./cmd/branchdam-agent luminar-sync -config config.yaml -catalog /path/to/catalog.luminarneo -node-index node-index.json
 ```
 
 `node-index.json` maps absolute file paths to the `nodeUuid`s they were ingested as -- see
