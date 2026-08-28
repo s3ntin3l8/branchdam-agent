@@ -113,6 +113,16 @@ func splitDerivative(fileName string, suffixes []string) (base, suffix string, o
 // emitted, so a coincidental collision can't silently mislink two unrelated
 // files.
 //
+// The stem key deliberately ignores DirPath -- two same-named source images
+// in different folders (e.g. IMG_1767.jpeg imported from two separate
+// trips/cards) would make every derivative of that name ambiguous, even
+// though only one folder's derivative is really its match. Acknowledged and
+// left as-is: this is forward-looking (the verified catalog had zero stem
+// collisions across all 995 images -- see docs/luminar-catalog.md) and the
+// fail-closed design means a collision produces zero wrong edges, only a
+// missed one (ReasonAmbiguous). If cross-directory same-name collisions
+// ever show up in practice, key on (DirPath, base stem) instead.
+//
 // EXIF (camera model, capture time) is recorded as corroborating evidence on
 // the resulting pair, never used to gate the match itself: the two pairs
 // this rule was verified against agree on camera model, but only one of the

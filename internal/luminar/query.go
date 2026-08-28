@@ -47,6 +47,22 @@ import (
 //   - camera_model:  EXIF camera model, empty if unknown
 //   - capture_time:  EXIF capture timestamp, falling back to the catalog's
 //     own creation_date_int_64 when EXIF has none
+//
+// Exactly one row per image is guaranteed two different ways, both load-
+// bearing for Images (a second row per image would inflate PairDerivatives'
+// stem groups and silently downgrade a real pair to ReasonAmbiguous):
+//   - image_user_attributes/image_exiv_attributes both declare
+//     _out_id_int_64 INTEGER NOT NULL UNIQUE, so their LEFT JOINs can never
+//     fan out regardless of catalog contents -- schema-guaranteed, not just
+//     empirically observed.
+//   - paths_images has NO such constraint on _val_id_int_64 alone (its PK is
+//     the (dir, image) pair), so nothing stops a future catalog from filing
+//     one image under two directories. The 995-image catalog this was
+//     verified against never did (every image had exactly one paths_images
+//     row), but that's an empirical fact about one catalog, not a schema
+//     guarantee -- so the join below deterministically picks the
+//     lowest-numbered directory row per image instead of trusting a plain
+//     JOIN to stay 1:1.
 const DefaultCatalogQuery = `
 SELECT
     CAST(i._id_int_64 AS TEXT)                                                             AS image_id,
@@ -58,6 +74,9 @@ SELECT
     COALESCE(NULLIF(x.date_time_int_64, 0), i.creation_date_int_64)                         AS capture_time
 FROM images i
 JOIN paths_images pi ON pi._val_id_int_64 = i._id_int_64
+    AND pi._key_id_int_64 = (
+        SELECT MIN(pi2._key_id_int_64) FROM paths_images pi2 WHERE pi2._val_id_int_64 = i._id_int_64
+    )
 JOIN paths p         ON p._id_int_64      = pi._key_id_int_64
 JOIN volumes v       ON v._id_int_64      = p.volume_id_int_64
 LEFT JOIN image_user_attributes ua ON ua._out_id_int_64 = i._id_int_64

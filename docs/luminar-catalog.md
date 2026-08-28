@@ -95,7 +95,7 @@ Verified column shape (real schema, `_id_int_64`/`_wide_ch` convention, not Core
 | `images` | `_id_int_64` | Integer primary key |
 | `images` | `path_wide_ch` | **Bare filename only** — never a path in this schema |
 | `paths` | `path_wide_ch` | The image's containing directory, relative to its volume's mount point |
-| `paths_images` | `_key_id_int_64` / `_val_id_int_64` | Join: directory → image (1:1 in this catalog — every image has exactly one path row, never zero or two) |
+| `paths_images` | `_key_id_int_64` / `_val_id_int_64` | Join: directory → image. 1:1 in every image checked in the verified catalog, but **not schema-guaranteed** — its PK is the (dir, image) pair, not image alone, so nothing stops a future catalog from filing one image under two directories. `DefaultCatalogQuery` picks the lowest directory id deterministically (`MIN(_key_id_int_64)`) rather than trusting a plain join to stay 1:1; `image_user_attributes`/`image_exiv_attributes`, by contrast, both declare `_out_id_int_64 ... UNIQUE`, so those two `LEFT JOIN`s can never fan out regardless of catalog contents |
 | `volumes` | `info_wide_ch` | JSON blob; `kMountPointSerializationKey` is the filesystem mount point (`/`, `/Volumes/Untitled`, ...) |
 | `image_user_attributes` | `trash_bool` | 1 if the image is in Luminar's trash |
 | `image_exiv_attributes` | `camera_model_wide_ch`, `date_time_int_64` | EXIF camera model and capture timestamp |
@@ -109,6 +109,11 @@ Gotchas hit during verification, each worth knowing before touching this query a
   uses `path.Join`.
 - Only **macOS** path assembly (a POSIX mount point plus `/`-joined sub-paths) has been verified.
   A Windows Luminar Neo catalog's `volumes.info_wide_ch` shape is unobserved.
+- **`path.Join` normalizes; `nodeindex.Resolve` doesn't.** `FullPath()` collapses `//`, cleans
+  `..`, and strips a trailing `/`; the node-index JSON file is matched against verbatim, with no
+  normalization on that side. The two only agree if the index file was itself built from
+  already-normalized paths — true for every path form seen in the verified catalog, but worth
+  checking first if a `-node-index` entry mysteriously never resolves.
 
 ## Pairing derived files (`internal/luminar/derive.go`)
 
@@ -121,6 +126,14 @@ stem matching **exactly one** other image in the catalog, that's the pair. Zero 
 than one is reported (`Ambiguity`, `Stats.NoSourceInCatalog`/`Stats.Ambiguous`) and never emitted
 — pairing is a guess either way, but an *unambiguous* guess is a different risk profile from a
 guess among multiple candidates.
+
+The stem key deliberately ignores directory: two same-named source images in different folders
+(e.g. `IMG_1767.jpeg` imported from two separate trips or cards) would make every derivative named
+after either of them ambiguous, even though only one folder's derivative is really its match. Left
+as-is — this is forward-looking, since the verified catalog had zero stem collisions across all
+995 images (see the measurement below), and the fail-closed design means a collision produces zero
+wrong edges, only a missed one. If cross-directory same-name collisions ever show up in practice,
+key on `(DirPath, base stem)` instead of stem alone.
 
 `DefaultDerivativeSuffixes = ["_upscale", "_panorama"]` — the only two suffixes confirmed against
 the real catalog, both written by Luminar Neo features that produce a **new file** added back to

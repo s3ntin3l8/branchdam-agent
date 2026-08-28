@@ -29,6 +29,9 @@ import (
 //   - a pair on an unmounted volume (info_wide_ch = ”), so FullPath fails
 //     for both sides (111 -> 112) -- also exercises the NULLIF/malformed-JSON
 //     guard in DefaultCatalogQuery
+//   - an image filed under two directories via paths_images (113), proving
+//     DefaultCatalogQuery's deterministic MIN(_key_id_int_64) tiebreak keeps
+//     it to exactly one row instead of fanning out
 func createFixtureCatalog(t *testing.T, dir string) string {
 	t.Helper()
 	path := filepath.Join(dir, "catalog.db")
@@ -59,6 +62,7 @@ CREATE TABLE IF NOT EXISTS "image_exiv_attributes" (_id_int_64 INTEGER NOT NULL,
 
 		`INSERT INTO paths (_id_int_64, volume_id_int_64, path_wide_ch) VALUES (10, 2, 'Users/test/Pictures')`,
 		`INSERT INTO paths (_id_int_64, volume_id_int_64, path_wide_ch) VALUES (11, 1, 'Users/test/NoMount')`,
+		`INSERT INTO paths (_id_int_64, volume_id_int_64, path_wide_ch) VALUES (12, 2, 'Users/test/SecondDir')`,
 
 		// upscale pair, camera+time match
 		`INSERT INTO images (_id_int_64, guid_wide_ch, path_wide_ch, creation_date_int_64) VALUES (101, 'g101', 'IMG_1000.jpeg', 100)`,
@@ -100,6 +104,15 @@ CREATE TABLE IF NOT EXISTS "image_exiv_attributes" (_id_int_64 INTEGER NOT NULL,
 		`INSERT INTO images (_id_int_64, guid_wide_ch, path_wide_ch, creation_date_int_64) VALUES (112, 'g112', 'IMG_5000_upscale.jpg', 600)`,
 		`INSERT INTO paths_images (_key_id_int_64, _val_id_int_64) VALUES (11, 111)`,
 		`INSERT INTO paths_images (_key_id_int_64, _val_id_int_64) VALUES (11, 112)`,
+
+		// paths_images fan-out: one image filed under two directories.
+		// Nothing in the real schema's PK (dir, image) forbids this even
+		// though it never happened in the verified catalog -- DefaultCatalogQuery
+		// must still return exactly one row for it (the lower dir id, 10, wins
+		// over 12), never two.
+		`INSERT INTO images (_id_int_64, guid_wide_ch, path_wide_ch, creation_date_int_64) VALUES (113, 'g113', 'IMG_6000.jpeg', 700)`,
+		`INSERT INTO paths_images (_key_id_int_64, _val_id_int_64) VALUES (12, 113)`,
+		`INSERT INTO paths_images (_key_id_int_64, _val_id_int_64) VALUES (10, 113)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -125,8 +138,8 @@ func TestImages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Images: %v", err)
 	}
-	if len(images) != 12 {
-		t.Fatalf("expected 12 images, got %d: %+v", len(images), images)
+	if len(images) != 13 {
+		t.Fatalf("expected 13 images, got %d: %+v", len(images), images)
 	}
 
 	byID := make(map[string]CatalogImage, len(images))
@@ -175,6 +188,18 @@ func TestImages(t *testing.T) {
 	}
 	if _, ok := img111.FullPath(); ok {
 		t.Error("FullPath: expected ok=false for an unmounted volume")
+	}
+
+	// image_id=113 is filed under two directories (paths_images ids 10 and
+	// 12) -- the fan-out guard must have kept it to exactly one row (already
+	// covered by the len(images)==13 check above) and deterministically
+	// picked the lower dir id (10, "Pictures"), not 12 ("SecondDir").
+	img113, ok := byID["113"]
+	if !ok {
+		t.Fatal("image 113 not found")
+	}
+	if img113.DirPath != "Users/test/Pictures" {
+		t.Errorf("DirPath = %q, want Users/test/Pictures (the lower paths_images dir id must win)", img113.DirPath)
 	}
 }
 

@@ -130,6 +130,15 @@ type CatalogImage struct {
 // VolumeMount is empty -- no absolute path can be built, so nodeindex could
 // never match it regardless.
 //
+// path.Join also NORMALIZES its result (collapses "//", cleans "..",
+// strips a trailing "/"), which nodeindex.Resolve's verbatim map lookup does
+// not do on the other side. The two sides only ever agree if the node-index
+// file was itself built from already-normalized paths -- true for every
+// path form observed in the real catalog this was verified against, but an
+// index built by hand with a trailing slash or a doubled separator would
+// silently never match here. Worth checking first if -node-index entries
+// mysteriously never resolve.
+//
 // Only macOS path assembly (a POSIX volume mount plus '/'-joined
 // sub-paths) has been verified against a real catalog; a Windows Luminar
 // Neo catalog's volumes.info_wide_ch shape is unobserved and may need a
