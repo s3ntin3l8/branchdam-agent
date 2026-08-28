@@ -30,6 +30,15 @@ const supersample = 4
 // are full semicircles), not a general rounded rect. That means the stem
 // and the horizontal edge are the same primitive -- a stroked line segment
 // with round caps -- so this file only needs three shape testers, not four.
+//
+// This geometry is hand-duplicated (not generated from a shared source) in
+// two other places, since neither is Go and pulling in a build step just
+// for icon assets would fight this file's whole "no external tool" premise:
+//   - internal/tray/assets/index.html's inline <svg> (the status page header)
+//   - docs/img/logo.svg (the README logo)
+// TestBuildTrayIconMatchesExpectedGeometry below is a pixel-sample
+// regression test for *this* file's rendering; it can't catch the other two
+// drifting, so a geometry change here should be mirrored there by hand.
 const (
 	stemCX, stemY1, stemY2, stemSW = 5.25, 4.75, 27.25, 4.5
 	bowlCX, bowlCY, bowlR, bowlSW  = 14.0, 20.0, 7.25, 3.75

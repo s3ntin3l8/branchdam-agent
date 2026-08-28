@@ -1,6 +1,11 @@
 package tray
 
-import "testing"
+import (
+	"bytes"
+	"image"
+	"image/png"
+	"testing"
+)
 
 func TestBuildTrayIconIsAValidICOContainer(t *testing.T) {
 	b := buildTrayIcon()
@@ -28,5 +33,52 @@ func TestBuildTrayIconIsAValidICOContainer(t *testing.T) {
 		if got[i] != want {
 			t.Fatalf("PNG magic mismatch at byte %d: got %x, want %x", i, got, pngMagic)
 		}
+	}
+}
+
+// TestBuildTrayIconMatchesExpectedGeometry decodes the actual rendered PNG
+// and samples pixels at points chosen to be well inside or outside each
+// shape (not near an edge, so antialiasing can't make the assertion flaky).
+// TestBuildTrayIconIsAValidICOContainer only validates the .ico wrapper
+// bytes -- this is the test that would catch a typo'd geometry constant
+// silently blanking or misplacing part of the monogram.
+func TestBuildTrayIconMatchesExpectedGeometry(t *testing.T) {
+	b := buildTrayIcon()
+	img, err := png.Decode(bytes.NewReader(b[22:]))
+	if err != nil {
+		t.Fatalf("png.Decode: %v", err)
+	}
+
+	opaque := func(t *testing.T, name string, x, y int) {
+		t.Helper()
+		_, _, _, a := img.At(x, y).RGBA()
+		if a == 0 {
+			t.Errorf("%s at (%d,%d): alpha = 0, want opaque", name, x, y)
+		}
+	}
+	transparent := func(t *testing.T, name string, x, y int) {
+		t.Helper()
+		_, _, _, a := img.At(x, y).RGBA()
+		if a != 0 {
+			t.Errorf("%s at (%d,%d): alpha = %d, want fully transparent", name, x, y, a)
+		}
+	}
+
+	// Stem: a vertical capsule centered at x=5.25, spanning y in
+	// [4.75,27.25] -- (5,16) is deep inside both bounds.
+	opaque(t, "stem", 5, 16)
+	// Bowl: a *stroked* ring (not filled) centered at (14,20) with inner
+	// radius 5.375 -- the center itself must be hollow.
+	transparent(t, "bowl center (hollow ring)", 14, 20)
+	// Bowl ring itself: radius 7.25 from center, e.g. straight up from
+	// center at (14,13) is on the stroke.
+	opaque(t, "bowl ring", 14, 13)
+	// Satellite: a filled circle centered at (27,20) -- the center is
+	// solid, unlike the bowl.
+	opaque(t, "satellite dot", 27, 20)
+	// Background corner: far from every shape.
+	transparent(t, "background corner", 0, 0)
+	if b := img.Bounds(); b != image.Rect(0, 0, trayIconSize, trayIconSize) {
+		t.Errorf("decoded image bounds = %v, want %dx%d", b, trayIconSize, trayIconSize)
 	}
 }
