@@ -36,6 +36,7 @@ const supersample = 4
 // for icon assets would fight this file's whole "no external tool" premise:
 //   - internal/tray/assets/index.html's inline <svg> (the status page header)
 //   - docs/img/logo.svg (the README logo)
+//
 // TestBuildTrayIconMatchesExpectedGeometry below is a pixel-sample
 // regression test for *this* file's rendering; it can't catch the other two
 // drifting, so a geometry change here should be mirrored there by hand.
