@@ -1,14 +1,32 @@
 # branchdam-agent
 
-The workstation agent for [branchDAM](https://github.com/s3ntin3l8/branchdam) (phase 10 of the
-original spec) -- a Go binary that ingests SD cards, keeps an offline queue, and reports to
-branchDAM over its `/api/v1/agent/*` REST contract. See branchDAM's
-[`docs/roadmap.md`](https://github.com/s3ntin3l8/branchdam/blob/main/docs/roadmap.md) for how
-this repo fits into the overall project, and
-[`docs/agent-protocol.md`](https://github.com/s3ntin3l8/branchdam/blob/main/docs/agent-protocol.md)
-for the wire contract this repo implements against.
+The workstation companion agent for [branchDAM](https://github.com/s3ntin3l8/branchdam) — a cross-platform desktop application and CLI that handles SD card media ingestion, dual-copy verified storage writes, offline queueing, and catalog synchronization.
 
-## What's here today
+---
+
+## Core Capabilities
+
+- **Bit-for-Bit Verified Ingest**: Dual-write engine reads camera SD cards once and streams simultaneously to your NAS archive (Tier 3) and fast local NVMe edit drive (Tier 1), computing BLAKE3-256 and xxHash64 checksums in flight. Flushes and performs cache-busting unbuffered re-reads (`O_DIRECT` / `F_NOCACHE`) to guarantee data integrity.
+- **Offline Field Ingest**: Ingest media on the go without network access to your NAS or server. Events and local files are safely recorded in a local SQLite queue (`queue.db`), then automatically copied to the archive and rebased upon reconnecting to your LAN.
+- **System Tray & GUI (Windows & macOS)**: Lightweight menu bar / system tray companion providing auto card-detection, real-time queue status, and a native Settings UI for paths and server credentials.
+- **Catalog & NLE Synchronization**:
+  - **Skylum Luminar Neo**: `luminar-sync` reads local `catalog.db` files and links exported edits back to source RAW masters.
+  - **DaVinci Resolve**: Post-render Python hook (`hooks/resolve/`) writes `.dam.json` sidecars for confidence-1.00 timeline-to-export lineage.
+  - **Local Mirror Pruning**: `prune` safely reclaims local edit scratch space once branchDAM confirms the master archive copy is hash-verified.
+
+---
+
+## Architecture & Wire Protocol
+
+The agent communicates with the branchDAM server via its `/api/v1/agent/*` REST API contract with static `X-API-Key` authentication. See:
+- [`docs/offline-queue.md`](docs/offline-queue.md) — Offline queue state machine and crash safety.
+- [`docs/platform-support.md`](docs/platform-support.md) — OS support matrix and tray details.
+- [`docs/luminar-catalog.md`](docs/luminar-catalog.md) — Luminar Neo catalog extraction.
+- [branchDAM Agent Protocol](https://github.com/s3ntin3l8/branchdam/blob/main/docs/agent-protocol.md) — Wire contract and REST DTO specifications.
+
+---
+
+## Features & Subcommands
 
 - `internal/branchdam/` -- the REST client for branchDAM's agent-server contract
   (`hello`/`handshake`/`events`/`rebase`), with DTOs hand-synced to branchDAM's own
