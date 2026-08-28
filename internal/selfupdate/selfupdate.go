@@ -129,9 +129,12 @@ func (u *Updater) Check(ctx context.Context, currentVersion string) (CheckResult
 // docs/platform-support.md's Known gaps.
 //
 // The version being replaced (currentVersion) is recorded in a sidecar
-// file next to layout.Primary's own backup once every target has
-// succeeded -- see rollback.go's PreviousVersion/HasRollback/Rollback for
-// how that sidecar is used.
+// file next to layout.Primary's own backup BEFORE any target is touched,
+// not after -- see rollback.go's PreviousVersion/HasRollback/Rollback for
+// how that sidecar is used, and the write site below for why writing it
+// first (rather than after every target succeeds) is what keeps a
+// sidecar-write failure from ever orphaning an already-successful
+// target's backup.
 //
 // ctx should not be tied to a signal-derived cancellation for the whole
 // call: a cancel landing between the sibling apply and the primary apply
