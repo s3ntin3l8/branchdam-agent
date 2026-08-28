@@ -1,0 +1,11 @@
+<!-- This geometry is hand-duplicated from internal/tray/icon.go's
+     buildTrayIcon() (scaled 2x back up from its 32px integer constants)
+     and from internal/tray/assets/index.html's inline <svg>. Keep all
+     three in sync by hand if the monogram ever changes -- see icon.go's
+     doc comment. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect x="6" y="5" width="9" height="54" rx="4.5" fill="#2ba69a"/>
+  <circle cx="28" cy="40" r="14.5" stroke="#2ba69a" stroke-width="7.5"/>
+  <path d="M43 40 H48" stroke="#2ba69a" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="54" cy="40" r="6" fill="#2ba69a"/>
+</svg>
