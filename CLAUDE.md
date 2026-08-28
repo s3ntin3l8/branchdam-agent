@@ -446,6 +446,24 @@ whatever "latest" resolves to.
   own `LocalEditRoot` mirror is ever prunable, never real Tier-1 `LOCAL_SCRATCH` (Resolve
   caches/proxies) -- see branchDAM's `docs/workflow-coverage.md` item 12 for why that stays
   architecturally blocked.
+- **Branch protection on `main`**: required status checks (`test-go / lint-and-test`,
+  `golangci-lint`, `CodeQL`, `dependency-review / dependency-review`), no required reviews (solo
+  repo), `enforce_admins: false`, force-push and branch deletion both blocked. `strict` is
+  `false` (branches need not be up to date with `main`) so Dependabot PRs don't need a rebase on
+  every `main` advance to merge. `enforce_admins` stays `false` deliberately: release-please's own
+  release PR is opened with the default `GITHUB_TOKEN`, and GitHub's Actions recursion guard means
+  a `GITHUB_TOKEN`-opened PR never fires `on: pull_request` -- that PR permanently reads
+  `mergeStateStatus: BLOCKED` from zero reported checks, and `enforce_admins: false` is the only
+  thing that lets it merge (via GitHub's "merge without waiting for requirements" path). Also set:
+  **`required_conversation_resolution: true`** -- every review thread (Hermes's or a human's) must
+  be replied to and resolved before the merge button unblocks, mirroring mullion's
+  (`s3ntin3l8/mullion-session-manager`) actually-enforced posture. This is *not* the same as
+  gating on `reviewDecision`: it reads inline threads, not the verdict, so a `CHANGES_REQUESTED`
+  review with zero inline comments (findings only in the summary body) still doesn't block --
+  confirmed live against PR #44, which merged clean with a standing `CHANGES_REQUESTED` decision
+  because its threads were all resolved. Hermes itself is deliberately still not a required status
+  check (see the `hermes.yml` invariant below) -- gating on thread resolution instead means a dead
+  bot never wedges a merge, since a human can resolve threads without it.
 
 ## CI/CD — uses centralized reusable workflows
 
@@ -518,7 +536,14 @@ coverage, and govulncheck.
   new detections -- expect this after adding a fixture containing a 32+ char test API key).
 - **Addressing review feedback (Hermes or human).** Fixing the code alone is not enough --
   always reply to and resolve the inline conversation too, same convention as branchDAM's own
-  CLAUDE.md. Ask for another Hermes pass at any point, including after addressing feedback, by
+  CLAUDE.md, and enforced by `required_conversation_resolution` (see the branch-protection
+  invariant above) -- unresolved threads block merge. Thread resolution is a GraphQL-only
+  concept; there is no `gh pr` verb for it:
+  1. Reply: `gh api repos/s3ntin3l8/branchdam-agent/pulls/<PR>/comments/<comment_id>/replies -f body="Fixed in <commit>"`
+  2. Resolve: `gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'`
+     -- `threadId` comes from a `reviewThreads` GraphQL query on the PR, not the REST comment ID.
+
+  Ask for another Hermes pass at any point, including after addressing feedback, by
   commenting `@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue).
   Auto-review only fires once per PR, on `opened`/`ready_for_review` and only for PRs from this
   repo, not forks -- see `hermes.yml`'s own comments for why.
@@ -528,6 +553,7 @@ coverage, and govulncheck.
 - `README.md` -- setup, install, and usage instructions.
 - `CLAUDE.md` (this file) -- the live contract for how the repo is wired: layout, invariants,
   CI/CD conventions. Keep it in sync with the code, not with what the code used to do.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) -- branch protection and automated-review conventions.
 - [`docs/platform-support.md`](docs/platform-support.md) -- per-platform support matrix (tray vs.
   headless, why Windows ships two binaries, the `fyne.io/systray` cross-compile matrix) and known
   gaps (macOS `.app` bundle, tray queue-status stub, unvalidated Luminar schema).
