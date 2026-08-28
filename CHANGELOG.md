@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.0.1...v1.1.0) (2026-08-28)
+
+
+### Features
+
+* checksum-verified self-update, install-and-restart, macOS .app bundle ([#29](https://github.com/s3ntin3l8/branchdam-agent/issues/29)) ([12557bc](https://github.com/s3ntin3l8/branchdam-agent/commit/12557bc7dd763cad31c3f66f2873bd77dcebbd5b))
+* **ci:** add Hermes automated PR review workflow ([#37](https://github.com/s3ntin3l8/branchdam-agent/issues/37)) ([4231e90](https://github.com/s3ntin3l8/branchdam-agent/commit/4231e90f3d952f2f7faa62bf69cbba1e297db8ac))
+* **config:** surgical config write-back, path discovery, and validation ([#36](https://github.com/s3ntin3l8/branchdam-agent/issues/36)) ([d3ccf3f](https://github.com/s3ntin3l8/branchdam-agent/commit/d3ccf3f74ab93e2467b7ada58cf518be5a448a58))
+* **queue,ingest:** add queue.Counts aggregate and byte-progress plumbing ([#39](https://github.com/s3ntin3l8/branchdam-agent/issues/39)) ([f70cd38](https://github.com/s3ntin3l8/branchdam-agent/commit/f70cd38f6429dd7cf62310795ffe769b22baa7b6))
+* **selfupdate:** add rollback support, hardware-verification checklist ([#44](https://github.com/s3ntin3l8/branchdam-agent/issues/44)) ([d3704c5](https://github.com/s3ntin3l8/branchdam-agent/commit/d3704c52d0bf02eb9cc02decdb1b4033c366deab))
+* **tray:** real native settings menu ([#41](https://github.com/s3ntin3l8/branchdam-agent/issues/41)) ([eeb9cc1](https://github.com/s3ntin3l8/branchdam-agent/commit/eeb9cc1844cbf5e7920b925c0e05ca0d913bc638))
+* **tray:** real offline-queue status readout and drain/prune timers ([#42](https://github.com/s3ntin3l8/branchdam-agent/issues/42)) ([89841d0](https://github.com/s3ntin3l8/branchdam-agent/commit/89841d013f7f952cf145b19c0dd7fdb7fdb33a54))
+* **tray:** work out of the box -- startup diagnostics, first-run setup ([#38](https://github.com/s3ntin3l8/branchdam-agent/issues/38)) ([dc7a80c](https://github.com/s3ntin3l8/branchdam-agent/commit/dc7a80c9ed9ac734038c81a6b4c9cf1e9bbfd2b8))
+
 ## [1.0.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.0.0...v1.0.1) (2026-08-27)
 
 
