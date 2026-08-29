@@ -40,6 +40,9 @@ func fakeDialogFuncs() dialogFuncs {
 		directory: func(title string) (string, error) {
 			return "/chosen/dir", nil
 		},
+		file: func(title, defaultPath string, patterns []string) (string, error) {
+			return "/chosen/file.db", nil
+		},
 	}
 }
 
@@ -111,6 +114,86 @@ func TestRunDialogCmdDirectoryPrintsPath(t *testing.T) {
 	}
 	if out != "/chosen/dir\n" {
 		t.Errorf("got stdout %q", out)
+	}
+}
+
+func TestRunDialogCmdFilePrintsPath(t *testing.T) {
+	dlg := fakeDialogFuncs()
+	var code int
+	out := captureStdout(t, func() {
+		code = runDialogCmd([]string{"-kind", "file", "-title", "Pick a file"}, dlg)
+	})
+	if code != dialogExitOK {
+		t.Errorf("got exit %d, want %d", code, dialogExitOK)
+	}
+	if out != "/chosen/file.db\n" {
+		t.Errorf("got stdout %q", out)
+	}
+}
+
+func TestRunDialogCmdFileCanceled(t *testing.T) {
+	dlg := fakeDialogFuncs()
+	dlg.file = func(title, defaultPath string, patterns []string) (string, error) {
+		return "", zenity.ErrCanceled
+	}
+	got := runDialogCmd([]string{"-kind", "file"}, dlg)
+	if got != dialogExitCanceled {
+		t.Errorf("got exit %d, want %d (canceled)", got, dialogExitCanceled)
+	}
+}
+
+func TestRunDialogCmdFileFailure(t *testing.T) {
+	dlg := fakeDialogFuncs()
+	dlg.file = func(title, defaultPath string, patterns []string) (string, error) {
+		return "", errors.New("no display")
+	}
+	got := runDialogCmd([]string{"-kind", "file"}, dlg)
+	if got != dialogExitFailed {
+		t.Errorf("got exit %d, want %d", got, dialogExitFailed)
+	}
+}
+
+// TestRunDialogCmdFilePassesDefaultAndPatterns proves -default and
+// -patterns actually thread through into dlg.file's arguments, not just
+// that -kind file dispatches correctly.
+func TestRunDialogCmdFilePassesDefaultAndPatterns(t *testing.T) {
+	var gotTitle, gotDefault string
+	var gotPatterns []string
+	dlg := fakeDialogFuncs()
+	dlg.file = func(title, defaultPath string, patterns []string) (string, error) {
+		gotTitle, gotDefault, gotPatterns = title, defaultPath, patterns
+		return "/x", nil
+	}
+	captureStdout(t, func() {
+		runDialogCmd([]string{
+			"-kind", "file",
+			"-title", "Select the Luminar catalog",
+			"-default", "/data/catalog.db",
+			"-patterns", "*.lrcat, *.db ,,*.json",
+		}, dlg)
+	})
+	if gotTitle != "Select the Luminar catalog" {
+		t.Errorf("got title %q", gotTitle)
+	}
+	if gotDefault != "/data/catalog.db" {
+		t.Errorf("got default %q", gotDefault)
+	}
+	wantPatterns := []string{"*.lrcat", "*.db", "*.json"}
+	if len(gotPatterns) != len(wantPatterns) {
+		t.Fatalf("got patterns %v, want %v", gotPatterns, wantPatterns)
+	}
+	for i, p := range wantPatterns {
+		if gotPatterns[i] != p {
+			t.Errorf("pattern[%d] = %q, want %q", i, gotPatterns[i], p)
+		}
+	}
+}
+
+func TestSplitPatternsEmptyAndWhitespaceOnly(t *testing.T) {
+	for _, in := range []string{"", "   ", ",", " , , "} {
+		if got := splitPatterns(in); got != nil {
+			t.Errorf("splitPatterns(%q) = %v, want nil", in, got)
+		}
 	}
 }
 

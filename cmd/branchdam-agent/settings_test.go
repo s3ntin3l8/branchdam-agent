@@ -124,6 +124,105 @@ func TestConfigSettingsSetIntPersistsAndReloads(t *testing.T) {
 	}
 }
 
+// TestConfigSettingsSetBoolRejectsUnknownKey is the regression guard for
+// issue #58: validateBoolChange used to have no default case, so an
+// unrecognized key silently validated an UNCHANGED cfg (reporting no
+// problem) and was then written to config.yaml by config.Patch with no
+// validation at all. Asserts BOTH that SetBool returns an error AND that
+// config.Patch was never reached (file stays byte-for-byte unchanged) --
+// the second assertion is the one that actually pins the bug, since a
+// caller could return an error from some other path while still having
+// already written the file.
+func TestConfigSettingsSetBoolRejectsUnknownKey(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetBool("integrations.lumnar.enabled", true); err == nil {
+		t.Fatal("expected SetBool to reject an unrecognized key")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("expected config.yaml to be byte-for-byte unchanged -- an unrecognized key must be rejected before config.Patch ever runs")
+	}
+}
+
+func TestConfigSettingsSetIntRejectsUnknownKey(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetInt("integrations.luminar.timeoutSecs", 45); err == nil {
+		t.Fatal("expected SetInt to reject an unrecognized key")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("expected config.yaml to be byte-for-byte unchanged for an unrecognized SetInt key")
+	}
+}
+
+// TestConfigSettingsValidateStringChangeRejectsUnknownKey exercises
+// validateStringChange's default case directly -- PromptAndSet is the only
+// current caller, and it only ever passes settingsPromptFor's own known
+// keys, so there's no way to reach this through the public API today. The
+// switch itself (config.Patch's entire allowlist) still deserves direct
+// coverage independent of that.
+func TestConfigSettingsValidateStringChangeRejectsUnknownKey(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.validateStringChange("integrations.luminar.catalogPath", "/x.db"); err == nil {
+		t.Fatal("expected validateStringChange to reject an unrecognized key")
+	}
+}
+
+// TestConfigSettingsExistingKeysStillAccepted is a regression guard
+// alongside the three tests above: adding the default: cases must not
+// have narrowed the four keys that were already accepted before this PR.
+func TestConfigSettingsExistingKeysStillAccepted(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetBool("tray.startOnLogin", true); err != nil {
+		t.Errorf("tray.startOnLogin: %v", err)
+	}
+	if err := s.SetBool("selfUpdate.enabled", false); err != nil {
+		t.Errorf("selfUpdate.enabled: %v", err)
+	}
+	if err := s.SetBool("ingest.requireUnbuffered", true); err != nil {
+		t.Errorf("ingest.requireUnbuffered: %v", err)
+	}
+	if err := s.SetInt("selfUpdate.checkIntervalHours", 1); err != nil {
+		t.Errorf("selfUpdate.checkIntervalHours: %v", err)
+	}
+	stringCases := map[string]string{
+		"server.baseUrl":       "http://example.invalid",
+		"server.apiKey":        "0123456789abcdef0123456789abcdef", // 32+ chars -- server.apiKey's own length check would otherwise reject a short value here
+		"ingest.archiveRoot":   "/archive",
+		"ingest.localEditRoot": "/local",
+		"ingest.pathTemplate":  "{yyyy}/{original_name}",
+	}
+	for key, value := range stringCases {
+		if err := s.validateStringChange(key, value); err != nil {
+			t.Errorf("%s: %v", key, err)
+		}
+	}
+}
+
 func TestConfigSettingsPromptAndSetHappyPath(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	var gotArgs []string
