@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.1.1...v1.2.0) (2026-08-29)
+
+
+### Features
+
+* **config:** add integrations config schema for tray-configurable catalog sync ([#62](https://github.com/s3ntin3l8/branchdam-agent/issues/62)) ([de79a41](https://github.com/s3ntin3l8/branchdam-agent/commit/de79a4126b7b036ab45d3e0972b321087a3a5fea))
+* **luminar:** luminar-sync reads integrations config for -catalog/-node-index ([#63](https://github.com/s3ntin3l8/branchdam-agent/issues/63)) ([b133520](https://github.com/s3ntin3l8/branchdam-agent/commit/b133520dfa7ab9b8473e1ee299f912e2992689ff))
+* **resolve:** render-hook installer (embed, detect, install) ([#67](https://github.com/s3ntin3l8/branchdam-agent/issues/67)) ([36696f7](https://github.com/s3ntin3l8/branchdam-agent/commit/36696f76bb42e3b3cee93917219a7d8a293226d5))
+* **tray:** draw the b-node monogram as the tray icon ([#51](https://github.com/s3ntin3l8/branchdam-agent/issues/51)) ([f740d35](https://github.com/s3ntin3l8/branchdam-agent/commit/f740d35b246aa233dec844269b3415d873acebbd))
+* **tray:** integration syncer execution seam (Runner, scheduler, no menu) ([#64](https://github.com/s3ntin3l8/branchdam-agent/issues/64)) ([22f2f53](https://github.com/s3ntin3l8/branchdam-agent/commit/22f2f530eaeb17e49356cf926cb3a64878f56543))
+* **tray:** Integrations settings menu ([#66](https://github.com/s3ntin3l8/branchdam-agent/issues/66)) ([e98e516](https://github.com/s3ntin3l8/branchdam-agent/commit/e98e5167b3e88e3bb795bb52cc49a85d640cfa20))
+* **tray:** wire Resolve hook Install/Reveal menu items ([#70](https://github.com/s3ntin3l8/branchdam-agent/issues/70)) ([9c061af](https://github.com/s3ntin3l8/branchdam-agent/commit/9c061afb64a3ac8b80a55d778af619d66828faee))
+
+
+### Bug Fixes
+
+* **tray:** dialog file picker + close validate*Change allowlist gap ([#65](https://github.com/s3ntin3l8/branchdam-agent/issues/65)) ([9b710ab](https://github.com/s3ntin3l8/branchdam-agent/commit/9b710ab17772fbc61518b8729c9da3502c82be4f))
+
 ## [1.1.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.1.0...v1.1.1) (2026-08-28)
 
 
