@@ -221,6 +221,87 @@ prune:
 	}
 }
 
+// TestLoadIntegrationsDryRunEnabledByDefault mirrors
+// TestLoadSelfUpdateEnabledByDefault: a config file that never mentions
+// integrations at all must still come out with Luminar.DryRun true -- a
+// fresh install resolves and logs what a sync would emit and contacts no
+// server until an operator turns dry-run off explicitly.
+func TestLoadIntegrationsDryRunEnabledByDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("agentId: test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Integrations.Luminar.DryRun {
+		t.Error("Integrations.Luminar.DryRun must default to true when the config file doesn't mention integrations at all")
+	}
+}
+
+// TestLoadIntegrationsDryRunExplicitlyDisabled is the override side of the
+// above -- an explicit dryRun: false must survive Load, exactly like
+// selfUpdate.enabled: false does.
+func TestLoadIntegrationsDryRunExplicitlyDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "integrations:\n  luminar:\n    enabled: true\n    dryRun: false\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Integrations.Luminar.DryRun {
+		t.Error("an explicit integrations.luminar.dryRun: false in config must override the on-by-default dry run")
+	}
+	if !cfg.Integrations.Luminar.Enabled {
+		t.Error("expected Enabled=true")
+	}
+}
+
+func TestLoadIntegrationsOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+integrations:
+  nodeIndexPath: "/data/node-index.json"
+  luminar:
+    enabled: true
+    catalogPath: "/data/catalog.luminarneo"
+    dryRun: false
+    syncIntervalMinutes: 15
+    timeoutSecs: 45
+  resolve:
+    scriptsDir: "/custom/Scripts/Utility"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Integrations.NodeIndexPath != "/data/node-index.json" {
+		t.Errorf("got %q", cfg.Integrations.NodeIndexPath)
+	}
+	if !cfg.Integrations.Luminar.Enabled || cfg.Integrations.Luminar.CatalogPath != "/data/catalog.luminarneo" {
+		t.Errorf("got %+v", cfg.Integrations.Luminar)
+	}
+	if cfg.Integrations.Luminar.SyncIntervalMinutes != 15 || cfg.Integrations.Luminar.TimeoutSecs != 45 {
+		t.Errorf("got %+v", cfg.Integrations.Luminar)
+	}
+	if cfg.Integrations.Resolve.ScriptsDir != "/custom/Scripts/Utility" {
+		t.Errorf("got %q", cfg.Integrations.Resolve.ScriptsDir)
+	}
+}
+
 func TestLoadPruneConfigDefaultsDisabled(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

@@ -129,3 +129,40 @@ selfUpdate:
   # default) means every 24h; a negative value disables re-checking (the
   # tray still checks once at startup).
   checkIntervalHours: 24
+
+# Third-party catalog/NLE integrations. Each catalog reader is independently
+# opt-in; a fresh install has none enabled and every one of them in dry-run
+# mode -- see internal/luminar and, once wired into the tray, "Integrations"
+# in the tray menu. luminar-sync also reads this section as flag defaults
+# (explicit flags still win).
+integrations:
+  # Shared by EVERY catalog-reading integration (luminar today; lrcat #47 and
+  # applephotos #46 later): the JSON file mapping absolute workstation file
+  # paths to the nodeUuids they were ingested as. See internal/nodeindex.
+  # Matched VERBATIM -- no normalization, no symlink resolution.
+  nodeIndexPath: "C:\\ProgramData\\branchdam-agent\\node-index.json"
+
+  luminar:
+    enabled: false
+    catalogPath: ""
+    # true (the default, including when this whole section is absent) means
+    # resolve and LOG what a sync pass would emit, and contact no server at
+    # all. A fresh install never writes edges until an operator turns this
+    # off explicitly.
+    dryRun: true
+    # How often the tray syncs this integration on its own timer once
+    # enabled. 0 means the default (60); a NEGATIVE value means "manual
+    # only" -- the tray never syncs on its own, though "Sync now" still
+    # works.
+    syncIntervalMinutes: 60
+    # Bounds one sync pass, in seconds. Defaults to 30 when <= 0.
+    timeoutSecs: 30
+
+  # DaVinci Resolve carries installer state only -- the render hook
+  # (hooks/resolve/) is a Python script running inside Resolve's own
+  # interpreter, with no config read and no runtime knobs.
+  resolve:
+    # Optional override of the auto-detected Scripts/Utility directory list.
+    # Empty means "use the per-OS candidate list" -- see
+    # internal/resolvehook.CandidateDirs.
+    scriptsDir: ""

@@ -22,14 +22,15 @@ var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 // (~/.config/branchdam-agent/config.yaml per the plan, or wherever -config
 // points).
 type Config struct {
-	Server       ServerConfig     `yaml:"server"`
-	AgentID      string           `yaml:"agentId"`
-	PathMappings []PathMapping    `yaml:"pathMappings"`
-	Ingest       IngestConfig     `yaml:"ingest"`
-	Offline      OfflineConfig    `yaml:"offline"`
-	Prune        PruneConfig      `yaml:"prune"`
-	Tray         TrayConfig       `yaml:"tray"`
-	SelfUpdate   SelfUpdateConfig `yaml:"selfUpdate"`
+	Server       ServerConfig       `yaml:"server"`
+	AgentID      string             `yaml:"agentId"`
+	PathMappings []PathMapping      `yaml:"pathMappings"`
+	Ingest       IngestConfig       `yaml:"ingest"`
+	Offline      OfflineConfig      `yaml:"offline"`
+	Prune        PruneConfig        `yaml:"prune"`
+	Tray         TrayConfig         `yaml:"tray"`
+	SelfUpdate   SelfUpdateConfig   `yaml:"selfUpdate"`
+	Integrations IntegrationsConfig `yaml:"integrations"`
 }
 
 // OfflineConfig configures M2's offline queue (issue #4): where queue.db
@@ -190,6 +191,129 @@ func (s SelfUpdateConfig) CheckIntervalHoursOrDefault() int {
 	return s.CheckIntervalHours
 }
 
+// IntegrationsConfig configures branchdam-agent's third-party catalog and
+// NLE integrations -- Luminar Neo today, Lightroom Classic (issue #47) and
+// Apple Photos (issue #46) as future registry entries. A fresh install has
+// every integration disabled and every catalog reader in dry-run mode (see
+// defaultConfig()) -- nothing here contacts the server or reads a
+// third-party catalog until an operator opts in explicitly.
+type IntegrationsConfig struct {
+	// NodeIndexPath is the JSON file mapping absolute workstation file
+	// paths to the nodeUuids they were ingested as -- shared by every
+	// catalog-reading integration (internal/nodeindex.Resolver), since
+	// they all need to resolve the same paths back to the same node
+	// graph. Matched VERBATIM by nodeindex.Resolve -- no normalization,
+	// no symlink resolution (see docs/luminar-catalog.md).
+	NodeIndexPath string `yaml:"nodeIndexPath"`
+	// Luminar configures the Luminar Neo catalog reader (luminar-sync /
+	// internal/luminar).
+	Luminar CatalogSyncConfig `yaml:"luminar"`
+	// Resolve carries DaVinci Resolve render-hook installer state only --
+	// unlike Luminar, the render hook (hooks/resolve/) is a Python script
+	// running inside Resolve's own interpreter with no config read and no
+	// runtime knobs (see hooks/resolve/README.md), so there is no
+	// CatalogSyncConfig-shaped entry for it.
+	Resolve ResolveHookConfig `yaml:"resolve"`
+}
+
+// CatalogSyncConfig is the uniform shape every catalog-reader integration
+// uses -- Luminar today, lrcat (issue #47) and applephotos (issue #46)
+// next. A new integration adds a field of this type to IntegrationsConfig,
+// not a new struct shape.
+//
+// Deliberately does NOT carry queryFile/derivativeSuffixes-equivalent
+// knobs, even though internal/luminar.Syncer and luminar-sync itself
+// support overriding both: those two stay CLI-only correction levers (see
+// docs/luminar-catalog.md), by design. A tray-driven, config-persisted
+// override would convert a supervised, one-shot CLI override into an
+// automatic rule that runs on syncIntervalMinutes's timer, and branchDAM's
+// PostEdgeAttached is idempotent but "never refreshes confidence or
+// evidence" (internal/branchdam/events.go) -- a wrong edge a mistuned
+// override emits is then permanently wrong, fixable only by a server-side
+// data-correction migration. It would also silently falsify
+// luminar.SchemaMappingVersion's provenance claim about which query/suffix
+// set an edge's evidence was produced by.
+type CatalogSyncConfig struct {
+	// Enabled gates whether the tray registers a syncer for this
+	// integration at all -- false (the default) means it never runs,
+	// on a timer or via "Sync now". Deliberately NOT cross-validated
+	// against CatalogPath in Validate(): an operator ticking "Enabled"
+	// before setting a catalog path is a normal, transient state, not a
+	// config error -- see cmd/branchdam-agent's syncer-registration gate,
+	// which is where "enabled but not yet configured" is actually
+	// handled (a nil syncer, never a Validate problem).
+	Enabled bool `yaml:"enabled"`
+	// CatalogPath is the third-party application's catalog file this
+	// integration reads read-only. Must not contain '?' or '#' -- see
+	// Validate().
+	CatalogPath string `yaml:"catalogPath"`
+	// DryRun, when true, resolves and logs what a sync pass would emit
+	// without contacting the server at all. Defaults to true (see
+	// defaultConfig()) -- an operator turns this off explicitly, per
+	// integration, once they've read the dry-run log. This is the same
+	// "deliberately non-zero default" shape as SelfUpdateConfig.Enabled;
+	// never construct a CatalogSyncConfig literal and read this field --
+	// always go through Load.
+	DryRun bool `yaml:"dryRun"`
+	// SyncIntervalMinutes is how often the tray runs a sync pass on its
+	// own timer once this integration is enabled. Zero means the
+	// default (DefaultSyncIntervalMinutes); a NEGATIVE value means
+	// "manual only" -- the tray never syncs on its own, though "Sync
+	// now" still works. This mirrors SelfUpdateConfig.CheckIntervalHours's
+	// 0-means-default/negative-means-never convention, not
+	// OfflineConfig.DrainIntervalSecs's "<= 0 means default": unlike a
+	// queue drain, "enabled, but I only ever sync by hand" is a real,
+	// deliberate mode here -- a pass reads a catalog file the operator
+	// may have open in the third-party application right now.
+	// Deliberately NOT checked for negative values in Validate() (contrast
+	// TimeoutSecs below) precisely because negative is meaningful.
+	SyncIntervalMinutes int `yaml:"syncIntervalMinutes"`
+	// TimeoutSecs bounds one sync pass. Defaults to
+	// DefaultIntegrationTimeoutSecs when <= 0 -- matching luminar-sync's
+	// own -timeout flag default.
+	TimeoutSecs int `yaml:"timeoutSecs"`
+}
+
+// ResolveHookConfig configures the DaVinci Resolve render-hook installer
+// (internal/resolvehook).
+type ResolveHookConfig struct {
+	// ScriptsDir overrides the auto-detected candidate list of Resolve
+	// Scripts/Utility directories. Empty (the default) means "use the
+	// per-OS candidate list" -- see internal/resolvehook.CandidateDirs.
+	ScriptsDir string `yaml:"scriptsDir"`
+}
+
+// DefaultSyncIntervalMinutes is CatalogSyncConfig.SyncIntervalMinutes's
+// fallback when zero -- an hour, deliberately far coarser than the drain
+// (5s) and prune (30m) timers: a catalog sync reads a third-party
+// application's live database and re-POSTs edges the server treats as
+// idempotent no-ops (see CatalogSyncConfig's own doc comment), so there is
+// nothing to gain from a tight cadence.
+const DefaultSyncIntervalMinutes = 60
+
+// DefaultIntegrationTimeoutSecs is CatalogSyncConfig.TimeoutSecs's fallback
+// when <= 0 -- matches luminar-sync's own -timeout flag default.
+const DefaultIntegrationTimeoutSecs = 30
+
+// SyncIntervalMinutesOrDefault returns c.SyncIntervalMinutes, or
+// DefaultSyncIntervalMinutes when zero. A negative value is returned
+// verbatim and means "manual only" -- see the field's own doc comment.
+func (c CatalogSyncConfig) SyncIntervalMinutesOrDefault() int {
+	if c.SyncIntervalMinutes == 0 {
+		return DefaultSyncIntervalMinutes
+	}
+	return c.SyncIntervalMinutes
+}
+
+// TimeoutSecsOrDefault returns c.TimeoutSecs, or
+// DefaultIntegrationTimeoutSecs when <= 0.
+func (c CatalogSyncConfig) TimeoutSecsOrDefault() int {
+	if c.TimeoutSecs <= 0 {
+		return DefaultIntegrationTimeoutSecs
+	}
+	return c.TimeoutSecs
+}
+
 // IngestConfig configures M1's SD-card ingest core: where the two copies
 // land and what relative-path template both derive from, and card-detection
 // polling. ArchiveRoot/LocalEditRoot are workstation-native paths (this
@@ -267,6 +391,16 @@ func defaultConfig() Config {
 		// invariants. An operator who wants zero outbound GitHub traffic
 		// sets selfUpdate.enabled: false explicitly.
 		SelfUpdate: SelfUpdateConfig{Enabled: true},
+		// Dry run ON by default, including when config.yaml has no
+		// integrations: block at all -- Load unmarshals over this
+		// default, so an explicit dryRun: false in config still wins.
+		// A fresh install resolves and logs what a sync WOULD emit and
+		// contacts no server; an operator turns this off explicitly,
+		// per integration, once they've read the dry-run log. See
+		// CatalogSyncConfig.DryRun's own doc comment.
+		Integrations: IntegrationsConfig{
+			Luminar: CatalogSyncConfig{DryRun: true},
+		},
 	}
 }
 
@@ -401,6 +535,9 @@ func (c Config) Validate() []Problem {
 	checkPlaceholder("offline.tier0ContainerRoot", c.Offline.Tier0ContainerRoot)
 	checkPlaceholder("tray.statusAddr", c.Tray.StatusAddr)
 	checkPlaceholder("selfUpdate.repo", c.SelfUpdate.Repo)
+	checkPlaceholder("integrations.nodeIndexPath", c.Integrations.NodeIndexPath)
+	checkPlaceholder("integrations.luminar.catalogPath", c.Integrations.Luminar.CatalogPath)
+	checkPlaceholder("integrations.resolve.scriptsDir", c.Integrations.Resolve.ScriptsDir)
 	for i, m := range c.PathMappings {
 		checkPlaceholder(fmt.Sprintf("pathMappings[%d].workstationPath", i), m.WorkstationPath)
 		checkPlaceholder(fmt.Sprintf("pathMappings[%d].containerPath", i), m.ContainerPath)
@@ -424,6 +561,27 @@ func (c Config) Validate() []Problem {
 	}
 	if c.Prune.IntervalMinutes < 0 {
 		problems = append(problems, Problem{Field: "prune.intervalMinutes", Message: "must not be negative"})
+	}
+	if c.Integrations.Luminar.TimeoutSecs < 0 {
+		problems = append(problems, Problem{Field: "integrations.luminar.timeoutSecs", Message: "must not be negative"})
+	}
+	// integrations.luminar.syncIntervalMinutes is deliberately NOT checked
+	// here -- unlike the other interval fields above, a negative value is
+	// meaningful ("manual only"; see CatalogSyncConfig.SyncIntervalMinutes's
+	// own doc comment), not a mistake.
+
+	// internal/luminar.Open concatenates CatalogPath into a
+	// "file:<path>?mode=ro" SQLite URI and rejects '?'/'#' outright: a '?'
+	// could inject a second query parameter and silently open the catalog
+	// ?immutable=1, the one mode that package exists to never use against a
+	// live-WAL catalog. Checked here, inline, rather than by importing
+	// internal/luminar -- internal/config must stay dependency-free -- so a
+	// runtime-only failure becomes a config problem an operator sees once.
+	if strings.ContainsAny(c.Integrations.Luminar.CatalogPath, "?#") {
+		problems = append(problems, Problem{
+			Field:   "integrations.luminar.catalogPath",
+			Message: "must not contain '?' or '#' -- the path is concatenated into a SQLite file: URI and would be misread as query parameters",
+		})
 	}
 
 	return problems
