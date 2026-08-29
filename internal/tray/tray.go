@@ -144,6 +144,12 @@ type Status struct {
 	// only mirrors for display).
 	Busy     bool
 	BusyCard string
+	// Integrations is RUNTIME state only, ordered by the compile-time
+	// Integrations() registry so the status page and (a later PR's) menu
+	// render in the same order every time. Config state (enabled, dry
+	// run, configured paths) comes from Settings.Snapshot(), never from
+	// here -- Runner never reads config.
+	Integrations []IntegrationStatus
 }
 
 // Runner owns the state a tray-resident process needs: the ingest engine
@@ -196,6 +202,22 @@ type Runner struct {
 	pruner      Pruner
 	lastDrain   *DrainSummary
 	lastPrune   *PruneSummary
+
+	// syncers is nil-able per ID (issue #57), same contract as drainer/
+	// pruner above: an absent entry is "not configured" -- disabled, or
+	// enabled but missing a required config field -- never an error. Set
+	// via SetIntegrationSyncers, which (unlike queueReader/drainer/pruner)
+	// IS re-called on every settings reload, since an integration's
+	// enabled/dry-run/configured state can change at any time the tray is
+	// running, not just at startup.
+	syncers map[IntegrationID]IntegrationSyncer
+	// syncInFlight tracks in-progress Sync calls PER ID, deliberately not
+	// a single shared mutex like drainMu: two different integrations (e.g.
+	// luminar and a future lrcat) must never block each other, only
+	// concurrent passes for the SAME id. See TriggerSync's own doc
+	// comment for why this shares neither gate nor drainMu.
+	syncInFlight map[IntegrationID]bool
+	lastSync     map[IntegrationID]*SyncSummary
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -381,6 +403,84 @@ func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bo
 	return summary, true
 }
 
+// SetIntegrationSyncers swaps in the full set of registered integration
+// syncers, built from the current config. Called from runTrayCmd at
+// startup AND from configSettings.reload() on every settings change --
+// unlike SetQueueDeps, this second call site is not optional: without it,
+// rotating server.apiKey or changing server.baseUrl from the Settings menu
+// would leave every integration syncer POSTing edges with a stale client
+// indefinitely, the same staleness class of bug SetQueueDeps' own rebuild
+// exists to fix for drain/prune. An absent map entry for a given ID is the
+// honest "not configured" signal (see IntegrationStatus's own doc
+// comment), never an error.
+func (r *Runner) SetIntegrationSyncers(m map[IntegrationID]IntegrationSyncer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.syncers = m
+}
+
+// TriggerSync runs one Sync pass for id via the registered
+// IntegrationSyncer, if one is wired and no other pass for the SAME id is
+// currently running. ran=false covers both "not registered" (mirrors a nil
+// Drainer/Pruner) and "already running" (mirrors TriggerDrain's own
+// skip-don't-queue contract) -- a caller (a timer tick or a menu click)
+// treats both identically: nothing new to show beyond what Status()
+// already reports.
+//
+// Deliberately per-ID, not one shared mutex like drainMu: a Luminar sync in
+// flight must never make a concurrent pass for a different integration
+// (e.g. a future lrcat, issue #47) report skipped -- unrelated
+// integrations must not block each other, only concurrent passes for the
+// SAME id.
+//
+// Deliberately never shares Runner.gate either (unlike TriggerPrune): a
+// sync only opens a third-party catalog read-only and POSTs edges -- it
+// never touches ingest.ArchiveRoot or ingest.LocalEditRoot, so it has none
+// of the hazard that makes TriggerPrune share gate with an ingest (prune
+// deletes from LocalEditRoot while ingest writes into it). Sharing would
+// instead cost twice: a scheduled sync tick dropped whenever a card
+// happens to be mid-copy, and a slow catalog read blocking an inserted
+// card from ingesting for its duration.
+func (r *Runner) TriggerSync(ctx context.Context, id IntegrationID) (summary SyncSummary, ran bool) {
+	r.mu.Lock()
+	syncer := r.syncers[id]
+	if syncer == nil {
+		r.mu.Unlock()
+		return SyncSummary{}, false
+	}
+	if r.syncInFlight[id] {
+		r.mu.Unlock()
+		return SyncSummary{}, false
+	}
+	if r.syncInFlight == nil {
+		r.syncInFlight = map[IntegrationID]bool{}
+	}
+	r.syncInFlight[id] = true
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		delete(r.syncInFlight, id)
+		r.mu.Unlock()
+	}()
+
+	summary, err := syncer.Sync(ctx)
+	summary.At = time.Now()
+	if err != nil {
+		summary.Err = err
+	}
+
+	r.mu.Lock()
+	if r.lastSync == nil {
+		r.lastSync = map[IntegrationID]*SyncSummary{}
+	}
+	stamped := summary
+	r.lastSync[id] = &stamped
+	r.mu.Unlock()
+
+	return summary, true
+}
+
 // Reconfigure swaps in a freshly built Ingester plus the watch/scratch
 // description it should report going forward -- the guarded-rebuild
 // mechanism issue #31's settings menu applies every hot-reloadable config
@@ -428,6 +528,20 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	pruneEnabled := r.pruner != nil
 	lastDrain := r.lastDrain
 	lastPrune := r.lastPrune
+
+	// Built entirely under r.mu, not after unlocking: r.syncers/r.lastSync
+	// are read map entries here, not copied whole-map references, so a
+	// concurrent TriggerSync write (a single map-key assignment, not a
+	// map replace) could otherwise race this read -- see TriggerSync's
+	// own r.lastSync[id] = &stamped assignment.
+	integrations := make([]IntegrationStatus, 0, len(Integrations()))
+	for _, d := range Integrations() {
+		st := IntegrationStatus{ID: d.ID, Registered: r.syncers[d.ID] != nil}
+		if ls, ok := r.lastSync[d.ID]; ok {
+			st.LastSync = ls
+		}
+		integrations = append(integrations, st)
+	}
 	r.mu.Unlock()
 
 	scratchNote := "not configured"
@@ -456,12 +570,13 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	}
 
 	return Status{
-		WatchDirs:   watchDirs,
-		ScratchNote: scratchNote,
-		QueueStatus: qs,
-		LastIngest:  last,
-		SelfUpdate:  selfUpdate,
-		Busy:        busy,
-		BusyCard:    busyCard,
+		WatchDirs:    watchDirs,
+		ScratchNote:  scratchNote,
+		QueueStatus:  qs,
+		LastIngest:   last,
+		SelfUpdate:   selfUpdate,
+		Busy:         busy,
+		BusyCard:     busyCard,
+		Integrations: integrations,
 	}
 }

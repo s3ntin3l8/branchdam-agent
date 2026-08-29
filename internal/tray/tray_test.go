@@ -308,6 +308,200 @@ func TestTriggerPruneSharesGateWithIngest(t *testing.T) {
 	close(release)
 }
 
+// fakeIntegrationSyncer substitutes a real internal/luminar-backed syncer
+// for Runner tests -- same pattern as fakeDrainer/fakePruner. started/
+// release, when non-nil, block Sync until the test closes release, letting
+// a test observe an in-flight pass.
+type fakeIntegrationSyncer struct {
+	summary SyncSummary
+	err     error
+	started chan struct{}
+	release chan struct{}
+	calls   int
+}
+
+func (f *fakeIntegrationSyncer) Sync(_ context.Context) (SyncSummary, error) {
+	f.calls++
+	if f.started != nil {
+		close(f.started)
+		<-f.release
+	}
+	return f.summary, f.err
+}
+
+func TestTriggerSyncRunsAndRecordsLastSync(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fs := &fakeIntegrationSyncer{summary: SyncSummary{PairsFound: 2, Emitted: 2}}
+	r.SetIntegrationSyncers(map[IntegrationID]IntegrationSyncer{IntegrationLuminar: fs})
+
+	summary, ran := r.TriggerSync(context.Background(), IntegrationLuminar)
+	if !ran {
+		t.Fatal("expected TriggerSync to run when a syncer is configured and idle")
+	}
+	if summary.PairsFound != 2 || summary.Emitted != 2 {
+		t.Errorf("got %+v", summary)
+	}
+	if summary.At.IsZero() {
+		t.Error("expected TriggerSync to stamp At, not leave it to the syncer")
+	}
+
+	st := r.Status(UpdateStatus{})
+	var got *IntegrationStatus
+	for i := range st.Integrations {
+		if st.Integrations[i].ID == IntegrationLuminar {
+			got = &st.Integrations[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("expected an IntegrationStatus entry for IntegrationLuminar")
+	}
+	if !got.Registered {
+		t.Error("expected Registered=true once a syncer is wired")
+	}
+	if got.LastSync == nil || got.LastSync.Emitted != 2 {
+		t.Errorf("expected Status to reflect the last sync, got %+v", got.LastSync)
+	}
+}
+
+func TestTriggerSyncSkipsWhenNotRegistered(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	_, ran := r.TriggerSync(context.Background(), IntegrationLuminar)
+	if ran {
+		t.Error("expected TriggerSync to report ran=false when no syncer is wired for this ID")
+	}
+	st := r.Status(UpdateStatus{})
+	for _, is := range st.Integrations {
+		if is.ID == IntegrationLuminar && is.Registered {
+			t.Error("expected Registered=false when no syncer is wired")
+		}
+	}
+}
+
+func TestTriggerSyncSkipsConcurrentPassSameID(t *testing.T) {
+	fs := &fakeIntegrationSyncer{started: make(chan struct{}), release: make(chan struct{})}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetIntegrationSyncers(map[IntegrationID]IntegrationSyncer{IntegrationLuminar: fs})
+
+	done := make(chan struct{})
+	go func() {
+		r.TriggerSync(context.Background(), IntegrationLuminar)
+		close(done)
+	}()
+	<-fs.started
+
+	if _, ran := r.TriggerSync(context.Background(), IntegrationLuminar); ran {
+		t.Error("expected a second TriggerSync for the SAME id to skip (ran=false) while a pass is already running")
+	}
+
+	close(fs.release)
+	<-done
+	if fs.calls != 1 {
+		t.Errorf("expected exactly 1 Sync call, got %d", fs.calls)
+	}
+}
+
+// TestTriggerSyncDifferentIDsDontBlockEachOther pins the deliberate
+// per-ID (not single shared mutex) locking design: a pass in flight for
+// one integration must never make a concurrent pass for a DIFFERENT
+// integration report skipped.
+func TestTriggerSyncDifferentIDsDontBlockEachOther(t *testing.T) {
+	const otherID IntegrationID = "other-for-test"
+
+	blocked := &fakeIntegrationSyncer{started: make(chan struct{}), release: make(chan struct{})}
+	other := &fakeIntegrationSyncer{summary: SyncSummary{Emitted: 1}}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetIntegrationSyncers(map[IntegrationID]IntegrationSyncer{
+		IntegrationLuminar: blocked,
+		otherID:            other,
+	})
+
+	done := make(chan struct{})
+	go func() {
+		r.TriggerSync(context.Background(), IntegrationLuminar)
+		close(done)
+	}()
+	<-blocked.started
+
+	if _, ran := r.TriggerSync(context.Background(), otherID); !ran {
+		t.Error("expected a concurrent sync for a DIFFERENT id to run, not be blocked by an in-flight pass for another id")
+	}
+
+	close(blocked.release)
+	<-done
+}
+
+func TestTriggerSyncNeverBlocksOnIngestGate(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, nil, "")
+	fs := &fakeIntegrationSyncer{summary: SyncSummary{Emitted: 1}}
+	r.SetIntegrationSyncers(map[IntegrationID]IntegrationSyncer{IntegrationLuminar: fs})
+
+	go r.TriggerIngest(context.Background(), "/media/a")
+	<-started
+
+	done := make(chan struct{})
+	go func() {
+		_, ran := r.TriggerSync(context.Background(), IntegrationLuminar)
+		if !ran {
+			t.Error("expected TriggerSync to run even while an ingest holds Runner.gate -- a sync uses its own locking, never gate")
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("TriggerSync appears to be blocked on Runner.gate")
+	}
+
+	close(release)
+}
+
+// TestTriggerIngestNeverBlocksOnSyncInFlight is the reverse of the above:
+// a held sync must never block an ingest either -- neither direction
+// shares a lock.
+func TestTriggerIngestNeverBlocksOnSyncInFlight(t *testing.T) {
+	fs := &fakeIntegrationSyncer{started: make(chan struct{}), release: make(chan struct{})}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetIntegrationSyncers(map[IntegrationID]IntegrationSyncer{IntegrationLuminar: fs})
+
+	go r.TriggerSync(context.Background(), IntegrationLuminar)
+	<-fs.started
+
+	done := make(chan struct{})
+	go func() {
+		r.TriggerIngest(context.Background(), "/media/a")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("TriggerIngest appears to be blocked by an in-flight sync")
+	}
+
+	close(fs.release)
+}
+
+func TestStatusIntegrationsOrderedByRegistry(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	st := r.Status(UpdateStatus{})
+	registry := Integrations()
+	if len(st.Integrations) != len(registry) {
+		t.Fatalf("got %d IntegrationStatus entries, want %d (one per registry entry)", len(st.Integrations), len(registry))
+	}
+	for i, d := range registry {
+		if st.Integrations[i].ID != d.ID {
+			t.Errorf("Integrations[%d].ID = %q, want %q (registry order)", i, st.Integrations[i].ID, d.ID)
+		}
+		if st.Integrations[i].Registered {
+			t.Errorf("Integrations[%d]: expected Registered=false with no syncers wired", i)
+		}
+	}
+}
+
 func TestStatusScratchNote(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, nil, "")
 	if got := r.Status(UpdateStatus{}).ScratchNote; got != "not configured" {
