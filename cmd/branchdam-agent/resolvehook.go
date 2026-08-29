@@ -27,6 +27,28 @@ func resolveHookCandidateDirs(scriptsDir string) []string {
 	return resolvehook.CandidateDirs(runtime.GOOS, home, os.Getenv("APPDATA"))
 }
 
+// resolveHookInstallTarget picks the install destination among dirs (in
+// CandidateDirs' own preference order), reinstalling in place at
+// detected.Dir when the hook is ALREADY installed somewhere (e.g. after a
+// version bump), and otherwise always targeting dirs[0] -- CandidateDirs'
+// most-preferred, writable entry -- for a fresh install.
+//
+// Deliberately NOT "the first existing directory": on macOS the
+// system-wide Scripts/Utility directory is typically created by the
+// Resolve installer itself and so already exists even when nothing has
+// been installed there, while the per-user directory CandidateDirs prefers
+// often does not exist yet. Detect's own Dir field reports that first
+// existing directory regardless of install state, so using it directly as
+// the fresh-install target would silently pick the unwritable system path
+// and fail with EACCES for an unprivileged operator -- exactly the hazard
+// CandidateDirs' own ordering exists to avoid.
+func resolveHookInstallTarget(dirs []string, detected resolvehook.HookState) string {
+	if detected.Installed {
+		return detected.Dir
+	}
+	return dirs[0]
+}
+
 // resolveHookInstaller implements tray.HookInstaller over
 // internal/resolvehook -- the concrete wiring cmd/branchdam-agent owns,
 // matching luminarSyncer's own relationship to tray.IntegrationSyncer.
@@ -38,21 +60,26 @@ func (h *resolveHookInstaller) candidateDirs() []string {
 	return resolveHookCandidateDirs(h.scriptsDir)
 }
 
-// Install installs into whichever candidate directory Detect finds the
-// hook ALREADY installed in (reinstalling in place, e.g. after a version
-// bump), falling back to the FIRST candidate -- CandidateDirs' own most-
-// preferred entry -- when nothing is installed yet at all.
-func (h *resolveHookInstaller) Install(_ context.Context) (tray.HookState, error) {
+// Install installs via resolveHookInstallTarget's own preference rule --
+// see that function's doc comment.
+func (h *resolveHookInstaller) Install(ctx context.Context) (tray.HookState, error) {
+	// internal/resolvehook.Install's own atomic temp-then-rename write means
+	// a mid-flight cancellation can never leave a partial file behind, so
+	// this is a courtesy check rather than a hard requirement -- but
+	// HookInstaller's own interface advertises ctx, and TriggerHookInstall
+	// bounds every call with a menu-path timeout, so honor it before doing
+	// any I/O rather than silently ignoring it.
+	if err := ctx.Err(); err != nil {
+		return tray.HookState{}, err
+	}
+
 	dirs := h.candidateDirs()
 	if len(dirs) == 0 {
 		return tray.HookState{}, fmt.Errorf("resolvehook: no candidate Scripts/Utility folder for this platform -- set integrations.resolve.scriptsDir")
 	}
 
 	detected := resolvehook.Detect(dirs, resolve.FileName, resolve.SourceSHA256)
-	target := detected.Dir
-	if target == "" {
-		target = dirs[0]
-	}
+	target := resolveHookInstallTarget(dirs, detected)
 
 	st, err := resolvehook.Install(target, resolve.FileName, resolve.Source)
 	if err != nil {
@@ -112,10 +139,7 @@ func runResolveHookCmd(args []string) int {
 
 	if *install {
 		detected := resolvehook.Detect(dirs, resolve.FileName, resolve.SourceSHA256)
-		target := detected.Dir
-		if target == "" {
-			target = dirs[0]
-		}
+		target := resolveHookInstallTarget(dirs, detected)
 		st, err := resolvehook.Install(target, resolve.FileName, resolve.Source)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "branchdam-agent resolve-hook: %v\n", err)

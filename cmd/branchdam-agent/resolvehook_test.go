@@ -12,6 +12,69 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/resolvehook"
 )
 
+// TestResolveHookInstallTargetPrefersWritablePerUserPathOnFreshInstall pins
+// the Hermes review fix (PR #67): a fresh install -- nothing found at any
+// candidate -- must target dirs[0], not merely the first EXISTING
+// directory. On macOS the system-wide Scripts/Utility directory is often
+// created by the Resolve installer itself and so exists even when nothing
+// has been installed there, while the per-user directory (dirs[0]) does
+// not exist yet -- targeting "first existing" would silently pick the
+// unwritable system path and fail with EACCES.
+func TestResolveHookInstallTargetPrefersWritablePerUserPathOnFreshInstall(t *testing.T) {
+	perUser := filepath.Join(t.TempDir(), "does-not-exist-yet")
+	system := t.TempDir() // exists, like Resolve's own system-wide dir
+	dirs := []string{perUser, system}
+
+	detected := resolvehook.Detect(dirs, "branchdam_render_hook.py", "irrelevant")
+	if detected.Dir != system {
+		t.Fatalf("test setup: Detect's Dir = %q, want the existing system dir %q", detected.Dir, system)
+	}
+	if detected.Installed {
+		t.Fatalf("test setup: expected Installed=false, got %+v", detected)
+	}
+
+	got := resolveHookInstallTarget(dirs, detected)
+	if got != perUser {
+		t.Errorf("resolveHookInstallTarget = %q, want the preferred per-user dir %q, not the merely-existing system dir %q", got, perUser, system)
+	}
+}
+
+func TestResolveHookInstallTargetReinstallsInPlaceWhenAlreadyInstalled(t *testing.T) {
+	perUser := t.TempDir()
+	system := t.TempDir()
+	dirs := []string{perUser, system}
+
+	const fileName = "branchdam_render_hook.py"
+	if _, err := resolvehook.Install(system, fileName, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+
+	detected := resolvehook.Detect(dirs, fileName, "irrelevant")
+	if !detected.Installed || detected.Dir != system {
+		t.Fatalf("test setup: got %+v, want Installed=true at %q", detected, system)
+	}
+
+	got := resolveHookInstallTarget(dirs, detected)
+	if got != system {
+		t.Errorf("resolveHookInstallTarget = %q, want the already-installed dir %q reused in place", got, system)
+	}
+}
+
+func TestResolveHookInstallerInstallHonorsCanceledContext(t *testing.T) {
+	dir := t.TempDir()
+	h := &resolveHookInstaller{scriptsDir: dir}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := h.Install(ctx); err == nil {
+		t.Error("expected an error from Install with an already-canceled context")
+	}
+	if _, err := os.Stat(filepath.Join(dir, resolve.FileName)); err == nil {
+		t.Error("expected no file to be written when the context was already canceled")
+	}
+}
+
 func TestResolveHookCandidateDirsOverride(t *testing.T) {
 	dirs := resolveHookCandidateDirs("/custom/scripts/dir")
 	if len(dirs) != 1 || dirs[0] != "/custom/scripts/dir" {
