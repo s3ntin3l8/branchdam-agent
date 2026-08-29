@@ -172,6 +172,19 @@ func (s *configSettings) validateBoolChange(key string, v bool) error {
 		cfg.SelfUpdate.Enabled = v
 	case "ingest.requireUnbuffered":
 		cfg.Ingest.RequireUnbuffered = v
+	default:
+		// config.Patch does no schema validation of its own -- these three
+		// switches (this one plus validateIntChange/validateStringChange
+		// below) ARE the entire allowlist. Without this case, an
+		// unrecognized key (a typo in a menu handler, a stale key after a
+		// rename) silently validated an UNCHANGED cfg, reported no
+		// problem, and was then written to config.yaml by config.Patch
+		// with no validation at all -- a latent bug independent of any
+		// specific caller, caught during a later PR's review and fixed
+		// here on its own (issue #58). Every current caller
+		// (settingsmenu.go's four checkbox/submenu keys) passes a listed
+		// key, so this is not a behavior change for any existing path.
+		return fmt.Errorf("settings: %q is not a settable bool key", key)
 	}
 	return firstValidateProblem(cfg)
 }
@@ -183,6 +196,9 @@ func (s *configSettings) validateIntChange(key string, v int) error {
 	switch key {
 	case "selfUpdate.checkIntervalHours":
 		cfg.SelfUpdate.CheckIntervalHours = v
+	default:
+		// See validateBoolChange's default case for why this exists.
+		return fmt.Errorf("settings: %q is not a settable int key", key)
 	}
 	return firstValidateProblem(cfg)
 }
@@ -202,6 +218,9 @@ func (s *configSettings) validateStringChange(key, v string) error {
 		cfg.Ingest.LocalEditRoot = v
 	case "ingest.pathTemplate":
 		cfg.Ingest.PathTemplate = v
+	default:
+		// See validateBoolChange's default case for why this exists.
+		return fmt.Errorf("settings: %q is not a settable string key", key)
 	}
 	return firstValidateProblem(cfg)
 }

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/ncruces/zenity"
 )
@@ -30,6 +31,13 @@ type dialogFuncs struct {
 	showError func(title, message string) error
 	entry     func(title, message, defaultText string, hidden bool) (string, error)
 	directory func(title string) (string, error)
+	// file selects an existing FILE (never a directory -- that's what
+	// makes this distinct from directory above), optionally filtered to
+	// patterns (e.g. "*.lrcat", "*.json"). Needed for the integrations
+	// menu's catalog and node-index pickers (issue #58) -- neither is a
+	// directory, which directory's zenity.Directory() option structurally
+	// cannot return.
+	file func(title, defaultPath string, patterns []string) (string, error)
 }
 
 // realDialogFuncs is dialogFuncs backed by the real zenity package: Win32
@@ -58,6 +66,20 @@ var realDialogFuncs = dialogFuncs{
 	directory: func(title string) (string, error) {
 		return zenity.SelectFile(zenity.Title(title), zenity.Directory())
 	},
+	file: func(title, defaultPath string, patterns []string) (string, error) {
+		opts := []zenity.Option{zenity.Title(title)}
+		if defaultPath != "" {
+			opts = append(opts, zenity.Filename(defaultPath))
+		}
+		if len(patterns) > 0 {
+			opts = append(opts, zenity.FileFilters{
+				{Name: "Supported files", Patterns: patterns, CaseFold: true},
+			})
+		}
+		// No zenity.Directory() here -- that option is what distinguishes
+		// this from the directory func above.
+		return zenity.SelectFile(opts...)
+	},
 }
 
 // runDialogCmd implements the hidden `branchdam-agent dialog` subcommand --
@@ -75,10 +97,14 @@ var realDialogFuncs = dialogFuncs{
 // in its own process) and issue #30 for why this exists at all.
 func runDialogCmd(args []string, dlg dialogFuncs) int {
 	fs := flag.NewFlagSet("dialog", flag.ContinueOnError)
-	kind := fs.String("kind", "", "dialog kind: error, entry, password, or directory")
+	kind := fs.String("kind", "", "dialog kind: error, entry, password, directory, or file")
 	title := fs.String("title", "branchDAM Agent", "dialog title")
 	message := fs.String("message", "", "dialog body text (error/entry/password only)")
-	defaultText := fs.String("default", "", "pre-filled text (entry/password only)")
+	// -default is reused as file's pre-filled path -- unlike password,
+	// where a secret has no business appearing in a subprocess's argv, a
+	// filesystem path is not a secret.
+	defaultText := fs.String("default", "", "pre-filled text (entry/password only) or path (file only)")
+	patterns := fs.String("patterns", "", "comma-separated filename patterns for -kind file (e.g. \"*.lrcat,*.json\"); empty means no filter")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -99,10 +125,30 @@ func runDialogCmd(args []string, dlg dialogFuncs) int {
 		value, err := dlg.directory(*title)
 		return reportPromptResult(value, err)
 
+	case "file":
+		value, err := dlg.file(*title, *defaultText, splitPatterns(*patterns))
+		return reportPromptResult(value, err)
+
 	default:
-		fmt.Fprintf(os.Stderr, "branchdam-agent dialog: -kind must be one of error, entry, password, directory (got %q)\n", *kind)
+		fmt.Fprintf(os.Stderr, "branchdam-agent dialog: -kind must be one of error, entry, password, directory, file (got %q)\n", *kind)
 		return 2
 	}
+}
+
+// splitPatterns parses -patterns' comma-separated form, trimming
+// whitespace and dropping empty entries -- mirrors
+// runLuminarSyncCmd's own -derivative-suffixes splitting so both
+// comma-separated flags in this binary behave identically. An empty or
+// all-whitespace input returns nil (no filter), never a single
+// empty-string pattern.
+func splitPatterns(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // reportPromptResult prints value to stdout (the only channel a re-exec'd
