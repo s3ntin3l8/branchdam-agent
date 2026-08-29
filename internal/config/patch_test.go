@@ -163,6 +163,59 @@ func TestPatchCreatesMissingNestedKeys(t *testing.T) {
 	}
 }
 
+// TestPatchCreatesIntegrationsBlockFromEmpty pins the specific case the
+// tray Settings menu design depends on: config.yaml has no integrations:
+// key at all (a fresh install, or one predating this feature), and a
+// three-segment dotted key ("integrations.luminar.enabled") must still
+// walk-and-create both the "integrations" and "luminar" mapping levels, not
+// just one. TestPatchCreatesMissingNestedKeys above already covers a
+// two-segment key from empty; this pins three, plus round-tripping a
+// sibling top-level config.example.yaml already had (server.baseUrl) so a
+// patch touching a brand-new section doesn't disturb an existing one.
+func TestPatchCreatesIntegrationsBlockFromEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "# a pre-existing comment, unrelated to integrations\nserver:\n  baseUrl: \"http://localhost:8080\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Patch(path, map[string]any{
+		"integrations.luminar.enabled":     true,
+		"integrations.luminar.catalogPath": "/data/catalog.luminarneo",
+		"integrations.nodeIndexPath":       "/data/node-index.json",
+	})
+	if err != nil {
+		t.Fatalf("Patch: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "a pre-existing comment, unrelated to integrations") {
+		t.Error("Patch dropped the pre-existing top-level comment")
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load patched config: %v", err)
+	}
+	if !cfg.Integrations.Luminar.Enabled {
+		t.Error("integrations.luminar.enabled not applied")
+	}
+	if cfg.Integrations.Luminar.CatalogPath != "/data/catalog.luminarneo" {
+		t.Errorf("integrations.luminar.catalogPath not applied: %q", cfg.Integrations.Luminar.CatalogPath)
+	}
+	if cfg.Integrations.NodeIndexPath != "/data/node-index.json" {
+		t.Errorf("integrations.nodeIndexPath not applied: %q", cfg.Integrations.NodeIndexPath)
+	}
+	// The pre-existing sibling key must survive untouched.
+	if cfg.Server.BaseURL != "http://localhost:8080" {
+		t.Errorf("unrelated server.baseUrl was disturbed: %q", cfg.Server.BaseURL)
+	}
+}
+
 func TestPatchOnExistingLeafPreservesLineComment(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

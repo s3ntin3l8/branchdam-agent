@@ -195,6 +195,114 @@ func TestValidateNegativeIntervals(t *testing.T) {
 	}
 }
 
+// TestValidateNegativeSyncIntervalIsNotAProblem is the deliberate asymmetry
+// with TestValidateNegativeIntervals above: unlike the other interval
+// fields, a negative integrations.luminar.syncIntervalMinutes means "manual
+// only" and must NOT be flagged.
+func TestValidateNegativeSyncIntervalIsNotAProblem(t *testing.T) {
+	cfg := Config{Integrations: IntegrationsConfig{Luminar: CatalogSyncConfig{SyncIntervalMinutes: -1}}}
+	if problems := cfg.Validate(); len(problems) != 0 {
+		t.Errorf("expected no problems for a negative syncIntervalMinutes, got %v", problems)
+	}
+}
+
+func TestValidateIntegrationsTimeoutSecsNegative(t *testing.T) {
+	cfg := Config{Integrations: IntegrationsConfig{Luminar: CatalogSyncConfig{TimeoutSecs: -1}}}
+	problems := cfg.Validate()
+	found := false
+	for _, p := range problems {
+		if p.Field == "integrations.luminar.timeoutSecs" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a problem for a negative timeoutSecs, got %v", problems)
+	}
+}
+
+func TestValidateCatalogPathRejectsQueryAndFragmentChars(t *testing.T) {
+	for _, bad := range []string{"/path/cat?alog.db", "/path/cat#alog.db"} {
+		cfg := Config{Integrations: IntegrationsConfig{Luminar: CatalogSyncConfig{CatalogPath: bad}}}
+		problems := cfg.Validate()
+		found := false
+		for _, p := range problems {
+			if p.Field == "integrations.luminar.catalogPath" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected a problem for catalogPath %q, got %v", bad, problems)
+		}
+	}
+
+	// A plain path must not be flagged.
+	cfg := Config{Integrations: IntegrationsConfig{Luminar: CatalogSyncConfig{CatalogPath: "/path/catalog.db"}}}
+	if problems := cfg.Validate(); len(problems) != 0 {
+		t.Errorf("expected no problems for a plain catalogPath, got %v", problems)
+	}
+}
+
+// TestValidateIntegrationsEnabledWithoutCatalogPathIsNotAProblem pins the
+// deliberate absence of a cross-field completeness rule: reload() rejects
+// on ANY Validate() problem and runs after every settings action, so
+// "enabled but not yet configured" must stay a runtime not-configured
+// state (a nil syncer, handled by cmd/branchdam-agent's registration gate),
+// never a Validate problem -- see IntegrationsConfig's own doc comments.
+func TestValidateIntegrationsEnabledWithoutCatalogPathIsNotAProblem(t *testing.T) {
+	cfg := Config{Integrations: IntegrationsConfig{Luminar: CatalogSyncConfig{Enabled: true}}}
+	if problems := cfg.Validate(); len(problems) != 0 {
+		t.Errorf("expected no problems for enabled-without-catalogPath, got %v", problems)
+	}
+}
+
+func TestValidateIntegrationsPlaceholders(t *testing.T) {
+	cfg := Config{Integrations: IntegrationsConfig{
+		NodeIndexPath: "${TEST_UNSET_INTEGRATIONS_VAR_XYZ}",
+		Luminar:       CatalogSyncConfig{CatalogPath: "${TEST_UNSET_INTEGRATIONS_VAR_XYZ}"},
+		Resolve:       ResolveHookConfig{ScriptsDir: "${TEST_UNSET_INTEGRATIONS_VAR_XYZ}"},
+	}}
+	problems := cfg.Validate()
+	wantFields := map[string]bool{
+		"integrations.nodeIndexPath":       false,
+		"integrations.luminar.catalogPath": false,
+		"integrations.resolve.scriptsDir":  false,
+	}
+	for _, p := range problems {
+		if _, ok := wantFields[p.Field]; ok {
+			wantFields[p.Field] = true
+		}
+	}
+	for field, found := range wantFields {
+		if !found {
+			t.Errorf("expected a placeholder problem for %s, got %v", field, problems)
+		}
+	}
+}
+
+func TestSyncIntervalMinutesOrDefault(t *testing.T) {
+	if got := (CatalogSyncConfig{}).SyncIntervalMinutesOrDefault(); got != DefaultSyncIntervalMinutes {
+		t.Errorf("got %d, want the default %d for a zero value", got, DefaultSyncIntervalMinutes)
+	}
+	if got := (CatalogSyncConfig{SyncIntervalMinutes: 15}).SyncIntervalMinutesOrDefault(); got != 15 {
+		t.Errorf("got %d, want the explicit 15", got)
+	}
+	if got := (CatalogSyncConfig{SyncIntervalMinutes: -1}).SyncIntervalMinutesOrDefault(); got != -1 {
+		t.Errorf("got %d, want -1 (manual only) returned verbatim", got)
+	}
+}
+
+func TestTimeoutSecsOrDefault(t *testing.T) {
+	if got := (CatalogSyncConfig{}).TimeoutSecsOrDefault(); got != DefaultIntegrationTimeoutSecs {
+		t.Errorf("got %d, want the default %d for a zero value", got, DefaultIntegrationTimeoutSecs)
+	}
+	if got := (CatalogSyncConfig{TimeoutSecs: -1}).TimeoutSecsOrDefault(); got != DefaultIntegrationTimeoutSecs {
+		t.Errorf("got %d, want the default for a negative value", got)
+	}
+	if got := (CatalogSyncConfig{TimeoutSecs: 45}).TimeoutSecsOrDefault(); got != 45 {
+		t.Errorf("got %d, want the explicit 45", got)
+	}
+}
+
 func TestDrainIntervalSecsOrDefault(t *testing.T) {
 	if got := (OfflineConfig{}).DrainIntervalSecsOrDefault(); got != DefaultDrainIntervalSecs {
 		t.Errorf("got %d, want the default %d for a zero value", got, DefaultDrainIntervalSecs)
