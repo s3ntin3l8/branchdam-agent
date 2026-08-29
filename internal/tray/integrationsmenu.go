@@ -75,6 +75,21 @@ func newIntegrationSubmenu(d IntegrationDescriptor, iv IntegrationView) *integra
 // runs one such goroutine per registry entry: adding lrcat means one more
 // newIntegrationSubmenu call and one more `go sub.dispatch(...)` call, not
 // a new select case anywhere.
+// integrationKey builds the dotted config.yaml key for one of id's own
+// leaves -- "integrations.<id>.<leaf>" -- the one place that string is
+// spelled in this package, matching cmd/branchdam-agent's own
+// IntegrationBuilder.ConfigKey (which independently derives the identical
+// string on the execution side; both packages must agree on the schema
+// config.IntegrationsConfig defines, but internal/tray cannot import that
+// package's cmd-side registry). Lives here rather than in integrations.go
+// (platform-independent, compiles on Linux too) because its only caller is
+// this file's own dispatch method -- keeping it here avoids an
+// "unused" lint finding on non-windows/darwin builds, where
+// integrationsmenu.go itself doesn't compile at all.
+func integrationKey(id IntegrationID, leaf string) string {
+	return "integrations." + string(id) + "." + leaf
+}
+
 func (sub *integrationSubmenu) dispatch(settings Settings, actionCh chan<- menuAction) {
 	id := sub.id
 	for {
