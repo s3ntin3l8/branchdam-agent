@@ -14,12 +14,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam-agent/hooks/resolve"
 	"github.com/s3ntin3l8/branchdam-agent/internal/agentlog"
 	"github.com/s3ntin3l8/branchdam-agent/internal/autostart"
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
+	"github.com/s3ntin3l8/branchdam-agent/internal/resolvehook"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
@@ -157,6 +159,25 @@ func runTrayCmd(args []string) int {
 			runner.TriggerSync(pctx, id)
 		})
 	}
+
+	// Resolve render-hook installer (issue #60): registered unconditionally,
+	// same rationale as the integration syncers above -- the tray never
+	// gates registration on whether the hook is already installed. Unlike a
+	// sync pass, hook state is never recomputed on a timer -- see
+	// HookState's own doc comment for why a live Detect on every refresh
+	// tick would reproduce the statusQueueReadTimeout hazard. Detect runs
+	// exactly once here, at startup; the only other place it runs again is
+	// inside TriggerHookInstall, after a successful install.
+	resolveInstaller := &resolveHookInstaller{scriptsDir: cfg.Integrations.Resolve.ScriptsDir}
+	runner.SetHookInstallers(map[tray.HookID]tray.HookInstaller{tray.HookResolve: resolveInstaller})
+	initialHookState := resolvehook.Detect(resolveHookCandidateDirs(cfg.Integrations.Resolve.ScriptsDir), resolve.FileName, resolve.SourceSHA256)
+	runner.SetHookState(tray.HookResolve, tray.HookState{
+		At:        time.Now(),
+		Dir:       initialHookState.Dir,
+		Path:      initialHookState.Path,
+		Installed: initialHookState.Installed,
+		UpToDate:  initialHookState.UpToDate,
+	})
 
 	// The offline queue (issue #32) is opt-in the same way `queue-drain`/
 	// `prune` already are: a nil QueueReader/Drainer/Pruner is Runner's

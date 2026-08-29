@@ -150,6 +150,12 @@ type Status struct {
 	// run, configured paths) comes from Settings.Snapshot(), never from
 	// here -- Runner never reads config.
 	Integrations []IntegrationStatus
+	// Hooks is Integrations' counterpart for installable script hooks
+	// (DaVinci Resolve's render hook, issue #60) -- a SEPARATE list, not
+	// folded into Integrations, since a hook has no CatalogSyncConfig and
+	// isn't in Integrations()'s own registry (see HookID's own doc
+	// comment). Ordered by the compile-time Hooks() registry.
+	Hooks []HookStatus
 }
 
 // Runner owns the state a tray-resident process needs: the ingest engine
@@ -218,6 +224,18 @@ type Runner struct {
 	// comment for why this shares neither gate nor drainMu.
 	syncInFlight map[IntegrationID]bool
 	lastSync     map[IntegrationID]*SyncSummary
+
+	// hookInstallers/hookInFlight/hookState mirror syncers/syncInFlight/
+	// lastSync's own shape exactly (issue #60), one map keyed by HookID
+	// instead of IntegrationID -- a hook is a separate concept (see
+	// HookID's own doc comment), not a slot in the integrations maps
+	// above. hookState is populated via SetHookState at tray startup and
+	// updated by TriggerHookInstall on completion -- NEVER computed live
+	// from Status() or a refresh tick; see SetHookState's own doc
+	// comment for why.
+	hookInstallers map[HookID]HookInstaller
+	hookInFlight   map[HookID]bool
+	hookState      map[HookID]*HookState
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -230,6 +248,8 @@ func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner
 		scratchDir:   scratchDir,
 		syncInFlight: map[IntegrationID]bool{},
 		lastSync:     map[IntegrationID]*SyncSummary{},
+		hookInFlight: map[HookID]bool{},
+		hookState:    map[HookID]*HookState{},
 	}
 }
 
@@ -481,6 +501,72 @@ func (r *Runner) TriggerSync(ctx context.Context, id IntegrationID) (summary Syn
 	return summary, true
 }
 
+// SetHookInstallers swaps in the full set of registered hook installers.
+// Mirrors SetIntegrationSyncers' own contract exactly (issue #60): an
+// absent map entry for a given ID is the honest "not configured" signal,
+// never an error.
+func (r *Runner) SetHookInstallers(m map[HookID]HookInstaller) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hookInstallers = m
+}
+
+// SetHookState seeds Runner's CACHED view of id's on-disk state -- called
+// once from runTrayCmd at startup, right after a one-time
+// resolvehook.Detect call. Deliberately never called from Status() or the
+// menu-refresh tick: Detect is a filesystem stat plus a checksum read on
+// (potentially) a networked scriptsDir, and computing it live on every 5s
+// refresh -- or on every status-page request -- would reproduce the exact
+// hazard statusQueueReadTimeout (see Status' own doc comment) was added to
+// fix. TriggerHookInstall keeps this cache fresh after an install action
+// completes; nothing else ever needs to call this again.
+func (r *Runner) SetHookState(id HookID, st HookState) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	stamped := st
+	r.hookState[id] = &stamped
+}
+
+// TriggerHookInstall installs id's script hook via the registered
+// HookInstaller, if one is wired and no other install for the SAME id is
+// currently running -- ran=false covers both cases, mirroring TriggerSync's
+// own contract exactly. On success (or failure), the result is cached via
+// the same map SetHookState seeds, so Status() (and a later PR's menu)
+// reflect the fresh state without ever calling Detect live.
+func (r *Runner) TriggerHookInstall(ctx context.Context, id HookID) (state HookState, ran bool) {
+	r.mu.Lock()
+	installer := r.hookInstallers[id]
+	if installer == nil {
+		r.mu.Unlock()
+		return HookState{}, false
+	}
+	if r.hookInFlight[id] {
+		r.mu.Unlock()
+		return HookState{}, false
+	}
+	r.hookInFlight[id] = true
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		delete(r.hookInFlight, id)
+		r.mu.Unlock()
+	}()
+
+	state, err := installer.Install(ctx)
+	state.At = time.Now()
+	if err != nil {
+		state.Err = err
+	}
+
+	r.mu.Lock()
+	stamped := state
+	r.hookState[id] = &stamped
+	r.mu.Unlock()
+
+	return state, true
+}
+
 // Reconfigure swaps in a freshly built Ingester plus the watch/scratch
 // description it should report going forward -- the guarded-rebuild
 // mechanism issue #31's settings menu applies every hot-reloadable config
@@ -542,6 +628,19 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		}
 		integrations = append(integrations, st)
 	}
+
+	// Built under the same lock, same reasoning as integrations above:
+	// r.hookState is read map entries here, not a copied whole-map
+	// reference, so a concurrent TriggerHookInstall write could otherwise
+	// race this read.
+	hooks := make([]HookStatus, 0, len(Hooks()))
+	for _, id := range Hooks() {
+		hs := HookStatus{ID: id, Registered: r.hookInstallers[id] != nil}
+		if s, ok := r.hookState[id]; ok {
+			hs.State = s
+		}
+		hooks = append(hooks, hs)
+	}
 	r.mu.Unlock()
 
 	scratchNote := "not configured"
@@ -578,5 +677,6 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		Busy:         busy,
 		BusyCard:     busyCard,
 		Integrations: integrations,
+		Hooks:        hooks,
 	}
 }

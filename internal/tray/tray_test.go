@@ -485,6 +485,134 @@ func TestTriggerIngestNeverBlocksOnSyncInFlight(t *testing.T) {
 	close(fs.release)
 }
 
+// fakeHookInstaller substitutes a real internal/resolvehook-backed
+// installer for Runner tests -- same pattern as fakeIntegrationSyncer.
+type fakeHookInstaller struct {
+	state   HookState
+	err     error
+	started chan struct{}
+	release chan struct{}
+	calls   int
+
+	revealCalls int
+	revealErr   error
+}
+
+func (f *fakeHookInstaller) Install(_ context.Context) (HookState, error) {
+	f.calls++
+	if f.started != nil {
+		close(f.started)
+		<-f.release
+	}
+	return f.state, f.err
+}
+
+func (f *fakeHookInstaller) Reveal() error {
+	f.revealCalls++
+	return f.revealErr
+}
+
+func TestTriggerHookInstallRunsAndRecordsState(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fh := &fakeHookInstaller{state: HookState{Dir: "/scripts", Installed: true, UpToDate: true}}
+	r.SetHookInstallers(map[HookID]HookInstaller{HookResolve: fh})
+
+	state, ran := r.TriggerHookInstall(context.Background(), HookResolve)
+	if !ran {
+		t.Fatal("expected TriggerHookInstall to run when an installer is configured and idle")
+	}
+	if !state.Installed || !state.UpToDate {
+		t.Errorf("got %+v", state)
+	}
+	if state.At.IsZero() {
+		t.Error("expected TriggerHookInstall to stamp At, not leave it to the installer")
+	}
+
+	st := r.Status(UpdateStatus{})
+	hs, ok := st.Hook(HookResolve)
+	if !ok {
+		t.Fatal("expected a HookStatus entry for HookResolve")
+	}
+	if !hs.Registered {
+		t.Error("expected Registered=true once an installer is wired")
+	}
+	if hs.State == nil || !hs.State.Installed {
+		t.Errorf("expected Status to reflect the install result, got %+v", hs.State)
+	}
+}
+
+func TestTriggerHookInstallSkipsWhenNotRegistered(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	_, ran := r.TriggerHookInstall(context.Background(), HookResolve)
+	if ran {
+		t.Error("expected TriggerHookInstall to report ran=false when no installer is wired")
+	}
+}
+
+func TestTriggerHookInstallSkipsConcurrentPass(t *testing.T) {
+	fh := &fakeHookInstaller{started: make(chan struct{}), release: make(chan struct{})}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetHookInstallers(map[HookID]HookInstaller{HookResolve: fh})
+
+	done := make(chan struct{})
+	go func() {
+		r.TriggerHookInstall(context.Background(), HookResolve)
+		close(done)
+	}()
+	<-fh.started
+
+	if _, ran := r.TriggerHookInstall(context.Background(), HookResolve); ran {
+		t.Error("expected a second TriggerHookInstall for the SAME id to skip (ran=false) while an install is already running")
+	}
+
+	close(fh.release)
+	<-done
+	if fh.calls != 1 {
+		t.Errorf("expected exactly 1 Install call, got %d", fh.calls)
+	}
+}
+
+// TestSetHookStateSeedsCacheWithoutCallingInstaller pins the
+// cache-only, never-live-compute contract: SetHookState must be usable to
+// seed the initial state (from a one-time startup resolvehook.Detect call)
+// without ever touching a registered installer.
+func TestSetHookStateSeedsCacheWithoutCallingInstaller(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fh := &fakeHookInstaller{}
+	r.SetHookInstallers(map[HookID]HookInstaller{HookResolve: fh})
+
+	r.SetHookState(HookResolve, HookState{Dir: "/scripts", Installed: false})
+
+	st := r.Status(UpdateStatus{})
+	hs, ok := st.Hook(HookResolve)
+	if !ok || hs.State == nil {
+		t.Fatal("expected SetHookState to be reflected in Status()")
+	}
+	if hs.State.Installed {
+		t.Errorf("got %+v, want Installed=false as seeded", hs.State)
+	}
+	if fh.calls != 0 {
+		t.Errorf("expected SetHookState to never call the installer, got %d calls", fh.calls)
+	}
+}
+
+func TestStatusHooksOrderedByRegistry(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	st := r.Status(UpdateStatus{})
+	registry := Hooks()
+	if len(st.Hooks) != len(registry) {
+		t.Fatalf("got %d HookStatus entries, want %d (one per registry entry)", len(st.Hooks), len(registry))
+	}
+	for i, id := range registry {
+		if st.Hooks[i].ID != id {
+			t.Errorf("Hooks[%d].ID = %q, want %q (registry order)", i, st.Hooks[i].ID, id)
+		}
+		if st.Hooks[i].Registered {
+			t.Errorf("Hooks[%d]: expected Registered=false with no installers wired", i)
+		}
+	}
+}
+
 func TestStatusIntegrationsOrderedByRegistry(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, nil, "")
 	st := r.Status(UpdateStatus{})
