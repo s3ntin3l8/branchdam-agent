@@ -22,8 +22,15 @@ var statusPageTmpl = template.Must(template.New("index.html").Funcs(template.Fun
 	// into the single value text/template can call: a template method call
 	// must return exactly one value, or two where the second is `error` --
 	// (IntegrationView, bool) doesn't qualify. A miss (ok=false) renders as
-	// IntegrationView{}'s zero value, which the template already treats as
-	// "no config state" the same way it treats a nil *SyncSummary.
+	// IntegrationView{}'s zero value -- an intentional fallback, not a template
+	// bug: cmd/branchdam-agent's TestRegistryCompleteness guarantees
+	// Settings.Snapshot() emits one entry per Integrations() registry ID, so
+	// a real miss can't happen in this repo's own wiring. A third-party
+	// Settings implementation that violated that bijection would render as
+	// "disabled / live / catalog not set" rather than fail loudly -- an
+	// accepted trade, since a status page has no error-reporting surface
+	// beyond its own sections (see settingsmenu.go's lastErr for where
+	// config-change errors actually surface).
 	"integrationView": func(sv SettingsView, id IntegrationID) IntegrationView {
 		iv, _ := sv.Integration(id)
 		return iv
