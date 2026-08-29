@@ -562,24 +562,46 @@ func (c Config) Validate() []Problem {
 	if c.Prune.IntervalMinutes < 0 {
 		problems = append(problems, Problem{Field: "prune.intervalMinutes", Message: "must not be negative"})
 	}
-	if c.Integrations.Luminar.TimeoutSecs < 0 {
-		problems = append(problems, Problem{Field: "integrations.luminar.timeoutSecs", Message: "must not be negative"})
-	}
-	// integrations.luminar.syncIntervalMinutes is deliberately NOT checked
-	// here -- unlike the other interval fields above, a negative value is
-	// meaningful ("manual only"; see CatalogSyncConfig.SyncIntervalMinutes's
-	// own doc comment), not a mistake.
+	problems = append(problems, checkCatalogSync("integrations.luminar", c.Integrations.Luminar)...)
+	// When lrcat (#47) / applephotos (#46) land, their CatalogSyncConfig
+	// fields go through this SAME checkCatalogSync call (one per
+	// integration, field-prefixed by its own key) -- not a hand-copied
+	// pair of checks -- so a future integration can't silently ship
+	// without the '?'/'#' catalog-path safety net or the timeoutSecs
+	// sanity check.
 
-	// internal/luminar.Open concatenates CatalogPath into a
+	return problems
+}
+
+// checkCatalogSync runs the field-agnostic checks every CatalogSyncConfig
+// needs, regardless of which integration it belongs to -- prefix is the
+// integration's own dotted key (e.g. "integrations.luminar"). Kept as one
+// shared function specifically so adding lrcat/applephotos means one call
+// site here, not two more hand-copied blocks that can independently drift
+// (a Hermes review finding on the PR that introduced CatalogSyncConfig).
+//
+// Deliberately does NOT check SyncIntervalMinutes for a negative value --
+// unlike every other interval field in this package, negative is
+// meaningful here ("manual only"; see CatalogSyncConfig.SyncIntervalMinutes's
+// own doc comment), not a mistake.
+func checkCatalogSync(prefix string, c CatalogSyncConfig) []Problem {
+	var problems []Problem
+
+	if c.TimeoutSecs < 0 {
+		problems = append(problems, Problem{Field: prefix + ".timeoutSecs", Message: "must not be negative"})
+	}
+
+	// internal/luminar.Open (and any future catalog-reader integration
+	// following the same convention) concatenates CatalogPath into a
 	// "file:<path>?mode=ro" SQLite URI and rejects '?'/'#' outright: a '?'
 	// could inject a second query parameter and silently open the catalog
 	// ?immutable=1, the one mode that package exists to never use against a
 	// live-WAL catalog. Checked here, inline, rather than by importing
 	// internal/luminar -- internal/config must stay dependency-free -- so a
 	// runtime-only failure becomes a config problem an operator sees once.
-	if strings.ContainsAny(c.Integrations.Luminar.CatalogPath, "?#") {
+	if strings.ContainsAny(c.CatalogPath, "?#") {
 		problems = append(problems, Problem{
-			Field:   "integrations.luminar.catalogPath",
+			Field:   prefix + ".catalogPath",
 			Message: "must not contain '?' or '#' -- the path is concatenated into a SQLite file: URI and would be misread as query parameters",
 		})
 	}
