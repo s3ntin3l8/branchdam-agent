@@ -8,12 +8,24 @@ Windows, macOS, and Linux. The tray shell (`tray`) is Windows/macOS only.
 | | Windows | macOS (Apple Silicon) | Linux |
 |---|---|---|---|
 | Headless subcommands | yes | yes | yes |
+| Direct HTTP Streaming Ingest (`-upload`) | yes | yes | yes |
 | Tray shell | yes | yes | no -- `tray: unsupported on this platform` |
 | Release binary | `branchdam-agent.exe` + `branchdam-agent-tray.exe` | `branchdam-agent.app` (arm64 only, no amd64) | `branchdam-agent` |
 
 `internal/tray/run_unsupported.go` returns `ErrUnsupported` at runtime on every `GOOS` other
 than windows/darwin -- `tray` still builds and runs on Linux, it just errors immediately. A
 Linux workstation has the fully-tested headless `ingest` path instead.
+
+## Direct HTTP streaming & server-governed naming
+
+In addition to traditional dual-writing to local filesystem mounts (SMB/NFS shares), the agent supports direct streaming uploads across all platforms:
+- **`POST /api/v1/agent/upload`**: Ingest directly into the server's Master Archive over HTTP/HTTPS.
+- **Handshake Synchronization (`POST /api/v1/agent/handshake`)**: The server returns the active `namingTemplate`, which the workstation agent synchronizes at startup to ensure 100% path parity between local NVMe edit scratch (`LocalEditRoot`) and remote server archive storage.
+- **Cryptographic Verification**: The server computes and returns the Master Archive's BLAKE3 checksum, which the agent verifies against the local copy prior to granting safe card ejection.
+
+## Soft-delete trash lifecycle
+
+Asset deletions triggered via `EVENT_NODE_DELETED` do not immediately purge files from disk. Instead, branchDAM isolates the asset in the `.trash/` directory under `TIER3_MASTER_ARCHIVE` with a 30-day safety retention window (`trash.retentionDays`), while immediately purging references from active galleries and database indices.
 
 ## Why Windows ships two binaries
 

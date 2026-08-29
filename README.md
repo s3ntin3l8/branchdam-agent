@@ -11,12 +11,14 @@ The workstation companion agent for [branchDAM](https://github.com/s3ntin3l8/bra
 ## Core Capabilities
 
 - **Bit-for-Bit Verified Ingest**: Dual-write engine reads camera SD cards once and streams simultaneously to your NAS archive (Tier 3) and fast local NVMe edit drive (Tier 1), computing BLAKE3-256 and xxHash64 checksums in flight. Flushes and performs cache-busting unbuffered re-reads (`O_DIRECT` / `F_NOCACHE`) to guarantee data integrity.
+- **Direct HTTP Streaming Ingest**: Stream media straight to branchDAM's Master Archive over `POST /api/v1/agent/upload` without requiring local SMB or NFS share mounts. Naming templates are synchronized dynamically via server handshake (`POST /api/v1/agent/handshake`) with 100% path parity across local edit scratch and remote archive.
 - **Offline Field Ingest**: Ingest media on the go without network access to your NAS or server. Events and local files are safely recorded in a local SQLite queue (`queue.db`), then automatically copied to the archive and rebased upon reconnecting to your LAN.
 - **System Tray & GUI (Windows & macOS)**: Lightweight menu bar / system tray companion providing auto card-detection, real-time queue status, and a native Settings UI for paths and server credentials.
 - **Catalog & NLE Synchronization**:
   - **Skylum Luminar Neo**: `luminar-sync` reads a local `.luminarneo` catalog and infers derived-file->source links from filename convention.
   - **DaVinci Resolve**: Post-render Python hook (`hooks/resolve/`) writes `.dam.json` sidecars for confidence-1.00 timeline-to-export lineage.
   - **Local Mirror Pruning**: `prune` safely reclaims local edit scratch space once branchDAM confirms the master archive copy is hash-verified.
+  - **30-Day Trash Buffer Lifecycle**: Deleted assets (`EVENT_NODE_DELETED`) are safely isolated in branchDAM's `.trash/` buffer on the server, purging Immich galleries immediately while preserving master files for 30 days.
 
 ---
 
@@ -151,11 +153,14 @@ Linux, `~/Library/Application Support/branchdam-agent/config.yaml` on macOS,
 `%AppData%\branchdam-agent\config.yaml` on Windows) -- so a config placed there is found
 automatically without a flag on every invocation.
 
-### 4. Ingest an SD card, including offline
+### 4. Ingest an SD card, including direct HTTP streaming and offline
 
 ```sh
-# Online (server reachable): dual-copy write, immediate EVENT_NODE_CREATED.
+# Online (server reachable with local SMB/NFS mount): dual-copy write, immediate EVENT_NODE_CREATED.
 go run ./cmd/branchdam-agent ingest -config config.yaml -card /media/$USER/UNTITLED
+
+# Direct HTTP streaming (no SMB/NFS share mount required): streams to server Master Archive.
+go run ./cmd/branchdam-agent ingest -config config.yaml -card /media/$USER/UNTITLED -upload
 
 # Offline (no route to the NAS/server): local copy only, everything else queued.
 go run ./cmd/branchdam-agent ingest -config config.yaml -card /media/$USER/UNTITLED -offline
