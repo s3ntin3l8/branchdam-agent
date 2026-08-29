@@ -185,6 +185,107 @@ func TestRunLuminarSyncAgainstRealHTTPServer(t *testing.T) {
 	}
 }
 
+// TestRunLuminarSyncCatalogAndNodeIndexFallBackToConfig proves both
+// -catalog and -node-index fall back to integrations.luminar.catalogPath /
+// integrations.nodeIndexPath when the flags aren't passed at all -- neither
+// flag is passed here, only -config and -dry-run (so no real server needs
+// to be up).
+func TestRunLuminarSyncCatalogAndNodeIndexFallBackToConfig(t *testing.T) {
+	dir := t.TempDir()
+	catalogPath := createTestCatalog(t, dir)
+	nodeIndexPath := writeNodeIndexFile(t, dir)
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgContent := "integrations:\n" +
+		"  nodeIndexPath: \"" + nodeIndexPath + "\"\n" +
+		"  luminar:\n" +
+		"    catalogPath: \"" + catalogPath + "\"\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := run([]string{"luminar-sync", "-config", cfgPath, "-dry-run"})
+	if got != 0 {
+		t.Fatalf("run([luminar-sync -config ... -dry-run]) with no -catalog/-node-index = %d, want 0 (both should fall back to config)", got)
+	}
+}
+
+// TestRunLuminarSyncExplicitCatalogFlagWinsOverConfig proves an explicitly
+// passed -catalog overrides integrations.luminar.catalogPath in config,
+// rather than the fallback silently taking priority.
+func TestRunLuminarSyncExplicitCatalogFlagWinsOverConfig(t *testing.T) {
+	dir := t.TempDir()
+	catalogPath := createTestCatalog(t, dir)
+	nodeIndexPath := writeNodeIndexFile(t, dir)
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgContent := "integrations:\n" +
+		"  luminar:\n" +
+		"    catalogPath: \"/does/not/exist.db\"\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := run([]string{
+		"luminar-sync",
+		"-config", cfgPath,
+		"-catalog", catalogPath, // explicit flag must win over the bogus config path
+		"-node-index", nodeIndexPath,
+		"-dry-run",
+	})
+	if got != 0 {
+		t.Fatalf("run(...) with an explicit -catalog overriding a bogus config catalogPath = %d, want 0", got)
+	}
+}
+
+// TestRunLuminarSyncDryRunFlagHasNoConfigFallback pins the deliberate
+// asymmetry with -catalog/-node-index above: omitting -dry-run must still
+// mean "live" even when config sets integrations.luminar.dryRun: true (the
+// config default, present even with no integrations: block at all) --
+// otherwise every already-scripted `luminar-sync -catalog X -node-index Y`
+// invocation would silently become a permanent no-op the moment an
+// operator's config.yaml (or a fresh one with no integrations: section at
+// all) sets/defaults dryRun to true. Proven here by actually reaching a
+// real HTTP server without -dry-run, from a config that has
+// integrations.luminar.dryRun: true set (not merely defaulted).
+func TestRunLuminarSyncDryRunFlagHasNoConfigFallback(t *testing.T) {
+	posted := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/events", func(w http.ResponseWriter, r *http.Request) {
+		posted = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"eventId":"evt-no-fallback"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	catalogPath := createTestCatalog(t, dir)
+	nodeIndexPath := writeNodeIndexFile(t, dir)
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgContent := "server:\n  baseUrl: \"" + srv.URL + "\"\n  apiKey: \"0123456789abcdef0123456789abcdef\"\nagentId: \"test-agent\"\n" +
+		"integrations:\n  luminar:\n    dryRun: true\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := run([]string{
+		"luminar-sync",
+		"-config", cfgPath,
+		"-catalog", catalogPath,
+		"-node-index", nodeIndexPath,
+		// No -dry-run passed at all.
+	})
+	if got != 0 {
+		t.Fatalf("run(...) with no -dry-run flag = %d, want 0", got)
+	}
+	if !posted {
+		t.Error("expected the server to receive a POST -- omitting -dry-run must mean live even when config sets integrations.luminar.dryRun: true, since config.Load cannot distinguish that from an unconfigured default")
+	}
+}
+
 // TestRunLuminarSyncQueryFileOverride proves -query-file actually threads
 // through runLuminarSyncCmd into the syncer, not just Syncer.Query in
 // isolation (sync_test.go covers that half already). The override query

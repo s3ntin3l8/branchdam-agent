@@ -189,6 +189,17 @@ go run ./cmd/branchdam-agent luminar-sync -config config.yaml -catalog /path/to/
 agent-reachable lookup-by-path endpoint on branchDAM yet) and
 [`docs/luminar-catalog.md`](docs/luminar-catalog.md) for the node-resolution scope decision.
 
+**Config fallback.** `-catalog` and `-node-index` fall back to `integrations.luminar.catalogPath`
+and `integrations.nodeIndexPath` in config when the flag isn't passed at all, so a config the tray
+also uses (once wired up) works for the CLI too -- an explicit flag always wins. `-dry-run` gets
+**no** config fallback, deliberately: `integrations.luminar.dryRun` defaults to `true` even when
+`config.yaml` has no `integrations:` block at all, so falling back would silently turn every
+already-scripted `luminar-sync -catalog X -node-index Y` invocation (cron, CI, ...) into a no-op
+that still exits 0. `-dry-run` has always meant "preview, don't contact the server" here, and
+omitting it has always meant "do it" -- that stays true regardless of config. The config key
+governs only the tray's own timer-driven sync, once that lands. `-query-file`/`-derivative-suffixes`
+are also CLI-only, on purpose -- see [`docs/luminar-catalog.md`](docs/luminar-catalog.md).
+
 ### 6. Prune already-archived local-edit mirrors
 
 ```sh
