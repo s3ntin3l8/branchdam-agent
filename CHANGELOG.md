@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.2.0...v1.3.0) (2026-08-29)
+
+
+### Features
+
+* **ingest:** synchronize naming template from server handshake and support POST /api/v1/agent/upload ([#74](https://github.com/s3ntin3l8/branchdam-agent/issues/74)) ([e554055](https://github.com/s3ntin3l8/branchdam-agent/commit/e5540555e7dfc20309f5a93f3f9bbd4ff05a361b)), closes [#71](https://github.com/s3ntin3l8/branchdam-agent/issues/71)
+
 ## [1.2.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.1.1...v1.2.0) (2026-08-29)
 
 
