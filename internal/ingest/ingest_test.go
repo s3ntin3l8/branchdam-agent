@@ -2,10 +2,14 @@ package ingest
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/zeebo/blake3"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
@@ -18,6 +22,40 @@ type fakeClient struct {
 func (f *fakeClient) PostNodeCreated(_ context.Context, _ string, payload branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error) {
 	f.calls = append(f.calls, payload)
 	return &branchdam.EventResponse{EventID: "evt-" + payload.NodeUUID}, nil
+}
+
+type fakeUploaderClient struct {
+	fakeClient
+	uploadCalls []branchdam.UploadOptions
+	uploadResp  *branchdam.UploadResponse
+	uploadErr   error
+}
+
+func (f *fakeUploaderClient) Upload(_ context.Context, r io.Reader, opts branchdam.UploadOptions) (*branchdam.UploadResponse, error) {
+	f.uploadCalls = append(f.uploadCalls, opts)
+	if f.uploadErr != nil {
+		return nil, f.uploadErr
+	}
+	hasher := blake3.New()
+	n, _ := io.Copy(hasher, r)
+	hash := fmt.Sprintf("%x", hasher.Sum(nil))
+	if f.uploadResp != nil {
+		resp := *f.uploadResp
+		if resp.Blake3Hash == "" {
+			resp.Blake3Hash = hash
+		}
+		if resp.BytesWritten == 0 {
+			resp.BytesWritten = n
+		}
+		return &resp, nil
+	}
+	return &branchdam.UploadResponse{
+		NodeUUID:     "018f9999-upload-node-uuid",
+		Status:       "UPLOADED",
+		BytesWritten: n,
+		Blake3Hash:   hash,
+		RelativePath: "2026/2026-08-29/" + opts.Filename,
+	}, nil
 }
 
 func newTestEngine(t *testing.T, client nodeCreator, archiveRoot, localRoot string) *Engine {
@@ -296,5 +334,100 @@ func TestIngestCardRequireUnbufferedFailsOnBufferedFloor(t *testing.T) {
 		if fr.Err == nil {
 			t.Error("expected error when RequireUnbuffered=true and method is buffered_floor")
 		}
+	}
+}
+
+func TestIngestCardUploadStream(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "IMG_0042.jpg"), []byte("streaming-photo-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	uploader := &fakeUploaderClient{}
+	localRoot := filepath.Join(dir, "local")
+	e := NewEngine(uploader, "test-agent", config.IngestConfig{
+		LocalEditRoot: localRoot,
+		UploadStream:  true,
+	}, nil)
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	if len(res.Files) != 1 {
+		t.Fatalf("got %d files, want 1", len(res.Files))
+	}
+	fr := res.Files[0]
+	if fr.Err != nil {
+		t.Fatalf("file error: %v", fr.Err)
+	}
+
+	if len(uploader.uploadCalls) != 1 {
+		t.Fatalf("got %d upload calls, want 1", len(uploader.uploadCalls))
+	}
+	if uploader.uploadCalls[0].Filename != "IMG_0042.jpg" {
+		t.Errorf("uploaded filename = %q, want IMG_0042.jpg", uploader.uploadCalls[0].Filename)
+	}
+
+	// Local file was written under LocalEditRoot + relativePath returned by server
+	expectedLocal := filepath.Join(localRoot, "2026", "2026-08-29", "IMG_0042.jpg")
+	data, err := os.ReadFile(expectedLocal)
+	if err != nil {
+		t.Fatalf("read local copy %s: %v", expectedLocal, err)
+	}
+	if string(data) != "streaming-photo-data" {
+		t.Errorf("local data = %q, want 'streaming-photo-data'", string(data))
+	}
+
+	if !fr.LocalVerify.Verified {
+		t.Error("local copy was not verified")
+	}
+	if fr.NodeUUID != "018f9999-upload-node-uuid" {
+		t.Errorf("fr.NodeUUID = %q", fr.NodeUUID)
+	}
+}
+
+func TestIngestCardUploadStream_VerifyFailure(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "IMG_0042.jpg"), []byte("streaming-photo-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	uploader := &fakeUploaderClient{
+		uploadResp: &branchdam.UploadResponse{
+			NodeUUID:     "018f9999-corrupt-hash",
+			Status:       "UPLOADED",
+			BytesWritten: 20,
+			Blake3Hash:   "0000000000000000000000000000000000000000000000000000000000000000",
+			RelativePath: "2026/2026-08-29/IMG_0042.jpg",
+		},
+	}
+	localRoot := filepath.Join(dir, "local")
+	e := NewEngine(uploader, "test-agent", config.IngestConfig{
+		LocalEditRoot: localRoot,
+		UploadStream:  true,
+	}, nil)
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	fr := res.Files[0]
+	if fr.Err == nil {
+		t.Fatal("expected error on hash mismatch, got nil")
+	}
+
+	// Local file should be removed on verification failure
+	expectedLocal := filepath.Join(localRoot, "2026", "2026-08-29", "IMG_0042.jpg")
+	if _, err := os.Stat(expectedLocal); !os.IsNotExist(err) {
+		t.Error("expected local file to be removed after verification failure")
 	}
 }

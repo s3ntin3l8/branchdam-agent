@@ -187,6 +187,25 @@ type HandshakeResponse struct {
 	ServerTimeUnix        int64  `json:"serverTimeUnix"`
 	AcknowledgedEventUUID string `json:"acknowledgedEventUuid,omitempty"`
 	PendingEventsCount    int64  `json:"pendingEventsCount"`
+	NamingTemplate        string `json:"namingTemplate,omitempty"`
+}
+
+// UploadOptions configures headers for streaming upload to POST /api/v1/agent/upload.
+type UploadOptions struct {
+	Filename         string
+	CameraModel      string
+	CaptureTimestamp int64
+	Blake3Hash       string
+}
+
+// UploadResponse is the response body for POST /api/v1/agent/upload
+// (internal/httpapi.AgentUploadResponse in branchdam), returned on 201 Created.
+type UploadResponse struct {
+	NodeUUID     string `json:"nodeUuid"`
+	Status       string `json:"status"`
+	BytesWritten int64  `json:"bytesWritten"`
+	Blake3Hash   string `json:"blake3Hash"`
+	RelativePath string `json:"relativePath,omitempty"`
 }
 
 // RebaseRequest is the request body for POST /api/v1/agent/rebase
