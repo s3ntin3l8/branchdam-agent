@@ -49,6 +49,8 @@ func run(args []string) int {
 		return runQueueDrainCmd(args[1:])
 	case "prune":
 		return runPruneCmd(args[1:])
+	case "resolve-hook":
+		return runResolveHookCmd(args[1:])
 	case "tray":
 		return runTrayCmd(args[1:])
 	case "update":
@@ -82,6 +84,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  ingest        ingest a card's contents: dual-copy verified write + submit (-offline for issue #4's offline queue flow)")
 	fmt.Fprintln(os.Stderr, "  queue-drain   drain queue.db on reconnect: submit queued events, copy archive bytes, rebase to Tier-3")
 	fmt.Fprintln(os.Stderr, "  prune         delete offline-ingested files' LocalEditRoot mirror once the server confirms them verified (-dry-run to preview)")
+	fmt.Fprintln(os.Stderr, "  resolve-hook  detect or install DaVinci Resolve's render hook into its Scripts/Utility folder (-install; -dir to override autodetection)")
 	fmt.Fprintln(os.Stderr, "  tray          run the tray-resident shell (windows/darwin only) over the same ingest core")
 	fmt.Fprintln(os.Stderr, "  update        check for (and optionally apply) a newer release (-check, -yes; requires selfUpdate.enabled)")
 	fmt.Fprintln(os.Stderr, "  init          write a starter config.yaml to get started (-force to overwrite an existing one)")

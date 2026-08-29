@@ -14,8 +14,16 @@ consumes it.
 
 1. Copy `branchdam_render_hook.py` into Resolve's `Scripts/Utility/` directory:
    - Windows: `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`
-   - macOS: `/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/`
+   - macOS (per-user, no admin rights needed — prefer this one):
+     `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/`
+   - macOS (system-wide, all users, requires admin rights):
+     `/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/`
    - Linux: `/opt/resolve/Fusion/Scripts/Utility/` (or your install's equivalent)
+
+   Resolve reads scripts from both macOS locations, so either works — but an
+   unprivileged install (including `branchdam-agent resolve-hook -install`, or
+   the tray's own installer) can only write the per-user path; the system-wide
+   one fails with a permissions error unless run as an administrator.
 2. In Resolve, open the project you want to watch, then
    **Workspace > Scripts > Utility > branchdam_render_hook**.
 3. The script runs a poll loop for the life of the session (see "How it works"
