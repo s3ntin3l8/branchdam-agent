@@ -212,7 +212,12 @@ func TestRunLuminarSyncCatalogAndNodeIndexFallBackToConfig(t *testing.T) {
 
 // TestRunLuminarSyncExplicitCatalogFlagWinsOverConfig proves an explicitly
 // passed -catalog overrides integrations.luminar.catalogPath in config,
-// rather than the fallback silently taking priority.
+// rather than the fallback silently taking priority. The config's
+// nodeIndexPath is ALSO set to a bogus value here (symmetric with
+// catalogPath) precisely so the explicit -node-index flag has something to
+// actually override too -- a Hermes review finding on this PR caught that
+// an earlier version of this test passed -node-index with config setting
+// no nodeIndexPath at all, so nothing was being overridden on that side.
 func TestRunLuminarSyncExplicitCatalogFlagWinsOverConfig(t *testing.T) {
 	dir := t.TempDir()
 	catalogPath := createTestCatalog(t, dir)
@@ -220,6 +225,7 @@ func TestRunLuminarSyncExplicitCatalogFlagWinsOverConfig(t *testing.T) {
 
 	cfgPath := filepath.Join(dir, "config.yaml")
 	cfgContent := "integrations:\n" +
+		"  nodeIndexPath: \"/does/not/exist.json\"\n" +
 		"  luminar:\n" +
 		"    catalogPath: \"/does/not/exist.db\"\n"
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o644); err != nil {
@@ -230,11 +236,11 @@ func TestRunLuminarSyncExplicitCatalogFlagWinsOverConfig(t *testing.T) {
 		"luminar-sync",
 		"-config", cfgPath,
 		"-catalog", catalogPath, // explicit flag must win over the bogus config path
-		"-node-index", nodeIndexPath,
+		"-node-index", nodeIndexPath, // ditto
 		"-dry-run",
 	})
 	if got != 0 {
-		t.Fatalf("run(...) with an explicit -catalog overriding a bogus config catalogPath = %d, want 0", got)
+		t.Fatalf("run(...) with explicit -catalog/-node-index overriding bogus config paths = %d, want 0", got)
 	}
 }
 
