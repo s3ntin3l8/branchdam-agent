@@ -83,6 +83,19 @@ func (s *configSettings) SetQueueStore(store *queue.Store) {
 	s.queueStore = store
 }
 
+// currentConfig returns the most recently loaded config -- the live source
+// runTrayCmd's per-integration startPeriodicVar scheduler goroutines read
+// their own interval from on every check, so a config change (from a hand
+// edit + "Reload config", or a later PR's Settings menu) takes effect
+// without a tray restart. Cheap: a mutex lock plus a struct copy, safe to
+// call on every scheduler tick (default every 30s, see
+// integrationSyncCheckInterval).
+func (s *configSettings) currentConfig() config.Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg
+}
+
 func (s *configSettings) Snapshot() tray.SettingsView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -332,6 +345,16 @@ func (s *configSettings) reload() error {
 	s.mu.Unlock()
 
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
+
+	// Rebuild every integration syncer against the freshly reloaded
+	// client/config, for the exact reason the queueDrainer/queuePruner
+	// rebuild below exists (issue #57): TriggerSync reads Runner's
+	// syncers map fresh on every call, so without this, rotating
+	// server.apiKey or changing server.baseUrl from the menu would leave
+	// every enabled integration POSTing edges with the stale client
+	// indefinitely -- silently, since a 401 on an EVENT_EDGE_ATTACHED
+	// surfaces only as SyncSummary.Errors, not a visible failure.
+	s.runner.SetIntegrationSyncers(buildIntegrationDeps(newCfg, client))
 
 	if queueStore != nil {
 		var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: newCfg.AgentID}

@@ -141,6 +141,23 @@ func runTrayCmd(args []string) int {
 	runner := tray.NewRunner(engine, cfg.Ingest.CardRoots, cfg.Ingest.LocalEditRoot)
 	settings := newConfigSettings(resolvedPath, cfg, runner, dialog)
 
+	// Integration syncers (issue #57): started unconditionally, unlike the
+	// conditional prune timer below -- an integration can be enabled from
+	// a later PR's Settings menu at any time the tray is running, which is
+	// the entire point of startPeriodicVar re-reading its interval live
+	// via settings.currentConfig() rather than a value captured once here.
+	// TriggerSync's own ran=false for an unregistered/disabled ID is what
+	// makes a check tick with nothing configured a free no-op.
+	runner.SetIntegrationSyncers(buildIntegrationDeps(cfg, client))
+	for _, b := range integrationBuilders {
+		id, interval := b.ID, b.Interval
+		go startPeriodicVar(ctx, integrationSyncCheckInterval, func() time.Duration {
+			return interval(settings.currentConfig())
+		}, integrationSyncTimeout, func(pctx context.Context) {
+			runner.TriggerSync(pctx, id)
+		})
+	}
+
 	// The offline queue (issue #32) is opt-in the same way `queue-drain`/
 	// `prune` already are: a nil QueueReader/Drainer/Pruner is Runner's
 	// honest "not configured" signal (see tray.QueueStatus's doc comment),
