@@ -151,11 +151,19 @@ var integrationBuilders = []IntegrationBuilder{
 // integration in integrationBuilders.
 func applyIntegrationBoolChange(cfg *config.Config, key string, v bool) (handled bool) {
 	for _, b := range integrationBuilders {
-		c := b.Current(*cfg)
+		// Match the key BEFORE deriving b.Current(*cfg) -- a Hermes
+		// review nit on this PR: calling Current for every builder ahead
+		// of knowing whether its key even matches is a wasted derive per
+		// non-matching entry. Harmless at today's single-entry registry
+		// size, but cheap to avoid outright as lrcat (#47)/applephotos
+		// (#46) grow it.
+		var c config.CatalogSyncConfig
 		switch key {
 		case b.ConfigKey("enabled"):
+			c = b.Current(*cfg)
 			c.Enabled = v
 		case b.ConfigKey("dryRun"):
+			c = b.Current(*cfg)
 			c.DryRun = v
 		default:
 			continue

@@ -26,9 +26,10 @@ type integrationSubmenu struct {
 	dryRun      *systray.MenuItem
 	catalogPath *systray.MenuItem
 
-	interval15    *systray.MenuItem
-	interval60    *systray.MenuItem
-	intervalNever *systray.MenuItem
+	intervalParent *systray.MenuItem
+	interval15     *systray.MenuItem
+	interval60     *systray.MenuItem
+	intervalNever  *systray.MenuItem
 
 	syncNow *systray.MenuItem
 
@@ -56,10 +57,10 @@ func newIntegrationSubmenu(d IntegrationDescriptor, iv IntegrationView) *integra
 	sub.dryRun = parent.AddSubMenuItemCheckbox("Dry run (log only, emit nothing)", "Resolve and log what a sync would emit without contacting the server", iv.DryRun)
 	sub.catalogPath = parent.AddSubMenuItem(catalogPathTitle(iv.CatalogPathSet), "Catalog file this integration reads")
 
-	intervalParent := parent.AddSubMenuItem("Sync every", "How often the tray runs this integration's sync on its own timer")
-	sub.interval15 = intervalParent.AddSubMenuItemCheckbox("15 minutes", "", iv.SyncIntervalMinutes == 15)
-	sub.interval60 = intervalParent.AddSubMenuItemCheckbox("60 minutes (default)", "", iv.SyncIntervalMinutes == 0 || iv.SyncIntervalMinutes == 60)
-	sub.intervalNever = intervalParent.AddSubMenuItemCheckbox("Never (manual only)", "", iv.SyncIntervalMinutes < 0)
+	sub.intervalParent = parent.AddSubMenuItem("Sync every", "How often the tray runs this integration's sync on its own timer")
+	sub.interval15 = sub.intervalParent.AddSubMenuItemCheckbox("15 minutes", "", iv.SyncIntervalMinutes == 15)
+	sub.interval60 = sub.intervalParent.AddSubMenuItemCheckbox("60 minutes (default)", "", iv.SyncIntervalMinutes == 0 || iv.SyncIntervalMinutes == 60)
+	sub.intervalNever = sub.intervalParent.AddSubMenuItemCheckbox("Never (manual only)", "", iv.SyncIntervalMinutes < 0)
 
 	parent.AddSeparator()
 	sub.syncNow = parent.AddSubMenuItem("Sync now", "Run one sync pass right now")
@@ -138,6 +139,19 @@ func (sub *integrationSubmenu) sync(iv IntegrationView, status IntegrationStatus
 	setChecked(sub.interval15, iv.SyncIntervalMinutes == 15)
 	setChecked(sub.interval60, iv.SyncIntervalMinutes == 0 || iv.SyncIntervalMinutes == 60)
 	setChecked(sub.intervalNever, iv.SyncIntervalMinutes < 0)
+	// A Hermes review finding on this PR: a hand-edited config.yaml can
+	// set syncIntervalMinutes to a value none of the three menu options
+	// represent (e.g. 30) -- all three checkboxes would then show
+	// unchecked, silently implying "unset" rather than the real
+	// hand-configured value. Rather than guessing which of the three is
+	// "closest" (which could misleadingly suggest a click already
+	// changed it), the parent item's own title names the actual value so
+	// it's never ambiguous.
+	if iv.SyncIntervalMinutes != 15 && iv.SyncIntervalMinutes != 0 && iv.SyncIntervalMinutes != 60 && iv.SyncIntervalMinutes >= 0 {
+		sub.intervalParent.SetTitle(fmt.Sprintf("Sync every (currently: %d min, hand-configured)", iv.SyncIntervalMinutes))
+	} else {
+		sub.intervalParent.SetTitle("Sync every")
+	}
 
 	sub.catalogPath.SetTitle(catalogPathTitle(iv.CatalogPathSet))
 	sub.status.SetTitle(integrationStatusLine(sub.title, iv, status))
