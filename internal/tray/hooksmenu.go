@@ -3,6 +3,8 @@
 package tray
 
 import (
+	"fmt"
+
 	"fyne.io/systray"
 )
 
@@ -23,11 +25,13 @@ type hookSubmenu struct {
 	install *systray.MenuItem
 	reveal  *systray.MenuItem
 
-	// installSkipped is mutated ONLY from Run's own select loop (via the
-	// install-done-channel case) -- see settingsMenu.lastErr's own doc
-	// comment for why that single-goroutine-ownership discipline is what
-	// makes an unsynchronized field safe here.
+	// installSkipped/revealErr are mutated ONLY from Run's own select loop
+	// (via the install-done-channel and reveal-done-channel cases
+	// respectively) -- see settingsMenu.lastErr's own doc comment for why
+	// that single-goroutine-ownership discipline is what makes an
+	// unsynchronized field safe here.
 	installSkipped bool
+	revealErr      error
 }
 
 // newHookSubmenu builds one registry entry's own systray items --
@@ -50,8 +54,8 @@ func newHookSubmenu(d HookDescriptor) *hookSubmenu {
 }
 
 // sync re-renders this submenu from a fresh Runner status entry -- called
-// on every refresh tick and after every install action completes, exactly
-// mirroring integrationSubmenu.sync's own contract.
+// on every refresh tick and after every install/reveal action completes,
+// exactly mirroring integrationSubmenu.sync's own contract.
 func (sub *hookSubmenu) sync(status HookStatus) {
 	sub.status.SetTitle(hookStatusLine(sub.title, status))
 
@@ -60,6 +64,18 @@ func (sub *hookSubmenu) sync(status HookStatus) {
 		sub.installSkipped = false
 	} else {
 		sub.install.SetTitle("Install / update render hook")
+	}
+
+	// revealErr is NOT cleared here the way installSkipped is -- it isn't a
+	// one-tick transient note, it's the last result of a real action, and
+	// should keep reading "(reveal failed: ...)" until either a
+	// successful Reveal or a tray restart clears it, matching
+	// settingsMenu.lastErr's own persistence (never auto-cleared by a
+	// timer tick either).
+	if sub.revealErr != nil {
+		sub.parent.SetTitle(fmt.Sprintf("%s (reveal failed: %v)", sub.title, sub.revealErr))
+	} else {
+		sub.parent.SetTitle(sub.title)
 	}
 }
 

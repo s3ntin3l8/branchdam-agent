@@ -71,6 +71,14 @@ type hookInstallResult struct {
 	ran bool
 }
 
+// hookRevealResult is what each hookSubmenu's own "Reveal Scripts folder"
+// worker goroutine feeds back to the main select loop -- err is nil on a
+// successful shell-out, matching Runner.RevealHook's own contract.
+type hookRevealResult struct {
+	id  HookID
+	err error
+}
+
 // applyResult is what the install goroutine feeds back to the select loop.
 type applyResult struct {
 	version string
@@ -388,7 +396,15 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		// second hook needs no new code here. TriggerHookInstall's own
 		// per-ID in-flight tracking (tray.go) makes a rapid double-click
 		// safe the same way TriggerSync's does.
-		hookInstallDoneCh := make(chan hookInstallResult, 1)
+		//
+		// Buffered to len(hm.subs), not 1: a Hermes review finding on this
+		// PR -- with a cap-1 channel, N hooks completing their installs in
+		// the same instant would have all but one worker block on its send
+		// until the select loop drains the channel, delaying that worker's
+		// NEXT read of its own install.ClickedCh. One hook today makes this
+		// unreachable, but sizing it correctly now is what actually makes
+		// "a second hook needs no new code here" true.
+		hookInstallDoneCh := make(chan hookInstallResult, len(hm.subs))
 		for _, sub := range hm.subs {
 			sub := sub
 			go func() {
@@ -401,17 +417,22 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 			}()
 		}
 
-		// "Reveal Scripts folder" needs no done channel at all: unlike
-		// Install, Reveal never mutates any state a submenu's own sync()
-		// renders (see Runner.RevealHook's own doc comment), so there is
-		// nothing for the main select loop to react to -- matching
-		// openBrowser's own "_ = ..., no visible feedback" precedent for
-		// "Open status page" below.
+		// "Reveal Scripts folder" -- a Hermes review finding on this PR:
+		// the original version discarded RevealHook's error entirely
+		// (matching openBrowser's own precedent for "Open status page"),
+		// which meant a failed Reveal -- an unregistered hook, or the
+		// installer's own shell-out failing -- had zero feedback anywhere,
+		// unlike Install (which has both the skipped-note and the status
+		// line). Reveal never mutates HookState, so it still needs no
+		// SetHookState/hookInFlight involvement and (unlike Install) the
+		// result never triggers a refresh of the status line -- only the
+		// parent item's own title, via revealErr.
+		hookRevealDoneCh := make(chan hookRevealResult, len(hm.subs))
 		for _, sub := range hm.subs {
 			sub := sub
 			go func() {
 				for range sub.reveal.ClickedCh {
-					_ = r.RevealHook(sub.id)
+					hookRevealDoneCh <- hookRevealResult{id: sub.id, err: r.RevealHook(sub.id)}
 				}
 			}()
 		}
@@ -498,6 +519,13 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 						if sub.id == res.id {
 							sub.installSkipped = true
 						}
+					}
+				}
+				refresh()
+			case res := <-hookRevealDoneCh:
+				for _, sub := range hm.subs {
+					if sub.id == res.id {
+						sub.revealErr = res.err
 					}
 				}
 				refresh()
