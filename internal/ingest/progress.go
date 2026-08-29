@@ -1,5 +1,7 @@
 package ingest
 
+import "io"
+
 // ProgressPhase distinguishes a copy from a verify byte-progress sample.
 // Verify re-reads the whole file a second time (verify.go's cache-defeating
 // re-read), so a progress readout covering only the copy would sit at 100%
@@ -64,6 +66,21 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 	p.total += int64(len(b))
 	p.onBytes(p.total)
 	return len(b), nil
+}
+
+type progressReader struct {
+	r       io.Reader
+	total   int64
+	onBytes func(int64)
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 && p.onBytes != nil {
+		p.total += int64(n)
+		p.onBytes(p.total)
+	}
+	return n, err
 }
 
 // DrainOption configures optional behavior on Drain -- currently just

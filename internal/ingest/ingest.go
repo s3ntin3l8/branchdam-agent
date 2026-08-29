@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -22,6 +23,11 @@ type nodeCreator interface {
 	PostNodeCreated(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error)
 }
 
+// uploader is the subset of *branchdam.Client's surface Engine needs for direct HTTP streaming ingest.
+type uploader interface {
+	Upload(ctx context.Context, body io.Reader, opts branchdam.UploadOptions) (*branchdam.UploadResponse, error)
+}
+
 // Engine drives one full ingest run over a card's contents: metadata
 // extraction, the dual-copy verified write, DJI .srt GPS handling, and
 // submission via the branchDAM agent-event client. Plain library code, no
@@ -29,6 +35,7 @@ type nodeCreator interface {
 // PR are both thin drivers over this type.
 type Engine struct {
 	Client   nodeCreator
+	Uploader uploader
 	AgentID  string
 	Ingest   config.IngestConfig
 	Mappings []config.PathMapping
@@ -76,7 +83,7 @@ func (e *Engine) progressOpts(path string, phase ProgressPhase, total int64) []W
 
 // NewEngine builds an Engine with real clock/UUID/exiftool dependencies.
 func NewEngine(client nodeCreator, agentID string, ingestCfg config.IngestConfig, mappings []config.PathMapping) *Engine {
-	return &Engine{
+	e := &Engine{
 		Client:      client,
 		AgentID:     agentID,
 		Ingest:      ingestCfg,
@@ -85,6 +92,10 @@ func NewEngine(client nodeCreator, agentID string, ingestCfg config.IngestConfig
 		Now:         time.Now,
 		NewNodeUUID: func() (string, error) { id, err := uuid.NewV7(); return id.String(), err },
 	}
+	if u, ok := client.(uploader); ok {
+		e.Uploader = u
+	}
+	return e
 }
 
 // FileResult is one card file's outcome.
@@ -145,6 +156,10 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 // extraction (needed up front to fill the naming template), dual-copy
 // write, verify, DJI .srt GPS, and (for non-sidecar files) submission.
 func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string) FileResult {
+	if e.Ingest.UploadStream {
+		return e.ingestFileUpload(ctx, srcPath)
+	}
+
 	fr := FileResult{SourcePath: srcPath}
 
 	ext := extNoDot(srcPath)
@@ -349,4 +364,109 @@ func strPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// ingestFileUpload streams media directly to POST /api/v1/agent/upload on the
+// branchDAM server, persists the local edit copy under LocalEditRoot with the
+// server-returned relativePath, and verifies cryptographic BLAKE3 parity.
+func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResult {
+	fr := FileResult{SourcePath: srcPath}
+
+	ext := extNoDot(srcPath)
+	fr.IsSidecar = ext == "xmp" || ext == "srt"
+
+	srcInfo, err := os.Stat(srcPath)
+	if err != nil {
+		fr.Err = fmt.Errorf("stat source: %w", err)
+		return fr
+	}
+
+	var exif *ExifResult
+	if e.Exiftool != nil && e.Exiftool.HasExiftool() && !fr.IsSidecar {
+		if res, err := e.Exiftool.Exif(ctx, srcPath); err == nil {
+			exif = res
+		}
+	}
+	fr.Exif = exif
+
+	var captureTimestamp int64
+	var cameraModel string
+	if exif != nil && exif.CapturedAt != nil {
+		captureTimestamp = exif.CapturedAt.Unix()
+	} else {
+		captureTimestamp = srcInfo.ModTime().Unix()
+	}
+	if exif != nil {
+		cameraModel = exif.CameraModel
+	}
+
+	if e.Uploader == nil {
+		fr.Err = fmt.Errorf("ingest: uploadStream is true but client does not support upload")
+		return fr
+	}
+
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		fr.Err = fmt.Errorf("open source %s: %w", srcPath, err)
+		return fr
+	}
+	defer func() { _ = srcFile.Close() }()
+
+	uploadOpts := branchdam.UploadOptions{
+		Filename:         filepath.Base(srcPath),
+		CameraModel:      cameraModel,
+		CaptureTimestamp: captureTimestamp,
+	}
+
+	var body io.Reader = srcFile
+	if o := applyWriteOptions(e.progressOpts(srcPath, ProgressPhaseCopying, srcInfo.Size())); o.onBytes != nil {
+		body = &progressReader{r: srcFile, onBytes: o.onBytes}
+	}
+
+	upResp, err := e.Uploader.Upload(ctx, body, uploadOpts)
+	if err != nil {
+		fr.Err = fmt.Errorf("upload %s: %w", srcPath, err)
+		return fr
+	}
+
+	fr.NodeUUID = upResp.NodeUUID
+	fr.ArchivePath = upResp.RelativePath
+	localPath := filepath.Join(e.Ingest.LocalEditRoot, upResp.RelativePath)
+	fr.LocalPath = localPath
+
+	writeRes, err := WriteLocal(srcPath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
+	if err != nil {
+		fr.Err = fmt.Errorf("write local copy: %w", err)
+		return fr
+	}
+	fr.Write = writeRes
+	_ = os.Chtimes(localPath, e.now(), srcInfo.ModTime())
+
+	localVerify, err := Verify(localPath, upResp.Blake3Hash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+	if err != nil {
+		_ = os.Remove(localPath)
+		fr.Err = fmt.Errorf("verify local copy: %w", err)
+		return fr
+	}
+	fr.LocalVerify = localVerify
+
+	if !localVerify.Verified {
+		_ = os.Remove(localPath)
+		fr.Err = fmt.Errorf("ingest: verification failed for %s (local verified=%v, server blake3=%s, local blake3=%s) -- safe-eject withheld",
+			srcPath, localVerify.Verified, upResp.Blake3Hash, writeRes.FullHash)
+		return fr
+	}
+
+	if e.Ingest.RequireUnbuffered && localVerify.Method == VerifyMethodBufferedFloor {
+		fr.Err = fmt.Errorf("ingest: unbuffered verify required by config, but verify fell back to buffered floor (local=%s) -- safe-eject withheld", localVerify.Method)
+		return fr
+	}
+
+	if isImageExt(ext) && e.Exiftool != nil {
+		if ph, err := phash.Extract(ctx, e.Exiftool.Path(), localPath); err == nil {
+			fr.PHash = ph
+		}
+	}
+
+	return fr
 }

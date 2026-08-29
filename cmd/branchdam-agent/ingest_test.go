@@ -175,3 +175,86 @@ func TestRunIngestCollisionMultiSubdir(t *testing.T) {
 		t.Errorf("expected DSC0001_2.JPG in archive: %v", err)
 	}
 }
+
+func TestRunIngestUploadStreaming(t *testing.T) {
+	var mu sync.Mutex
+	var uploadCount int
+	var handshakeCalled bool
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/handshake", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		handshakeCalled = true
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"ok": true,
+			"serverVersion": "0.12.0",
+			"serverTimeUnix": 1756470000,
+			"namingTemplate": "{yyyy}/{original_name}"
+		}`))
+	})
+	mux.HandleFunc("/api/v1/agent/upload", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		uploadCount++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{
+			"nodeUuid": "018f-upload-uuid",
+			"status": "UPLOADED",
+			"bytesWritten": 12,
+			"blake3Hash": "c69ee721fa225ae783156722ee0d67961d9f8c47b0715f3beda16fef9e82b3cf",
+			"relativePath": "2026/PXL_0001.jpg"
+		}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	localRoot := filepath.Join(dir, "local")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "PXL_0001.jpg"), []byte("sample-photo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"" + srv.URL + "\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"ingest:\n" +
+		"  localEditRoot: \"" + localRoot + "\"\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := run([]string{"ingest", "-config", cfgPath, "-card", cardRoot, "-upload", "-timeout", "30s"})
+	if got != 0 {
+		t.Fatalf("run([ingest -upload]) = %d, want 0", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !handshakeCalled {
+		t.Error("expected handshake to be called")
+	}
+	if uploadCount != 1 {
+		t.Errorf("uploadCount = %d, want 1", uploadCount)
+	}
+
+	// Local file should be created under localRoot / 2026 / PXL_0001.jpg
+	localFile := filepath.Join(localRoot, "2026", "PXL_0001.jpg")
+	data, err := os.ReadFile(localFile)
+	if err != nil {
+		t.Fatalf("read local file: %v", err)
+	}
+	if string(data) != "sample-photo" {
+		t.Errorf("local file data = %q, want 'sample-photo'", string(data))
+	}
+}

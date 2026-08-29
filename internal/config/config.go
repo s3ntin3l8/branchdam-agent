@@ -352,6 +352,9 @@ type IngestConfig struct {
 	// during verification (withholding safe-eject and failing the ingest run)
 	// rather than advisory/logged. Defaults to false.
 	RequireUnbuffered bool `yaml:"requireUnbuffered"`
+	// UploadStream enables direct HTTP streaming upload to POST /api/v1/agent/upload
+	// rather than writing directly to a mounted ArchiveRoot. Defaults to false.
+	UploadStream bool `yaml:"uploadStream"`
 }
 
 // ServerConfig is the branchDAM server this agent reports to.

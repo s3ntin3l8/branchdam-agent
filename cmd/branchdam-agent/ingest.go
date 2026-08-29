@@ -29,6 +29,7 @@ func runIngestCmd(args []string) int {
 	cardPath := fs.String("card", "", "path to the card's root directory (a mounted volume, or a fixture directory)")
 	timeout := fs.Duration("timeout", 10*time.Minute, "overall ingest run timeout")
 	offline := fs.Bool("offline", false, "offline mode (issue #4): write the local copy only, queue the archive copy and EVENT_NODE_CREATED in queue.db for a later `queue-drain` -- see offline.* in config and docs/offline-queue.md")
+	upload := fs.Bool("upload", false, "direct HTTP streaming upload to POST /api/v1/agent/upload instead of local archiveRoot dual-write")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -47,12 +48,19 @@ func runIngestCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "branchdam-agent ingest: load config %q: %v\n", resolvedPath, err)
 		return 1
 	}
+	if *upload {
+		cfg.Ingest.UploadStream = true
+	}
 	if cfg.Server.APIKey == "" {
 		fmt.Fprintln(os.Stderr, "branchdam-agent ingest: server.apiKey is empty in config")
 		return 1
 	}
-	if cfg.Ingest.ArchiveRoot == "" || cfg.Ingest.LocalEditRoot == "" {
-		fmt.Fprintln(os.Stderr, "branchdam-agent ingest: ingest.archiveRoot and ingest.localEditRoot must both be set in config")
+	if cfg.Ingest.LocalEditRoot == "" {
+		fmt.Fprintln(os.Stderr, "branchdam-agent ingest: ingest.localEditRoot must be set in config")
+		return 1
+	}
+	if !cfg.Ingest.UploadStream && cfg.Ingest.ArchiveRoot == "" {
+		fmt.Fprintln(os.Stderr, "branchdam-agent ingest: ingest.archiveRoot must be set in config when not using -upload")
 		return 1
 	}
 
@@ -61,6 +69,12 @@ func runIngestCmd(args []string) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+
+	// Synchronize naming template from server handshake if available
+	if hs, err := client.Handshake(ctx, branchdam.HandshakeRequest{AgentID: cfg.AgentID}); err == nil && hs.NamingTemplate != "" {
+		cfg.Ingest.PathTemplate = hs.NamingTemplate
+		engine.Ingest.PathTemplate = hs.NamingTemplate
+	}
 
 	if *offline {
 		return runIngestOffline(ctx, engine, cfg, *cardPath)
