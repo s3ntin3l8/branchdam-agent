@@ -613,6 +613,59 @@ func TestStatusHooksOrderedByRegistry(t *testing.T) {
 	}
 }
 
+func TestRevealHookCallsRegisteredInstaller(t *testing.T) {
+	fh := &fakeHookInstaller{}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetHookInstallers(map[HookID]HookInstaller{HookResolve: fh})
+
+	if err := r.RevealHook(HookResolve); err != nil {
+		t.Fatalf("RevealHook: %v", err)
+	}
+	if fh.revealCalls != 1 {
+		t.Errorf("expected exactly 1 Reveal call, got %d", fh.revealCalls)
+	}
+}
+
+func TestRevealHookReturnsInstallersError(t *testing.T) {
+	fh := &fakeHookInstaller{revealErr: errors.New("xdg-open: not found")}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetHookInstallers(map[HookID]HookInstaller{HookResolve: fh})
+
+	if err := r.RevealHook(HookResolve); err == nil {
+		t.Error("expected RevealHook to surface the installer's own error")
+	}
+}
+
+func TestRevealHookErrorsWhenNotRegistered(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	if err := r.RevealHook(HookResolve); err == nil {
+		t.Error("expected RevealHook to error when no installer is wired for this ID")
+	}
+}
+
+// TestRevealHookNeverTouchesInstallInFlightOrCache pins RevealHook's own
+// doc comment: Reveal must not participate in TriggerHookInstall's
+// hookInFlight dedup (a concurrent Reveal must never be skipped) and must
+// never write to the SetHookState cache (Status() must be unaffected).
+func TestRevealHookNeverTouchesInstallInFlightOrCache(t *testing.T) {
+	fh := &fakeHookInstaller{state: HookState{Dir: "/scripts", Installed: true, UpToDate: true}}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetHookInstallers(map[HookID]HookInstaller{HookResolve: fh})
+	r.SetHookState(HookResolve, HookState{Dir: "/seeded", Installed: false})
+
+	if err := r.RevealHook(HookResolve); err != nil {
+		t.Fatalf("RevealHook: %v", err)
+	}
+	if _, ran := r.TriggerHookInstall(context.Background(), HookResolve); !ran {
+		t.Error("a prior RevealHook call must not block a subsequent TriggerHookInstall via hookInFlight")
+	}
+
+	st, ok := r.Status(UpdateStatus{}).Hook(HookResolve)
+	if !ok || st.State == nil || st.State.Dir != "/scripts" {
+		t.Errorf("expected TriggerHookInstall's own state to have overwritten the seeded state, got %+v -- RevealHook must never write the cache itself", st.State)
+	}
+}
+
 func TestStatusIntegrationsOrderedByRegistry(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, nil, "")
 	st := r.Status(UpdateStatus{})

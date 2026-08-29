@@ -252,18 +252,27 @@ for every field. Every menu-driven change applies immediately, no restart requir
 **DaVinci Resolve render hook.** An installer, not a sync integration, since the hook itself runs
 inside Resolve's own Python interpreter and takes no config beyond an optional
 `integrations.resolve.scriptsDir` override (see [`hooks/resolve/README.md`](hooks/resolve/README.md)).
-Install (or reinstall/update) it headlessly with:
+A top-level "DaVinci Resolve" tray menu item -- a sibling of the catalog-integration items, not
+nested under them -- covers this without ever touching a terminal:
 
-```sh
-branchdam-agent resolve-hook -install [-dir <path>] [-config <path>]
+```
+DaVinci Resolve
+├─ "installed and up to date" / "not installed" / ...   [disabled, cached at startup]
+├─ Install / update render hook
+└─ Reveal Scripts folder
 ```
 
 Installing always targets the most-writable candidate directory (the per-user `Scripts/Utility`
 folder on macOS, so an unprivileged operator never hits `EACCES` against the admin-owned
 system-wide one) unless the hook is already installed somewhere else, in which case it reinstalls
-in place. The tray tracks the same installed/up-to-date state (checked once at startup) and shows
-it read-only on the status page's "DaVinci Resolve render hook" section; a tray menu item to
-trigger the install itself isn't wired yet -- use the subcommand above until it is.
+in place. The status line is checked once at startup and refreshed after every "Install / update"
+click -- never on the regular 5s menu-refresh tick, since a filesystem stat plus a checksum read on
+a possibly-networked `scriptsDir` could otherwise hang the whole menu. The same install logic is
+also available headlessly, for a workstation that never runs the tray:
+
+```sh
+branchdam-agent resolve-hook -install [-dir <path>] [-config <path>]
+```
 
 On Linux, `tray` builds and runs, but immediately returns an error (`tray: unsupported on this
 platform`) -- the tray is scoped to Windows/macOS; a Linux workstation still has the fully-tested

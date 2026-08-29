@@ -25,6 +25,26 @@ func Hooks() []HookID {
 	return []HookID{HookResolve}
 }
 
+// HookDescriptor is one compile-time registry entry for the hooks menu
+// (issue #68) -- the HookID/Title counterpart to IntegrationDescriptor. A
+// separate function from Hooks() (which only returns IDs and already has
+// callers -- Status()'s own construction, and a Runner test -- that don't
+// need a title) rather than changing Hooks()'s own signature.
+type HookDescriptor struct {
+	ID    HookID
+	Title string
+}
+
+// HookDescriptors is the compile-time registry newHooksMenu builds items
+// from -- mirrors Integrations()'s own doc-comment rationale exactly: the
+// menu is built once with no teardown-and-rebuild path (onReady), so this
+// list must stay static.
+func HookDescriptors() []HookDescriptor {
+	return []HookDescriptor{
+		{ID: HookResolve, Title: "DaVinci Resolve"},
+	}
+}
+
 // HookState is Runner's cached view of one hook's on-disk state -- NEVER
 // computed live from Status() or the menu-refresh tick (see
 // Runner.SetHookState's own doc comment for why: a filesystem stat plus a

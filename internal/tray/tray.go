@@ -567,6 +567,23 @@ func (r *Runner) TriggerHookInstall(ctx context.Context, id HookID) (state HookS
 	return state, true
 }
 
+// RevealHook opens id's Scripts folder via its registered HookInstaller --
+// a fire-and-forget OS shell-out, same "no meaningful error surface"
+// precedent as run_supported.go's own openBrowser (used for "Open status
+// page"): Reveal never mutates hook state, so unlike TriggerHookInstall it
+// needs neither hookInFlight tracking nor a SetHookState cache update, and
+// a caller is free to discard the error the same way openBrowser's own
+// caller does.
+func (r *Runner) RevealHook(id HookID) error {
+	r.mu.Lock()
+	installer := r.hookInstallers[id]
+	r.mu.Unlock()
+	if installer == nil {
+		return fmt.Errorf("tray: no hook installer registered for %q", id)
+	}
+	return installer.Reveal()
+}
+
 // Reconfigure swaps in a freshly built Ingester plus the watch/scratch
 // description it should report going forward -- the guarded-rebuild
 // mechanism issue #31's settings menu applies every hot-reloadable config
