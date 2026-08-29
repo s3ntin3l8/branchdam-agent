@@ -179,3 +179,22 @@ against.
 
 This exact sequence was run manually against a local `go run ./cmd/branchdam` during this PR's
 development; see the PR description for the resulting `media_nodes` row.
+
+## Direct HTTP Streaming Ingest vs. Offline Queue
+
+Workstations connected over LAN or VPN can bypass local NAS storage mounts (`ArchiveRoot`) by using direct HTTP streaming ingest:
+
+```sh
+branchdam-agent ingest -config config.yaml -card /media/$USER/UNTITLED -upload
+```
+
+- **Online HTTP Streaming (`-upload`)**: Streams raw octets directly to `POST /api/v1/agent/upload`. The server persists the file into `TIER3_MASTER_ARCHIVE`, creates `media_nodes`, extracts metadata, and returns the canonical `relativePath` and BLAKE3 hash. The agent writes the local NVMe edit copy at `LocalEditRoot/relativePath` and cryptographically verifies the BLAKE3 checksum.
+- **Offline Field Ingest (`-offline`)**: Used when disconnected from the server. Writes the local NVMe copy immediately and persists queue state to `queue.db`. On reconnect, `queue-drain` submits `EVENT_NODE_CREATED`, copies files to the archive, and rebases paths.
+
+## Soft-Delete Trash Buffer Lifecycle
+
+When an agent emits `EVENT_NODE_DELETED` (or when files are deleted from the DAM):
+1. **Gallery Purge**: The asset is immediately removed from live UI indexing and Immich gallery libraries.
+2. **Buffer Isolation**: The server relocates the master file into the `.trash/` directory under `TIER3_MASTER_ARCHIVE` rather than permanently unlinking it from disk.
+3. **30-Day Safety Window**: The server's background prune worker retains `.trash/` files for 30 days (governed by `trash.retentionDays`), protecting against accidental deletions before final unlinking.
+
