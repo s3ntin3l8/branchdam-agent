@@ -241,7 +241,7 @@ func runTrayCmd(args []string) int {
 
 	statusSrv := tray.NewStatusServer(cfg.Tray.StatusAddrOrDefault(), func() tray.Status {
 		return runner.Status(updater.Status())
-	}, version)
+	}, settings.Snapshot, version)
 
 	// Listen (not ListenAndServe) is called before tray.Run starts, so
 	// the bind itself acts as this tray's single-instance guard: a
