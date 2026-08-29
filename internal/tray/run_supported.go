@@ -48,10 +48,26 @@ const drainPruneClickTimeout = 2 * time.Minute
 // timer-driven path.
 const integrationSyncClickTimeout = 10 * time.Minute
 
+// hookInstallClickTimeout bounds a menu-triggered "Install / update render
+// hook" pass -- matches drainPruneClickTimeout's own 2 minutes, not
+// integrationSyncClickTimeout's 10: an atomic temp-then-rename script
+// write is a small, local (or at worst LAN-networked scriptsDir) file
+// operation, much closer in shape to a drain/prune pass than a
+// third-party-catalog sync.
+const hookInstallClickTimeout = 2 * time.Minute
+
 // syncClickResult is what each integrationSubmenu's own "Sync now" worker
 // goroutine feeds back to the main select loop.
 type syncClickResult struct {
 	id  IntegrationID
+	ran bool
+}
+
+// hookInstallResult is what each hookSubmenu's own "Install / update
+// render hook" worker goroutine feeds back to the main select loop --
+// mirrors syncClickResult's own shape exactly.
+type hookInstallResult struct {
+	id  HookID
 	ran bool
 }
 
@@ -151,6 +167,13 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		im := newIntegrationsMenu(settings, menuActionCh)
 		systray.AddSeparator()
 
+		// The hooks menu (issue #68) takes no Settings/actionCh dependency
+		// at all -- a hook has no menu-editable config in this PR's scope,
+		// see hookSubmenu's own doc comment -- so, unlike im/sm, it's built
+		// with no arguments.
+		hm := newHooksMenu()
+		systray.AddSeparator()
+
 		sm := newSettingsMenu(settings, menuActionCh)
 		restartNowItem := sm.parent.AddSubMenuItem("Restart now", "Apply a change that needs a restart (status address or watch folders)")
 		restartNowItem.Hide()
@@ -218,6 +241,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 			sv := settings.Snapshot()
 			sm.sync(sv)
 			im.sync(sv, st)
+			hm.sync(st)
 			if sv.RestartRequired {
 				restartNowItem.Show()
 			} else {
@@ -358,6 +382,40 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 			}()
 		}
 
+		// "Install / update render hook" per hook, same shape as "Sync
+		// now" above: one worker goroutine per registry entry, reading its
+		// own install.ClickedCh directly rather than a select case, so a
+		// second hook needs no new code here. TriggerHookInstall's own
+		// per-ID in-flight tracking (tray.go) makes a rapid double-click
+		// safe the same way TriggerSync's does.
+		hookInstallDoneCh := make(chan hookInstallResult, 1)
+		for _, sub := range hm.subs {
+			sub := sub
+			go func() {
+				for range sub.install.ClickedCh {
+					hctx, cancel := context.WithTimeout(ctx, hookInstallClickTimeout)
+					_, ran := r.TriggerHookInstall(hctx, sub.id)
+					cancel()
+					hookInstallDoneCh <- hookInstallResult{id: sub.id, ran: ran}
+				}
+			}()
+		}
+
+		// "Reveal Scripts folder" needs no done channel at all: unlike
+		// Install, Reveal never mutates any state a submenu's own sync()
+		// renders (see Runner.RevealHook's own doc comment), so there is
+		// nothing for the main select loop to react to -- matching
+		// openBrowser's own "_ = ..., no visible feedback" precedent for
+		// "Open status page" below.
+		for _, sub := range hm.subs {
+			sub := sub
+			go func() {
+				for range sub.reveal.ClickedCh {
+					_ = r.RevealHook(sub.id)
+				}
+			}()
+		}
+
 		applyDoneCh := make(chan applyResult, 1)
 		rollbackDoneCh := make(chan applyResult, 1)
 		var releaseGate func()
@@ -430,6 +488,15 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 					for _, sub := range im.subs {
 						if sub.id == res.id {
 							sub.syncSkipped = true
+						}
+					}
+				}
+				refresh()
+			case res := <-hookInstallDoneCh:
+				if !res.ran {
+					for _, sub := range hm.subs {
+						if sub.id == res.id {
+							sub.installSkipped = true
 						}
 					}
 				}

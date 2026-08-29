@@ -133,12 +133,43 @@ exists for queue counts). **Installed**, **up to date**, and **modified/out of d
 as distinct states since a hand-edited copy and a stale shipped version are the same SHA-256
 mismatch, indistinguishable by design -- see `HookState`'s own doc comment.
 
-**Read-only.** Neither section is interactive -- there is currently no tray menu item to trigger a
-sync or a hook install from the status page or from an "Integrations"/"DaVinci Resolve" menu tree;
-sync happens via the Integrations menu (above) or its background timer, and the Resolve hook
-installs via `branchdam-agent resolve-hook -install` (headless) even from a running tray, since no
-PR in this feature's original 6-PR split ended up owning a menu-driven "Install / update render
-hook" item -- filed as a follow-up.
+**Read-only.** Neither section is itself interactive -- both are plain `<meta http-equiv="refresh">`
+HTML, no JS, no POST endpoints (see `handleIndex`'s own doc comment on why this repo never adds one).
+The actions themselves live one level up, in the tray menu: catalog sync via the Integrations menu's
+"Sync now" (or its background timer), and the Resolve hook via the "DaVinci Resolve" menu's
+"Install / update render hook" (issue #68) -- see that section below. `branchdam-agent resolve-hook
+-install` remains available headlessly, for a workstation that never runs the tray at all.
+
+## DaVinci Resolve hook menu (issue #68)
+
+A separate top-level menu, sibling to the Integrations menu's own top-level items rather than
+nested under it: `internal/tray.HookDescriptors()`'s compile-time registry (DaVinci Resolve's
+render hook today) is what `newHooksMenu` builds items from, mirroring `Integrations()`'s own "menu
+built once, no rebuild path" constraint.
+
+- **"Install / update render hook"** -- a `Runner` action (`Runner.TriggerHookInstall`), wired
+  directly into `run_supported.go`'s own select loop with its own worker goroutine + done channel,
+  exactly like "Sync now": `TriggerHookInstall` does a real (small, atomic) file write, which would
+  freeze the whole menu including Quit if run inline. Bounded by `hookInstallClickTimeout` (2
+  minutes, matching `drainPruneClickTimeout` rather than the much larger
+  `integrationSyncClickTimeout` -- a script write is a small, local-or-LAN operation, not a
+  third-party catalog read).
+- **"Reveal Scripts folder"** -- `Runner.RevealHook`, a fire-and-forget OS shell-out via the
+  registered `HookInstaller.Reveal()`. Unlike Install, this needs no done channel or select-loop
+  case at all: it mutates no state any submenu's own `sync()` renders, matching "Open status page"'s
+  own `_ = openBrowser(statusURL)` precedent of silently discarding the result.
+- **No config-driven items** -- a hook has no `CatalogSyncConfig` and no menu-editable
+  `integrations.resolve.scriptsDir` override yet (still config-file-only), so `hookSubmenu` has no
+  `dispatch()` goroutine and no shared-`menuActionCh` involvement at all, unlike
+  `integrationSubmenu`.
+
+The disabled status line's wording is deliberately identical to the status page's own DaVinci
+Resolve section (`hookStatusLine` in `hooksmenu.go`), so the menu and the status page never disagree
+about what a given `HookState` means.
+
+**Unverified on real hardware**, same caveat as the Integrations menu above: `make build-windows` is
+the only CI-reachable compile check that includes this file at all, and the menu items themselves
+have never been clicked through on either target platform.
 
 ## Startup diagnostics and first-run setup
 
@@ -410,12 +441,18 @@ to say "verified."
    with "Dry run" on -- confirm a sync pass fires on its own (no menu click) roughly once a minute,
    the status page's "last sync" timestamp advances each time, and the `(dry run)` marker is present
    throughout since no real POST should ever leave the workstation.
-9. Resolve hook install (headless -- there is no menu item for this yet, see the Status page
-   section above): run `branchdam-agent resolve-hook -install` with no `-dir` override -- confirm it
-   installs into `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`,
-   opening the script from Resolve's own Workspace ▸ Scripts ▸ Utility menu actually runs it, and
-   that the status page's "DaVinci Resolve render hook" section reflects "installed and up to date"
-   after restarting the tray (state is cached at startup, not live -- see the Status page section).
+9. Resolve hook install, headless: run `branchdam-agent resolve-hook -install` with no `-dir`
+   override -- confirm it installs into
+   `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`, and opening the
+   script from Resolve's own Workspace ▸ Scripts ▸ Utility menu actually runs it.
+10. DaVinci Resolve hook menu (issue #68): open the top-level "DaVinci Resolve" item (a sibling of
+    the Integrations menu's own items) -- confirm the disabled status line matches whatever item 9
+    just installed, click "Install / update render hook" and confirm the status line updates to
+    "installed and up to date" without a tray restart (state is cached and refreshed only by this
+    click -- see the DaVinci Resolve hook menu section above), and click "Reveal Scripts folder" and
+    confirm Explorer opens the correct directory. Also confirm a rapid double-click on "Install /
+    update render hook" shows the "(skipped just now -- already running)" note rather than running
+    two installs concurrently or silently dropping the second click.
 
 **macOS (Apple Silicon):**
 
@@ -442,8 +479,8 @@ to say "verified."
 7. Integrations menu: same as Windows item 7 -- confirm the `-kind file` picker renders correctly
    via `osascript`, including when the tray is launched by launchd rather than from Finder.
 8. Timer-driven sync: same as Windows item 8.
-9. Resolve hook install, admin-rights path: `branchdam-agent resolve-hook -install` with no `-dir`
-   override targets the per-user
+9. Resolve hook install, admin-rights path (headless): `branchdam-agent resolve-hook -install` with
+   no `-dir` override targets the per-user
    `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/` path
    first (no admin rights needed) -- confirm that succeeds, then separately confirm the
    ADMIN-RIGHTS path by running
@@ -451,3 +488,6 @@ to say "verified."
    without `sudo` and confirming it fails with a permissions error (not a silent no-op), then with
    `sudo` and confirming it succeeds. Confirm Resolve picks up the script from whichever location it
    ends up in via Workspace ▸ Scripts ▸ Utility.
+10. DaVinci Resolve hook menu: same as Windows item 10 -- additionally confirm "Reveal Scripts
+    folder" opens the per-user path via `osascript`/Finder, including when the tray is launched by
+    launchd rather than from Finder.
