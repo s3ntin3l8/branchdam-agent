@@ -99,6 +99,73 @@
   </section>
 
   <section>
+    <h2>Integrations</h2>
+    {{if not .Status.Integrations}}
+    <p>No catalog integrations registered.</p>
+    {{else}}
+    <ul>
+      {{range .Status.Integrations}}
+      {{$cfg := integrationView $.Settings .ID}}
+      <li>
+        <strong>{{.ID}}</strong>:
+        {{if not .Registered}}
+        <span class="stub">not configured</span>
+        {{else}}
+        {{if $cfg.Enabled}}enabled{{else}}disabled{{end}},
+        {{if $cfg.DryRun}}dry run{{else}}live{{end}},
+        catalog {{if $cfg.CatalogPathSet}}<code>{{$cfg.CatalogPath}}</code>{{else}}<span class="stub">not set</span>{{end}}
+        {{end}}
+        {{with .LastSync}}
+        <br>
+        last sync {{since .At}} ago:
+        {{if .Err}}
+        <span class="fail">failed: {{.Err}}</span>
+        {{else}}
+        {{.PairsFound}} pairs found, {{.Emitted}} emitted{{if .DryRun}} <em>(dry run &mdash; nothing was emitted)</em>{{end}}, {{.Skipped}} skipped{{if gt .Errors 0}}, <span class="fail">{{.Errors}} errors</span>{{end}}
+        {{end}}
+        {{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
+  </section>
+
+  <section>
+    <h2>DaVinci Resolve render hook</h2>
+    {{if not .Status.Hooks}}
+    <p>No hooks registered.</p>
+    {{else}}
+    <ul>
+      {{range .Status.Hooks}}
+      <li>
+        <strong>{{.ID}}</strong>:
+        {{if not .Registered}}
+        <span class="stub">not configured</span>
+        {{else if not .State}}
+        <span class="stub">not checked yet this session</span>
+        {{else}}
+        {{with .State}}
+        {{if .Err}}
+        <span class="fail">install failed: {{.Err}}</span>
+        {{else if eq .Dir ""}}
+        <span class="stub">no Scripts/Utility folder found for this platform</span>
+        {{else if not .Installed}}
+        not installed (would install to <code>{{.Dir}}</code>)
+        {{else if .UpToDate}}
+        <span class="ok">installed and up to date</span> at <code>{{.Path}}</code>
+        {{else}}
+        <span class="fail">installed but modified or out of date</span> at <code>{{.Path}}</code>
+        {{end}}
+        (checked {{since .At}} ago)
+        {{end}}
+        {{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
+  </section>
+
+  <section>
     <h2>Self-update</h2>
     <p>{{.Status.SelfUpdate.Note}}</p>
   </section>

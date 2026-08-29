@@ -34,9 +34,10 @@ make build-darwin-app# Assembles macOS .app bundle via tools/mkbundle
 | `internal/branchdam` | REST client for branchDAM `/api/v1/agent/*` contract (`hello`, `handshake`, `events`, `rebase`, `node-status`) |
 | `internal/ingest` | DualWrite (streaming multi-writer), cache-defeating Verify, EXIF/SRT metadata extraction, naming engine |
 | `internal/queue` | Local SQLite queue (`queue.db`) persisting ingest records and retry states for offline field operation |
-| `internal/tray` | Menu bar / system tray companion (Windows/macOS) with loopback HTTP status server (`localhost:52419`) |
+| `internal/tray` | Menu bar / system tray companion (Windows/macOS) with loopback HTTP status server (`127.0.0.1:38080`, `config.DefaultStatusAddr`) |
 | `internal/selfupdate` | Checksum-validated self-update (`go-selfupdate`) with atomic apply and instant rollback |
 | `internal/luminar` | Read-only Luminar Neo catalog parser (schema verified against `db_version 155`) generating Tier-2 lineage edges from filename-inferred pairing -- see `docs/luminar-catalog.md` |
+| `internal/resolvehook` | Detects and installs DaVinci Resolve's render hook into its `Scripts/Utility` folder (`CandidateDirs`/`Detect`/`Install`, atomic temp-then-rename write) |
 | `internal/nodeindex` | File path to `nodeUuid` lookup resolver |
 | `internal/hashing` | Ported xxHash64 `FastHash`, `StreamingFastHasher`, BLAKE3 `FullHash`, and `PerceptualHash` |
 | `internal/config` | YAML config loader with environment expansion and surgical `yaml.Node` atomic patcher |

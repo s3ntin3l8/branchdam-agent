@@ -224,8 +224,9 @@ go run ./cmd/branchdam-agent tray -config config.yaml
 
 Starts the tray icon (windows/darwin) plus an embedded status page (default
 `http://127.0.0.1:38080/`, loopback-only -- see `tray.statusAddr` in `config.example.yaml`)
-showing configured watch directories, the local scratch directory, and queue status. The tray
-menu's "Ingest now" and its automatic card-insertion trigger both call the same
+showing configured watch directories, the local scratch directory, queue status, each catalog
+integration's config/last-sync state, and the DaVinci Resolve render hook's installed state. The
+tray menu's "Ingest now" and its automatic card-insertion trigger both call the same
 `internal/ingest.Engine.IngestCard` the headless `ingest` subcommand uses.
 
 **Offline queue.** When `offline.queueDbPath` is set, the tray opens `queue.db` itself and runs
@@ -247,6 +248,22 @@ The tray also runs each enabled integration's sync on its own background timer
 (`integrations.luminar.syncIntervalMinutes`), independent of the ingest/drain/prune timers so a sync
 pass never blocks a card ingest and vice versa -- see `config.example.yaml`'s `integrations:` block
 for every field. Every menu-driven change applies immediately, no restart required.
+
+**DaVinci Resolve render hook.** An installer, not a sync integration, since the hook itself runs
+inside Resolve's own Python interpreter and takes no config beyond an optional
+`integrations.resolve.scriptsDir` override (see [`hooks/resolve/README.md`](hooks/resolve/README.md)).
+Install (or reinstall/update) it headlessly with:
+
+```sh
+branchdam-agent resolve-hook -install [-dir <path>] [-config <path>]
+```
+
+Installing always targets the most-writable candidate directory (the per-user `Scripts/Utility`
+folder on macOS, so an unprivileged operator never hits `EACCES` against the admin-owned
+system-wide one) unless the hook is already installed somewhere else, in which case it reinstalls
+in place. The tray tracks the same installed/up-to-date state (checked once at startup) and shows
+it read-only on the status page's "DaVinci Resolve render hook" section; a tray menu item to
+trigger the install itself isn't wired yet -- use the subcommand above until it is.
 
 On Linux, `tray` builds and runs, but immediately returns an error (`tray: unsupported on this
 platform`) -- the tray is scoped to Windows/macOS; a Linux workstation still has the fully-tested

@@ -61,9 +61,12 @@ by a snapshot diff in `SettingsView`, which shows "Restart now" instead of apply
 **Unverified on real hardware**, same caveat as issue #30's dialog work below -- the
 settings dialogs share the same re-exec'd `dialog` subcommand.
 
-The embedded status page itself is unchanged by this PR (still the `<meta http-equiv="refresh">`
-HTML page from issue #3) -- a `/status.json` route and a smoother live-refresh loop are deferred to
-issue #32's tray-timer work, which is already touching this file for the real queue-depth readout.
+The embedded status page (still the `<meta http-equiv="refresh">` HTML page from issue #3, no JS) now
+also renders an "Integrations" section (per-integration enabled/dry-run config state joined by ID
+against the last sync summary -- see the `integrationView` template func in
+`internal/tray/statusserver.go`) and a "DaVinci Resolve render hook" section (issue #60/#61) -- see
+the Status page section below. A `/status.json` route and a smoother live-refresh loop are still
+deferred to issue #32's own tray-timer work.
 
 ## Integrations menu
 
@@ -101,6 +104,41 @@ submenu, one action, per integration) have never been clicked through on either 
 `make build-darwin` explicitly excludes both `internal/tray` and `cmd/branchdam-agent`
 (`Makefile:47`), so darwin compilation of the menu is unverified anywhere in this repo's own
 tooling.
+
+## Status page (issue #61)
+
+The embedded status page's "Integrations" section joins two independent sources at render time,
+by ID, via a `integrationView` template func (`text/template` can only call a method that returns
+one value, or two where the second is `error` -- `SettingsView.Integration`/`Status.Integration`'s
+`(T, bool)` return doesn't qualify, hence the func):
+
+- **Config state** (enabled, dry run, catalog path) from `Settings.Snapshot()` -- `Runner.Status()`
+  deliberately never reads config (see `Status.Integrations`'s own doc comment), so `StatusServer`
+  now also takes a `SettingsFunc func() SettingsView`, called once per request alongside
+  `StatusFunc`. `SettingsFunc` is nil-tolerant (renders an empty `SettingsView`) since several
+  existing tests construct a bare `StatusServer{StatusFunc: ...}` literal with no settings source.
+- **Runtime state** (last sync time/counts/error) from `Status.Integrations[].LastSync`.
+
+The `(dry run — nothing was emitted)` marker is driven by `SyncSummary.DryRun` -- the flag as it
+was **at the time that pass ran** -- not by the config's current dry-run checkbox. Those can
+disagree (a pass runs under dry-run, the operator unticks it immediately after); rendering off the
+config value instead would make the marker disappear from a stale `Emitted` count that never
+actually reached the server, which is the exact "actively misleading" failure mode the issue called
+out.
+
+A "DaVinci Resolve render hook" section renders the same cached `HookState` the tray's own hook
+installer maintains (`Runner.SetHookState`, seeded once via `resolvehook.Detect` at startup --
+never recomputed on the status page's own refresh, for the same reason `statusQueueReadTimeout`
+exists for queue counts). **Installed**, **up to date**, and **modified/out of date** are rendered
+as distinct states since a hand-edited copy and a stale shipped version are the same SHA-256
+mismatch, indistinguishable by design -- see `HookState`'s own doc comment.
+
+**Read-only.** Neither section is interactive -- there is currently no tray menu item to trigger a
+sync or a hook install from the status page or from an "Integrations"/"DaVinci Resolve" menu tree;
+sync happens via the Integrations menu (above) or its background timer, and the Resolve hook
+installs via `branchdam-agent resolve-hook -install` (headless) even from a running tray, since no
+PR in this feature's original 6-PR split ended up owning a menu-driven "Install / update render
+hook" item -- filed as a follow-up.
 
 ## Startup diagnostics and first-run setup
 
@@ -360,12 +398,24 @@ to say "verified."
    pass is in flight is never blocked or corrupted.
 7. Integrations menu: open the top-level "Luminar Neo" item (a sibling of Settings, not nested
    under it) -- confirm the "Catalog…" and "Node index…" file pickers render (`-kind file` in the
-   `dialog` subcommand, new in this PR) while systray's message pump is already running, that
-   ticking "Enabled" with no catalog path set yet shows the "not fully configured" status line
-   rather than a crash or a silent no-op, and that toggling "Dry run" off and clicking "Sync now"
-   against a real catalog actually reaches the configured `server.baseUrl` (check the audit queue
-   for the emitted edge). Also confirm a Settings-menu click and an Integrations-menu click issued
-   back-to-back never cross-contaminate each other's "last change failed" title.
+   `dialog` subcommand) while systray's message pump is already running, that ticking "Enabled"
+   with no catalog path set yet shows the "not fully configured" status line rather than a crash or
+   a silent no-op, and that toggling "Dry run" off and clicking "Sync now" against a real catalog
+   actually reaches the configured `server.baseUrl` (check the audit queue for the emitted edge --
+   confirm the status page's own Integrations section shows the same emitted count with no
+   "(dry run — nothing was emitted)" marker once it's off). Also confirm a Settings-menu click and
+   an Integrations-menu click issued back-to-back never cross-contaminate each other's "last change
+   failed" title.
+8. Timer-driven sync: set `integrations.luminar.syncIntervalMinutes: 1` and leave the tray running
+   with "Dry run" on -- confirm a sync pass fires on its own (no menu click) roughly once a minute,
+   the status page's "last sync" timestamp advances each time, and the `(dry run)` marker is present
+   throughout since no real POST should ever leave the workstation.
+9. Resolve hook install (headless -- there is no menu item for this yet, see the Status page
+   section above): run `branchdam-agent resolve-hook -install` with no `-dir` override -- confirm it
+   installs into `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`,
+   opening the script from Resolve's own Workspace ▸ Scripts ▸ Utility menu actually runs it, and
+   that the status page's "DaVinci Resolve render hook" section reflects "installed and up to date"
+   after restarting the tray (state is cached at startup, not live -- see the Status page section).
 
 **macOS (Apple Silicon):**
 
@@ -391,3 +441,13 @@ to say "verified."
 6. Tray-driven queue: same as Windows item 6.
 7. Integrations menu: same as Windows item 7 -- confirm the `-kind file` picker renders correctly
    via `osascript`, including when the tray is launched by launchd rather than from Finder.
+8. Timer-driven sync: same as Windows item 8.
+9. Resolve hook install, admin-rights path: `branchdam-agent resolve-hook -install` with no `-dir`
+   override targets the per-user
+   `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/` path
+   first (no admin rights needed) -- confirm that succeeds, then separately confirm the
+   ADMIN-RIGHTS path by running
+   `branchdam-agent resolve-hook -install -dir "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"`
+   without `sudo` and confirming it fails with a permissions error (not a silent no-op), then with
+   `sudo` and confirming it succeeds. Confirm Resolve picks up the script from whichever location it
+   ends up in via Workspace ▸ Scripts ▸ Utility.

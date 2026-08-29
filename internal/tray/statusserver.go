@@ -18,14 +18,36 @@ var statusPageFS embed.FS
 
 var statusPageTmpl = template.Must(template.New("index.html").Funcs(template.FuncMap{
 	"since": func(t time.Time) string { return time.Since(t).Round(time.Second).String() },
+	// integrationView bridges SettingsView.Integration's (T, bool) return
+	// into the single value text/template can call: a template method call
+	// must return exactly one value, or two where the second is `error` --
+	// (IntegrationView, bool) doesn't qualify. A miss (ok=false) renders as
+	// IntegrationView{}'s zero value -- an intentional fallback, not a template
+	// bug: cmd/branchdam-agent's TestRegistryCompleteness guarantees
+	// Settings.Snapshot() emits one entry per Integrations() registry ID, so
+	// a real miss can't happen in this repo's own wiring. A third-party
+	// Settings implementation that violated that bijection would render as
+	// "disabled / live / catalog not set" rather than fail loudly -- an
+	// accepted trade, since a status page has no error-reporting surface
+	// beyond its own sections (see settingsmenu.go's lastErr for where
+	// config-change errors actually surface).
+	"integrationView": func(sv SettingsView, id IntegrationID) IntegrationView {
+		iv, _ := sv.Integration(id)
+		return iv
+	},
 }).ParseFS(statusPageFS, "assets/index.html"))
 
 // statusPageView is what statusPageTmpl renders -- deliberately a superset
 // of Status with presentation-only fields (Version), not a second source
-// of truth: PageData always derives from a live Status() call.
+// of truth: PageData always derives from a live Status()/Settings()
+// call. Settings is CONFIG state (enabled, dry run, catalog path) that
+// Status deliberately never carries -- see Status.Integrations' own doc
+// comment -- so the Integrations section joins the two by ID via the
+// integrationView template func above.
 type statusPageView struct {
-	Version string
-	Status  Status
+	Version  string
+	Status   Status
+	Settings SettingsView
 }
 
 // StatusServer is the embedded localhost status page: spec §7.2's three
@@ -39,15 +61,22 @@ type StatusServer struct {
 	// rewritten rather than trusted as-is.
 	Addr       string
 	StatusFunc func() Status
-	Version    string
+	// SettingsFunc supplies the CONFIG-state half of the Integrations
+	// section (enabled, dry run, catalog path) -- nil-tolerant, since
+	// several existing tests construct a StatusServer as a bare struct
+	// literal with no settings source; handleIndex renders an empty
+	// SettingsView in that case rather than calling a nil func.
+	SettingsFunc func() SettingsView
+	Version      string
 
 	srv *http.Server
 }
 
 // NewStatusServer builds a StatusServer bound to addr (or its loopback-only
-// rewrite -- see normalizeLoopback). statusFunc is called once per request.
-func NewStatusServer(addr string, statusFunc func() Status, version string) *StatusServer {
-	return &StatusServer{Addr: normalizeLoopback(addr), StatusFunc: statusFunc, Version: version}
+// rewrite -- see normalizeLoopback). statusFunc and settingsFunc are each
+// called once per request.
+func NewStatusServer(addr string, statusFunc func() Status, settingsFunc func() SettingsView, version string) *StatusServer {
+	return &StatusServer{Addr: normalizeLoopback(addr), StatusFunc: statusFunc, SettingsFunc: settingsFunc, Version: version}
 }
 
 // normalizeLoopback rewrites a bare ":port" (which net/http would bind to
@@ -130,6 +159,9 @@ func (s *StatusServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	view := statusPageView{Version: s.Version, Status: s.StatusFunc()}
+	if s.SettingsFunc != nil {
+		view.Settings = s.SettingsFunc()
+	}
 	if err := statusPageTmpl.Execute(w, view); err != nil {
 		// Template execution failing mid-write can't be turned into a
 		// clean error response (headers/some body bytes may already be
