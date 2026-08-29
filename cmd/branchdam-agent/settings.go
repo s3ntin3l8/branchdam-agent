@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/autostart"
@@ -100,6 +101,25 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cfg := s.cfg
+
+	// Built from integrationBuilders (not tray.Integrations()) since this
+	// is cmd/branchdam-agent, the package that owns config.Config -- one
+	// entry per builder, in registry order, matching
+	// TestRegistryCompleteness's bijection guarantee against
+	// tray.Integrations().
+	integrations := make([]tray.IntegrationView, 0, len(integrationBuilders))
+	for _, b := range integrationBuilders {
+		c := b.Current(cfg)
+		integrations = append(integrations, tray.IntegrationView{
+			ID:                  b.ID,
+			Enabled:             c.Enabled,
+			DryRun:              c.DryRun,
+			CatalogPath:         c.CatalogPath,
+			CatalogPathSet:      c.CatalogPath != "",
+			SyncIntervalMinutes: c.SyncIntervalMinutes,
+		})
+	}
+
 	return tray.SettingsView{
 		ConfigPath:                 s.path,
 		StartOnLogin:               cfg.Tray.StartOnLogin,
@@ -112,6 +132,9 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		LocalEditRoot:              cfg.Ingest.LocalEditRoot,
 		NamingTemplate:             cfg.Ingest.PathTemplate,
 		RestartRequired:            s.restartRequired,
+		NodeIndexPath:              cfg.Integrations.NodeIndexPath,
+		NodeIndexPathSet:           cfg.Integrations.NodeIndexPath != "",
+		Integrations:               integrations,
 	}
 }
 
@@ -175,16 +198,19 @@ func (s *configSettings) validateBoolChange(key string, v bool) error {
 	default:
 		// config.Patch does no schema validation of its own -- these three
 		// switches (this one plus validateIntChange/validateStringChange
-		// below) ARE the entire allowlist. Without this case, an
+		// below) ARE the entire allowlist. Without a rejection here, an
 		// unrecognized key (a typo in a menu handler, a stale key after a
-		// rename) silently validated an UNCHANGED cfg, reported no
-		// problem, and was then written to config.yaml by config.Patch
-		// with no validation at all -- a latent bug independent of any
-		// specific caller, caught during a later PR's review and fixed
-		// here on its own (issue #58). Every current caller
-		// (settingsmenu.go's four checkbox/submenu keys) passes a listed
-		// key, so this is not a behavior change for any existing path.
-		return fmt.Errorf("settings: %q is not a settable bool key", key)
+		// rename) would silently validate an UNCHANGED cfg, report no
+		// problem, and be written to config.yaml by config.Patch with no
+		// validation at all -- the latent bug issue #58 fixed. Every
+		// integrations.<id>.enabled / .dryRun key is handled generically
+		// via applyIntegrationBoolChange (integrations.go), covering every
+		// entry in integrationBuilders without a per-integration case
+		// here that could independently drift as lrcat (#47)/applephotos
+		// (#46) land.
+		if !applyIntegrationBoolChange(&cfg, key, v) {
+			return fmt.Errorf("settings: %q is not a settable bool key", key)
+		}
 	}
 	return firstValidateProblem(cfg)
 }
@@ -198,7 +224,11 @@ func (s *configSettings) validateIntChange(key string, v int) error {
 		cfg.SelfUpdate.CheckIntervalHours = v
 	default:
 		// See validateBoolChange's default case for why this exists.
-		return fmt.Errorf("settings: %q is not a settable int key", key)
+		// integrations.<id>.syncIntervalMinutes is handled generically
+		// via applyIntegrationIntChange, same reasoning.
+		if !applyIntegrationIntChange(&cfg, key, v) {
+			return fmt.Errorf("settings: %q is not a settable int key", key)
+		}
 	}
 	return firstValidateProblem(cfg)
 }
@@ -218,9 +248,19 @@ func (s *configSettings) validateStringChange(key, v string) error {
 		cfg.Ingest.LocalEditRoot = v
 	case "ingest.pathTemplate":
 		cfg.Ingest.PathTemplate = v
+	case "integrations.nodeIndexPath":
+		// Shared across every catalog integration (see
+		// config.IntegrationsConfig.NodeIndexPath's own doc comment) --
+		// a top-level field, not per-integration, so it's handled
+		// directly here rather than through applyIntegrationStringChange.
+		cfg.Integrations.NodeIndexPath = v
 	default:
 		// See validateBoolChange's default case for why this exists.
-		return fmt.Errorf("settings: %q is not a settable string key", key)
+		// integrations.<id>.catalogPath is handled generically via
+		// applyIntegrationStringChange, same reasoning.
+		if !applyIntegrationStringChange(&cfg, key, v) {
+			return fmt.Errorf("settings: %q is not a settable string key", key)
+		}
 	}
 	return firstValidateProblem(cfg)
 }
@@ -238,10 +278,13 @@ type settingsPrompt struct {
 	kind    string // dialog.go's -kind: "entry", "password", "directory", or "file"
 	title   string
 	message string
-	// defaultValue pre-fills an "entry" dialog with the current value --
-	// never used for "password" (a secret has no business appearing,
-	// even partially, in a process's argv) or "directory".
+	// defaultValue pre-fills an "entry" or "file" dialog with the current
+	// value -- never used for "password" (a secret has no business
+	// appearing, even partially, in a process's argv) or "directory".
 	defaultValue func(cfg config.Config) string
+	// patterns is -kind file's filename filter (e.g. {"*.json"}); unused
+	// for every other kind.
+	patterns []string
 }
 
 func settingsPromptFor(field tray.SettingsField) (settingsPrompt, error) {
@@ -271,6 +314,12 @@ func settingsPromptFor(field tray.SettingsField) (settingsPrompt, error) {
 			message:      "Destination path template ({yyyy}/{mm}/{dd}/{camera_model}/{original_name}):",
 			defaultValue: func(cfg config.Config) string { return cfg.Ingest.PathTemplate },
 		}, nil
+	case tray.FieldNodeIndexPath:
+		return settingsPrompt{
+			key: "integrations.nodeIndexPath", kind: "file", title: "Select the node-index JSON file",
+			patterns:     []string{"*.json"},
+			defaultValue: func(cfg config.Config) string { return cfg.Integrations.NodeIndexPath },
+		}, nil
 	default:
 		return settingsPrompt{}, fmt.Errorf("settings: unknown field %v", field)
 	}
@@ -294,6 +343,9 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 			args = append(args, "-default", def)
 		}
 	}
+	if len(prompt.patterns) > 0 {
+		args = append(args, "-patterns", strings.Join(prompt.patterns, ","))
+	}
 
 	value, exitCode, err := s.dialog(args...)
 	if err != nil {
@@ -313,6 +365,54 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 	}
 	if err := config.Patch(s.path, map[string]any{prompt.key: value}); err != nil {
 		return false, fmt.Errorf("save %s: %w", prompt.key, err)
+	}
+	return true, s.reload()
+}
+
+// PromptAndSetIntegrationPath is PromptAndSet's counterpart for a
+// per-integration catalog path (see tray.Settings.PromptAndSetIntegrationPath's
+// own doc comment for why this is a parameterized method rather than one
+// SettingsField enum value per integration). Mirrors PromptAndSet's own
+// dialog/validate/patch/reload shape closely, differing only in how the
+// dotted key and dialog metadata are derived (from integrationBuilders via
+// id, rather than settingsPromptFor via a SettingsField).
+func (s *configSettings) PromptAndSetIntegrationPath(id tray.IntegrationID) (bool, error) {
+	b, ok := builderFor(id)
+	if !ok {
+		return false, fmt.Errorf("settings: unknown integration %q", id)
+	}
+
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+
+	args := []string{"-kind", "file", "-title", "Select the " + b.Title + " catalog file"}
+	if def := b.Current(cfg).CatalogPath; def != "" {
+		args = append(args, "-default", def)
+	}
+	if len(b.CatalogFilePatterns) > 0 {
+		args = append(args, "-patterns", strings.Join(b.CatalogFilePatterns, ","))
+	}
+
+	value, exitCode, err := s.dialog(args...)
+	key := b.ConfigKey("catalogPath")
+	if err != nil {
+		return false, fmt.Errorf("run settings dialog for %s: %w", key, err)
+	}
+	switch exitCode {
+	case dialogExitCanceled:
+		return false, nil
+	case dialogExitOK:
+		// fall through
+	default:
+		return false, fmt.Errorf("settings dialog for %s failed (exit %d)", key, exitCode)
+	}
+
+	if err := s.validateStringChange(key, value); err != nil {
+		return false, err
+	}
+	if err := config.Patch(s.path, map[string]any{key: value}); err != nil {
+		return false, fmt.Errorf("save %s: %w", key, err)
 	}
 	return true, s.reload()
 }

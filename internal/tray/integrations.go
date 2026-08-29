@@ -86,3 +86,29 @@ type IntegrationStatus struct {
 	Registered bool
 	LastSync   *SyncSummary
 }
+
+// Integration looks up st's entry for id by ID, mirroring
+// SettingsView.Integration -- both types are ordered to match
+// Integrations()'s registry, but a lookup by ID is the deliberate
+// convention throughout this package (see IntegrationStatus's own doc
+// comment), never index-based zipping across two independently-built
+// slices.
+func (st Status) Integration(id IntegrationID) (IntegrationStatus, bool) {
+	for _, is := range st.Integrations {
+		if is.ID == id {
+			return is, true
+		}
+	}
+	return IntegrationStatus{}, false
+}
+
+// integrationKey builds the dotted config.yaml key for one of id's own
+// leaves -- "integrations.<id>.<leaf>" -- the one place that string is
+// spelled in this package, matching cmd/branchdam-agent's own
+// IntegrationBuilder.ConfigKey (which independently derives the identical
+// string on the execution side; both packages must agree on the schema
+// config.IntegrationsConfig defines, but internal/tray cannot import that
+// package's cmd-side registry).
+func integrationKey(id IntegrationID, leaf string) string {
+	return "integrations." + string(id) + "." + leaf
+}

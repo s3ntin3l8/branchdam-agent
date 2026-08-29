@@ -19,7 +19,7 @@ import (
 type settingsMenu struct {
 	parent   *systray.MenuItem
 	settings Settings
-	actionCh chan<- func() error
+	actionCh chan<- menuAction
 
 	// lastErr is set by Run's select loop from settingsDoneCh and
 	// rendered into the parent item's title on the next sync -- the only
@@ -49,7 +49,7 @@ type settingsMenu struct {
 // menu (systray.AddMenuItem must already have a menu started -- this is
 // only ever called from within Run's onReady) and starts the goroutine
 // that turns its items' clicks into actions on actionCh.
-func newSettingsMenu(settings Settings, actionCh chan<- func() error) *settingsMenu {
+func newSettingsMenu(settings Settings, actionCh chan<- menuAction) *settingsMenu {
 	parent := systray.AddMenuItem("Settings", "Tray and ingest settings")
 	sv := settings.Snapshot()
 
@@ -85,14 +85,20 @@ func newSettingsMenu(settings Settings, actionCh chan<- func() error) *settingsM
 }
 
 // send is a non-blocking submission to actionCh -- a click while a
-// previous settings action is still in flight is dropped, matching
+// previous action (from Settings or, now that the channel is shared,
+// Integrations) is still in flight is dropped, matching
 // run_supported.go's ingestNow precedent, rather than queued.
 func (sm *settingsMenu) send(action func() error) {
 	select {
-	case sm.actionCh <- action:
+	case sm.actionCh <- menuAction{run: action, report: sm.setLastErr}:
 	default:
 	}
 }
+
+// setLastErr is menuAction's report callback for every action this menu
+// sends -- called ONLY from Run's own select loop (see menuAction's doc
+// comment for why a worker-goroutine call would race with sync() below).
+func (sm *settingsMenu) setLastErr(err error) { sm.lastErr = err }
 
 func (sm *settingsMenu) dispatch() {
 	for {

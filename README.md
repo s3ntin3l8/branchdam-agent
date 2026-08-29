@@ -237,14 +237,16 @@ the same passes on demand. The status page and menu show a real backlog count an
 failed count from `queue.db`, never a fabricated number when the queue isn't configured or can't be
 read.
 
-**Integrations.** When `integrations.luminar.enabled: true` is set in config, the tray runs Luminar
-Neo sync passes on its own background timer (`integrations.luminar.syncIntervalMinutes`, default 60;
-a negative value means manual-only), independent of the ingest/drain/prune timers so a sync pass
-never blocks a card ingest and vice versa. `integrations.luminar.dryRun` defaults to `true` --
-resolves and logs what a pass would emit without contacting the server -- until an operator turns it
-off explicitly; see `config.example.yaml`'s `integrations:` block. There is no menu affordance for
-this yet (hand-edit `config.yaml` and use "Reload config"); a tray "Integrations" submenu is planned
-follow-on work.
+**Integrations.** Each catalog integration -- Luminar Neo today -- gets its own **top-level** tray
+menu item (e.g. "Luminar Neo"), not nested under Settings: an Enabled checkbox, a Dry run checkbox
+(defaults **on** -- resolves and logs what a pass would emit without contacting the server, until an
+operator turns it off explicitly), a catalog file picker, a "Sync every" submenu (15 min / 60 min
+default / manual-only), and "Sync now". A shared "Node index…" item (the JSON file mapping
+workstation paths to `nodeUuid`s every catalog integration resolves against) sits alongside them.
+The tray also runs each enabled integration's sync on its own background timer
+(`integrations.luminar.syncIntervalMinutes`), independent of the ingest/drain/prune timers so a sync
+pass never blocks a card ingest and vice versa -- see `config.example.yaml`'s `integrations:` block
+for every field. Every menu-driven change applies immediately, no restart required.
 
 On Linux, `tray` builds and runs, but immediately returns an error (`tray: unsupported on this
 platform`) -- the tray is scoped to Windows/macOS; a Linux workstation still has the fully-tested
