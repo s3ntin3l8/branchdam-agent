@@ -224,7 +224,13 @@ type Runner struct {
 // the configured ingest.cardRoots) and scratchDir (ingest.localEditRoot)
 // in the status snapshot.
 func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner {
-	return &Runner{ingester: ingester, watchDirs: watchDirs, scratchDir: scratchDir}
+	return &Runner{
+		ingester:     ingester,
+		watchDirs:    watchDirs,
+		scratchDir:   scratchDir,
+		syncInFlight: map[IntegrationID]bool{},
+		lastSync:     map[IntegrationID]*SyncSummary{},
+	}
 }
 
 // WatchDirs returns a defensive copy of the directories currently
@@ -452,9 +458,6 @@ func (r *Runner) TriggerSync(ctx context.Context, id IntegrationID) (summary Syn
 		r.mu.Unlock()
 		return SyncSummary{}, false
 	}
-	if r.syncInFlight == nil {
-		r.syncInFlight = map[IntegrationID]bool{}
-	}
 	r.syncInFlight[id] = true
 	r.mu.Unlock()
 
@@ -471,9 +474,6 @@ func (r *Runner) TriggerSync(ctx context.Context, id IntegrationID) (summary Syn
 	}
 
 	r.mu.Lock()
-	if r.lastSync == nil {
-		r.lastSync = map[IntegrationID]*SyncSummary{}
-	}
 	stamped := summary
 	r.lastSync[id] = &stamped
 	r.mu.Unlock()

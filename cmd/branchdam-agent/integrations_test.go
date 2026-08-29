@@ -233,6 +233,58 @@ func TestStartPeriodicVarReReadsInterval(t *testing.T) {
 	}
 }
 
+// TestStartPeriodicVarNoBackToBackAfterLongPass is the regression guard
+// for a Hermes review discussion on this PR: a pass that runs LONGER than
+// its own configured interval must not immediately re-fire the moment it
+// finishes. fn blocks for longer than interval() itself, and the test
+// asserts the second call lands no sooner than roughly interval() after
+// the first one's completion, not back-to-back.
+func TestStartPeriodicVarNoBackToBackAfterLongPass(t *testing.T) {
+	const iv = 100 * time.Millisecond
+	const passDuration = 150 * time.Millisecond // longer than iv itself
+
+	var mu sync.Mutex
+	var calls []time.Time
+	record := func() {
+		mu.Lock()
+		calls = append(calls, time.Now())
+		mu.Unlock()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go startPeriodicVar(ctx, 10*time.Millisecond, func() time.Duration { return iv }, time.Second, func(_ context.Context) {
+		record()
+		time.Sleep(passDuration)
+	})
+
+	// Long enough for at least two passes if the cooldown is respected
+	// (passDuration + iv per cycle, ~250ms), short enough that a
+	// back-to-back bug (two calls ~10ms apart) would be caught well
+	// before a third legitimate call could confuse the assertion.
+	time.Sleep(600 * time.Millisecond)
+	cancel()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) < 2 {
+		t.Fatalf("expected at least 2 calls in 600ms of a ~250ms cycle, got %d", len(calls))
+	}
+	gap := calls[1].Sub(calls[0])
+	// Correct behavior (cooldown measured from pass END): second call at
+	// roughly passDuration+iv (~250ms) after the first. A back-to-back
+	// bug (cooldown measured from pass START) would instead show a gap of
+	// roughly passDuration+checkInterval (~160ms) -- the threshold below
+	// sits squarely between the two so it discriminates reliably; verified
+	// by temporarily reverting the fix locally and confirming this
+	// assertion fails against the buggy ordering.
+	const wantMin = passDuration + iv/2 // 200ms: below the correct ~250ms, above the buggy ~160ms
+	if gap < wantMin {
+		t.Errorf("second call started %v after the first, want at least %v -- suggests a back-to-back re-fire with no cooldown (cooldown measured from pass start instead of pass end)", gap, wantMin)
+	}
+}
+
 func TestStartPeriodicVarIdlesOnNonPositiveInterval(t *testing.T) {
 	calls := make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(context.Background())

@@ -189,6 +189,19 @@ func (emptyNodeIndex) Resolve(_ string) (string, bool, error) { return "", false
 // sleeps checkInterval and re-evaluates rather than exiting, so flipping
 // an integration back on (or shortening its interval) from the menu takes
 // effect within one checkInterval, not only after a restart.
+//
+// A pass that outlives its own interval (e.g. syncIntervalMinutes set
+// shorter than a large catalog's real sync time) cannot re-fire
+// back-to-back with no cooldown: fn runs SYNCHRONOUSLY inside the select
+// case, so timer.Reset is only ever called once fn has returned -- no
+// tick accumulates while fn is running, and last is stamped right after,
+// so the very next check sees an elapsed time near zero and correctly
+// waits a full interval() before firing again (verified by
+// TestStartPeriodicVarNoBackToBackAfterLongPass). Considered stamping
+// last at pass START instead (a Hermes review suggestion on this PR) --
+// traced through and rejected: that ordering is what WOULD introduce a
+// back-to-back re-fire the moment a long pass finishes, since elapsed
+// time would already exceed interval() by the time the next check runs.
 func startPeriodicVar(ctx context.Context, checkInterval time.Duration, interval func() time.Duration, timeout time.Duration, fn func(context.Context)) {
 	timer := time.NewTimer(checkInterval)
 	defer timer.Stop()
@@ -200,6 +213,14 @@ func startPeriodicVar(ctx context.Context, checkInterval time.Duration, interval
 		case <-timer.C:
 			iv := interval()
 			if iv > 0 && (last.IsZero() || time.Since(last) >= iv) {
+				// Stamped AFTER fn() returns, deliberately -- see this
+				// function's own doc comment on why a pass that outlives
+				// its own interval still can't re-fire back-to-back: the
+				// timer is only Reset (re-armed) once fn() returns, so no
+				// tick accumulates during a long pass, and stamping here
+				// means the very next check sees an elapsed time close to
+				// 0, correctly waiting a full iv from THIS point before
+				// firing again.
 				fnCtx, cancel := context.WithTimeout(ctx, timeout)
 				fn(fnCtx)
 				cancel()
