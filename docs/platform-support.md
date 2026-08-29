@@ -65,6 +65,43 @@ The embedded status page itself is unchanged by this PR (still the `<meta http-e
 HTML page from issue #3) -- a `/status.json` route and a smoother live-refresh loop are deferred to
 issue #32's tray-timer work, which is already touching this file for the real queue-depth readout.
 
+## Integrations menu
+
+A separate top-level menu, not nested under Settings: one item per catalog integration
+(`internal/tray.Integrations()`'s compile-time registry -- Luminar Neo today), plus a shared "Node
+index…" item. Each integration's own submenu -- Enabled, Dry run, Catalog…, "Sync every" (its own
+nested submenu: 15 min / 60 min default / manual-only), "Sync now" -- keeps every leaf at depth 3
+(`Luminar Neo ▸ Sync every ▸ 15 minutes`), matching the deepest tree this repo has actually shipped
+(`Settings ▸ Check every ▸ 1 hour`) rather than nesting a fourth level under a wrapper "Integrations"
+item.
+
+**Different mechanism from Settings.** Settings changes apply through `Runner.Reconfigure`;
+integration changes apply through the separate `Runner.SetIntegrationSyncers` (rebuilt on every
+reload, same staleness class of fix as the offline-queue drainer/pruner rebuild). "Sync now" is a
+`Runner` action (like "Drain queue now"), not a Settings mutation -- it goes through
+`Runner.TriggerSync` directly from `run_supported.go`'s own select loop, one worker goroutine per
+registry entry.
+
+**Shared error-reporting channel, split lastErr.** Settings and Integrations share one worker
+goroutine/channel (`menuActionCh`/`menuDoneCh` in `run_supported.go`) since both do blocking I/O and
+neither can run inline without freezing the whole menu (including Quit) -- but each menu (and each
+integration's own submenu) owns its **own** `lastErr`, routed via a `report` callback carried on the
+action itself (`menuAction`/`menuActionResult`), so a Settings action's error can never appear in an
+Integrations submenu's title or vice versa. A consequence worth knowing: the channel itself is
+shared and size-1, so a Settings click and an Integrations click landing in the same instant means
+one is dropped -- the same "drop rather than queue" semantics every other menu action in this file
+already has.
+
+**Unverified on real hardware**, same caveat as the Settings menu above and issue #30's dialog work
+below: the catalog/node-index file picker (`-kind file` in the `dialog` subcommand) has never
+rendered on a real Win32 message pump or via `osascript`, and the four-registry-entry-worth of new
+systray items (one top-level item, three checkboxes, one file prompt, one nested "Sync every"
+submenu, one action, per integration) have never been clicked through on either target platform.
+`make build-windows` is the only CI-reachable compile check that includes this file at all --
+`make build-darwin` explicitly excludes both `internal/tray` and `cmd/branchdam-agent`
+(`Makefile:47`), so darwin compilation of the menu is unverified anywhere in this repo's own
+tooling.
+
 ## Startup diagnostics and first-run setup
 
 Issue #30: a tray launched with no console (`branchdam-agent-tray.exe`, or the macOS `.app` via
@@ -321,6 +358,14 @@ to say "verified."
    offline, then let the tray's own drain/prune timers run (or use "Drain queue now"/"Prune now")
    -- confirm the status page's queue counts update and a card ingest started while a drain/prune
    pass is in flight is never blocked or corrupted.
+7. Integrations menu: open the top-level "Luminar Neo" item (a sibling of Settings, not nested
+   under it) -- confirm the "Catalog…" and "Node index…" file pickers render (`-kind file` in the
+   `dialog` subcommand, new in this PR) while systray's message pump is already running, that
+   ticking "Enabled" with no catalog path set yet shows the "not fully configured" status line
+   rather than a crash or a silent no-op, and that toggling "Dry run" off and clicking "Sync now"
+   against a real catalog actually reaches the configured `server.baseUrl` (check the audit queue
+   for the emitted edge). Also confirm a Settings-menu click and an Integrations-menu click issued
+   back-to-back never cross-contaminate each other's "last change failed" title.
 
 **macOS (Apple Silicon):**
 
@@ -344,3 +389,5 @@ to say "verified."
 5. Rollback: same as Windows item 5 -- additionally confirm `Info.plist`'s `CFBundleVersion` is
    rewritten back to the rolled-back version, not left at the version being rolled back FROM.
 6. Tray-driven queue: same as Windows item 6.
+7. Integrations menu: same as Windows item 7 -- confirm the `-kind file` picker renders correctly
+   via `osascript`, including when the tray is launched by launchd rather than from Finder.

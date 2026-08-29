@@ -14,6 +14,14 @@ const (
 	FieldArchiveRoot
 	FieldLocalEditRoot
 	FieldNamingTemplate
+	// FieldNodeIndexPath is appended, not inserted -- these are iota
+	// constants, so inserting in the middle would silently renumber the
+	// five above. It's a single field (unlike per-integration catalog
+	// paths, which go through PromptAndSetIntegrationPath instead)
+	// because the node index is shared by every catalog-reading
+	// integration -- see config.IntegrationsConfig.NodeIndexPath's own
+	// doc comment.
+	FieldNodeIndexPath
 )
 
 // SettingsView is a read-only snapshot of the on-disk configuration
@@ -50,6 +58,58 @@ type SettingsView struct {
 	// can't be hot-reloaded. The menu surfaces "Restart now" rather than
 	// silently pretending the change already took effect.
 	RestartRequired bool
+
+	// NodeIndexPath/NodeIndexPathSet mirror ServerBaseURL/ServerAPIKeySet's
+	// own pattern -- the path itself is not a secret (unlike the API key),
+	// but a bool-plus-value pair keeps this field's rendering symmetric
+	// with every other free-text field the menu shows a "(configured)" /
+	// "(not set)" title for.
+	NodeIndexPath    string
+	NodeIndexPathSet bool
+
+	// Integrations is CONFIG state only, ordered to match the compile-time
+	// Integrations() registry -- paired with Runner's own
+	// Status.Integrations (RUNTIME state: last sync, registered) by the
+	// integrations menu to render "enabled but not configured" vs. "ready"
+	// vs. a real last-sync summary. An implementation MUST emit one entry
+	// per registry entry, so Integration(id) below can never miss.
+	Integrations []IntegrationView
+}
+
+// IntegrationView is one catalog integration's CONFIG state -- the
+// Settings-side counterpart to Runner's IntegrationStatus (RUNTIME state).
+// Neither is derivable from the other; the integrations menu joins them by
+// ID.
+//
+// CatalogPathSet is a bool alongside the path itself for the same reason
+// ServerAPIKeySet exists on SettingsView: the menu's title only ever needs
+// "(configured)" vs. "(not set)", and the path itself is still pre-filled
+// into the file picker via PromptAndSetIntegrationPath's own
+// defaultValue-style lookup, not read from here.
+type IntegrationView struct {
+	ID             IntegrationID
+	Enabled        bool
+	DryRun         bool
+	CatalogPath    string
+	CatalogPathSet bool
+	// SyncIntervalMinutes mirrors config.CatalogSyncConfig.SyncIntervalMinutes
+	// verbatim: 0 means unset (defaults to 60 elsewhere), negative means
+	// "manual only" -- same convention as SettingsView.SelfUpdateCheckIntervalHrs.
+	SyncIntervalMinutes int
+}
+
+// Integration looks up v's entry for id by ID, never by slice position --
+// a future integration (lrcat #47, applephotos #46) could register in any
+// order relative to another. ok is false if the implementation didn't
+// emit an entry for id at all (a Settings/Snapshot bug, not a normal
+// runtime state).
+func (v SettingsView) Integration(id IntegrationID) (IntegrationView, bool) {
+	for _, iv := range v.Integrations {
+		if iv.ID == id {
+			return iv, true
+		}
+	}
+	return IntegrationView{}, false
 }
 
 // Settings is the subset of the tray's on-disk configuration a settings
@@ -73,6 +133,14 @@ type Settings interface {
 	// distinct from err, which means the dialog itself failed to render or
 	// the change failed to save.
 	PromptAndSet(field SettingsField) (ok bool, err error)
+
+	// PromptAndSetIntegrationPath is PromptAndSet's counterpart for a
+	// per-integration catalog path -- a parameterized method rather than
+	// one SettingsField enum value per integration (lrcat #47, applephotos
+	// #46, ...), matching SettingsField's own design note: a single enum
+	// plus one method beats N near-identical ones. Same ok/err contract as
+	// PromptAndSet.
+	PromptAndSetIntegrationPath(id IntegrationID) (ok bool, err error)
 
 	// Reload re-reads config.yaml from disk and reconfigures the running
 	// tray -- the same path a hand-edit followed by "Reload config" takes,

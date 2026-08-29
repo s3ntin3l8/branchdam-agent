@@ -40,10 +40,49 @@ const menuRefreshInterval = 5 * time.Second
 // until a Hermes review finding on this PR caught the inconsistency.
 const drainPruneClickTimeout = 2 * time.Minute
 
+// integrationSyncClickTimeout bounds a menu-triggered "Sync now" pass --
+// deliberately NOT drainPruneClickTimeout (2 minutes): a large third-party
+// catalog plus a per-edge POST loop can run considerably longer than a
+// queue drain/prune pass. Matches cmd/branchdam-agent's own
+// integrationSyncTimeout, which bounds the SAME operation on its
+// timer-driven path.
+const integrationSyncClickTimeout = 10 * time.Minute
+
+// syncClickResult is what each integrationSubmenu's own "Sync now" worker
+// goroutine feeds back to the main select loop.
+type syncClickResult struct {
+	id  IntegrationID
+	ran bool
+}
+
 // applyResult is what the install goroutine feeds back to the select loop.
 type applyResult struct {
 	version string
 	err     error
+}
+
+// menuAction pairs one blocking Settings call with the menu item that owns
+// its error -- settingsMenu and integrationsMenu (and each of the latter's
+// per-registry-entry integrationSubmenus) all share ONE worker
+// goroutine/channel (see onReady below), so a plain func() error is no
+// longer enough to route a result back to the RIGHT lastErr field. The
+// worker goroutine must never call report itself: report mutates a
+// *systray.MenuItem-owning struct's own field, which sync() (called from
+// Run's own select loop) also reads -- calling report from any other
+// goroutine would race. It is therefore called ONLY from the select loop's
+// menuDoneCh case, never from the worker.
+type menuAction struct {
+	run    func() error
+	report func(error)
+}
+
+// menuActionResult is what the shared worker goroutine feeds back --
+// report is carried through unchanged so the select loop can invoke it
+// without needing to know which menu (or which of N integration
+// submenus) originated the action.
+type menuActionResult struct {
+	report func(error)
+	err    error
 }
 
 // Run starts the tray icon and blocks until ctx is cancelled, the user
@@ -88,24 +127,31 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		pruneNow := systray.AddMenuItem("Prune now", "Delete verified local-edit-root mirrors eligible for cleanup")
 		systray.AddSeparator()
 
-		// Every settings action (a checkbox toggle, a free-text prompt,
-		// Reload/Open/Reveal) runs through this one worker, for the same
-		// reason ingestNow does: SetBool/SetInt/PromptAndSet/Reload all do
-		// blocking I/O (disk, a dialog subprocess, rebuilding the ingest
-		// Engine), and running any of that inline in the select loop below
-		// would freeze the whole menu, including Quit, for as long as it
-		// takes. newSettingsMenu's own dispatch goroutine feeds this
-		// channel directly (non-blocking, drops a click if one is already
-		// in flight) rather than routing through the select loop below.
-		settingsActionCh := make(chan func() error, 1)
-		settingsDoneCh := make(chan error, 1)
+		// Every config-changing action -- a Settings checkbox/free-text
+		// prompt/Reload/Open/Reveal, AND (now) an Integrations
+		// checkbox/catalog-path prompt/interval choice -- runs through
+		// this ONE shared worker, for the same reason ingestNow does:
+		// they all do blocking I/O (disk, a dialog subprocess, rebuilding
+		// the ingest Engine and integration syncers), and running any of
+		// that inline in the select loop below would freeze the whole
+		// menu, including Quit, for as long as it takes. Each menu's own
+		// dispatch goroutine feeds this channel directly (non-blocking,
+		// drops a click if one is already in flight anywhere -- Settings
+		// and Integrations included) rather than routing through the
+		// select loop below. See menuAction's own doc comment for why the
+		// worker never calls report itself.
+		menuActionCh := make(chan menuAction, 1)
+		menuDoneCh := make(chan menuActionResult, 1)
 		go func() {
-			for action := range settingsActionCh {
-				settingsDoneCh <- action()
+			for a := range menuActionCh {
+				menuDoneCh <- menuActionResult{report: a.report, err: a.run()}
 			}
 		}()
 
-		sm := newSettingsMenu(settings, settingsActionCh)
+		im := newIntegrationsMenu(settings, menuActionCh)
+		systray.AddSeparator()
+
+		sm := newSettingsMenu(settings, menuActionCh)
 		restartNowItem := sm.parent.AddSubMenuItem("Restart now", "Apply a change that needs a restart (status address or watch folders)")
 		restartNowItem.Hide()
 		systray.AddSeparator()
@@ -171,6 +217,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 
 			sv := settings.Snapshot()
 			sm.sync(sv)
+			im.sync(sv, st)
 			if sv.RestartRequired {
 				restartNowItem.Show()
 			} else {
@@ -281,6 +328,36 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 			}
 		}()
 
+		// "Sync now" per integration, one worker goroutine per registry
+		// entry (built generically from im.subs, so a new integration
+		// needs no new code here) -- each goroutine reads its OWN
+		// syncNow.ClickedCh directly in a for-range loop rather than a
+		// select case, sidestepping the "N dynamic cases in one static
+		// select" problem entirely. TriggerSync's own per-ID in-flight
+		// tracking (tray.go) already makes a rapid double-click safe even
+		// without a request-channel dedup layer like ingestRequestCh's:
+		// a for-range loop over one item's own ClickedCh already
+		// serializes calls for that ID, and a second click arriving while
+		// the first is still running simply waits its turn in the
+		// channel's own buffer -- TriggerSync would report ran=false for
+		// it regardless, since only one call per ID and this goroutine
+		// can be in flight at a time. Only the RESULT needs to reach the
+		// main select loop (to mutate the right submenu's own fields,
+		// which must only ever happen from one goroutine, matching every
+		// other *systray.MenuItem mutation in this file).
+		syncDoneCh := make(chan syncClickResult, 1)
+		for _, sub := range im.subs {
+			sub := sub
+			go func() {
+				for range sub.syncNow.ClickedCh {
+					sctx, cancel := context.WithTimeout(ctx, integrationSyncClickTimeout)
+					_, ran := r.TriggerSync(sctx, sub.id)
+					cancel()
+					syncDoneCh <- syncClickResult{id: sub.id, ran: ran}
+				}
+			}()
+		}
+
 		applyDoneCh := make(chan applyResult, 1)
 		rollbackDoneCh := make(chan applyResult, 1)
 		var releaseGate func()
@@ -345,8 +422,17 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 					pruneSkipped = true
 				}
 				refresh()
-			case err := <-settingsDoneCh:
-				sm.lastErr = err
+			case res := <-menuDoneCh:
+				res.report(res.err)
+				refresh()
+			case res := <-syncDoneCh:
+				if !res.ran {
+					for _, sub := range im.subs {
+						if sub.id == res.id {
+							sub.syncSkipped = true
+						}
+					}
+				}
 				refresh()
 			case <-restartNowItem.ClickedCh:
 				if rel, ok := r.TryLockIdle(); ok {

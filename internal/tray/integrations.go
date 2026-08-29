@@ -86,3 +86,18 @@ type IntegrationStatus struct {
 	Registered bool
 	LastSync   *SyncSummary
 }
+
+// Integration looks up st's entry for id by ID, mirroring
+// SettingsView.Integration -- both types are ordered to match
+// Integrations()'s registry, but a lookup by ID is the deliberate
+// convention throughout this package (see IntegrationStatus's own doc
+// comment), never index-based zipping across two independently-built
+// slices.
+func (st Status) Integration(id IntegrationID) (IntegrationStatus, bool) {
+	for _, is := range st.Integrations {
+		if is.ID == id {
+			return is, true
+		}
+	}
+	return IntegrationStatus{}, false
+}

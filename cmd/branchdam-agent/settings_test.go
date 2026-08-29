@@ -176,16 +176,21 @@ func TestConfigSettingsSetIntRejectsUnknownKey(t *testing.T) {
 }
 
 // TestConfigSettingsValidateStringChangeRejectsUnknownKey exercises
-// validateStringChange's default case directly -- PromptAndSet is the only
-// current caller, and it only ever passes settingsPromptFor's own known
-// keys, so there's no way to reach this through the public API today. The
-// switch itself (config.Patch's entire allowlist) still deserves direct
-// coverage independent of that.
+// validateStringChange's default case directly -- PromptAndSet/
+// PromptAndSetIntegrationPath are the only current callers, and both only
+// ever pass a known key (settingsPromptFor's own keys, or
+// integrationBuilders-derived ones), so there's no way to reach this
+// through the public API today. The switch itself (config.Patch's entire
+// allowlist) still deserves direct coverage independent of that.
+// "integrations.lumnar.catalogPath" (note the typo) stands in for a stale
+// key or a handler bug -- "integrations.luminar.catalogPath" (correctly
+// spelled) is now a RECOGNIZED key as of this PR, via
+// applyIntegrationStringChange.
 func TestConfigSettingsValidateStringChangeRejectsUnknownKey(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner, nil)
 
-	if err := s.validateStringChange("integrations.luminar.catalogPath", "/x.db"); err == nil {
+	if err := s.validateStringChange("integrations.lumnar.catalogPath", "/x.db"); err == nil {
 		t.Fatal("expected validateStringChange to reject an unrecognized key")
 	}
 }
@@ -296,6 +301,105 @@ func TestConfigSettingsAPIKeyNeverPassedAsDialogDefault(t *testing.T) {
 	}
 	if slices.Contains(gotArgs, "-default") {
 		t.Fatalf("API key prompt must never pass a -default (would put the old secret in argv), got %v", gotArgs)
+	}
+}
+
+func TestConfigSettingsSnapshotIncludesIntegrations(t *testing.T) {
+	path, _, runner := settingsTestFixture(t)
+	editConfigFile(t, path, "tray:\n", "integrations:\n  nodeIndexPath: \"/data/node-index.json\"\n  luminar:\n    enabled: true\n    catalogPath: \"/data/catalog.db\"\n    dryRun: false\n    syncIntervalMinutes: 15\ntray:\n")
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newConfigSettings(path, reloaded, runner, nil)
+
+	sv := s.Snapshot()
+	if sv.NodeIndexPath != "/data/node-index.json" || !sv.NodeIndexPathSet {
+		t.Errorf("NodeIndexPath = %q, NodeIndexPathSet = %v", sv.NodeIndexPath, sv.NodeIndexPathSet)
+	}
+
+	iv, ok := sv.Integration(tray.IntegrationLuminar)
+	if !ok {
+		t.Fatal("expected an IntegrationView for IntegrationLuminar")
+	}
+	if !iv.Enabled || iv.DryRun {
+		t.Errorf("got Enabled=%v DryRun=%v, want Enabled=true DryRun=false", iv.Enabled, iv.DryRun)
+	}
+	if iv.CatalogPath != "/data/catalog.db" || !iv.CatalogPathSet {
+		t.Errorf("CatalogPath = %q, CatalogPathSet = %v", iv.CatalogPath, iv.CatalogPathSet)
+	}
+	if iv.SyncIntervalMinutes != 15 {
+		t.Errorf("SyncIntervalMinutes = %d, want 15", iv.SyncIntervalMinutes)
+	}
+}
+
+func TestConfigSettingsSnapshotIntegrationsDefaultsUnconfigured(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	iv, ok := s.Snapshot().Integration(tray.IntegrationLuminar)
+	if !ok {
+		t.Fatal("expected an IntegrationView for IntegrationLuminar even when unconfigured -- one entry per registry entry, always")
+	}
+	if iv.Enabled || iv.CatalogPathSet {
+		t.Errorf("expected a fresh config's Luminar entry to be disabled and unconfigured, got %+v", iv)
+	}
+}
+
+func TestConfigSettingsPromptAndSetIntegrationPathHappyPath(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	var gotArgs []string
+	dialog := func(args ...string) (string, int, error) {
+		gotArgs = args
+		return "/data/catalog.db", dialogExitOK, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+
+	ok, err := s.PromptAndSetIntegrationPath(tray.IntegrationLuminar)
+	if err != nil {
+		t.Fatalf("PromptAndSetIntegrationPath: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	iv, _ := s.Snapshot().Integration(tray.IntegrationLuminar)
+	if iv.CatalogPath != "/data/catalog.db" {
+		t.Errorf("CatalogPath = %q", iv.CatalogPath)
+	}
+	if !slices.Contains(gotArgs, "file") {
+		t.Errorf("expected -kind file in dialog args, got %v", gotArgs)
+	}
+	if !slices.Contains(gotArgs, "-patterns") {
+		t.Errorf("expected -patterns in dialog args (Luminar's CatalogFilePatterns), got %v", gotArgs)
+	}
+}
+
+func TestConfigSettingsPromptAndSetIntegrationPathCanceled(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := func(args ...string) (string, int, error) {
+		return "", dialogExitCanceled, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+
+	ok, err := s.PromptAndSetIntegrationPath(tray.IntegrationLuminar)
+	if err != nil {
+		t.Fatalf("expected no error on cancel, got %v", err)
+	}
+	if ok {
+		t.Error("expected ok=false on cancel")
+	}
+	iv, _ := s.Snapshot().Integration(tray.IntegrationLuminar)
+	if iv.CatalogPathSet {
+		t.Error("expected CatalogPath unchanged after a canceled prompt")
+	}
+}
+
+func TestConfigSettingsPromptAndSetIntegrationPathUnknownID(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if _, err := s.PromptAndSetIntegrationPath("not-a-real-integration"); err == nil {
+		t.Fatal("expected an error for an unknown integration ID")
 	}
 }
 

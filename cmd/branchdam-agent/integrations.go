@@ -22,6 +22,33 @@ import (
 // tray.Integrations()'s own order.
 type IntegrationBuilder struct {
 	ID tray.IntegrationID
+	// Title must match the corresponding tray.Integrations() entry's own
+	// Title exactly -- TestRegistryCompleteness asserts this. Used by the
+	// Settings/dialog wiring (settings.go) for dialog titles and error
+	// messages; the menu itself (internal/tray) reads Title from its own
+	// registry, never from here.
+	Title string
+
+	// Current extracts this integration's own CatalogSyncConfig out of
+	// the whole Config -- the ONE place cfg.Integrations.Luminar (or a
+	// future .Lrcat/.ApplePhotos) is read by name, so every other piece
+	// of the Settings/dialog wiring (Snapshot, PromptAndSetIntegrationPath,
+	// applyIntegration*Change) stays ID-generic instead of switching on ID.
+	Current func(cfg config.Config) config.CatalogSyncConfig
+	// Apply is Current's write-side counterpart -- Go has no generic way
+	// to address cfg.Integrations.Luminar vs. a future cfg.Integrations.Lrcat
+	// by ID string alone, so a settings change is applied via this closure
+	// rather than reflection.
+	Apply func(cfg *config.Config, c config.CatalogSyncConfig)
+
+	// CatalogFilePatterns are the file-picker filter patterns for this
+	// integration's catalog file (e.g. {"*.db", "*.catalog", "*"} for
+	// Luminar) -- the trailing "*" is deliberate: the real on-disk
+	// extension isn't documented to be stable across catalog-app
+	// versions, and a picker that can't select an unexpected extension is
+	// worse than an unfiltered one.
+	CatalogFilePatterns []string
+
 	// Ready reports whether cfg has everything this integration needs to
 	// actually run -- an integration that is disabled, or enabled but
 	// missing a required path, is simply absent from
@@ -29,27 +56,57 @@ type IntegrationBuilder struct {
 	// "not configured" signal), never an error. Deliberately NOT a
 	// config.Validate() rule -- see
 	// config.CatalogSyncConfig.Enabled's own doc comment for why a
-	// cross-field completeness check there would deadlock the (later)
-	// Settings menu.
+	// cross-field completeness check there would deadlock the Settings
+	// menu.
 	Ready func(cfg config.Config) bool
 	// New builds the syncer once Ready reports true.
 	New func(cfg config.Config, client *branchdam.Client) tray.IntegrationSyncer
 	// Interval returns this integration's own sync interval given the
 	// CURRENT config -- used by runTrayCmd's per-builder
 	// startPeriodicVar goroutine so each integration schedules
-	// independently and picks up a live config change (e.g. from a
-	// later PR's Settings menu) without a restart. A value <= 0 means
-	// "manual only" -- see config.CatalogSyncConfig.SyncIntervalMinutes's
-	// own doc comment on why that's a real, deliberate mode, not an
-	// error.
+	// independently and picks up a live config change from the Settings
+	// menu without a restart. A value <= 0 means "manual only" -- see
+	// config.CatalogSyncConfig.SyncIntervalMinutes's own doc comment on
+	// why that's a real, deliberate mode, not an error.
 	Interval func(cfg config.Config) time.Duration
+}
+
+// ConfigKey builds the dotted config.yaml key for one of this
+// integration's own leaves ("integrations.<id>.<leaf>") -- the one place
+// that string is spelled on the execution side, mirroring
+// internal/tray's own unexported integrationKey helper (which derives the
+// identical string independently, since internal/tray cannot import this
+// package's registry). Both must agree on the schema
+// config.IntegrationsConfig defines.
+func (b IntegrationBuilder) ConfigKey(leaf string) string {
+	return "integrations." + string(b.ID) + "." + leaf
+}
+
+// builderFor looks up integrationBuilders by ID, mirroring
+// tray.SettingsView.Integration/tray.Status.Integration's own by-ID-not-index
+// lookup convention.
+func builderFor(id tray.IntegrationID) (IntegrationBuilder, bool) {
+	for _, b := range integrationBuilders {
+		if b.ID == id {
+			return b, true
+		}
+	}
+	return IntegrationBuilder{}, false
 }
 
 // integrationBuilders is the compile-time execution registry, in the same
 // order as tray.Integrations().
 var integrationBuilders = []IntegrationBuilder{
 	{
-		ID: tray.IntegrationLuminar,
+		ID:    tray.IntegrationLuminar,
+		Title: "Luminar Neo",
+		Current: func(cfg config.Config) config.CatalogSyncConfig {
+			return cfg.Integrations.Luminar
+		},
+		Apply: func(cfg *config.Config, c config.CatalogSyncConfig) {
+			cfg.Integrations.Luminar = c
+		},
+		CatalogFilePatterns: []string{"*.db", "*.catalog", "*"},
 		Ready: func(cfg config.Config) bool {
 			l := cfg.Integrations.Luminar
 			if !l.Enabled || l.CatalogPath == "" {
@@ -83,6 +140,71 @@ var integrationBuilders = []IntegrationBuilder{
 			return time.Duration(cfg.Integrations.Luminar.SyncIntervalMinutesOrDefault()) * time.Minute
 		},
 	},
+}
+
+// applyIntegrationBoolChange mutates cfg in place if key matches
+// "integrations.<id>.enabled" or "integrations.<id>.dryRun" for a known
+// integration, reporting handled=false otherwise. Centralizes the
+// integrations.*.* key parsing so validateBoolChange (settings.go) doesn't
+// need a per-integration case that could independently drift as lrcat
+// (#47)/applephotos (#46) land -- one call site here covers every
+// integration in integrationBuilders.
+func applyIntegrationBoolChange(cfg *config.Config, key string, v bool) (handled bool) {
+	for _, b := range integrationBuilders {
+		// Match the key BEFORE deriving b.Current(*cfg) -- a Hermes
+		// review nit on this PR: calling Current for every builder ahead
+		// of knowing whether its key even matches is a wasted derive per
+		// non-matching entry. Harmless at today's single-entry registry
+		// size, but cheap to avoid outright as lrcat (#47)/applephotos
+		// (#46) grow it.
+		var c config.CatalogSyncConfig
+		switch key {
+		case b.ConfigKey("enabled"):
+			c = b.Current(*cfg)
+			c.Enabled = v
+		case b.ConfigKey("dryRun"):
+			c = b.Current(*cfg)
+			c.DryRun = v
+		default:
+			continue
+		}
+		b.Apply(cfg, c)
+		return true
+	}
+	return false
+}
+
+// applyIntegrationIntChange is applyIntegrationBoolChange's counterpart
+// for "integrations.<id>.syncIntervalMinutes".
+func applyIntegrationIntChange(cfg *config.Config, key string, v int) (handled bool) {
+	for _, b := range integrationBuilders {
+		if key != b.ConfigKey("syncIntervalMinutes") {
+			continue
+		}
+		c := b.Current(*cfg)
+		c.SyncIntervalMinutes = v
+		b.Apply(cfg, c)
+		return true
+	}
+	return false
+}
+
+// applyIntegrationStringChange is applyIntegrationBoolChange's counterpart
+// for "integrations.<id>.catalogPath". integrations.nodeIndexPath is NOT
+// handled here -- it's a shared, top-level IntegrationsConfig field, not
+// per-integration, so validateStringChange's own switch handles it
+// directly alongside server.baseUrl and friends.
+func applyIntegrationStringChange(cfg *config.Config, key, v string) (handled bool) {
+	for _, b := range integrationBuilders {
+		if key != b.ConfigKey("catalogPath") {
+			continue
+		}
+		c := b.Current(*cfg)
+		c.CatalogPath = v
+		b.Apply(cfg, c)
+		return true
+	}
+	return false
 }
 
 // buildIntegrationDeps constructs one tray.IntegrationSyncer per builder

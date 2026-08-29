@@ -31,8 +31,11 @@ func TestRegistryCompleteness(t *testing.T) {
 		if d.ID != b.ID {
 			t.Errorf("index %d: tray.Integrations()[%d].ID = %q, integrationBuilders[%d].ID = %q -- registries must list IDs in the same order", i, i, d.ID, i, b.ID)
 		}
-		if b.Ready == nil || b.New == nil || b.Interval == nil {
-			t.Errorf("integrationBuilders[%d] (%q) is missing Ready/New/Interval", i, b.ID)
+		if d.Title != b.Title {
+			t.Errorf("index %d: tray.Integrations()[%d].Title = %q, integrationBuilders[%d].Title = %q -- must match exactly (the Settings/dialog wiring uses IntegrationBuilder.Title for dialog titles and error messages)", i, i, d.Title, i, b.Title)
+		}
+		if b.Ready == nil || b.New == nil || b.Interval == nil || b.Current == nil || b.Apply == nil {
+			t.Errorf("integrationBuilders[%d] (%q) is missing Ready/New/Interval/Current/Apply", i, b.ID)
 		}
 	}
 }
