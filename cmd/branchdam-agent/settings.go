@@ -235,7 +235,7 @@ func firstValidateProblem(cfg config.Config) error {
 // settingsPrompt describes one PromptAndSet field's dialog.
 type settingsPrompt struct {
 	key     string
-	kind    string // dialog.go's -kind: "entry", "password", or "directory"
+	kind    string // dialog.go's -kind: "entry", "password", "directory", or "file"
 	title   string
 	message string
 	// defaultValue pre-fills an "entry" dialog with the current value --
