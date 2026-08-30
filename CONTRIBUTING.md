@@ -16,7 +16,7 @@ available to the repo owner.
 
 `required_conversation_resolution` is also on: every review thread (Hermes's or a human's) must
 be replied to and resolved before a PR is mergeable, even with `enforce_admins: false`. See
-[`CLAUDE.md`](CLAUDE.md)'s "Addressing review feedback" guideline for the exact commands (thread
+[`AGENTS.md`](AGENTS.md)'s "Review thread resolution" guideline for the exact commands (thread
 resolution is a GraphQL-only concept, not a `gh pr` verb).
 
 ## Automated review
