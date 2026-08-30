@@ -2,16 +2,8 @@
 
 Guidance for Claude Code (claude.ai/code) working in `branchdam-agent`.
 
-## Guidelines
-
-- **PR & Issue Templates:** Fill [`.github/pull_request_template.md`](.github/pull_request_template.md) and [`.github/ISSUE_TEMPLATE/issue-blueprint.md`](.github/ISSUE_TEMPLATE/issue-blueprint.md). See [`CONTRIBUTING.md`](CONTRIBUTING.md) for branch protection and checklist.
-- **Review Thread Resolution:** Hermes/human review threads require two API calls to resolve:
-  ```sh
-  # 1. Reply to inline comment (REST)
-  gh api repos/s3ntin3l8/branchdam-agent/pulls/<PR>/comments/<comment_id>/replies -f body="Fixed in <sha>"
-  # 2. Resolve thread (GraphQL)
-  gh api graphql -f query="mutation { resolveReviewThread(input: {threadId: \"<thread_id>\"}) { thread { isResolved } } }"
-  ```
+**Before anything else, read [`AGENTS.md`](AGENTS.md).** It has the
+non-negotiables for working in this repo.
 
 ## Commands
 
