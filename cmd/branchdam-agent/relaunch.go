@@ -45,11 +45,39 @@ func relaunchSelf(selfExe string, args []string) error {
 // --args ...", not a bare exec.Command(selfExe, ...), so LaunchServices
 // attaches a proper application session to the new process instead of it
 // running as a bare child of this one.
+//
+// The -n ("always open a new instance") flag is required. relaunchSelf
+// is called while the old process is still alive (runTrayCmd's call
+// stack hasn't returned yet). Without -n, LaunchServices sees the
+// bundle as running, activates the old instance, and ignores --args —
+// the freshly-updated binary never starts and the tray disappears.
+// With -n, LaunchServices creates a new instance regardless. The port
+// conflict that -n would normally cause is already mitigated: runTrayCmd
+// calls stop() + wg.Wait() (cmd/branchdam-agent/tray.go:283-284)
+// before relaunchSelf, fully releasing the status-server listener so
+// the new instance binds successfully. Single-instance is preserved
+// because only one tray is actively running at any time — the old
+// process exits immediately after relaunchSelf returns. See issue #107.
 func relaunchMacBundle(bundlePath string, args []string) error {
-	cmdArgs := append([]string{"-n", "-a", bundlePath, "--args"}, args...)
-	cmd := exec.Command("open", cmdArgs...)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("relaunch via open -a %s: %w", bundlePath, err)
+	cmd := exec.Command("open", relaunchMacBundleOpenArgs(bundlePath, args)...)
+	if err := startRelaunchCmd(cmd); err != nil {
+		return fmt.Errorf("relaunch via open -n -a %s: %w", bundlePath, err)
 	}
 	return nil
+}
+
+// relaunchMacBundleOpenArgs builds the argv passed to `open` for the
+// macOS bundled relaunch path. Extracted as a pure function so the
+// argv (and specifically the presence of the -n flag) is testable on
+// every CI host, not just darwin.
+func relaunchMacBundleOpenArgs(bundlePath string, args []string) []string {
+	return append([]string{"-n", "-a", bundlePath, "--args"}, args...)
+}
+
+// startRelaunchCmd runs cmd.Start() and returns the error. Indirected
+// through a package var so tests can substitute a no-op (running
+// \`open\` in a unit test on Linux is a non-starter, but the wrapper
+// and the argv are what we want to pin).
+var startRelaunchCmd = func(cmd *exec.Cmd) error {
+	return cmd.Start()
 }
