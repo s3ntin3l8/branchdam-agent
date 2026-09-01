@@ -11,8 +11,11 @@
 package autostart
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -64,6 +67,72 @@ func RenderLaunchAgentPlist(execPath string, args []string) string {
 // directory: ~/Library/LaunchAgents/<Label>.plist.
 func LaunchAgentRelPath() string {
 	return "Library/LaunchAgents/" + Label + ".plist"
+}
+
+// SidecarPath returns the path to the JSON sidecar file that stores
+// the args array for the autostart command. The sidecar is written to
+// the per-user config directory alongside config.yaml.
+func SidecarPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("autostart: resolve config directory: %w", err)
+	}
+	return filepath.Join(dir, "branchdam-agent", "args.json"), nil
+}
+
+// WriteSidecar writes args as a JSON array to the sidecar file, creating
+// the parent directory if needed. The sidecar is read back by the
+// -read-args subcommand at login time.
+func WriteSidecar(args []string) error {
+	path, err := SidecarPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("autostart: create sidecar directory: %w", err)
+	}
+	data, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Errorf("autostart: marshal args: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("autostart: write sidecar: %w", err)
+	}
+	return nil
+}
+
+// RemoveSidecar removes the args sidecar file. A missing file is not an error.
+func RemoveSidecar() {
+	path, err := SidecarPath()
+	if err != nil {
+		return
+	}
+	os.Remove(path)
+}
+
+// RenderLaunchAgentPlistReadArgs renders the LaunchAgent plist XML that starts
+// execPath with -read-args sidecarPath at login. This avoids embedding
+// potentially dangerous characters in the plist command arguments.
+func RenderLaunchAgentPlistReadArgs(execPath string, sidecarPath string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>%s</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>%s</string>
+        <string>-read-args</string>
+        <string>%s</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
+`, xmlEscape(Label), xmlEscape(execPath), xmlEscape(sidecarPath))
 }
 
 func xmlEscape(s string) string {
