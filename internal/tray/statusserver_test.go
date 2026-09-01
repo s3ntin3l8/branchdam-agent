@@ -367,33 +367,33 @@ func TestHandleIndex404sOnUnknownPath(t *testing.T) {
 
 func TestHandleIndexHandshakeOKGreen(t *testing.T) {
 	s := &StatusServer{StatusFunc: func() Status {
-		return Status{QueueStatus: QueueStatus{LastDrain: &DrainSummary{HandshakeOK: true}}}
+		return Status{HandshakeOK: true, HasDrained: true}
 	}}
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
 	s.handleIndex(rec, req)
 	body := rec.Body.String()
 	if !strings.Contains(body, "handshake OK") {
-		t.Errorf("response body missing 'handshake OK' when LastDrain.HandshakeOK=true\n---\n%s", body)
+		t.Errorf("response body missing 'handshake OK' when HasDrained && HandshakeOK\n---\n%s", body)
 	}
 	if strings.Contains(body, "handshake failed") {
-		t.Errorf("response body must not contain 'handshake failed' when LastDrain.HandshakeOK=true\n---\n%s", body)
+		t.Errorf("response body must not contain 'handshake failed' when HasDrained && HandshakeOK\n---\n%s", body)
 	}
 }
 
 func TestHandleIndexHandshakeNOTReachable(t *testing.T) {
 	s := &StatusServer{StatusFunc: func() Status {
-		return Status{QueueStatus: QueueStatus{LastDrain: &DrainSummary{HandshakeOK: false}}}
+		return Status{HandshakeOK: false, HasDrained: true}
 	}}
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
 	s.handleIndex(rec, req)
 	body := rec.Body.String()
 	if !strings.Contains(body, "handshake failed") {
-		t.Errorf("response body missing 'handshake failed' when LastDrain.HandshakeOK=false\n---\n%s", body)
+		t.Errorf("response body missing 'handshake failed' when HasDrained && !HandshakeOK\n---\n%s", body)
 	}
 	if strings.Contains(body, "handshake OK") {
-		t.Errorf("response body must not contain 'handshake OK' when LastDrain.HandshakeOK=false\n---\n%s", body)
+		t.Errorf("response body must not contain 'handshake OK' when HasDrained && !HandshakeOK\n---\n%s", body)
 	}
 }
 
@@ -404,7 +404,7 @@ func TestHandleIndexNoDrainYet(t *testing.T) {
 	s.handleIndex(rec, req)
 	body := rec.Body.String()
 	if !strings.Contains(body, "no drain run yet") {
-		t.Errorf("response body missing 'no drain run yet' when LastDrain is nil\n---\n%s", body)
+		t.Errorf("response body missing 'no drain run yet' when HasDrained is false\n---\n%s", body)
 	}
 }
 

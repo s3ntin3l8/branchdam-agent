@@ -54,21 +54,23 @@
   <section>
     <h2>Server connection</h2>
     <p class="stub">last-known state from the most recent drain pass — a fresh probe is not performed</p>
-    {{with .Status.QueueStatus.LastDrain}}
-    {{if .Err}}
-    <p><span class="fail">last drain failed: {{.Err}}</span></p>
-    {{else if .HandshakeOK}}
+    {{if not .Status.HasDrained}}
+    <p><span class="stub">no drain run yet this session</span></p>
+    {{else if .Status.HandshakeOK}}
     <p><span class="ok">last drain: handshake OK</span></p>
     {{else}}
     <p><span class="fail">last drain: handshake failed</span></p>
-    {{end}}
-    {{else}}
-    <p><span class="stub">no drain run yet this session</span></p>
     {{end}}
   </section>
 
   <section>
     <h2>Queue status</h2>
+    {{/* Note: this section intentionally restates the "last drain"
+        outcome that the Server connection section above already shows
+        in reachability terms. The two views answer different
+        questions ("how is the queue?" vs "is the server reachable?"),
+        and operators expect to see both, so the duplication is
+        intentional, not an oversight. */}}
     {{if .Status.InFlightDrain}}<p class="stub">drain in progress...</p>{{end}}
     {{if .Status.InFlightPrune}}<p class="stub">prune in progress...</p>{{end}}
     {{if not .Status.QueueStatus.Configured}}

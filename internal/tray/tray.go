@@ -148,8 +148,19 @@ type Status struct {
 	BusySince time.Time
 	// HandshakeOK surfaces the most recent DrainSummary.HandshakeOK to the
 	// status page -- the operator's most basic "is the server reachable?"
-	// signal, which DrainSummary already computes but never exposed.
+	// signal, which DrainSummary already computes but never exposed. False
+	// when no drain has run yet (see HasDrained for that distinction);
+	// this is the single source of truth for the "Server connection"
+	// section's reachable/unreachable label, so the template does not
+	// reach into QueueStatus.LastDrain directly.
 	HandshakeOK bool
+	// HasDrained is true once at least one drain pass has completed in
+	// this session -- the "have we ever heard from the server?" signal
+	// the Server connection section uses to distinguish "no drain run
+	// yet" from "last drain: handshake failed". Independent of
+	// HandshakeOK on purpose: a never-drained install is neither
+	// "reachable" nor "unreachable", it's "unknown".
+	HasDrained bool
 	// InFlightDrain reports whether a drain pass is currently running.
 	InFlightDrain bool
 	// InFlightPrune reports whether a prune pass is currently running.
@@ -738,6 +749,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		BusyCard:      busyCard,
 		BusySince:     busySince,
 		HandshakeOK:   lastDrain != nil && lastDrain.HandshakeOK,
+		HasDrained:    lastDrain != nil,
 		InFlightDrain: inFlightDrain,
 		InFlightPrune: inFlightPrune,
 		Integrations:  integrations,
