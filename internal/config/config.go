@@ -48,6 +48,20 @@ type Config struct {
 	StrictConfigPermissions bool               `yaml:"strictConfigPermissions"`
 }
 
+// strictConfigPermissionsSource is the resolved source of a Config's
+// effective strict-permission setting -- used by checkFilePermissions
+// to phrase the strict-mode error so the remediation matches whichever
+// source actually turned strict on (Hermes review on #126: a
+// "set strictConfigPermissions: false" suggestion is a no-op when the
+// env var is the trigger, so the message must reflect which one).
+type strictConfigPermissionsSource int
+
+const (
+	strictSourceYAML strictConfigPermissionsSource = iota
+	strictSourceEnv
+	strictSourceEnvUnset
+)
+
 // StrictConfigPermissionsEffective reports whether the strict permission
 // check is on for this Config, after applying the env-var override
 // (BRANCHDAM_AGENT_STRICT_CONFIG_PERMISSIONS). The env var always wins
@@ -55,16 +69,31 @@ type Config struct {
 // can still be hard-failed in a hardened CI/scripted environment, and a
 // config that sets it to true stays strict even if the env is unset
 // (matching the operator's explicit, file-persisted intent).
-func (c Config) StrictConfigPermissionsEffective() bool {
-	if v, ok := os.LookupEnv(StrictConfigPermissionsEnv); ok {
-		switch {
-		case v == "" || v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") || strings.EqualFold(v, "on"):
-			return true
-		case v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "no") || strings.EqualFold(v, "off"):
-			return false
-		}
+//
+// An unrecognized env value (e.g. "2", "yes " with trailing space,
+// "enabled" -- a typo, a leading/trailing space, or a synonym this
+// helper doesn't recognize) is treated as "env says nothing" and falls
+// through to the YAML value, with a one-shot slog.Warn so the operator
+// learns the env var was ignored rather than silently behaving as if
+// it were unset. The "env wins" contract is the value of the override,
+// not its interpretation: silently turning "2" into "false" because
+// the parser doesn't recognize it would re-introduce the
+// silent-insecurity the env var exists to prevent (Hermes review on
+// #126).
+func (c Config) StrictConfigPermissionsEffective() (bool, strictConfigPermissionsSource) {
+	v, ok := os.LookupEnv(StrictConfigPermissionsEnv)
+	if !ok {
+		return c.StrictConfigPermissions, strictSourceEnvUnset
 	}
-	return c.StrictConfigPermissions
+	switch {
+	case v == "" || v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") || strings.EqualFold(v, "on"):
+		return true, strictSourceEnv
+	case v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "no") || strings.EqualFold(v, "off"):
+		return false, strictSourceEnv
+	default:
+		slog.Warn("unrecognized value for "+StrictConfigPermissionsEnv+" -- falling back to config.strictConfigPermissions", "value", v)
+		return c.StrictConfigPermissions, strictSourceEnvUnset
+	}
 }
 
 // OfflineConfig configures M2's offline queue (issue #4): where queue.db
@@ -494,15 +523,26 @@ func Load(path string) (Config, error) {
 //   - Permissions loose AND apiKey AND strict: return a hard error
 //     naming the path; the caller's start-up gate surfaces it.
 //
-// A Stat that fails for any reason (a follow-up stat the platform
-// couldn't satisfy, e.g. Windows reparse-point races) silently skips
-// the check: a ReadFile moments earlier proved the file exists, and a
-// missing permission check is the lesser evil vs. failing a config load
-// the operator knows is readable. The strict path skips the same way --
-// a non-guarantee documented here, since issue #97's acceptance
-// criterion is about silently-insecure 0o644 hand-edited files, which
-// Stat reliably reports on every platform.
+// Platform notes:
+//   - Windows: os.FileMode.Perm() returns 0o666 for any non-readonly
+//     file (Windows has no POSIX mode bits; ACLs govern access), so
+//     the 0o077 mask would ALWAYS trip on Windows and the strict path
+//     would refuse every config with an apiKey, regardless of the
+//     actual ACL. The check is a no-op on Windows by design -- the
+//     same audit (S-5) recommends operator-driven ACL review on
+//     Windows (Explorer > Properties > Security), which is outside
+//     this package's scope. issue #97's acceptance criterion is
+//     silently-insecure 0o644 hand-edited files; that case is
+//     unique to POSIX umasks and cannot arise on Windows in the same
+//     way (Hermes review on #126).
+//   - POSIX: a Stat that fails silently skips the check rather than
+//     failing Load -- a successful ReadFile moments earlier proved the
+//     file exists; a missing permission check is the lesser evil vs.
+//     failing a config load the operator knows is readable.
 func checkFilePermissions(path string, cfg Config) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	fi, err := os.Stat(path)
 	if err != nil {
 		return nil
@@ -514,10 +554,22 @@ func checkFilePermissions(path string, cfg Config) error {
 		return nil
 	}
 
-	if cfg.StrictConfigPermissionsEffective() {
-		return fmt.Errorf("config file %s is group/world readable (mode %#o) and contains a server.apiKey; chmod 600 and re-run (strict mode -- set strictConfigPermissions: false or unset %s to warn instead)", path, fi.Mode().Perm(), StrictConfigPermissionsEnv)
+	strict, source := cfg.StrictConfigPermissionsEffective()
+	if strict {
+		// The remediation depends on which source actually turned
+		// strict on. The env wins over the YAML value, so suggesting
+		// "set strictConfigPermissions: false" when the env is the
+		// trigger is a no-op -- a Hermes review finding on #126.
+		var fix string
+		switch source {
+		case strictSourceEnv:
+			fix = fmt.Sprintf("unset %s (or set it to 0/false) to warn instead", StrictConfigPermissionsEnv)
+		default:
+			fix = fmt.Sprintf("set strictConfigPermissions: false (or unset %s) to warn instead", StrictConfigPermissionsEnv)
+		}
+		return fmt.Errorf("config file %s is group/world readable (mode %#o) and contains a server.apiKey; chmod 600 and re-run (strict mode -- %s)", path, fi.Mode().Perm(), fix)
 	}
-	slog.Warn("config.yaml is world-readable; consider 'chmod 600'", "path", path, "mode", fmt.Sprintf("%#o", fi.Mode().Perm()))
+	slog.Warn("config.yaml is group/world-readable; consider 'chmod 600'", "path", path, "mode", fmt.Sprintf("%#o", fi.Mode().Perm()))
 	return nil
 }
 
