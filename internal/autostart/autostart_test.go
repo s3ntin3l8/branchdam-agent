@@ -16,7 +16,8 @@ func TestXMLEscapeHandlesSpecialChars(t *testing.T) {
 	// parseable and must not contain any raw HTML-tag sequence in place
 	// of the originals.
 	cases := []struct {
-		in, wantSubstr string}{
+		in, wantSubstr string
+	}{
 		{`a & b`, "&amp;"},
 		{`<tag>`, "&lt;tag&gt;"},
 		{`"quoted"`, "&quot;quoted&quot;"},
