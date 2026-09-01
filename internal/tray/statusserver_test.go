@@ -366,30 +366,45 @@ func TestHandleIndex404sOnUnknownPath(t *testing.T) {
 }
 
 func TestHandleIndexHandshakeOKGreen(t *testing.T) {
-	s := &StatusServer{StatusFunc: func() Status { return Status{HandshakeOK: true} }}
+	s := &StatusServer{StatusFunc: func() Status {
+		return Status{QueueStatus: QueueStatus{LastDrain: &DrainSummary{HandshakeOK: true}}}
+	}}
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
 	s.handleIndex(rec, req)
 	body := rec.Body.String()
-	if !strings.Contains(body, "server reachable") {
-		t.Errorf("response body missing 'server reachable' when HandshakeOK=true\n---\n%s", body)
+	if !strings.Contains(body, "handshake OK") {
+		t.Errorf("response body missing 'handshake OK' when LastDrain.HandshakeOK=true\n---\n%s", body)
 	}
-	if strings.Contains(body, "server unreachable") {
-		t.Errorf("response body must not contain 'server unreachable' when HandshakeOK=true\n---\n%s", body)
+	if strings.Contains(body, "handshake failed") {
+		t.Errorf("response body must not contain 'handshake failed' when LastDrain.HandshakeOK=true\n---\n%s", body)
 	}
 }
 
 func TestHandleIndexHandshakeNOTReachable(t *testing.T) {
-	s := &StatusServer{StatusFunc: func() Status { return Status{HandshakeOK: false} }}
+	s := &StatusServer{StatusFunc: func() Status {
+		return Status{QueueStatus: QueueStatus{LastDrain: &DrainSummary{HandshakeOK: false}}}
+	}}
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
 	s.handleIndex(rec, req)
 	body := rec.Body.String()
-	if !strings.Contains(body, "server unreachable") {
-		t.Errorf("response body missing 'server unreachable' when HandshakeOK=false\n---\n%s", body)
+	if !strings.Contains(body, "handshake failed") {
+		t.Errorf("response body missing 'handshake failed' when LastDrain.HandshakeOK=false\n---\n%s", body)
 	}
-	if strings.Contains(body, "server reachable") {
-		t.Errorf("response body must not contain 'server reachable' when HandshakeOK=false\n---\n%s", body)
+	if strings.Contains(body, "handshake OK") {
+		t.Errorf("response body must not contain 'handshake OK' when LastDrain.HandshakeOK=false\n---\n%s", body)
+	}
+}
+
+func TestHandleIndexNoDrainYet(t *testing.T) {
+	s := &StatusServer{StatusFunc: func() Status { return Status{} }}
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "no drain run yet") {
+		t.Errorf("response body missing 'no drain run yet' when LastDrain is nil\n---\n%s", body)
 	}
 }
 

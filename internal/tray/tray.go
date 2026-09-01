@@ -389,6 +389,17 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 
 	r.mu.Lock()
 	drainer := r.drainer
+	r.mu.Unlock()
+
+	if drainer == nil {
+		return DrainSummary{}, false
+	}
+
+	// Set inFlightDrain AFTER the nil-drainer guard. A periodic timer
+	// tick on an unconfigured drainer must not flash "drain in
+	// progress" to a concurrent Status() call; setting the flag here
+	// ensures the flag is true only when an actual drain is running.
+	r.mu.Lock()
 	r.inFlightDrain = true
 	r.mu.Unlock()
 	defer func() {
@@ -396,10 +407,6 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 		r.inFlightDrain = false
 		r.mu.Unlock()
 	}()
-
-	if drainer == nil {
-		return DrainSummary{}, false
-	}
 
 	summary, err := drainer.Drain(ctx)
 	summary.At = time.Now()
@@ -430,6 +437,17 @@ func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bo
 
 	r.mu.Lock()
 	pruner := r.pruner
+	r.mu.Unlock()
+
+	if pruner == nil {
+		return PruneSummary{}, false
+	}
+
+	// Set inFlightPrune AFTER the nil-pruner guard. A menu-click
+	// TriggerPrune on an unconfigured pruner must not briefly report
+	// prune-in-flight to a concurrent Status() call; setting the flag
+	// here ensures the flag is true only when an actual prune is running.
+	r.mu.Lock()
 	r.inFlightPrune = true
 	r.mu.Unlock()
 	defer func() {
@@ -437,10 +455,6 @@ func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bo
 		r.inFlightPrune = false
 		r.mu.Unlock()
 	}()
-
-	if pruner == nil {
-		return PruneSummary{}, false
-	}
 
 	summary, err := pruner.Prune(ctx)
 	summary.At = time.Now()

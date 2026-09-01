@@ -53,10 +53,17 @@
 
   <section>
     <h2>Server connection</h2>
-    {{if .Status.HandshakeOK}}
-    <p><span class="ok">server reachable</span></p>
+    <p class="stub">last-known state from the most recent drain pass — a fresh probe is not performed</p>
+    {{with .Status.QueueStatus.LastDrain}}
+    {{if .Err}}
+    <p><span class="fail">last drain failed: {{.Err}}</span></p>
+    {{else if .HandshakeOK}}
+    <p><span class="ok">last drain: handshake OK</span></p>
     {{else}}
-    <p><span class="fail">server unreachable</span></p>
+    <p><span class="fail">last drain: handshake failed</span></p>
+    {{end}}
+    {{else}}
+    <p><span class="stub">no drain run yet this session</span></p>
     {{end}}
   </section>
 
