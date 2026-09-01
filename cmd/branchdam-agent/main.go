@@ -57,6 +57,8 @@ func run(args []string) int {
 		return runUpdateCmd(args[1:])
 	case "init":
 		return runInitCmd(args[1:])
+	case "-read-args":
+		return runReadArgsCmd(args[1:])
 	case "dialog":
 		// Hidden -- see dialog.go's doc comment. Deliberately absent from
 		// usage() below: this exists only to be re-exec'd by this same
@@ -88,6 +90,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  tray          run the tray-resident shell (windows/darwin only) over the same ingest core")
 	fmt.Fprintln(os.Stderr, "  update        check for (and optionally apply) a newer release (-check, -yes; requires selfUpdate.enabled)")
 	fmt.Fprintln(os.Stderr, "  init          write a starter config.yaml to get started (-force to overwrite an existing one)")
+	fmt.Fprintln(os.Stderr, "  -read-args    re-exec from a JSON sidecar (used by autostart, not for direct use)")
 	fmt.Fprintln(os.Stderr, "  version       print the agent's own version")
 }
 
