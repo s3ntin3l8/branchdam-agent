@@ -155,7 +155,7 @@ func TestValidateNonSensitiveFieldNamesThePlaceholder(t *testing.T) {
 func TestValidateNoProblemsOnWellFormedConfig(t *testing.T) {
 	cfg := Config{
 		Server: ServerConfig{
-			BaseURL: "http://localhost:8080",
+			BaseURL: "https://branchdam.example.com",
 			APIKey:  "0123456789abcdef0123456789abcdef",
 		},
 		AgentID: "workstation-01",

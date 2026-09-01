@@ -215,7 +215,7 @@ func TestConfigSettingsExistingKeysStillAccepted(t *testing.T) {
 		t.Errorf("selfUpdate.checkIntervalHours: %v", err)
 	}
 	stringCases := map[string]string{
-		"server.baseUrl":       "http://example.invalid",
+		"server.baseUrl":       "https://example.invalid",
 		"server.apiKey":        "0123456789abcdef0123456789abcdef", // 32+ chars -- server.apiKey's own length check would otherwise reject a short value here
 		"ingest.archiveRoot":   "/archive",
 		"ingest.localEditRoot": "/local",

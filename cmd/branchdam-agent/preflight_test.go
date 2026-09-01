@@ -30,7 +30,7 @@ func fakeRunVersionOK(_ string) (string, error) { return "13.10", nil }
 func baseCfg() config.Config {
 	return config.Config{
 		Server: config.ServerConfig{
-			BaseURL: "http://localhost:8080",
+			BaseURL: "https://localhost:8080",
 			APIKey:  "0123456789abcdef0123456789abcdef",
 		},
 	}

@@ -8,6 +8,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -467,10 +469,31 @@ func ResolvePath(flagValue string) (string, error) {
 // decides for itself which of these are blocking for what it's about to
 // do (a bare `luminar-sync` run doesn't care that ingest.archiveRoot is
 // empty; `tray` does).
+//
+// Severity is advisory metadata: ZeroValueProblem (the empty string)
+// means "structural failure" -- the value is wrong in any context, and
+// callers like preflight treat it as blocking by default. SeverityWarning
+// marks a value that is suspicious-but-tolerable (e.g. cleartext http on
+// a loopback host -- legitimate for a co-located dev server) and callers
+// surface it but do not block on it. Kept as a string rather than an
+// enum/iota so adding a new severity tier later (e.g. a future
+// SeverityInfo for purely-informational problems) is a one-line
+// addition, not a breaking change to every test that compares Problem
+// literals.
 type Problem struct {
-	Field   string
-	Message string
+	Field    string
+	Message  string
+	Severity string
 }
+
+const (
+	// SeverityWarning marks a Problem as advisory: surfaced to the operator
+	// but not blocking. Used today by checkServerBaseURL for cleartext
+	// http on a loopback host (issue #96) -- a legitimate local-dev
+	// posture that no operator should have to scrub through a hard
+	// failure to use.
+	SeverityWarning = "warning"
+)
 
 // String renders p as "field: message", the form preflight and the tray's
 // startup-error surface both print.
@@ -553,6 +576,17 @@ func (c Config) Validate() []Problem {
 		})
 	}
 
+	// Server.BaseURL is concatenated verbatim with "/api/v1/agent/..." in
+	// internal/branchdam/client.go's post() -- so a trailing slash here
+	// becomes "host//api/...", and an "http://" on a non-loopback host is
+	// a cleartext wire exposure that no operator should land on by typo.
+	// The placeholder check above runs first; if it flagged BaseURL, skip
+	// these structural checks so the operator sees the placeholder
+	// message rather than a downstream parse error against "${...}".
+	if !envVarRe.MatchString(c.Server.BaseURL) {
+		problems = append(problems, checkServerBaseURL(c.Server.BaseURL)...)
+	}
+
 	if c.Ingest.PollIntervalSecs < 0 {
 		problems = append(problems, Problem{Field: "ingest.pollIntervalSecs", Message: "must not be negative"})
 	}
@@ -574,6 +608,114 @@ func (c Config) Validate() []Problem {
 	// sanity check.
 
 	return problems
+}
+
+// checkServerBaseURL enforces the BaseURL invariants an operator can
+// silently get wrong: a typo, a missing scheme, a trailing slash, or an
+// http:// host on a public network. internal/branchdam.Client.post()
+// concatenates baseURL + "/api/v1/agent/..." verbatim, so a trailing slash
+// produces "host//api/v1/agent/..." (rejected by most servers as a path
+// normalization), and a cleartext transport on a non-loopback host is a
+// wire-exposure the agent must refuse to use rather than send the
+// X-API-Key shared secret over.
+//
+// Kept as its own function (mirroring checkCatalogSync's shape) so the
+// base URL policy can evolve without growing Validate()'s own block --
+// e.g. a future "block private-RFC1918 hosts without an opt-in" rule
+// adds one more branch here, not another inline stanza in Validate().
+func checkServerBaseURL(raw string) []Problem {
+	var problems []Problem
+
+	// Defensive: an empty BaseURL has already been flagged as a
+	// placeholder by checkPlaceholder above; this function is reached
+	// only when that check didn't fire, so a literal "" at this point
+	// is a zero-value Config (not a config-file typo) and is not
+	// something an operator needs to be told about at Validate time --
+	// defaultConfig() fills it in for the file path, and the
+	// requiredness-for-each-subcommand checks live in
+	// cmd/branchdam-agent, not here.
+	if raw == "" {
+		return nil
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		problems = append(problems, Problem{
+			Field:   "server.baseUrl",
+			Message: fmt.Sprintf("not a valid URL: %v", err),
+		})
+		return problems
+	}
+
+	// Must be absolute (have a scheme). A relative path like
+	// "/api/v1/agent/hello" or "branchdam.example.com" parses
+	// successfully but with no scheme -- which would let the HTTP client
+	// silently build a request to the wrong host.
+	if !u.IsAbs() || u.Scheme == "" {
+		problems = append(problems, Problem{
+			Field:   "server.baseUrl",
+			Message: fmt.Sprintf("must be an absolute URL with an http or https scheme (got %q)", raw),
+		})
+		return problems
+	}
+
+	if u.Scheme != "http" && u.Scheme != "https" {
+		problems = append(problems, Problem{
+			Field:   "server.baseUrl",
+			Message: fmt.Sprintf("scheme must be http or https (got %q)", u.Scheme),
+		})
+		return problems
+	}
+
+	// Trailing slash on the path would concatenate to "host//api/..."
+	// in client.go's baseURL+path. Path is empty for a bare host
+	// ("http://example.com"), in which case Path == "" is fine.
+	if strings.HasSuffix(u.Path, "/") {
+		problems = append(problems, Problem{
+			Field:   "server.baseUrl",
+			Message: "must not end with a trailing slash -- internal/branchdam/client.go concatenates this URL with \"/api/v1/...\" verbatim, producing a double-slash path",
+		})
+	}
+
+	// Cleartext http on a non-loopback host is refused outright. A
+	// shared X-API-Key is never worth sending over the wire in cleartext
+	// to anything but localhost; loopback http stays a warning, not a
+	// refusal, so a workstation pointing at a co-located dev server
+	// keeps working without an operator having to reach for TLS first.
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		problems = append(problems, Problem{
+			Field:   "server.baseUrl",
+			Message: "uses cleartext http on a non-loopback host -- the X-API-Key shared secret would be sent in cleartext; use https or a loopback host",
+		})
+		return problems
+	}
+	if u.Scheme == "http" && isLoopbackHost(u.Hostname()) {
+		problems = append(problems, Problem{
+			Field:    "server.baseUrl",
+			Severity: SeverityWarning,
+			Message:  "uses cleartext http on a loopback host -- fine for a local dev server, but use https for anything reachable beyond this workstation",
+		})
+	}
+
+	return problems
+}
+
+// isLoopbackHost reports whether h is one of the loopback host names an
+// operator is reasonably likely to type: 127.0.0.1, ::1 (any zone), and
+// "localhost". Hostnames are compared case-insensitively. net.ParseIP
+// handles bracketed-IPv6 ("::1") the same way url.URL.Hostname() strips
+// the brackets, so no extra unwrapping is needed here.
+func isLoopbackHost(h string) bool {
+	if h == "" {
+		return false
+	}
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // checkCatalogSync runs the field-agnostic checks every CatalogSyncConfig
