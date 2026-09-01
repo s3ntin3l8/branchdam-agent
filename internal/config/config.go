@@ -475,11 +475,12 @@ func ResolvePath(flagValue string) (string, error) {
 // callers like preflight treat it as blocking by default. SeverityWarning
 // marks a value that is suspicious-but-tolerable (e.g. cleartext http on
 // a loopback host -- legitimate for a co-located dev server) and callers
-// surface it but do not block on it. Kept as a string rather than an
-// enum/iota so adding a new severity tier later (e.g. a future
-// SeverityInfo for purely-informational problems) is a one-line
-// addition, not a breaking change to every test that compares Problem
-// literals.
+// surface it but do not block on it.
+//
+// "Blocking or not?" is decided by Problem.Advisory(), not by comparing
+// Severity == SeverityWarning at every call site -- so adding a future
+// SeverityInfo / SeverityHint tier only needs to extend Advisory(), not
+// every reader.
 type Problem struct {
 	Field    string
 	Message  string
@@ -499,6 +500,19 @@ const (
 // startup-error surface both print.
 func (p Problem) String() string {
 	return fmt.Sprintf("%s: %s", p.Field, p.Message)
+}
+
+// Advisory reports whether p should block a settings-driven config
+// mutation or a process's startup gate. Today only SeverityWarning is
+// advisory; the zero-value Severity is the structural-failure default.
+//
+// Centralizing the "blocking or not?" decision here means call sites in
+// cmd/branchdam-agent (settings.firstBlockingProblem, preflight, the tray
+// startup gate) don't each compare Severity with `== warning` / `!= warning`
+// and silently disagree when a future SeverityInfo / SeverityHint tier
+// lands -- a Hermes review finding on the PR that introduced Severity.
+func (p Problem) Advisory() bool {
+	return p.Severity == SeverityWarning
 }
 
 // Validate runs the checks that apply regardless of which subcommand is

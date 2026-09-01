@@ -126,3 +126,29 @@ func TestValidateBaseURL_HTTPSNonLoopbackClean(t *testing.T) {
 		}
 	}
 }
+
+// TestProblemAdvisory centralizes the "is this Problem advisory or
+// blocking?" decision so call sites in cmd/branchdam-agent don't each
+// write their own `p.Severity == SeverityWarning` comparison and silently
+// drift when a future SeverityInfo / SeverityInfo tier is added. Today
+// only SeverityWarning is advisory; zero-value Severity is the structural
+// failure default.
+func TestProblemAdvisory(t *testing.T) {
+	cases := []struct {
+		name     string
+		problem  Problem
+		advisory bool
+	}{
+		{"zero_value_severity_is_blocking", Problem{Field: "x", Message: "y"}, false},
+		{"severity_warning_is_advisory", Problem{Field: "x", Message: "y", Severity: SeverityWarning}, true},
+		{"empty_string_severity_is_blocking", Problem{Field: "x", Message: "y", Severity: ""}, false},
+		{"unknown_severity_is_blocking", Problem{Field: "x", Message: "y", Severity: "info"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.problem.Advisory(); got != tc.advisory {
+				t.Errorf("Advisory() = %v, want %v", got, tc.advisory)
+			}
+		})
+	}
+}

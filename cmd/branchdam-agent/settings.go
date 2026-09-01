@@ -274,7 +274,7 @@ func firstValidateProblem(cfg config.Config) error {
 
 // firstBlockingProblem returns the first Validate() Problem that should
 // block a settings-driven config mutation or reload -- i.e. a structural
-// failure, not a config.SeverityWarning advisory. Used by firstValidateProblem
+// failure, not a Problem marked Advisory(). Used by firstValidateProblem
 // (SetBool/SetInt/PromptAndSet path) and reload (Reload config / Restart
 // Required path), so they share one definition of "blocking" instead of
 // each diverging independently (Hermes review finding on the PR that
@@ -284,7 +284,7 @@ func firstValidateProblem(cfg config.Config) error {
 // nothing at all.
 func firstBlockingProblem(cfg config.Config) *config.Problem {
 	for _, p := range cfg.Validate() {
-		if p.Severity != config.SeverityWarning {
+		if !p.Advisory() {
 			return &p
 		}
 	}
