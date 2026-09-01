@@ -83,6 +83,12 @@ func SidecarPath() (string, error) {
 // WriteSidecar writes args as a JSON array to the sidecar file, creating
 // the parent directory if needed. The sidecar is read back by the
 // -read-args subcommand at login time.
+//
+// The write is atomic: a temp file is created in the same directory and
+// renamed over the final path via os.Rename. A kill mid-write leaves the
+// previous valid sidecar in place (or no sidecar on a first run) rather
+// than a truncated/invalid file that would silently disable autostart at
+// the next login.
 func WriteSidecar(args []string) error {
 	path, err := SidecarPath()
 	if err != nil {
@@ -95,8 +101,33 @@ func WriteSidecar(args []string) error {
 	if err != nil {
 		return fmt.Errorf("autostart: marshal args: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("autostart: write sidecar: %w", err)
+	tmp, err := os.CreateTemp(filepath.Dir(path), "args.json.tmp.*")
+	if err != nil {
+		return fmt.Errorf("autostart: create temp sidecar: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if _, statErr := os.Stat(tmpPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("autostart: write temp sidecar: %w", err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("autostart: chmod temp sidecar: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("autostart: fsync temp sidecar: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("autostart: close temp sidecar: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("autostart: rename temp sidecar: %w", err)
 	}
 	return nil
 }

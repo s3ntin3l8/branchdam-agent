@@ -2,6 +2,8 @@ package autostart
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -107,5 +109,37 @@ func TestSidecarPathSpecialChars(t *testing.T) {
 	}
 	if parsed[1] != args[1] {
 		t.Errorf("arg[1] = %q, want %q", parsed[1], args[1])
+	}
+}
+
+// TestWriteSidecarAtomicNoTempLeftBehind verifies that a successful
+// write does not leave a temp file in the sidecar directory. A kill
+// mid-write would leave a temp file, which the defer in WriteSidecar
+// cleans up on the next run; this test pins the happy path's
+// no-temp-file invariant.
+func TestWriteSidecarAtomicNoTempLeftBehind(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpHome)
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("APPDATA", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
+
+	if err := WriteSidecar([]string{"tray", "-config", "/etc/config.yaml"}); err != nil {
+		t.Fatalf("WriteSidecar: %v", err)
+	}
+
+	sidecarPath, err := SidecarPath()
+	if err != nil {
+		t.Fatalf("SidecarPath: %v", err)
+	}
+	dir := filepath.Dir(sidecarPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read sidecar dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "args.json.tmp.") {
+			t.Errorf("temp sidecar left behind: %s", e.Name())
+		}
 	}
 }

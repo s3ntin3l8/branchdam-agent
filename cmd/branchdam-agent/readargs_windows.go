@@ -1,3 +1,5 @@
+//go:build windows
+
 package main
 
 import (
@@ -8,8 +10,19 @@ import (
 )
 
 // runReadArgsCmd reads a JSON sidecar file containing args and re-execs
-// the agent with those args. This is used by the autostart mechanism
-// to avoid embedding potentially dangerous characters in shell commands.
+// the agent with those args.
+//
+// On Windows, there is no syscall.Exec equivalent: Go's standard
+// library only exposes CreateProcess via os/exec, and any exec.Cmd
+// spawns a child. Windows' Run-key semantics differ from Unix's
+// launchd/session-manager model -- the Run-key launches a child of
+// the user's logon session directly, and SIGTERM-equivalent (logoff)
+// propagation to descendants is the kernel's job, not the parent's
+// -- so the macOS hermes concern (launchd tracking the wrapper, not
+// the tray) does not apply on Windows. A short-lived wrapper process
+// is acceptable here; the tray sees the inherited stdio, env, and
+// session, and on logoff the session tear-down propagates to all
+// descendants regardless of who spawned them.
 func runReadArgsCmd(args []string) int {
 	if len(args) != 1 {
 		fmt.Fprintf(os.Stderr, "usage: branchdam-agent -read-args <sidecar-path>\n")
@@ -30,17 +43,13 @@ func runReadArgsCmd(args []string) int {
 		return 1
 	}
 
-	// Find the executable path
 	execPath, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "branchdam-agent -read-args: resolve executable: %v\n", err)
 		return 1
 	}
 
-	// Build the new args: executable path + decoded args
 	newArgs := append([]string{execPath}, sidecarArgs...)
-
-	// Re-exec with the decoded args
 	cmd := exec.Command(newArgs[0], newArgs[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
