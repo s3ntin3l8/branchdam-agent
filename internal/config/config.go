@@ -418,6 +418,19 @@ type IngestConfig struct {
 	// UploadStream enables direct HTTP streaming upload to POST /api/v1/agent/upload
 	// rather than writing directly to a mounted ArchiveRoot. Defaults to false.
 	UploadStream bool `yaml:"uploadStream"`
+	// AllowedExtensions is the M5/#100 allowlist of file extensions a card
+	// walk ingests; the walk also unconditionally skips OS-metadata files
+	// (Thumbs.db, System Volume Information, any dotfile) regardless of
+	// what's here, but a non-empty AllowedExtensions narrows the set
+	// further. When empty (the default), the walk accepts every file the
+	// OS-metadata skip does not rule out -- preserving the pre-#100
+	// behavior of every existing config.
+	//
+	// Matching is case-insensitive: an operator can write "JPG" or "jpg"
+	// or "Jpg" in YAML, and a file's "IMG_0001.JPG" still matches.
+	// Extensions are compared without the leading dot ("jpg" in YAML
+	// matches "IMG_0001.jpg" on disk).
+	AllowedExtensions []string `yaml:"allowedExtensions"`
 }
 
 // ServerConfig is the branchDAM server this agent reports to.

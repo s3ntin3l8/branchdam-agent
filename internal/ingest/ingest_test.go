@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -429,5 +430,208 @@ func TestIngestCardUploadStream_VerifyFailure(t *testing.T) {
 	expectedLocal := filepath.Join(localRoot, "2026", "2026-08-29", "IMG_0042.jpg")
 	if _, err := os.Stat(expectedLocal); !os.IsNotExist(err) {
 		t.Error("expected local file to be removed after verification failure")
+	}
+}
+
+// TestIngestCardSkipsOSMetadata pins issue #100's #1 footgun: a card
+// formatted by macOS leaves a .DS_Store in every directory; a card
+// touched by Windows leaves Thumbs.db. Pre-#100, every such file became
+// a media_nodes row and an exiftool fork. With #100 the walk short-
+// circuits them and reports them as Skipped.
+func TestIngestCardSkipsOSMetadata(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	subdir := filepath.Join(cardRoot, "DCIM", "100MSDCF")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Real photo -- must be ingested, not skipped.
+	if err := os.WriteFile(filepath.Join(subdir, "DSC0001.JPG"), []byte("photo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// OS-metadata files the walk must skip, scattered in two
+	// directories so the directory count vs. file count would be
+	// visibly wrong if any leak through.
+	for _, p := range []string{
+		filepath.Join(cardRoot, ".DS_Store"),
+		filepath.Join(cardRoot, "._DSC0001.JPG"), // AppleDouble
+		filepath.Join(cardRoot, ".Spotlight-V100"),
+		filepath.Join(subdir, "Thumbs.db"),
+		filepath.Join(subdir, ".DS_Store"),
+	} {
+		if err := os.WriteFile(p, []byte("os-junk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	client := &fakeClient{}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	// Walk produces one FileResult per non-dir entry, including the
+	// OS-metadata ones (so the operator sees them in the result). The
+	// real assertion is on Skipped + EventID + client.calls.
+	if len(res.Files) != 6 {
+		t.Fatalf("got %d files, want 6 (1 photo + 5 OS-metadata)", len(res.Files))
+	}
+
+	// Exactly one real photo gets submitted; the 5 OS-metadata files
+	// are Skipped and have no EventID.
+	if len(client.calls) != 1 {
+		t.Fatalf("got %d PostNodeCreated calls, want 1 (only the real photo)", len(client.calls))
+	}
+	real, junk := 0, 0
+	for _, fr := range res.Files {
+		if fr.Err != nil {
+			t.Fatalf("unexpected error for %s: %v", fr.SourcePath, fr.Err)
+		}
+		if fr.Skipped {
+			junk++
+			if fr.EventID != "" {
+				t.Errorf("OS-metadata file %s was Skipped but has an EventID (%s) -- it must not have been submitted", filepath.Base(fr.SourcePath), fr.EventID)
+			}
+			if !strings.HasPrefix(fr.SkipReason, "OS metadata:") {
+				t.Errorf("OS-metadata file %s has wrong skip reason %q", filepath.Base(fr.SourcePath), fr.SkipReason)
+			}
+		} else {
+			real++
+			if fr.EventID == "" {
+				t.Errorf("real file %s missing EventID", filepath.Base(fr.SourcePath))
+			}
+		}
+	}
+	if real != 1 || junk != 5 {
+		t.Errorf("got real=%d junk=%d, want 1 and 5", real, junk)
+	}
+
+	// Destination tree must not contain the OS-metadata files: skipping
+	// means the walk never invokes ingestFile, so DualWrite never ran.
+	archiveRoot := filepath.Join(dir, "archive")
+	for _, name := range []string{".DS_Store", "Thumbs.db", "._DSC0001.JPG", ".Spotlight-V100"} {
+		if _, err := os.Stat(filepath.Join(archiveRoot, name)); err == nil {
+			t.Errorf("OS-metadata file %s leaked into archive destination", name)
+		}
+	}
+}
+
+// TestIngestCardAllowedExtensionsFilter pins the M5/#100 extension
+// allowlist: a non-empty Ingest.AllowedExtensions narrows the walk to
+// only those extensions, case-insensitively. An empty list (the
+// default, the regression guard for older configs) accepts everything
+// the OS-metadata skip doesn't rule out.
+func TestIngestCardAllowedExtensionsFilter(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"a.jpg", // matches
+		"b.JPG", // matches (case)
+		"c.mp4", // matches
+		"d.txt", // filtered out
+		"e.png", // filtered out
+		"f",     // no ext -- filtered out
+	} {
+		if err := os.WriteFile(filepath.Join(cardRoot, name), []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	client := &fakeClient{}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+	e.Ingest.AllowedExtensions = []string{"jpg", "MP4"}
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+
+	// All 6 files appear in res.Files (the walk still visits them), but
+	// only the 3 matching extensions are submitted. Skipped is set on
+	// the rejected ones with the right reason.
+	if len(res.Files) != 6 {
+		t.Fatalf("got %d files, want 6", len(res.Files))
+	}
+	if len(client.calls) != 3 {
+		t.Errorf("got %d PostNodeCreated calls, want 3 (jpg/JPG/mp4)", len(client.calls))
+	}
+	submitted, filtered := 0, 0
+	for _, fr := range res.Files {
+		if fr.Err != nil {
+			t.Fatalf("unexpected error for %s: %v", fr.SourcePath, fr.Err)
+		}
+		base := filepath.Base(fr.SourcePath)
+		switch base {
+		case "a.jpg", "b.JPG", "c.mp4":
+			if fr.Skipped {
+				t.Errorf("%s must NOT be skipped (matches allowlist)", base)
+			}
+			if fr.EventID == "" {
+				t.Errorf("%s missing EventID", base)
+			}
+			submitted++
+		default:
+			if !fr.Skipped {
+				t.Errorf("%s must be skipped (not in allowlist)", base)
+			}
+			if fr.EventID != "" {
+				t.Errorf("%s Skipped but has an EventID", base)
+			}
+			if !strings.Contains(fr.SkipReason, "extension") {
+				t.Errorf("%s skip reason = %q, want something mentioning extension", base, fr.SkipReason)
+			}
+			filtered++
+		}
+	}
+	if submitted != 3 || filtered != 3 {
+		t.Errorf("got submitted=%d filtered=%d, want 3 and 3", submitted, filtered)
+	}
+
+	// Rejected files must not have been copied to either destination.
+	archiveRoot := filepath.Join(dir, "archive")
+	for _, name := range []string{"d.txt", "e.png", "f"} {
+		if _, err := os.Stat(filepath.Join(archiveRoot, name)); err == nil {
+			t.Errorf("rejected file %s leaked into archive destination", name)
+		}
+	}
+}
+
+// TestIngestCardAllowedExtensionsAcceptsAllWhenEmpty is the backward-
+// compat guard: a config that never mentions AllowedExtensions must
+// behave exactly like pre-#100 (everything not matching an OS-metadata
+// rule gets ingested).
+func TestIngestCardAllowedExtensionsAcceptsAllWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.jpg", "b.txt", "c.unknown"} {
+		if err := os.WriteFile(filepath.Join(cardRoot, name), []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	client := &fakeClient{}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+	if len(e.Ingest.AllowedExtensions) != 0 {
+		t.Fatalf("test setup wrong: AllowedExtensions=%v, want empty", e.Ingest.AllowedExtensions)
+	}
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	if len(client.calls) != 3 {
+		t.Errorf("got %d PostNodeCreated calls, want 3 (no allowlist = accept all)", len(client.calls))
+	}
+	for _, fr := range res.Files {
+		if fr.Skipped {
+			t.Errorf("%s should NOT be skipped when AllowedExtensions is empty", filepath.Base(fr.SourcePath))
+		}
 	}
 }

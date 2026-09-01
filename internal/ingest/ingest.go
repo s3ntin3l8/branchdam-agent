@@ -127,8 +127,24 @@ type CardResult struct {
 // file found under it. Returns per-file results even when some files
 // failed -- a single bad file must not abort the rest of the card, matching
 // the same "log and continue" spirit as branchDAM's own scan pipeline.
+//
+// Issue #100: the walk applies two pre-filters before any per-file
+// pipeline (exiftool, DualWrite, EVENT_NODE_CREATED) runs:
+//
+//  1. by-name: Thumbs.db, System Volume Information, and any dotfile
+//     (basename starting with "."). Case-insensitive on the named files.
+//  2. by-extension: when Ingest.AllowedExtensions is non-empty, only
+//     files whose extension is in that list are ingested (case-
+//     insensitive, leading dot optional on either side).
+//
+// Filtered files appear in the result as FileResult{Skipped: true,
+// SkipReason: "OS metadata: ..."} so an operator running
+// `ingest --card <path>` and eyeballing res.Files can see what was
+// rejected and why. They do NOT become media_nodes rows and do NOT
+// trigger an exiftool subprocess.
 func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, error) {
-	var files []string
+	stemSuffix := make(map[string]string)
+	var result CardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -136,18 +152,27 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 		if d.IsDir() {
 			return nil
 		}
-		files = append(files, path)
+		if skip, reason := shouldSkipByName(path); skip {
+			result.Files = append(result.Files, FileResult{
+				SourcePath: path,
+				Skipped:    true,
+				SkipReason: reason,
+			})
+			return nil
+		}
+		if shouldSkipByExtension(e.Ingest.AllowedExtensions, extNoDot(path)) {
+			result.Files = append(result.Files, FileResult{
+				SourcePath: path,
+				Skipped:    true,
+				SkipReason: fmt.Sprintf("extension %q not in allowedExtensions", extNoDot(path)),
+			})
+			return nil
+		}
+		result.Files = append(result.Files, e.ingestFile(ctx, path, stemSuffix))
 		return nil
 	})
 	if err != nil {
 		return CardResult{}, fmt.Errorf("ingest: walk card root %s: %w", cardRoot, err)
-	}
-
-	stemSuffix := make(map[string]string)
-	var result CardResult
-	for _, f := range files {
-		fr := e.ingestFile(ctx, f, stemSuffix)
-		result.Files = append(result.Files, fr)
 	}
 	return result, nil
 }

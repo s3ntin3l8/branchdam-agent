@@ -63,12 +63,20 @@ type OfflineCardResult struct {
 //
 // e.Queue must be set (non-nil) -- this is the offline entry point and has
 // no fallback if there's nowhere durable to record intent.
+//
+// Issue #100: the same by-name and by-extension pre-filters
+// IngestCard applies run here, for the same reasons (a macOS-formatted
+// card's .DS_Store in every directory must not become a queue.db row).
+// Skipped files still appear in OfflineCardResult.Files, marked
+// OfflineFileResult{Skipped: true, SkipReason: "OS metadata: ..."}, so
+// `ingest -offline --card <path>` is symmetric with the online path.
 func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (OfflineCardResult, error) {
 	if e.Queue == nil {
 		return OfflineCardResult{}, fmt.Errorf("ingest: IngestCardOffline requires a non-nil Engine.Queue")
 	}
 
-	var files []string
+	stemSuffix := make(map[string]string)
+	var result OfflineCardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -76,18 +84,27 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 		if d.IsDir() {
 			return nil
 		}
-		files = append(files, path)
+		if skip, reason := shouldSkipByName(path); skip {
+			result.Files = append(result.Files, OfflineFileResult{
+				SourcePath: path,
+				Skipped:    true,
+				SkipReason: reason,
+			})
+			return nil
+		}
+		if shouldSkipByExtension(e.Ingest.AllowedExtensions, extNoDot(path)) {
+			result.Files = append(result.Files, OfflineFileResult{
+				SourcePath: path,
+				Skipped:    true,
+				SkipReason: fmt.Sprintf("extension %q not in allowedExtensions", extNoDot(path)),
+			})
+			return nil
+		}
+		result.Files = append(result.Files, e.ingestFileOffline(ctx, path, stemSuffix))
 		return nil
 	})
 	if err != nil {
 		return OfflineCardResult{}, fmt.Errorf("ingest: walk card root %s: %w", cardRoot, err)
-	}
-
-	stemSuffix := make(map[string]string)
-	var result OfflineCardResult
-	for _, f := range files {
-		fr := e.ingestFileOffline(ctx, f, stemSuffix)
-		result.Files = append(result.Files, fr)
 	}
 	return result, nil
 }
