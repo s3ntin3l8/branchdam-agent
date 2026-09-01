@@ -106,22 +106,34 @@ func WriteSidecar(args []string) error {
 		return fmt.Errorf("autostart: create temp sidecar: %w", err)
 	}
 	tmpPath := tmp.Name()
+	// closeTmpAndWrap closes tmp and returns an error joining the
+	// original op error (origErr) with any close error so a close
+	// failure on a write-failure path is not silently lost. The temp
+	// file is also removed by the defer so the rename below doesn't
+	// trip over a half-written file.
+	closeTmpAndWrap := func(origErr error) error {
+		cerr := tmp.Close()
+		if cerr == nil {
+			return origErr
+		}
+		if origErr == nil {
+			return fmt.Errorf("autostart: close temp sidecar: %w", cerr)
+		}
+		return fmt.Errorf("autostart: %w (close: %v)", origErr, cerr)
+	}
 	defer func() {
 		if _, statErr := os.Stat(tmpPath); statErr == nil {
 			_ = os.Remove(tmpPath)
 		}
 	}()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("autostart: write temp sidecar: %w", err)
+		return fmt.Errorf("autostart: write temp sidecar: %w", closeTmpAndWrap(err))
 	}
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("autostart: chmod temp sidecar: %w", err)
+		return fmt.Errorf("autostart: chmod temp sidecar: %w", closeTmpAndWrap(err))
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("autostart: fsync temp sidecar: %w", err)
+		return fmt.Errorf("autostart: fsync temp sidecar: %w", closeTmpAndWrap(err))
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("autostart: close temp sidecar: %w", err)
