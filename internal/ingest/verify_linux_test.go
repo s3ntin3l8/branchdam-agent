@@ -27,9 +27,15 @@ func TestOpenForVerifyNonEINVALNotSwallowed(t *testing.T) {
 	}
 }
 
-// TestOpenForVerifyRealFileUnbuffered verifies that on a real filesystem
-// (not tmpfs), openForVerify succeeds with O_DIRECT (Unbuffered method).
-func TestOpenForVerifyRealFileUnbuffered(t *testing.T) {
+// TestOpenForVerifyRealFileSmoke is a smoke test: openForVerify must
+// succeed on a real file and not silently fall back to a wrong
+// method. It does NOT assert VerifyMethodUnbuffered specifically,
+// because t.TempDir() may live on tmpfs (CI runners, overlay) where
+// O_DIRECT legitimately falls back to BufferedFloor. Asserting
+// Unbuffered there would flake; the unbuffered path is covered by
+// the unit-level mock test above and by the integration tests run
+// against a real SSD.
+func TestOpenForVerifyRealFileSmoke(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "test.bin")
 	if err := os.WriteFile(p, []byte("hello"), 0o644); err != nil {
@@ -42,7 +48,7 @@ func TestOpenForVerifyRealFileUnbuffered(t *testing.T) {
 	}
 	defer f.Close() //nolint:errcheck // test read-only; close error is not meaningful
 
-	if method != VerifyMethodUnbuffered {
-		t.Logf("method=%s (may be BufferedFloor on tmpfs/overlay)", method)
+	if method != VerifyMethodUnbuffered && method != VerifyMethodBufferedFloor {
+		t.Errorf("method=%s, want Unbuffered or BufferedFloor", method)
 	}
 }
