@@ -144,6 +144,27 @@ type Status struct {
 	// only mirrors for display).
 	Busy     bool
 	BusyCard string
+	// BusySince is when the current ingest started (zero when not busy).
+	BusySince time.Time
+	// HandshakeOK surfaces the most recent DrainSummary.HandshakeOK to the
+	// status page -- the operator's most basic "is the server reachable?"
+	// signal, which DrainSummary already computes but never exposed. False
+	// when no drain has run yet (see HasDrained for that distinction);
+	// this is the single source of truth for the "Server connection"
+	// section's reachable/unreachable label, so the template does not
+	// reach into QueueStatus.LastDrain directly.
+	HandshakeOK bool
+	// HasDrained is true once at least one drain pass has completed in
+	// this session -- the "have we ever heard from the server?" signal
+	// the Server connection section uses to distinguish "no drain run
+	// yet" from "last drain: handshake failed". Independent of
+	// HandshakeOK on purpose: a never-drained install is neither
+	// "reachable" nor "unreachable", it's "unknown".
+	HasDrained bool
+	// InFlightDrain reports whether a drain pass is currently running.
+	InFlightDrain bool
+	// InFlightPrune reports whether a prune pass is currently running.
+	InFlightPrune bool
 	// Integrations is RUNTIME state only, ordered by the compile-time
 	// Integrations() registry so the status page and (a later PR's) menu
 	// render in the same order every time. Config state (enabled, dry
@@ -203,11 +224,13 @@ type Runner struct {
 	// opened once at tray startup (cmd/branchdam-agent/tray.go) and its
 	// path is not one of the fields issue #31's settings menu can edit, so
 	// there is nothing here that needs to survive a live config reload.
-	queueReader QueueReader
-	drainer     Drainer
-	pruner      Pruner
-	lastDrain   *DrainSummary
-	lastPrune   *PruneSummary
+	queueReader   QueueReader
+	drainer       Drainer
+	pruner        Pruner
+	lastDrain     *DrainSummary
+	lastPrune     *PruneSummary
+	inFlightDrain bool
+	inFlightPrune bool
 
 	// syncers is nil-able per ID (issue #57), same contract as drainer/
 	// pruner above: an absent entry is "not configured" -- disabled, or
@@ -378,9 +401,23 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 	r.mu.Lock()
 	drainer := r.drainer
 	r.mu.Unlock()
+
 	if drainer == nil {
 		return DrainSummary{}, false
 	}
+
+	// Set inFlightDrain AFTER the nil-drainer guard. A periodic timer
+	// tick on an unconfigured drainer must not flash "drain in
+	// progress" to a concurrent Status() call; setting the flag here
+	// ensures the flag is true only when an actual drain is running.
+	r.mu.Lock()
+	r.inFlightDrain = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.inFlightDrain = false
+		r.mu.Unlock()
+	}()
 
 	summary, err := drainer.Drain(ctx)
 	summary.At = time.Now()
@@ -412,9 +449,23 @@ func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bo
 	r.mu.Lock()
 	pruner := r.pruner
 	r.mu.Unlock()
+
 	if pruner == nil {
 		return PruneSummary{}, false
 	}
+
+	// Set inFlightPrune AFTER the nil-pruner guard. A menu-click
+	// TriggerPrune on an unconfigured pruner must not briefly report
+	// prune-in-flight to a concurrent Status() call; setting the flag
+	// here ensures the flag is true only when an actual prune is running.
+	r.mu.Lock()
+	r.inFlightPrune = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.inFlightPrune = false
+		r.mu.Unlock()
+	}()
 
 	summary, err := pruner.Prune(ctx)
 	summary.At = time.Now()
@@ -625,12 +676,15 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	last := r.last
 	busy := r.busy
 	busyCard := r.busyCard
+	busySince := r.busySince
 	watchDirs := append([]string(nil), r.watchDirs...)
 	scratchDir := r.scratchDir
 	queueReader := r.queueReader
 	pruneEnabled := r.pruner != nil
 	lastDrain := r.lastDrain
 	lastPrune := r.lastPrune
+	inFlightDrain := r.inFlightDrain
+	inFlightPrune := r.inFlightPrune
 
 	// Built entirely under r.mu, not after unlocking: r.syncers/r.lastSync
 	// are read map entries here, not copied whole-map references, so a
@@ -686,14 +740,19 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	}
 
 	return Status{
-		WatchDirs:    watchDirs,
-		ScratchNote:  scratchNote,
-		QueueStatus:  qs,
-		LastIngest:   last,
-		SelfUpdate:   selfUpdate,
-		Busy:         busy,
-		BusyCard:     busyCard,
-		Integrations: integrations,
-		Hooks:        hooks,
+		WatchDirs:     watchDirs,
+		ScratchNote:   scratchNote,
+		QueueStatus:   qs,
+		LastIngest:    last,
+		SelfUpdate:    selfUpdate,
+		Busy:          busy,
+		BusyCard:      busyCard,
+		BusySince:     busySince,
+		HandshakeOK:   lastDrain != nil && lastDrain.HandshakeOK,
+		HasDrained:    lastDrain != nil,
+		InFlightDrain: inFlightDrain,
+		InFlightPrune: inFlightPrune,
+		Integrations:  integrations,
+		Hooks:         hooks,
 	}
 }

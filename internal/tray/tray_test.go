@@ -706,6 +706,143 @@ func TestStatusWatchDirsIsACopy(t *testing.T) {
 	}
 }
 
+func TestStatusSurfacesBusySince(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, nil, "")
+
+	go r.TriggerIngest(context.Background(), "/media/a")
+	<-started
+
+	st := r.Status(UpdateStatus{})
+	if !st.Busy {
+		t.Fatal("expected Busy=true during ingest")
+	}
+	if st.BusySince.IsZero() {
+		t.Error("expected BusySince to be set during ingest")
+	}
+
+	close(release)
+}
+
+func TestStatusSurfacesHandshakeOK(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	r.TriggerDrain(context.Background())
+
+	st := r.Status(UpdateStatus{})
+	if !st.HandshakeOK {
+		t.Error("expected HandshakeOK=true when last drain succeeded with handshake")
+	}
+}
+
+func TestStatusSurfacesHandshakeNOTOK(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	r.TriggerDrain(context.Background())
+
+	st := r.Status(UpdateStatus{})
+	if st.HandshakeOK {
+		t.Error("expected HandshakeOK=false when last drain had failed handshake")
+	}
+}
+
+func TestStatusHandshakeOKFalseWithNoDrains(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	st := r.Status(UpdateStatus{})
+	if st.HandshakeOK {
+		t.Error("expected HandshakeOK=false when no drains have run yet")
+	}
+}
+
+func TestStatusSurfacesInFlightDrain(t *testing.T) {
+	fd := &fakeDrainer{started: make(chan struct{}), release: make(chan struct{})}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetQueueDeps(nil, fd, nil)
+
+	done := make(chan struct{})
+	go func() {
+		r.TriggerDrain(context.Background())
+		close(done)
+	}()
+	<-fd.started
+
+	st := r.Status(UpdateStatus{})
+	if !st.InFlightDrain {
+		t.Error("expected InFlightDrain=true while a drain pass is running")
+	}
+
+	close(fd.release)
+	<-done
+
+	st = r.Status(UpdateStatus{})
+	if st.InFlightDrain {
+		t.Error("expected InFlightDrain=false once drain pass completes")
+	}
+}
+
+// TestTriggerDrainInFlightDrainStaysFalseWhenNotConfigured is the
+// regression test for the Hermes review on #123: the periodic drain
+// timer (cmd/branchdam-agent/tray.go:214) runs unconditionally, so on
+// an unconfigured queue (no drainer wired) a TriggerDrain tick must
+// leave Status().InFlightDrain strictly false. The earlier
+// implementation set the flag before the nil-drainer guard and
+// reset it via defer, briefly flashing "drain in progress..." to a
+// concurrent Status() call on every tick.
+func TestTriggerDrainInFlightDrainStaysFalseWhenNotConfigured(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	// Deliberately do NOT call SetQueueDeps with a drainer: this
+	// mirrors the "unconfigured offline queue" case.
+
+	for i := 0; i < 5; i++ {
+		_, ran := r.TriggerDrain(context.Background())
+		if ran {
+			t.Fatalf("tick %d: expected ran=false on a Runner with no drainer wired", i)
+		}
+		st := r.Status(UpdateStatus{})
+		if st.InFlightDrain {
+			t.Fatalf("tick %d: InFlightDrain must stay false on a no-drainer Runner, got true (status=%+v)", i, st)
+		}
+	}
+}
+
+// TestTriggerPruneInFlightPruneStaysFalseWhenNotConfigured is the
+// prune-side mirror of TestTriggerDrainInFlightDrainStaysFalseWhenNotConfigured:
+// a menu-click TriggerPrune on an unconfigured pruner must leave
+// Status().InFlightPrune strictly false. TriggerPrune is invoked
+// from the tray's "Prune now" menu item (run_supported.go) and would
+// otherwise briefly flash "prune in progress..." on a Runner with no
+// pruner wired.
+func TestTriggerPruneInFlightPruneStaysFalseWhenNotConfigured(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	// Deliberately do NOT call SetQueueDeps with a pruner: this
+	// mirrors the "unconfigured pruner" case (prune.enabled=false).
+
+	for i := 0; i < 5; i++ {
+		_, ran := r.TriggerPrune(context.Background())
+		if ran {
+			t.Fatalf("tick %d: expected ran=false on a Runner with no pruner wired", i)
+		}
+		st := r.Status(UpdateStatus{})
+		if st.InFlightPrune {
+			t.Fatalf("tick %d: InFlightPrune must stay false on a no-pruner Runner, got true (status=%+v)", i, st)
+		}
+	}
+}
+
+func TestStatusInFlightPruneFalseWhenIdle(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	st := r.Status(UpdateStatus{})
+	if st.InFlightPrune {
+		t.Error("expected InFlightPrune=false when nothing is running")
+	}
+}
+
 func TestTriggerIngestSerializesConcurrentCalls(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
