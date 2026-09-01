@@ -1,10 +1,30 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// captureSlog swaps slog.Default() for a JSON-handler writing to buf
+// for the duration of the test, restoring the prior default on cleanup
+// so a misbehaving test can't leak its handler into a sibling. Used
+// by the perm-warning tests to assert slog.Warn("config.yaml is
+// world-readable; consider 'chmod 600'") was actually emitted (and not
+// e.g. silently routed to /dev/null because the real default handler
+// was rotated mid-test).
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	buf := &bytes.Buffer{}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	return buf
+}
 
 func TestLoadDefaults(t *testing.T) {
 	dir := t.TempDir()
@@ -315,5 +335,198 @@ func TestLoadPruneConfigDefaultsDisabled(t *testing.T) {
 	}
 	if cfg.Prune.Enabled {
 		t.Error("expected Prune.Enabled=false when the prune block is entirely absent")
+	}
+}
+
+// TestLoadWorldReadableConfigWithAPIKeyWarns is the headline assertion
+// for issue #97 / audit S-5: a 0o644 config.yaml carrying a real
+// server.apiKey must produce slog.Warn("config.yaml is world-readable;
+// consider 'chmod 600'") after a successful Load. The config still
+// loads -- the default-mode check is a warning, not a refusal, so an
+// existing deployment that just noticed the gap keeps starting while
+// the operator fixes it.
+func TestLoadWorldReadableConfigWithAPIKeyWarns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+server:
+  baseUrl: "https://branchdam.example.com"
+  apiKey: "0123456789abcdef0123456789abcdef"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logBuf := captureSlog(t)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load on a world-readable config with an apiKey must still succeed (default mode is warn, not refuse): %v", err)
+	}
+	if cfg.Server.APIKey == "" {
+		t.Error("expected apiKey to round-trip through Load")
+	}
+
+	// Walk the JSON log line(s) and look for the warning -- structured
+	// matching rather than strings.Contains so a typo or extra wrapping
+	// in the warning call is caught (it would be emitted under a
+	// different msg key).
+	var found map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logBuf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("slog emitted a non-JSON line: %q", line)
+		}
+		if rec["msg"] == "config.yaml is world-readable; consider 'chmod 600'" {
+			found = rec
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected slog.Warn(\"config.yaml is world-readable; consider 'chmod 600'\") to be emitted; got log: %s", logBuf.String())
+	}
+	if found["level"] != "WARN" {
+		t.Errorf("expected level=WARN, got %v", found["level"])
+	}
+	if found["path"] != path {
+		t.Errorf("expected path=%q, got %v", path, found["path"])
+	}
+}
+
+// TestLoadWorldReadableConfigWithoutAPIKeyIsSilent pins the "no-op when
+// there's no secret to protect" half of checkFilePermissions: a
+// world-readable config without a real apiKey must NOT warn, because
+// the file carries nothing the operator can lock down by chmod. This
+// keeps the warning meaningful -- a 0o644 file that already passes the
+// "no real secret" check shouldn't be surfaced to the operator.
+func TestLoadWorldReadableConfigWithoutAPIKeyIsSilent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  baseUrl: http://x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logBuf := captureSlog(t)
+
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if strings.Contains(logBuf.String(), "world-readable") {
+		t.Errorf("expected no perm warning for a 0o644 config without a real apiKey; got log: %s", logBuf.String())
+	}
+}
+
+// TestLoadStrictModeRefusesWorldReadable is the strict-mode half of
+// issue #97: with strictConfigPermissions: true, a 0o644 config.yaml
+// carrying a real server.apiKey must make Load return a hard error --
+// the agent refuses to start until the operator chmods 600. The
+// message must name the path so an operator staring at a generic
+// "config error" output can find the file, and must include the
+// current mode so the operator can confirm chmod took effect on retry.
+func TestLoadStrictModeRefusesWorldReadable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+server:
+  baseUrl: "https://branchdam.example.com"
+  apiKey: "0123456789abcdef0123456789abcdef"
+strictConfigPermissions: true
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected Load to return an error in strict mode with a world-readable config")
+	}
+	if !strings.Contains(err.Error(), "strict mode") {
+		t.Errorf("error must name strict mode so an operator can find the toggle; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error must name the offending path; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "chmod 600") {
+		t.Errorf("error must suggest the fix; got: %v", err)
+	}
+}
+
+// TestLoadStrictModeViaEnv is the env-var half of issue #97's strict
+// toggle. The env var BRANCHDAM_AGENT_STRICT_CONFIG_PERMISSIONS lets
+// a CI/scripted environment enforce the same refusal without editing
+// config.yaml first, and must win over the YAML value (a config that
+// explicitly sets the flag to false can still be hard-failed by the
+// env, and vice versa).
+func TestLoadStrictModeViaEnv(t *testing.T) {
+	t.Run("env-true-overrides-yaml-false", func(t *testing.T) {
+		t.Setenv(StrictConfigPermissionsEnv, "1")
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		// strictConfigPermissions explicitly false in YAML; the env
+		// var must still make Load refuse.
+		content := `
+server:
+  apiKey: "0123456789abcdef0123456789abcdef"
+strictConfigPermissions: false
+`
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Error("expected Load to refuse when env sets strict even with yaml strictConfigPermissions: false")
+		}
+	})
+
+	t.Run("env-false-overrides-yaml-true", func(t *testing.T) {
+		t.Setenv(StrictConfigPermissionsEnv, "0")
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		// strictConfigPermissions explicitly true in YAML; the env
+		// var must still make Load warn (not refuse).
+		content := `
+server:
+  apiKey: "0123456789abcdef0123456789abcdef"
+strictConfigPermissions: true
+`
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		logBuf := captureSlog(t)
+		if _, err := Load(path); err != nil {
+			t.Errorf("expected Load to warn, not refuse, when env unsets strict even with yaml strictConfigPermissions: true: %v", err)
+		}
+		if !strings.Contains(logBuf.String(), "world-readable") {
+			t.Errorf("expected the same warning as default mode; got log: %s", logBuf.String())
+		}
+	})
+}
+
+// TestLoadModeZeroSixZeroWithAPIKeyIsClean confirms the false-positive
+// half of the warning: a config.yaml at mode 0o600 (Patch's own output
+// mode) with a real apiKey must NOT warn -- the file is already
+// properly locked down, and the warning would be noise that erodes
+// operator trust in every subsequent perm warning.
+func TestLoadModeZeroSixZeroWithAPIKeyIsClean(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+server:
+  apiKey: "0123456789abcdef0123456789abcdef"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	logBuf := captureSlog(t)
+
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if strings.Contains(logBuf.String(), "world-readable") {
+		t.Errorf("expected no perm warning for a 0o600 config with a real apiKey; got log: %s", logBuf.String())
 	}
 }

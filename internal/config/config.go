@@ -8,15 +8,27 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// StrictConfigPermissionsEnv is the environment variable that forces
+// Load to refuse a config.yaml whose permission bits let group or world
+// read it, regardless of the YAML value of strictConfigPermissions. It
+// exists so a CI/scripted environment can enforce the same check the
+// config flag does without having to edit config.yaml first -- the
+// typical "I just realized this is how chmod 600" hardening step. The
+// env wins over the YAML value, so a config that explicitly sets the
+// flag to false can still be hard-failed in a hardened env.
+const StrictConfigPermissionsEnv = "BRANCHDAM_AGENT_STRICT_CONFIG_PERMISSIONS"
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 
@@ -24,15 +36,35 @@ var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 // (~/.config/branchdam-agent/config.yaml per the plan, or wherever -config
 // points).
 type Config struct {
-	Server       ServerConfig       `yaml:"server"`
-	AgentID      string             `yaml:"agentId"`
-	PathMappings []PathMapping      `yaml:"pathMappings"`
-	Ingest       IngestConfig       `yaml:"ingest"`
-	Offline      OfflineConfig      `yaml:"offline"`
-	Prune        PruneConfig        `yaml:"prune"`
-	Tray         TrayConfig         `yaml:"tray"`
-	SelfUpdate   SelfUpdateConfig   `yaml:"selfUpdate"`
-	Integrations IntegrationsConfig `yaml:"integrations"`
+	Server                  ServerConfig       `yaml:"server"`
+	AgentID                 string             `yaml:"agentId"`
+	PathMappings            []PathMapping      `yaml:"pathMappings"`
+	Ingest                  IngestConfig       `yaml:"ingest"`
+	Offline                 OfflineConfig      `yaml:"offline"`
+	Prune                   PruneConfig        `yaml:"prune"`
+	Tray                    TrayConfig         `yaml:"tray"`
+	SelfUpdate              SelfUpdateConfig   `yaml:"selfUpdate"`
+	Integrations            IntegrationsConfig `yaml:"integrations"`
+	StrictConfigPermissions bool               `yaml:"strictConfigPermissions"`
+}
+
+// StrictConfigPermissionsEffective reports whether the strict permission
+// check is on for this Config, after applying the env-var override
+// (BRANCHDAM_AGENT_STRICT_CONFIG_PERMISSIONS). The env var always wins
+// over the YAML value: a config that explicitly sets the flag to false
+// can still be hard-failed in a hardened CI/scripted environment, and a
+// config that sets it to true stays strict even if the env is unset
+// (matching the operator's explicit, file-persisted intent).
+func (c Config) StrictConfigPermissionsEffective() bool {
+	if v, ok := os.LookupEnv(StrictConfigPermissionsEnv); ok {
+		switch {
+		case v == "" || v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") || strings.EqualFold(v, "on"):
+			return true
+		case v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "no") || strings.EqualFold(v, "off"):
+			return false
+		}
+	}
+	return c.StrictConfigPermissions
 }
 
 // OfflineConfig configures M2's offline queue (issue #4): where queue.db
@@ -411,6 +443,17 @@ func defaultConfig() Config {
 
 // Load reads path, expands ${VAR} environment references, and parses it as
 // YAML into Config, applying defaultConfig()'s zero-value defaults first.
+//
+// After a successful parse, Load also checks the file's permission bits
+// (issue #97 / audit S-5): if path's group-or-world read bits are set
+// and the parsed config carries a real server.apiKey, Load logs a
+// slog.Warn naming the file and the recommended `chmod 600`. The
+// purpose is to surface the silent insecurity of a hand-edited
+// config.yaml left at the umask default (mode 0o644) -- Patch already
+// writes mode 0o600, so the gap is only on hand-edited files. When
+// strict mode is on (config.strictConfigPermissions or the
+// BRANCHDAM_AGENT_STRICT_CONFIG_PERMISSIONS env var), the same check
+// becomes a hard error and Load returns it instead of warning.
 func Load(path string) (Config, error) {
 	cfg := defaultConfig()
 
@@ -425,7 +468,57 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
 
+	if err := checkFilePermissions(path, cfg); err != nil {
+		return cfg, err
+	}
+
 	return cfg, nil
+}
+
+// checkFilePermissions is the post-Load security gate on config.yaml's
+// filesystem mode (issue #97 / audit S-5). It runs only when the parsed
+// config carries a real server.apiKey -- the only secret the file holds
+// today -- and only the config file itself is checked, not its parent
+// directory. A 0o077 mask catches any of the nine group+world bits
+// (group read/write/exec + world read/write/exec), so 0o640 (group
+// readable) trips the same warning as 0o644 (world readable).
+//
+// Behavior:
+//   - Permissions clean (mask == 0): no-op.
+//   - Permissions loose AND no apiKey: no-op (the file carries no
+//     secret to protect; warning would be noise).
+//   - Permissions loose AND apiKey AND !strict: slog.Warn with the
+//     path so an operator can find it. The Load call still succeeds --
+//     a warning, not an error, so an existing deployment that just
+//     noticed the gap keeps starting while the operator fixes it.
+//   - Permissions loose AND apiKey AND strict: return a hard error
+//     naming the path; the caller's start-up gate surfaces it.
+//
+// A Stat that fails for any reason (a follow-up stat the platform
+// couldn't satisfy, e.g. Windows reparse-point races) silently skips
+// the check: a ReadFile moments earlier proved the file exists, and a
+// missing permission check is the lesser evil vs. failing a config load
+// the operator knows is readable. The strict path skips the same way --
+// a non-guarantee documented here, since issue #97's acceptance
+// criterion is about silently-insecure 0o644 hand-edited files, which
+// Stat reliably reports on every platform.
+func checkFilePermissions(path string, cfg Config) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	if fi.Mode().Perm()&0o077 == 0 {
+		return nil
+	}
+	if cfg.Server.APIKey == "" {
+		return nil
+	}
+
+	if cfg.StrictConfigPermissionsEffective() {
+		return fmt.Errorf("config file %s is group/world readable (mode %#o) and contains a server.apiKey; chmod 600 and re-run (strict mode -- set strictConfigPermissions: false or unset %s to warn instead)", path, fi.Mode().Perm(), StrictConfigPermissionsEnv)
+	}
+	slog.Warn("config.yaml is world-readable; consider 'chmod 600'", "path", path, "mode", fmt.Sprintf("%#o", fi.Mode().Perm()))
+	return nil
 }
 
 // DefaultPath returns the standard per-user location for config.yaml --
