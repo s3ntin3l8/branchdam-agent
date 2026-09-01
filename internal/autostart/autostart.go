@@ -107,7 +107,7 @@ func RemoveSidecar() {
 	if err != nil {
 		return
 	}
-	os.Remove(path)
+	_ = os.Remove(path)
 }
 
 // RenderLaunchAgentPlistReadArgs renders the LaunchAgent plist XML that starts
