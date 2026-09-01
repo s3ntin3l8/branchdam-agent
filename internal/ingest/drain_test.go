@@ -409,3 +409,171 @@ func TestBackoffFor(t *testing.T) {
 		}
 	}
 }
+
+// --- F-28: backoff round-trip tests ---
+
+// TestF28NodeCreatedBackoffRoundTrip proves the full cycle: a failed
+// node_created attempt writes a next_attempt_unix into queue.db, and
+// subsequent Drain passes skip the row until that timestamp elapses.
+func TestF28NodeCreatedBackoffRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	store := openStoreT(t)
+	seedMediaRow(t, store, dir, "uuid-nc-backoff", []byte("hello"))
+
+	fail := true
+	client := &fakeDrainClient{
+		nodeCreated: func(branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error) {
+			if fail {
+				return nil, fmt.Errorf("connection refused")
+			}
+			return &branchdam.EventResponse{EventID: "evt-ok"}, nil
+		},
+	}
+
+	t0 := time.Unix(1_800_000_000, 0)
+
+	// Pass 1: node_created fails, backoff written to the row.
+	stats, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.NodeCreatedSent != 0 {
+		t.Errorf("NodeCreatedSent = %d, want 0 (first attempt failed)", stats.NodeCreatedSent)
+	}
+
+	// Pass 2 immediately after: backoff should withhold the retry.
+	stats2, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(time.Millisecond)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.nodeCreatedCalls) != 1 {
+		t.Errorf("expected backoff to withhold retry after 1 failed attempt, got %d PostNodeCreated calls", len(client.nodeCreatedCalls))
+	}
+	if stats2.NodeCreatedSent != 0 {
+		t.Errorf("NodeCreatedSent = %d, want 0 (backoff active)", stats2.NodeCreatedSent)
+	}
+
+	// Pass 3 after backoffCap: retry should proceed.
+	fail = false
+	stats3, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(backoffCap)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats3.NodeCreatedSent != 1 {
+		t.Errorf("NodeCreatedSent = %d, want 1 (backoff elapsed, retry succeeded)", stats3.NodeCreatedSent)
+	}
+}
+
+// TestF28RebaseBackoffComparisonDirection verifies that the
+// next_attempt_unix gate uses `> now()` (skip if in the future), not
+// `<` (which would invert the logic). A rebase attempt with
+// next_attempt_unix set 10s in the future is skipped; the same row
+// with next_attempt_unix set 10s in the past is attempted.
+func TestF28RebaseBackoffComparisonDirection(t *testing.T) {
+	dir := t.TempDir()
+	store := openStoreT(t)
+	seedMediaRow(t, store, dir, "uuid-compare-dir", []byte("hello"))
+
+	attempt := 0
+	client := &fakeDrainClient{
+		rebase: func(branchdam.RebaseRequest) (*branchdam.RebaseResponse, error) {
+			attempt++
+			if attempt == 1 {
+				return nil, &branchdam.HTTPError{StatusCode: 500, Body: "transient"}
+			}
+			return &branchdam.RebaseResponse{Status: "REBASED"}, nil
+		},
+	}
+
+	t0 := time.Unix(1_800_000_000, 0)
+
+	// Submit node_created and complete archive_copy so rebase is eligible.
+	if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(MinRebaseDwell+time.Second))); err != nil {
+		t.Fatal(err)
+	}
+	if attempt != 1 {
+		t.Fatalf("expected 1 rebase attempt, got %d", attempt)
+	}
+
+	// next_attempt_unix is 10s in the future: must be skipped.
+	rebaseBefore := len(client.rebaseCalls)
+	if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(MinRebaseDwell+2*time.Second))); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.rebaseCalls) != rebaseBefore {
+		t.Error("rebase should be skipped when next_attempt_unix > now()")
+	}
+
+	// next_attempt_unix is 10s in the past: must be attempted.
+	if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(MinRebaseDwell+20*time.Second))); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.rebaseCalls) != rebaseBefore+1 {
+		t.Errorf("rebase should be attempted when next_attempt_unix < now(), got %d calls", len(client.rebaseCalls))
+	}
+}
+
+// TestF28BackoffCapAllowsReEntry proves that after backoffCap elapses
+// from the last failed attempt, the row re-enters the Drain pass and
+// can succeed. This closes the round-trip: attempt → backoff → skip →
+// cap elapses → retry → success.
+func TestF28BackoffCapAllowsReEntry(t *testing.T) {
+	dir := t.TempDir()
+	store := openStoreT(t)
+	seedMediaRow(t, store, dir, "uuid-cap-reentry", []byte("hello"))
+
+	attempts := 0
+	client := &fakeDrainClient{
+		nodeCreated: func(branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error) {
+			attempts++
+			if attempts <= 3 {
+				return nil, fmt.Errorf("still down")
+			}
+			return &branchdam.EventResponse{EventID: "evt-ok"}, nil
+		},
+	}
+
+	t0 := time.Unix(1_800_000_000, 0)
+
+	// Pass 1 at t0: first failure → next_attempt = t0+2s (backoffBase).
+	if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0)); err != nil {
+		t.Fatal(err)
+	}
+	// Pass 2 at t0+2s: backoff elapsed, second failure → next_attempt = t0+6s.
+	if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(2*time.Second))); err != nil {
+		t.Fatal(err)
+	}
+	// Pass 3 at t0+6s: backoff elapsed, third failure → next_attempt = t0+14s.
+	if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(6*time.Second))); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pass 4 immediately after: next_attempt=t0+14s > now=t0+6.001s → skipped.
+	callsBefore := len(client.nodeCreatedCalls)
+	if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(6*time.Second+time.Millisecond))); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.nodeCreatedCalls) != callsBefore {
+		t.Error("expected backoff to withhold retry immediately after 3rd failure")
+	}
+
+	// Pass 5 at t0+backoffCap: next_attempt=t0+14s < t0+300s → proceeds, succeeds.
+	if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(backoffCap))); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 4 {
+		t.Errorf("expected 4 attempts (3 failures + 1 success), got %d", attempts)
+	}
+
+	// Row should be submitted now (node_created done).
+	stats, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(backoffCap+time.Minute)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Remaining != 0 {
+		t.Errorf("Remaining = %d, want 0 (row should be submitted and archive-copy pending)", stats.Remaining)
+	}
+}
