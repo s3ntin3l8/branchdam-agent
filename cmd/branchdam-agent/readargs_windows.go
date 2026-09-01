@@ -3,7 +3,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,24 +22,21 @@ import (
 // is acceptable here; the tray sees the inherited stdio, env, and
 // session, and on logoff the session tear-down propagates to all
 // descendants regardless of who spawned them.
+//
+// Important for callers that care about parent-child identity
+// (Tray's own relaunchSelf after self-update, run_supported.go's
+// "open status page" handler, etc.): the tray running under
+// -read-args is the CHILD of this short-lived wrapper, not the
+// direct Run-key process. The Run-key spawns this wrapper; the
+// wrapper spawns the tray. Process identity (PID, parent PID)
+// downstream of the wrapper is therefore a normal parent-child
+// relationship, not a logon-session-child relationship. Anything
+// that depends on being the direct Run-key descendant (e.g. a
+// future 'find my grandparent' audit) must walk one level up.
 func runReadArgsCmd(args []string) int {
-	if len(args) != 1 {
-		fmt.Fprintf(os.Stderr, "usage: branchdam-agent -read-args <sidecar-path>\n")
-		return 2
-	}
-
-	sidecarPath := args[0]
-
-	data, err := os.ReadFile(sidecarPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent -read-args: read sidecar: %v\n", err)
-		return 1
-	}
-
-	var sidecarArgs []string
-	if err := json.Unmarshal(data, &sidecarArgs); err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent -read-args: parse sidecar: %v\n", err)
-		return 1
+	sidecarArgs, code := readArgsFromSidecar(args)
+	if code != 0 {
+		return code
 	}
 
 	execPath, err := os.Executable()

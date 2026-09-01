@@ -26,11 +26,7 @@ func Enable(execPath string, args []string) error {
 	}
 	plistPath := filepath.Join(home, LaunchAgentRelPath())
 
-	if err := WriteSidecar(args); err != nil {
-		return err
-	}
-
-	sidecar, err := SidecarPath()
+	sidecar, err := WriteSidecar(args)
 	if err != nil {
 		return err
 	}

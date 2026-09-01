@@ -33,36 +33,6 @@ const RunKeyName = "BranchDAMAgent"
 // scoped to those two per the plan doc.
 var ErrUnsupported = errors.New("autostart: unsupported on this platform (windows and darwin only)")
 
-// RenderLaunchAgentPlist renders the LaunchAgent plist XML that starts
-// execPath with args at login, RunAtLoad but not KeepAlive (a crashed tray
-// should not be relentlessly respawned by launchd; the operator's next
-// login restarts it same as any other login item). Pure string building,
-// no file I/O -- see autostart_darwin.go for the write.
-func RenderLaunchAgentPlist(execPath string, args []string) string {
-	var argXML strings.Builder
-	fmt.Fprintf(&argXML, "        <string>%s</string>\n", xmlEscape(execPath))
-	for _, a := range args {
-		fmt.Fprintf(&argXML, "        <string>%s</string>\n", xmlEscape(a))
-	}
-
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>%s</string>
-    <key>ProgramArguments</key>
-    <array>
-%s    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <false/>
-</dict>
-</plist>
-`, xmlEscape(Label), argXML.String())
-}
-
 // LaunchAgentRelPath is the plist's path relative to the user's home
 // directory: ~/Library/LaunchAgents/<Label>.plist.
 func LaunchAgentRelPath() string {
@@ -89,21 +59,26 @@ func SidecarPath() (string, error) {
 // previous valid sidecar in place (or no sidecar on a first run) rather
 // than a truncated/invalid file that would silently disable autostart at
 // the next login.
-func WriteSidecar(args []string) error {
+//
+// Returns the final sidecar path on success so the caller (Enable on
+// darwin and windows) can pass it to RenderLaunchAgentPlistReadArgs / the
+// Run-key without a redundant SidecarPath() call. On error, the path
+// is not meaningful.
+func WriteSidecar(args []string) (string, error) {
 	path, err := SidecarPath()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("autostart: create sidecar directory: %w", err)
+		return "", fmt.Errorf("autostart: create sidecar directory: %w", err)
 	}
 	data, err := json.Marshal(args)
 	if err != nil {
-		return fmt.Errorf("autostart: marshal args: %w", err)
+		return "", fmt.Errorf("autostart: marshal args: %w", err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), "args.json.tmp.*")
 	if err != nil {
-		return fmt.Errorf("autostart: create temp sidecar: %w", err)
+		return "", fmt.Errorf("autostart: create temp sidecar: %w", err)
 	}
 	tmpPath := tmp.Name()
 	// closeTmpAndWrap closes tmp and returns an error joining the
@@ -127,30 +102,44 @@ func WriteSidecar(args []string) error {
 		}
 	}()
 	if _, err := tmp.Write(data); err != nil {
-		return fmt.Errorf("autostart: write temp sidecar: %w", closeTmpAndWrap(err))
+		return "", fmt.Errorf("autostart: write temp sidecar: %w", closeTmpAndWrap(err))
 	}
 	if err := tmp.Chmod(0o600); err != nil {
-		return fmt.Errorf("autostart: chmod temp sidecar: %w", closeTmpAndWrap(err))
+		return "", fmt.Errorf("autostart: chmod temp sidecar: %w", closeTmpAndWrap(err))
 	}
 	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("autostart: fsync temp sidecar: %w", closeTmpAndWrap(err))
+		return "", fmt.Errorf("autostart: fsync temp sidecar: %w", closeTmpAndWrap(err))
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("autostart: close temp sidecar: %w", err)
+		return "", fmt.Errorf("autostart: close temp sidecar: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("autostart: rename temp sidecar: %w", err)
+		return "", fmt.Errorf("autostart: rename temp sidecar: %w", err)
 	}
-	return nil
+	return path, nil
 }
 
-// RemoveSidecar removes the args sidecar file. A missing file is not an error.
+// RemoveSidecar removes the args sidecar file and, if it is now empty,
+// the parent config directory too. A missing file is not an error; a
+// non-empty parent directory is also not an error (something else --
+// the future config.yaml the user is editing, for example -- lives
+// there and must not be deleted). The empty-dir cleanup is best-effort
+// and does its work only when no other file remains in the directory.
 func RemoveSidecar() {
 	path, err := SidecarPath()
 	if err != nil {
 		return
 	}
 	_ = os.Remove(path)
+	// Best-effort empty-dir cleanup: read the directory; if it now
+	// contains zero entries, rmdir it. A non-empty result means
+	// something else lives there (a config.yaml, etc.) -- leave it.
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > 0 {
+		return
+	}
+	_ = os.Remove(dir)
 }
 
 // RenderLaunchAgentPlistReadArgs renders the LaunchAgent plist XML that starts

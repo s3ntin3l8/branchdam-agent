@@ -3,7 +3,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"syscall"
@@ -27,23 +26,9 @@ import (
 // and returns an error. The caller treats a syscall.Exec error as
 // a startup failure.
 func runReadArgsCmd(args []string) int {
-	if len(args) != 1 {
-		fmt.Fprintf(os.Stderr, "usage: branchdam-agent -read-args <sidecar-path>\n")
-		return 2
-	}
-
-	sidecarPath := args[0]
-
-	data, err := os.ReadFile(sidecarPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent -read-args: read sidecar: %v\n", err)
-		return 1
-	}
-
-	var sidecarArgs []string
-	if err := json.Unmarshal(data, &sidecarArgs); err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent -read-args: parse sidecar: %v\n", err)
-		return 1
+	sidecarArgs, code := readArgsFromSidecar(args)
+	if code != 0 {
+		return code
 	}
 
 	execPath, err := os.Executable()

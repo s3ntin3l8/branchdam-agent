@@ -8,34 +8,30 @@ import (
 	"testing"
 )
 
-func TestRenderLaunchAgentPlist(t *testing.T) {
-	xml := RenderLaunchAgentPlist("/usr/local/bin/branchdam-agent", []string{"tray", "-config", "/etc/config.yaml"})
-
-	for _, want := range []string{
-		"<key>Label</key>",
-		"<string>" + Label + "</string>",
-		"<string>/usr/local/bin/branchdam-agent</string>",
-		"<string>tray</string>",
-		"<string>-config</string>",
-		"<string>/etc/config.yaml</string>",
-		"<key>RunAtLoad</key>",
-		"<true/>",
-		"<key>KeepAlive</key>",
-		"<false/>",
-	} {
-		if !strings.Contains(xml, want) {
-			t.Errorf("rendered plist missing %q\n---\n%s", want, xml)
+func TestXMLEscapeHandlesSpecialChars(t *testing.T) {
+	// Pin the XML escaping behavior shared by every plist-rendering
+	// helper in this package (RenderLaunchAgentPlistReadArgs, etc.).
+	// Ampersand, less-than/greater-than, and double-quote must all be
+	// entity-encoded in the plist XML; the resulting XML must remain
+	// parseable and must not contain any raw HTML-tag sequence in place
+	// of the originals.
+	cases := []struct {
+		in, wantSubstr string}{
+		{`a & b`, "&amp;"},
+		{`<tag>`, "&lt;tag&gt;"},
+		{`"quoted"`, "&quot;quoted&quot;"},
+		{`Photos & <Archive>/"agent"`, "Photos &amp; &lt;Archive&gt;/&quot;agent&quot;"},
+	}
+	for _, c := range cases {
+		got := xmlEscape(c.in)
+		if !strings.Contains(got, c.wantSubstr) {
+			t.Errorf("xmlEscape(%q): missing %q in output\n---\n%s", c.in, c.wantSubstr, got)
 		}
-	}
-}
-
-func TestRenderLaunchAgentPlistEscapesSpecialChars(t *testing.T) {
-	xml := RenderLaunchAgentPlist(`/Users/me/Photos & <Archive>/"agent"`, nil)
-	if strings.Contains(xml, `& <Archive>`) {
-		t.Error("expected XML-unsafe characters to be escaped")
-	}
-	if !strings.Contains(xml, "&amp;") || !strings.Contains(xml, "&lt;Archive&gt;") || !strings.Contains(xml, "&quot;agent&quot;") {
-		t.Errorf("expected escaped entities in output:\n%s", xml)
+		// Negative: raw HTML-tag sequences must not appear where the
+		// input had angle brackets.
+		if strings.Contains(c.in, "<") && strings.Contains(got, "<tag>") {
+			t.Errorf("xmlEscape(%q): raw <tag> sequence leaked through\n---\n%s", c.in, got)
+		}
 	}
 }
 
@@ -124,7 +120,8 @@ func TestWriteSidecarAtomicNoTempLeftBehind(t *testing.T) {
 	t.Setenv("APPDATA", tmpHome)
 	t.Setenv("USERPROFILE", tmpHome)
 
-	if err := WriteSidecar([]string{"tray", "-config", "/etc/config.yaml"}); err != nil {
+	path, err := WriteSidecar([]string{"tray", "-config", "/etc/config.yaml"})
+	if err != nil {
 		t.Fatalf("WriteSidecar: %v", err)
 	}
 
@@ -132,6 +129,10 @@ func TestWriteSidecarAtomicNoTempLeftBehind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SidecarPath: %v", err)
 	}
+	if path != sidecarPath {
+		t.Errorf("WriteSidecar returned %q, want %q", path, sidecarPath)
+	}
+
 	dir := filepath.Dir(sidecarPath)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -141,5 +142,65 @@ func TestWriteSidecarAtomicNoTempLeftBehind(t *testing.T) {
 		if strings.HasPrefix(e.Name(), "args.json.tmp.") {
 			t.Errorf("temp sidecar left behind: %s", e.Name())
 		}
+	}
+}
+
+// TestRemoveSidecarRemovesEmptyParentDir pins the post-Disable cleanup:
+// once the sidecar is gone and nothing else lives in the config dir,
+// the empty parent dir is also removed. If a config.yaml or other
+// file is present, the dir is left alone.
+func TestRemoveSidecarRemovesEmptyParentDir(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpHome)
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("APPDATA", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
+
+	path, err := WriteSidecar([]string{"tray"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+
+	// Pre-condition: dir exists.
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("dir should exist after WriteSidecar: %v", err)
+	}
+
+	RemoveSidecar()
+
+	// Post-condition: dir is gone (it was empty after the sidecar
+	// removal).
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("expected empty dir %q to be removed, got stat err = %v", dir, err)
+	}
+}
+
+// TestRemoveSidecarLeavesNonEmptyParentDir is the negative case: if
+// something else (e.g. a config.yaml the user is editing) is in the
+// dir, RemoveSidecar must not delete the dir.
+func TestRemoveSidecarLeavesNonEmptyParentDir(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpHome)
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("APPDATA", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
+
+	path, err := WriteSidecar([]string{"tray"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(path)
+
+	// Drop an unrelated file in the same dir to simulate a sibling
+	// config file.
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("server: x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	RemoveSidecar()
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("expected non-empty dir %q to survive, got stat err = %v", dir, err)
 	}
 }
