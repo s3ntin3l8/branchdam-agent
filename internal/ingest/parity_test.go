@@ -50,6 +50,7 @@ func TestParityAgentIngestVsServerScan(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go toolchain not found on PATH -- skipping parity test")
 	}
+	skipIfServerDirty(t, branchdamSrc)
 
 	agentModuleRoot := findModuleRoot(t)
 
@@ -345,7 +346,6 @@ func locateBranchDAMSrc(t *testing.T) string {
 	candidates := []string{
 		filepath.Join(root, "..", "branchDAM"),
 		filepath.Join(root, "..", "..", "branchDAM"), // worktree layout: <parent>/branchdam-agent-wt/<n>
-		"/home/bjoern/projects/branchDAM",            // this dev machine's known layout; harmless elsewhere
 	}
 	for _, c := range candidates {
 		if isBranchDAMServerModule(c) {
@@ -366,6 +366,110 @@ func isBranchDAMServerModule(dir string) bool {
 	}
 	first := strings.SplitN(string(data), "\n", 2)[0]
 	return strings.TrimSpace(first) == "module github.com/s3ntin3l8/branchdam"
+}
+
+// skipIfServerDirty skips the parity test if the server checkout has
+// uncommitted changes in paths that feed `go build` (sqlc-generated
+// code, sqlc sources, hashing). Unrelated WIP (e.g. a stray edit in
+// docs/) does not mask parity coverage. Returns false for non-git
+// directories or when git isn't available.
+func skipIfServerDirty(t *testing.T, dir string) {
+	t.Helper()
+	if dirty, path := hasDirtyBuildPaths(dir); dirty {
+		t.Skipf("skipping parity test: server checkout at %s has uncommitted changes in %s; commit or stash first", dir, path)
+	}
+}
+
+// buildPathsThatAffectCompilation are the server-side paths whose
+// uncommitted state can cause `go build ./...` to fail. Keeping this
+// list narrow means unrelated WIP in the sibling checkout doesn't
+// silently skip the parity test.
+var buildPathsThatAffectCompilation = []string{
+	"internal/db/sqlcgen/",
+	"internal/db/queries/",
+	"internal/hashing/",
+	"internal/httpapi/",
+}
+
+// hasDirtyBuildPaths returns (true, firstDirtyPath) if any of the
+// paths that feed `go build` have uncommitted changes (staged,
+// unstaged, or untracked). Returns ("", "") for clean or non-git.
+func hasDirtyBuildPaths(dir string) (bool, string) {
+	args := append([]string{"-C", dir, "status", "--porcelain", "--"}, buildPathsThatAffectCompilation...)
+	out, err := exec.Command("git", args...).CombinedOutput()
+	if err != nil {
+		return false, "" // not a git repo or git not available
+	}
+	raw := string(out)
+	// Trim trailing whitespace/newlines but preserve the leading status
+	// characters (XY ) so the path offset is predictable.
+	raw = strings.TrimRight(raw, " \t\n\r")
+	if len(raw) == 0 {
+		return false, ""
+	}
+	// Return the first dirty path for the skip message.
+	firstLine := strings.SplitN(raw, "\n", 2)[0]
+	// git status --porcelain format: XY <path> (2 status chars + space + path)
+	path := strings.TrimSpace(firstLine[3:])
+	return true, path
+}
+
+// TestHasDirtyBuildPaths verifies the narrowed dirty-check helper using
+// a real git repository in a temp directory. The check only flags paths
+// that feed `go build` (sqlcgen, queries, hashing, httpapi), not
+// unrelated WIP.
+func TestHasDirtyBuildPaths(t *testing.T) {
+	// Dirty in a build path → true.
+	dirty := t.TempDir()
+	cmd := exec.Command("git", "init")
+	cmd.Dir = dirty
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := os.MkdirAll(filepath.Join(dirty, "internal", "db", "sqlcgen"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirty, "internal", "db", "sqlcgen", "querier.go"), []byte("package sqlcgen"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	isDirty, path := hasDirtyBuildPaths(dirty)
+	if !isDirty {
+		t.Error("hasDirtyBuildPaths returned false for dirty build path")
+	}
+	if path == "" {
+		t.Error("hasDirtyBuildPaths returned empty path for dirty build path")
+	}
+
+	// Dirty outside build paths → false.
+	unrelated := t.TempDir()
+	cmd = exec.Command("git", "init")
+	cmd.Dir = unrelated
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(unrelated, "README.md"), []byte("# hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := hasDirtyBuildPaths(unrelated); d {
+		t.Error("hasDirtyBuildPaths returned true for unrelated WIP")
+	}
+
+	// Clean repo → false.
+	clean := t.TempDir()
+	cmd = exec.Command("git", "init")
+	cmd.Dir = clean
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if d, _ := hasDirtyBuildPaths(clean); d {
+		t.Error("hasDirtyBuildPaths returned true for clean repo")
+	}
+
+	// Non-git directory → false.
+	nogit := t.TempDir()
+	if d, _ := hasDirtyBuildPaths(nogit); d {
+		t.Error("hasDirtyBuildPaths returned true for non-git directory")
+	}
 }
 
 // findModuleRoot walks up from the test's working directory until it finds
