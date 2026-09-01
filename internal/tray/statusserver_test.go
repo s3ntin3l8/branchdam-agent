@@ -364,3 +364,102 @@ func TestHandleIndex404sOnUnknownPath(t *testing.T) {
 		t.Errorf("got status %d, want 404", rec.Code)
 	}
 }
+
+func TestHandleIndexHandshakeOKGreen(t *testing.T) {
+	s := &StatusServer{StatusFunc: func() Status { return Status{HandshakeOK: true} }}
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "server reachable") {
+		t.Errorf("response body missing 'server reachable' when HandshakeOK=true\n---\n%s", body)
+	}
+	if strings.Contains(body, "server unreachable") {
+		t.Errorf("response body must not contain 'server unreachable' when HandshakeOK=true\n---\n%s", body)
+	}
+}
+
+func TestHandleIndexHandshakeNOTReachable(t *testing.T) {
+	s := &StatusServer{StatusFunc: func() Status { return Status{HandshakeOK: false} }}
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "server unreachable") {
+		t.Errorf("response body missing 'server unreachable' when HandshakeOK=false\n---\n%s", body)
+	}
+	if strings.Contains(body, "server reachable") {
+		t.Errorf("response body must not contain 'server reachable' when HandshakeOK=false\n---\n%s", body)
+	}
+}
+
+func TestHandleIndexInFlightDrain(t *testing.T) {
+	s := &StatusServer{StatusFunc: func() Status { return Status{InFlightDrain: true} }}
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "drain in progress") {
+		t.Errorf("response body missing 'drain in progress' when InFlightDrain=true\n---\n%s", body)
+	}
+}
+
+func TestHandleIndexInFlightPrune(t *testing.T) {
+	s := &StatusServer{StatusFunc: func() Status { return Status{InFlightPrune: true} }}
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "prune in progress") {
+		t.Errorf("response body missing 'prune in progress' when InFlightPrune=true\n---\n%s", body)
+	}
+}
+
+func TestHandleIndexNoInFlightWhenIdle(t *testing.T) {
+	s := &StatusServer{StatusFunc: func() Status { return Status{InFlightDrain: false, InFlightPrune: false} }}
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, "in progress") {
+		t.Errorf("response body must not contain 'in progress' when neither drain nor prune is running\n---\n%s", body)
+	}
+}
+
+func TestHandleIndexBusySinceShown(t *testing.T) {
+	since := time.Now().Add(-3 * time.Minute)
+	s := &StatusServer{StatusFunc: func() Status {
+		return Status{Busy: true, BusyCard: "/media/card1", BusySince: since}
+	}}
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "/media/card1") {
+		t.Errorf("response body missing card path\n---\n%s", body)
+	}
+	if !strings.Contains(body, "ago") {
+		t.Errorf("response body missing elapsed time for BusySince\n---\n%s", body)
+	}
+}
+
+func TestHandleIndexHTMLInjectionPrevented(t *testing.T) {
+	s := &StatusServer{StatusFunc: func() Status {
+		return Status{
+			QueueStatus: QueueStatus{
+				Configured: true,
+				Err:        errors.New("<script>alert('xss')</script>"),
+			},
+		}
+	}}
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, "<script>") {
+		t.Errorf("response body must escape HTML in error messages to prevent injection\n---\n%s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Errorf("response body should contain escaped HTML entities\n---\n%s", body)
+	}
+}

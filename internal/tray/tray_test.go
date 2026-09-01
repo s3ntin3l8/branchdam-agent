@@ -706,6 +706,94 @@ func TestStatusWatchDirsIsACopy(t *testing.T) {
 	}
 }
 
+func TestStatusSurfacesBusySince(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, nil, "")
+
+	go r.TriggerIngest(context.Background(), "/media/a")
+	<-started
+
+	st := r.Status(UpdateStatus{})
+	if !st.Busy {
+		t.Fatal("expected Busy=true during ingest")
+	}
+	if st.BusySince.IsZero() {
+		t.Error("expected BusySince to be set during ingest")
+	}
+
+	close(release)
+}
+
+func TestStatusSurfacesHandshakeOK(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	r.TriggerDrain(context.Background())
+
+	st := r.Status(UpdateStatus{})
+	if !st.HandshakeOK {
+		t.Error("expected HandshakeOK=true when last drain succeeded with handshake")
+	}
+}
+
+func TestStatusSurfacesHandshakeNOTOK(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	r.TriggerDrain(context.Background())
+
+	st := r.Status(UpdateStatus{})
+	if st.HandshakeOK {
+		t.Error("expected HandshakeOK=false when last drain had failed handshake")
+	}
+}
+
+func TestStatusHandshakeOKFalseWithNoDrains(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	st := r.Status(UpdateStatus{})
+	if st.HandshakeOK {
+		t.Error("expected HandshakeOK=false when no drains have run yet")
+	}
+}
+
+func TestStatusSurfacesInFlightDrain(t *testing.T) {
+	fd := &fakeDrainer{started: make(chan struct{}), release: make(chan struct{})}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetQueueDeps(nil, fd, nil)
+
+	done := make(chan struct{})
+	go func() {
+		r.TriggerDrain(context.Background())
+		close(done)
+	}()
+	<-fd.started
+
+	st := r.Status(UpdateStatus{})
+	if !st.InFlightDrain {
+		t.Error("expected InFlightDrain=true while a drain pass is running")
+	}
+
+	close(fd.release)
+	<-done
+
+	st = r.Status(UpdateStatus{})
+	if st.InFlightDrain {
+		t.Error("expected InFlightDrain=false once drain pass completes")
+	}
+}
+
+func TestStatusInFlightPruneFalseWhenIdle(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	st := r.Status(UpdateStatus{})
+	if st.InFlightPrune {
+		t.Error("expected InFlightPrune=false when nothing is running")
+	}
+}
+
 func TestTriggerIngestSerializesConcurrentCalls(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

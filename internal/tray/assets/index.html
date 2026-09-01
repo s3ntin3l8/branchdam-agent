@@ -52,7 +52,18 @@
   </section>
 
   <section>
+    <h2>Server connection</h2>
+    {{if .Status.HandshakeOK}}
+    <p><span class="ok">server reachable</span></p>
+    {{else}}
+    <p><span class="fail">server unreachable</span></p>
+    {{end}}
+  </section>
+
+  <section>
     <h2>Queue status</h2>
+    {{if .Status.InFlightDrain}}<p class="stub">drain in progress...</p>{{end}}
+    {{if .Status.InFlightPrune}}<p class="stub">prune in progress...</p>{{end}}
     {{if not .Status.QueueStatus.Configured}}
     <p class="stub">not configured (set <code>offline.queueDbPath</code> in config.yaml to enable)</p>
     {{else if .Status.QueueStatus.Err}}
@@ -173,7 +184,7 @@
   <section>
     <h2>Ingest status</h2>
     {{if .Status.Busy}}
-    <p>busy: ingesting <code>{{.Status.BusyCard}}</code></p>
+    <p>busy: ingesting <code>{{.Status.BusyCard}}</code> (since {{since .Status.BusySince}} ago)</p>
     {{else}}
     <p>idle</p>
     {{end}}
