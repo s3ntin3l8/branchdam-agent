@@ -40,11 +40,14 @@ VULNCHECK_IGNORE ?= GO-2026-5932
 
 # govulncheck is in Go's x/vuln module family, so we install on the fly
 # rather than committing a pre-installed binary. JSON output is used instead
-# of relying on govulncheck's own exit code -- that code is still 3 on
-# findings even in -format json mode, so the pass/fail decision (and the
-# VULNCHECK_IGNORE allowlist) is applied here against the parsed findings,
-# mirroring what ci-go.yml does in CI. Set VULNCHECK_IGNORE="" to fail on
-# every finding; comma-separate IDs to allowlist specific ones.
+# of relying on govulncheck's own exit code: verified against govulncheck
+# v1.7 (the version pinned by `go install ...@latest` on this host),
+# `-format json` exits 0 for both clean and findings-present runs (it only
+# exits non-zero on a tool-level failure like a package-load error). The
+# pass/fail decision (and the VULNCHECK_IGNORE allowlist) is therefore
+# applied here against the parsed findings, mirroring what ci-go.yml does
+# in CI. Set VULNCHECK_IGNORE="" to fail on every finding; comma-separate
+# IDs to allowlist specific ones.
 #
 # Default allowlist mirrors ci-cd.yml's `govulncheck-ignore` input:
 # GO-2026-5932 (golang.org/x/crypto/openpgp, unmaintained, no upstream fix
