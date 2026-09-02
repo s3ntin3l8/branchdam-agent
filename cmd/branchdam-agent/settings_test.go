@@ -509,6 +509,26 @@ func TestConfigSettingsValidateStringChangeCardRootsRejectsPlaceholder(t *testin
 	}
 }
 
+func TestSplitCommaPaths(t *testing.T) {
+	cases := []struct {
+		input string
+		want  []string
+	}{
+		{"", nil},
+		{"   ", nil},
+		{",,", nil},
+		{"/a, /b, /c", []string{"/a", "/b", "/c"}},
+		{"  /a  ,  /b  ", []string{"/a", "/b"}},
+		{"/single", []string{"/single"}},
+	}
+	for _, tc := range cases {
+		got := splitCommaPaths(tc.input)
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("splitCommaPaths(%q) = %v, want %v", tc.input, got, tc.want)
+		}
+	}
+}
+
 func TestConfigSettingsReloadRefusesUnexpandedAPIKeyPlaceholder(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner, nil)

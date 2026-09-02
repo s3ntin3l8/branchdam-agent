@@ -296,6 +296,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		ticker := time.NewTicker(menuRefreshInterval)
 		defer ticker.Stop()
 
+		r.SetOnCardIngested(refresh)
 		if detector != nil || len(r.WatchDirs()) > 0 {
 			r.ReconfigureDetector(ctx, r.WatchDirs())
 		}
@@ -634,6 +635,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 	}
 
 	onExit := func() {
+		r.SetOnCardIngested(nil)
 		r.StopDetector()
 		close(errCh)
 	}

@@ -268,6 +268,7 @@ type Runner struct {
 	detectorDone     chan struct{}
 	detectorBaseCtx  context.Context
 	detectorInterval time.Duration
+	onCardIngested   func()
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -645,6 +646,26 @@ func (r *Runner) RevealHook(id HookID) error {
 	return installer.Reveal()
 }
 
+// SetOnCardIngested registers a callback invoked when a card is detected
+// and ingested by the Detector.Watch goroutine (run_supported.go uses this
+// to trigger an immediate menu refresh).
+func (r *Runner) SetOnCardIngested(fn func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onCardIngested = fn
+}
+
+// BaseContext returns the registered lifecycle context for the detector
+// goroutine, or context.Background() if none was set.
+func (r *Runner) BaseContext() context.Context {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+	if r.detectorBaseCtx != nil {
+		return r.detectorBaseCtx
+	}
+	return context.Background()
+}
+
 // SetDetectorInterval sets the poll interval used when creating a new
 // ingest.Detector. If d <= 0, ingest.DefaultPollInterval is used.
 func (r *Runner) SetDetectorInterval(d time.Duration) {
@@ -706,6 +727,12 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 		_ = detector.Watch(dctx, func(diff ingest.Diff) {
 			for _, path := range diff.Inserted {
 				r.TriggerIngest(dctx, path)
+				r.mu.Lock()
+				cb := r.onCardIngested
+				r.mu.Unlock()
+				if cb != nil {
+					cb()
+				}
 			}
 		})
 	}()
@@ -737,8 +764,9 @@ func (r *Runner) StopDetector() {
 // mid-copy the way swapping these fields without synchronization would.
 //
 // When watchDirs differs from the current roots, Reconfigure invokes
-// ReconfigureDetector (issue #78) to hot-restart the Detector.Watch goroutine
-// without requiring a tray restart.
+// ReconfigureDetector (issue #78) AFTER releasing gate, so waiting on the
+// previous detector goroutine to exit cannot deadlock against an in-flight
+// TriggerIngest call.
 //
 // One field is deliberately NOT reconfigurable this way and is the
 // caller's responsibility to treat as restart-required instead:
@@ -746,21 +774,24 @@ func (r *Runner) StopDetector() {
 // happened and is this tray's single-instance guard -- there's nothing to
 // swap it into).
 func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir string) {
-	r.gate.Lock()
-	defer r.gate.Unlock()
+	var rootsChanged bool
+	var newRoots []string
 
+	r.gate.Lock()
 	r.mu.Lock()
 	oldRoots := append([]string(nil), r.watchDirs...)
 	r.ingester = ingester
 	r.scratchDir = scratchDir
-	r.mu.Unlock()
-
 	if !slices.Equal(oldRoots, watchDirs) {
-		r.ReconfigureDetector(nil, watchDirs)
-	} else {
-		r.mu.Lock()
-		r.watchDirs = append([]string(nil), watchDirs...)
-		r.mu.Unlock()
+		rootsChanged = true
+		newRoots = append([]string(nil), watchDirs...)
+		r.watchDirs = newRoots
+	}
+	r.mu.Unlock()
+	r.gate.Unlock()
+
+	if rootsChanged {
+		r.ReconfigureDetector(r.BaseContext(), newRoots)
 	}
 }
 
