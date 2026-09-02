@@ -129,7 +129,42 @@ type DestinationResolution struct {
 	AlreadyIngested bool
 }
 
-// fastHashFile opens p and calculates its FastHash with size.
+// collisionSampleSize is the per-region FastHash sample size used during
+// the auto-suffix collision sweep in ResolveDestination (issue #105). 256KiB
+// per region keeps a single hash call's read budget at ~768KiB instead of
+// the canonical 6MiB, which matters when the sweep walks a directory of
+// thousands of prior collisions. The full-sample 2MiB is reserved for the
+// final-destination match on the very first counter (the one without a
+// suffix), where confirming an AlreadyIngested identity is the operator-
+// visible contract that drives the dedupe-vs-overwrite decision.
+const collisionSampleSize = 256 * 1024
+
+// hashBudget caps the total FastHash read traffic (sum of all regions
+// across every filesMatch/collisionFilesMatch call in a single
+// ResolveDestination) at this many bytes. 2 GiB is generous -- enough for
+// the first counter's full-sample 12MiB read plus ~1360 collision-sample
+// iterations at ~1.5MiB each, covering the 1000-collision benchmark in
+// issue #105 with margin to spare -- while bounding the worst case to a
+// single-digit-second pause instead of the unbounded 80 TB worst case
+// the unfixed 10000-iteration loop permitted.
+//
+// On exhaustion the loop falls back to an Lstat-only walk to find the
+// next free counter, never returning a DestinationResolution whose
+// RelPath already exists on disk (Hermes review on PR #129: returning
+// the current counter's rel on budget exhaustion would point the
+// downstream createExclusive(O_EXCL) write at a path that is already
+// taken once the archive carries more than ~1365 prior suffixed
+// collisions, and the ingest would fail with EEXIST instead of
+// allocating the next free slot).
+//
+// Declared as a var (not const) so tests can shrink it locally to
+// force the budget-exhaustion path without provisioning 1500 colliding
+// 4 MiB files.
+var hashBudget int64 = 2 * 1024 * 1024 * 1024
+
+// fastHashFile opens p and calculates its FastHash with size using the
+// canonical 2MiB per-region sample. Used for the final-destination match
+// (the operator-visible dedupe decision in ResolveDestination).
 func fastHashFile(p string, size int64) (string, error) {
 	f, err := os.Open(p) //nolint:gosec // path is our destination or source
 	if err != nil {
@@ -139,8 +174,23 @@ func fastHashFile(p string, size int64) (string, error) {
 	return hashing.FastHash(f, size)
 }
 
-// filesMatch reports whether dstPath exists, has the same size, and has the same
-// FastHash digest as srcPath.
+// collisionFastHashFile opens p and calculates its FastHash with size using
+// the smaller collisionSampleSize per-region sample. Used by
+// ResolveDestination's auto-suffix sweep, where each collision only needs
+// to confirm "different file" rather than "byte-identical" -- the latter
+// is the full-sample hash's responsibility on the first counter.
+func collisionFastHashFile(p string, size int64) (string, error) {
+	f, err := os.Open(p) //nolint:gosec // path is our destination or source
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	return hashing.FastHashWithSampleSize(f, size, collisionSampleSize)
+}
+
+// filesMatch reports whether dstPath exists, has the same size, and has
+// the same FastHash digest as srcPath. Uses the canonical 2MiB sample --
+// this is the final-destination match that drives the dedupe contract.
 func filesMatch(srcPath, dstPath string) bool {
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {
@@ -158,6 +208,46 @@ func filesMatch(srcPath, dstPath string) bool {
 		return false
 	}
 	dstHash, err := fastHashFile(dstPath, dstInfo.Size())
+	if err != nil {
+		return false
+	}
+	return srcHash == dstHash
+}
+
+// collisionFilesMatch is the budget-bounded counterpart of filesMatch used
+// by the auto-suffix collision sweep in ResolveDestination. It short-
+// circuits with a single os.Lstat on dstPath: if dstPath does not exist,
+// the source is automatically a fresh slot for this counter and no hash
+// work is done -- this is the common case (counter increments past the
+// last existing suffixed entry) and makes that case O(1) per collision.
+// When dstPath does exist, it uses the smaller collisionSampleSize per-
+// region FastHash rather than the full 2MiB sample; combined with the
+// hashBudget guard in ResolveDestination's caller this caps the loop's
+// read traffic regardless of how many prior collisions exist on disk.
+func collisionFilesMatch(srcPath, dstPath string) bool {
+	if _, err := os.Lstat(dstPath); err != nil {
+		// dstPath absent -- a fresh slot for this counter, no hashing
+		// needed. errors.Is(err, os.ErrNotExist) is implicit in any
+		// non-nil err from Lstat here, but checking explicitly keeps
+		// the intent obvious.
+		return false
+	}
+	srcInfo, err := os.Stat(srcPath)
+	if err != nil {
+		return false
+	}
+	dstInfo, err := os.Stat(dstPath)
+	if err != nil {
+		return false
+	}
+	if srcInfo.Size() != dstInfo.Size() {
+		return false
+	}
+	srcHash, err := collisionFastHashFile(srcPath, srcInfo.Size())
+	if err != nil {
+		return false
+	}
+	dstHash, err := collisionFastHashFile(dstPath, dstInfo.Size())
 	if err != nil {
 		return false
 	}
@@ -183,9 +273,45 @@ func checkRoots(roots []string, relPath, srcPath string) (allExist bool, allMatc
 	return validRoots > 0, true
 }
 
+// checkCollisionRoots is the budget-bounded counterpart of checkRoots used
+// by the auto-suffix sweep in ResolveDestination. It mirrors checkRoots's
+// contract -- all non-empty roots must exist and match the source for
+// allMatch -- but routes through collisionFilesMatch so each comparison
+// does the cheap Lstat short-circuit (O(1) when the destination is
+// absent) and the small-sample FastHash (when present), keeping the loop
+// inside hashBudget.
+func checkCollisionRoots(roots []string, relPath, srcPath string) (allExist bool, allMatch bool) {
+	validRoots := 0
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		validRoots++
+		p := filepath.Join(root, relPath)
+		if _, err := os.Stat(p); err != nil {
+			return false, false
+		}
+		if !collisionFilesMatch(srcPath, p) {
+			return true, false
+		}
+	}
+	return validRoots > 0, true
+}
+
 // ResolveDestination determines the relative destination path for srcPath under
 // the provided roots, resolving any naming collisions by auto-suffixing (_2, _3, ...)
 // and detecting whether an identical copy has already been ingested.
+//
+// The collision loop is bounded by hashBudget: the first counter (no
+// suffix, the path the new file would actually take) uses the canonical
+// 2MiB FastHash sample and the full filesMatch contract; subsequent
+// counters (the auto-suffix sweep) use checkCollisionRoots, which Lstat-
+// short-circuits absent destinations (the common case) and applies a
+// smaller-sample FastHash (256KiB per region) when the destination is
+// present. Together this bounds the loop's read traffic regardless of how
+// many prior collisions exist on disk (issue #105), while preserving
+// the operator-visible contract that the *first* counter's match is
+// byte-identical with what's already on disk.
 func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath string, knownSuffix string) DestinationResolution {
 	if knownSuffix != "" {
 		candidateVars := vars
@@ -218,6 +344,15 @@ func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath s
 		}
 	}
 
+	// Bytes a single comparison against one destination costs, per
+	// FastHash call. src+dst = 2; one FastHash samples 3 regions of
+	// sampleSize bytes each. Used by the budget guard below.
+	const (
+		fullBytesPerIter     = int64(hashing.FastHashSampleSize) * 3 * 2
+		collisionBytesPerItr = int64(collisionSampleSize) * 3 * 2
+	)
+	hashesDone := int64(0)
+
 	for counter := 1; counter <= 10000; counter++ {
 		suffix := ""
 		if counter > 1 {
@@ -227,14 +362,94 @@ func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath s
 		candidateVars.OriginalName = SuffixedFilename(vars.OriginalName, suffix)
 		rel := RenderPath(tpl, candidateVars)
 
-		allExist, allMatch := checkRoots(roots, rel, srcPath)
-		if allExist && allMatch {
-			return DestinationResolution{
-				RelPath:         rel,
-				Suffix:          suffix,
-				AlreadyIngested: true,
+		// counter==1 is the final-destination match -- the operator-
+		// visible dedupe decision gets the full 2MiB sample so the
+		// byte-identity confirmation against an existing identical
+		// copy is canonical.
+		// counter>1 is the auto-suffix sweep -- budget-bounded via
+		// checkCollisionRoots (Lstat short-circuit + small-sample
+		// FastHash) so the read traffic stays inside hashBudget even
+		// when thousands of suffixed entries exist.
+		var (
+			allExist, allMatch bool
+			budgetExhausted    bool
+		)
+		if counter == 1 {
+			if hashesDone+fullBytesPerIter > hashBudget {
+				// Even the first match is over budget -- an
+				// over-budget archive is pathological. Defer
+				// to the Lstat-only fallback walk below
+				// (findNextFreeSuffix) which never returns a
+				// path that already exists on disk.
+				budgetExhausted = true
+			} else {
+				allExist, allMatch = checkRoots(roots, rel, srcPath)
+				hashesDone += fullBytesPerIter
+			}
+		} else {
+			if hashesDone+collisionBytesPerItr > hashBudget {
+				budgetExhausted = true
+			} else {
+				allExist, allMatch = checkCollisionRoots(roots, rel, srcPath)
+				hashesDone += collisionBytesPerItr
 			}
 		}
+
+		if !budgetExhausted {
+			if allExist && allMatch {
+				return DestinationResolution{
+					RelPath:         rel,
+					Suffix:          suffix,
+					AlreadyIngested: true,
+				}
+			}
+			anyExists := false
+			for _, root := range roots {
+				if root == "" {
+					continue
+				}
+				if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
+					anyExists = true
+					break
+				}
+			}
+			if !anyExists {
+				return DestinationResolution{
+					RelPath:         rel,
+					Suffix:          suffix,
+					AlreadyIngested: false,
+				}
+			}
+		}
+	}
+
+	// Fallback path: either the loop ran out of counters (counter >
+	// 10000) or the FastHash budget was exhausted mid-sweep. In both
+	// cases the budget is no longer protecting us from taking an
+	// already-occupied suffix, so use an Lstat-only walk to find the
+	// next free slot. Returning a RelPath that already exists on disk
+	// would surface downstream as an O_EXCL EEXIST on createExclusive
+	// -- silent corruption-of-the-next-attempt rather than a graceful
+	// failure (Hermes review on PR #129).
+	return findNextFreeSuffix(roots, tpl, vars)
+}
+
+// findNextFreeSuffix walks the counter space with Lstat only (no
+// FastHash) starting at counter=1 and returns the first slot whose
+// destination does not exist in any root. Bypassed under normal
+// operation by the FastHash loop above; reached only when hashBudget
+// has been exhausted or the 10000-iteration cap is hit. AlreadyIngested
+// is always false here -- the budget was spent without confirming
+// byte-identity, so we cannot claim a duplicate-match.
+func findNextFreeSuffix(roots []string, tpl string, vars TemplateVars) DestinationResolution {
+	for counter := 1; counter <= 10000; counter++ {
+		suffix := ""
+		if counter > 1 {
+			suffix = fmt.Sprintf("_%d", counter)
+		}
+		candidateVars := vars
+		candidateVars.OriginalName = SuffixedFilename(vars.OriginalName, suffix)
+		rel := RenderPath(tpl, candidateVars)
 		anyExists := false
 		for _, root := range roots {
 			if root == "" {
@@ -246,14 +461,12 @@ func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath s
 			}
 		}
 		if !anyExists {
-			return DestinationResolution{
-				RelPath:         rel,
-				Suffix:          suffix,
-				AlreadyIngested: false,
-			}
+			return DestinationResolution{RelPath: rel, Suffix: suffix, AlreadyIngested: false}
 		}
 	}
-
+	// Worst case: every counter 1..10000 is occupied. Return the
+	// unsuffixed render so the caller surfaces a clear downstream
+	// failure rather than silently picking something arbitrary.
 	rel := RenderPath(tpl, vars)
 	return DestinationResolution{RelPath: rel, Suffix: ""}
 }

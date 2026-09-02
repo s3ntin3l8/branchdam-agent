@@ -35,8 +35,15 @@ import (
 	"github.com/corona10/goimagehash"
 )
 
-// fastHashSampleSize is 2MiB per region, matching branchDAM's spec Pillar 1.
-const fastHashSampleSize = 2 * 1024 * 1024
+// FastHashSampleSize is the per-region FastHash sample size (2MiB),
+// matching branchDAM's spec Pillar 1. Exposed so callers that want to
+// budget their read traffic (e.g. issue #105's collision sweep in
+// internal/ingest) can compute against the same constant FastHash uses.
+const FastHashSampleSize = 2 * 1024 * 1024
+
+// fastHashSampleSize is the canonical 2MiB per-region FastHash sample,
+// matching branchDAM's spec Pillar 1.
+const fastHashSampleSize = FastHashSampleSize
 
 // FastHash computes a cheap xxHash64 fingerprint over the first, middle, and
 // last 2MiB of the file plus its total size, in that order. For files
@@ -46,10 +53,31 @@ const fastHashSampleSize = 2 * 1024 * 1024
 // digest: a naive whole-file hash produces a different, wrong value here.
 // Returns 16 lowercase hex characters (64 bits).
 func FastHash(r io.ReaderAt, size int64) (string, error) {
-	h := xxhash.New()
-	buf := make([]byte, fastHashSampleSize)
+	return FastHashWithSampleSize(r, size, fastHashSampleSize)
+}
 
-	for _, reg := range sampleRegions(size) {
+// FastHashWithSampleSize is identical to FastHash but lets the caller
+// override the per-region sample size in bytes. Used by callers that need
+// to bound the read budget for a duplicate-detection sweep over many
+// existing files (issue #105): the canonical final-destination match in
+// ResolveDestination uses the full 2MiB regions via FastHash, while the
+// suffixed-collision sweep uses a much smaller per-region sample (256KiB)
+// to keep the read traffic per iteration bounded.
+//
+// A non-positive sampleSize falls back to fastHashSampleSize. The result
+// is otherwise byte-identical to FastHash for the same per-region size,
+// including the size<=0 / sub-(3*sampleSize) overlap behavior -- a digest
+// produced with sampleSize=256KiB will NOT match one produced with the
+// default 2MiB sample; callers comparing hashes across calls must use the
+// same sampleSize. Returns 16 lowercase hex characters (64 bits).
+func FastHashWithSampleSize(r io.ReaderAt, size, sampleSize int64) (string, error) {
+	if sampleSize <= 0 {
+		sampleSize = fastHashSampleSize
+	}
+	h := xxhash.New()
+	buf := make([]byte, sampleSize)
+
+	for _, reg := range sampleRegionsFor(size, sampleSize) {
 		n := reg.end - reg.start
 		if n == 0 {
 			continue
@@ -74,13 +102,21 @@ func FastHash(r io.ReaderAt, size int64) (string, error) {
 
 type region struct{ start, end int64 }
 
-// sampleRegions returns the (first, middle, last) 2MiB windows for size,
-// clamped to [0, size] so they overlap rather than go out of bounds for
-// small files. Ported verbatim, including the size<=0 early return and the
-// clamp closure -- de-duping or skipping the overlapping regions for a
-// sub-2MiB file is the single most likely silent port bug (a naive port
-// might try to "optimize" the redundant reads).
+// sampleRegions returns the (first, middle, last) windows for size using
+// the canonical 2MiB per-region sample size -- FastHash's contract.
 func sampleRegions(size int64) [3]region {
+	return sampleRegionsFor(size, fastHashSampleSize)
+}
+
+// sampleRegionsFor is the parameterized sibling of sampleRegions, used by
+// FastHashWithSampleSize to bound the read budget on collision-resolution
+// paths (issue #105). For files smaller than 3*sampleSize the three
+// windows overlap (even coincide entirely for a file under sampleSize) --
+// overlap is fine and deliberate, ported verbatim from branchDAM's own
+// sampleRegions clamping. A naive port might try to "optimize" the
+// redundant reads for sub-sampleSize files -- that is the single most
+// likely silent port bug, and is preserved here for the same reason.
+func sampleRegionsFor(size, sampleSize int64) [3]region {
 	if size <= 0 {
 		return [3]region{{0, 0}, {0, 0}, {0, 0}}
 	}
@@ -94,10 +130,10 @@ func sampleRegions(size int64) [3]region {
 		return v
 	}
 
-	first := region{0, clamp(fastHashSampleSize)}
-	middleStart := clamp(size/2 - fastHashSampleSize/2)
-	middle := region{middleStart, clamp(middleStart + fastHashSampleSize)}
-	lastStart := clamp(size - fastHashSampleSize)
+	first := region{0, clamp(sampleSize)}
+	middleStart := clamp(size/2 - sampleSize/2)
+	middle := region{middleStart, clamp(middleStart + sampleSize)}
+	lastStart := clamp(size - sampleSize)
 	last := region{lastStart, size}
 	return [3]region{first, middle, last}
 }

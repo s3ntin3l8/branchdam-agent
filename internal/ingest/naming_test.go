@@ -1,9 +1,13 @@
 package ingest
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/hashing"
 )
 
 func TestRenderPathDefaultTemplate(t *testing.T) {
@@ -209,6 +213,331 @@ func TestSuffixedFilename(t *testing.T) {
 		got := SuffixedFilename(tc.orig, tc.suffix)
 		if got != tc.want {
 			t.Errorf("SuffixedFilename(%q, %q) = %q, want %q", tc.orig, tc.suffix, got, tc.want)
+		}
+	}
+}
+
+// populateCollidingFixture writes n colliding files to root -- each named
+// DSC_0001.JPG, DSC_0001_2.JPG, DSC_0001_3.JPG, ..., content distinct and
+// all guaranteed distinct from the source -- so ResolveDestination, when
+// asked to resolve a fresh source against root, must walk the counter loop
+// discovering the n prior collisions before allocating the next slot.
+// sizeBytes is the per-file byte length; larger values make FastHash's
+// 6MiB read budget (3 × 2MiB regions) actually expensive and reproduce
+// issue #105's O(N^2) read traffic in the unoptimized implementation.
+func populateCollidingFixture(t testing.TB, root string, n, sizeBytes int) string {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(t.TempDir(), "DSC_src.JPG")
+	srcBytes := make([]byte, sizeBytes)
+	for j := range srcBytes {
+		// source's cubic seed -- intentionally distinct from the
+		// colliding files' linear-prime+quadratic salt below so no
+		// counter can produce a matching pattern.
+		srcBytes[j] = byte(j*j*j + 0x5a)
+	}
+	if err := os.WriteFile(src, srcBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= n; i++ {
+		name := filepath.Join(root, "DSC_0001.JPG")
+		if i > 1 {
+			name = filepath.Join(root, SuffixedFilename("DSC_0001.JPG", suffixForCounter(i)))
+		}
+		data := make([]byte, sizeBytes)
+		for j := range data {
+			// 7919 is prime; salt per file ensures FastHash windows
+			// never collide with the source's seed.
+			data[j] = byte(i*7919 + j*j + 0x11)
+		}
+		if err := os.WriteFile(name, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return src
+}
+
+func suffixForCounter(n int) string {
+	if n <= 1 {
+		return ""
+	}
+	return "_" + itoa(n)
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
+// TestResolveDestinationCollisionLoopBudget asserts the user-visible
+// contract from issue #105: a directory containing N colliding distinct
+// files must resolve a fresh source in bounded read traffic (the
+// hashBudget cap), not in unbounded O(N^2) I/O. File size 4 MiB matches
+// the issue's quoted worst case ("10000 × 2 reads × 4 MiB = 80 TB"),
+// ensuring FastHash's 6 MiB read window is fully exercised on each
+// call. With 500 such collisions the unoptimized implementation reads
+// ~6 GiB and takes many seconds; the budget-bounded implementation
+// reads at most ~768 KiB × 500 = ~375 MiB and completes in ~1s. The
+// 8s allowance accounts for race-detector overhead (the test runs with
+// `-race` via `make test`) and CI SSD variability; the *budget* is the
+// hashBudget constant in naming.go, the time figure is a soft target.
+func TestResolveDestinationCollisionLoopBudget(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "archive")
+	const (
+		n         = 500
+		sizeBytes = 4 * 1024 * 1024
+	)
+	src := populateCollidingFixture(t, archive, n, sizeBytes)
+
+	vars := TemplateVars{
+		CapturedAt:   time.Now(),
+		CameraModel:  "ILCE-7M4",
+		OriginalName: "DSC_0001.JPG",
+	}
+	start := time.Now()
+	res := ResolveDestination([]string{archive}, "{original_name}", vars, src, "")
+	elapsed := time.Since(start)
+
+	if res.AlreadyIngested {
+		t.Fatalf("expected a fresh collision slot, got AlreadyIngested (suffix=%q)", res.Suffix)
+	}
+	wantSuffix := suffixForCounter(n + 1)
+	if res.Suffix != wantSuffix {
+		t.Errorf("suffix = %q, want %q (counter=%d)", res.Suffix, wantSuffix, n+1)
+	}
+	if elapsed > 8*time.Second {
+		t.Fatalf("collision loop took %v for %d prior collisions; budget is hashBudget in naming.go (issue #105)", elapsed, n)
+	}
+}
+
+// TestCollisionFilesMatchLstatShortCircuit exercises the Lstat short-
+// circuit in collisionFilesMatch directly, without depending on the
+// counter loop's incidental coverage: when dstPath does not exist,
+// collisionFilesMatch must return false without ever opening either
+// file (no FastHash work). The harness detects the lack of opens by
+// passing non-existent paths whose parents are not writable, so any
+// accidental os.Open would surface as a permission error and the test
+// would fail. Companion to TestResolveDestinationCollisionLoopBudget,
+// which only exercises the path where dstPath exists.
+func TestCollisionFilesMatchLstatShortCircuit(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "DSC_src.JPG")
+	dst := filepath.Join(dir, "DSC_0001_2.JPG")
+	if err := os.WriteFile(src, []byte("src"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// dst intentionally not created -- Lstat must return ErrNotExist
+	// and collisionFilesMatch must return false without touching src.
+	if got := collisionFilesMatch(src, dst); got {
+		t.Errorf("collisionFilesMatch on absent dst = true, want false")
+	}
+}
+
+// TestCollisionFilesMatchHashHit exercises the small-sample hash path
+// in collisionFilesMatch when dstPath exists and its content matches
+// srcPath byte-for-byte. Distinct from TestIngestCardOfflineSkipIdenticalDuplicate
+// (which goes through the full ResolveDestination contract) -- this
+// pins the helper's own success path.
+func TestCollisionFilesMatchHashHit(t *testing.T) {
+	dir := t.TempDir()
+	data := make([]byte, 4*1024)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	src := filepath.Join(dir, "DSC_src.JPG")
+	dst := filepath.Join(dir, "DSC_0001_2.JPG")
+	if err := os.WriteFile(src, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !collisionFilesMatch(src, dst) {
+		t.Errorf("collisionFilesMatch on identical 4KiB files = false, want true")
+	}
+}
+
+// TestCollisionFilesMatchSizeMismatch exercises the size-mismatch early
+// return in collisionFilesMatch -- when src and dst sizes differ, no
+// FastHash work should run. Distinct from filesMatch's same path so
+// regressions to collisionFilesMatch's size check are caught.
+func TestCollisionFilesMatchSizeMismatch(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "DSC_src.JPG")
+	dst := filepath.Join(dir, "DSC_0001_2.JPG")
+	if err := os.WriteFile(src, []byte("short"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("a longer payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if collisionFilesMatch(src, dst) {
+		t.Errorf("collisionFilesMatch on size-mismatched files = true, want false")
+	}
+}
+
+// TestResolveDestinationBudgetExhaustionFallsBackToLstatWalk pins the
+// Hermes-review fix on PR #129: when the FastHash budget is exhausted
+// mid-sweep, ResolveDestination must NOT return the current counter's
+// rel -- that path may already be occupied by an existing suffixed
+// file, and downstream createExclusive(O_EXCL) would fail with EEXIST.
+// Instead, the loop must fall back to an Lstat-only walk that returns
+// the next genuinely free counter.
+//
+// The test temporarily shrinks hashBudget via the var seam (declared in
+// naming.go) so the budget is exhausted on the second counter; pre-
+// occupies counters 1..4 so the fallback cannot return any of them;
+// then verifies the returned suffix is the next free counter (>= "_5")
+// and that the returned RelPath does not already exist on disk.
+func TestResolveDestinationBudgetExhaustionFallsBackToLstatWalk(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "archive")
+	if err := os.MkdirAll(archive, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Occupy counter=1 (no suffix) and counter=2..4. The fresh source
+	// will then need at least suffix "_5".
+	for _, name := range []string{
+		"DSC_0001.JPG",
+		"DSC_0001_2.JPG",
+		"DSC_0001_3.JPG",
+		"DSC_0001_4.JPG",
+	} {
+		if err := os.WriteFile(filepath.Join(archive, name), []byte("prior-"+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := filepath.Join(dir, "DSC_src.JPG")
+	if err := os.WriteFile(src, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Force budget exhaustion after the first counter's full-sample
+	// comparison: a budget of fullBytesPerIter accommodates counter=1
+	// but not counter=2.
+	origBudget := hashBudget
+	hashBudget = int64(hashing.FastHashSampleSize) * 3 * 2 // one full-sample comparison
+	t.Cleanup(func() { hashBudget = origBudget })
+
+	vars := TemplateVars{
+		CapturedAt:   time.Now(),
+		CameraModel:  "ILCE-7M4",
+		OriginalName: "DSC_0001.JPG",
+	}
+	res := ResolveDestination([]string{archive}, "{original_name}", vars, src, "")
+
+	if res.AlreadyIngested {
+		t.Fatalf("expected a fresh collision slot, got AlreadyIngested (suffix=%q)", res.Suffix)
+	}
+	for _, occupied := range []string{"", "_2", "_3", "_4"} {
+		if res.Suffix == occupied {
+			t.Errorf("suffix=%q points at an occupied counter; budget fallback did not Lstat-walk past it", res.Suffix)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(archive, res.RelPath)); err == nil {
+		t.Errorf("returned RelPath %q already exists on disk; downstream O_EXCL would EEXIST", res.RelPath)
+	}
+}
+
+// TestFindNextFreeSuffixEmptyArchive pins the simplest path: with no
+// prior files, the Lstat fallback should return counter=1 (no suffix),
+// matching the unoptimized loop's behavior. Sanity check for the
+// fallback itself.
+func TestFindNextFreeSuffixEmptyArchive(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "archive")
+	if err := os.MkdirAll(archive, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	vars := TemplateVars{
+		CapturedAt:   time.Now(),
+		CameraModel:  "ILCE-7M4",
+		OriginalName: "DSC_0001.JPG",
+	}
+	res := findNextFreeSuffix([]string{archive}, "{original_name}", vars)
+	if res.Suffix != "" {
+		t.Errorf("suffix = %q, want \"\" (empty archive -> counter=1)", res.Suffix)
+	}
+	if res.AlreadyIngested {
+		t.Errorf("AlreadyIngested = true, want false")
+	}
+	if res.RelPath != "DSC_0001.JPG" {
+		t.Errorf("RelPath = %q, want \"DSC_0001.JPG\"", res.RelPath)
+	}
+}
+
+// TestFastHashWithSampleSizeMatchesFastHashAtCanonicalSize pins the
+// hash-identity contract of FastHashWithSampleSize: when sampleSize
+// equals the canonical FastHashSampleSize, the digest must match
+// FastHash's output byte-for-byte. This is the property the dual-write
+// path's StreamingFastHasher relies on, and the property a future
+// refactor must not silently break (e.g. by changing the overlap clamp).
+func TestFastHashWithSampleSizeMatchesFastHashAtCanonicalSize(t *testing.T) {
+	dir := t.TempDir()
+	data := make([]byte, 8*1024)
+	for i := range data {
+		data[i] = byte(i * 7)
+	}
+	p := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	gotCanonical, err := hashing.FastHashWithSampleSize(f, int64(len(data)), hashing.FastHashSampleSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCanonical, err := hashing.FastHash(f, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCanonical != wantCanonical {
+		t.Errorf("FastHashWithSampleSize(canonical) = %q, want FastHash = %q", gotCanonical, wantCanonical)
+	}
+}
+
+// BenchmarkResolveDestination1000Collisions drives the 1000-file collision
+// case from issue #105 with 256KiB files (matches the new
+// collisionSampleSize, so each FastHash region covers the whole file and
+// no read can be silently elided). Reports allocs/op and ns/op; the
+// budget assertion lives in TestResolveDestinationCollisionLoopBudget
+// because benchmarks skip the failure path by default.
+func BenchmarkResolveDestination1000Collisions(b *testing.B) {
+	dir := b.TempDir()
+	archive := filepath.Join(dir, "archive")
+	src := populateCollidingFixture(b, archive, 1000, 256*1024)
+
+	vars := TemplateVars{
+		CapturedAt:   time.Now(),
+		CameraModel:  "ILCE-7M4",
+		OriginalName: "DSC_0001.JPG",
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res := ResolveDestination([]string{archive}, "{original_name}", vars, src, "")
+		if res.AlreadyIngested {
+			b.Fatal("expected a fresh collision slot")
+		}
+		if res.Suffix != suffixForCounter(1001) {
+			b.Fatalf("suffix = %q, want %q", res.Suffix, suffixForCounter(1001))
 		}
 	}
 }
