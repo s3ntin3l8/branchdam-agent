@@ -53,6 +53,13 @@ VULNCHECK_IGNORE ?= GO-2026-5932
 # GO-2026-5932 (golang.org/x/crypto/openpgp, unmaintained, no upstream fix
 # -- tracked in issue #14). Re-check periodically and drop the ID once a
 # real fix exists.
+#
+# `mapfile` is bash 4+ only; stock macOS `/usr/bin/env bash` is 3.2, and
+# branchdam-agent's macOS/Windows desktop users do `make check` on it.
+# The findings-array population below uses a portable `while read` loop
+# so the recipe works on bash 3.2 too. (Comments INSIDE the recipe body
+# would break the `\` continuation chain, so the rationale lives up
+# here in the Make-comment block instead.)
 vulncheck: ## Check for known vulnerabilities (allowlist via VULNCHECK_IGNORE, default matches ci-cd.yml)
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 	$$(go env GOPATH)/bin/govulncheck -format json ./... > govulncheck.json || true
@@ -79,7 +86,10 @@ vulncheck: ## Check for known vulnerabilities (allowlist via VULNCHECK_IGNORE, d
 	  if [ -n "$$ig" ]; then ignore_clean+=( "$$ig" ); fi; \
 	done; \
 	if [ "$${#ignore_clean[@]}" -gt 0 ]; then echo "vulncheck-ignore allowlist: $${ignore_clean[*]}"; fi; \
-	mapfile -t found < <(jq -r 'select(.finding != null) | .finding.osv' govulncheck.json | sort -u); \
+	found=(); \
+	while IFS= read -r id; do \
+	  [ -n "$$id" ] && found+=( "$$id" ); \
+	done < <(jq -r 'select(.finding != null) | .finding.osv' govulncheck.json | sort -u); \
 	reported=(); suppressed=(); \
 	for id in "$${found[@]}"; do \
 	  matched=0; \
