@@ -37,6 +37,17 @@ type Option func(*Client)
 
 // WithHTTPClient overrides the default *http.Client (e.g. to inject a
 // shorter timeout or a custom transport in tests).
+//
+// SECURITY: this option replaces the entire *http.Client wholesale,
+// including the http.Transport that secureTransport() constructs with a
+// TLS 1.2 floor (S-2). A caller that supplies a *http.Client with
+// Transport == nil falls back to http.DefaultTransport -- Go's default,
+// which permits TLS 1.0/1.1 -- silently downgrading that protection. The
+// same applies to a caller that constructs its own Transport without
+// setting TLSClientConfig.MinVersion, which is exactly the field
+// TestClientUsesTLS12MinimumTransport inspects on the default. Production
+// call sites should not pass this option; it is intended for tests and
+// power-users who explicitly need to take ownership of the wire layer.
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) { c.httpClient = hc }
 }
