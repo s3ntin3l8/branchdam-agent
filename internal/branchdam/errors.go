@@ -135,6 +135,14 @@ func ClassifyError(msg string) Classification {
 // would otherwise be re-leaked into slog/crash-dump paths. The body is
 // always available to callers via the Body field for structured logging
 // or replay-driven debugging.
+//
+// IMPORTANT: callers logging this error MUST log err.Error() (the
+// status-only message) rather than the *HTTPError struct via %+v or
+// %#v -- both of those would dump the raw Body field verbatim,
+// re-introducing the S-7 leak that Error()'s sanitization exists to
+// prevent. To capture the body for diagnostic purposes, read httpErr.Body
+// explicitly under a redactor-aware logger, never via the error's own
+// formatted representation.
 type HTTPError struct {
 	StatusCode int
 	Body       string
