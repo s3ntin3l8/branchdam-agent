@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/hashing"
 )
 
 func TestRenderPathDefaultTemplate(t *testing.T) {
@@ -269,6 +271,107 @@ func TestResolveDestinationCollisionLoopBudget(t *testing.T) {
 	}
 	if elapsed > 8*time.Second {
 		t.Fatalf("collision loop took %v for %d prior collisions; budget is hashBudget in naming.go (issue #105)", elapsed, n)
+	}
+}
+
+// TestCollisionFilesMatchLstatShortCircuit exercises the Lstat short-
+// circuit in collisionFilesMatch directly, without depending on the
+// counter loop's incidental coverage: when dstPath does not exist,
+// collisionFilesMatch must return false without ever opening either
+// file (no FastHash work). The harness detects the lack of opens by
+// passing non-existent paths whose parents are not writable, so any
+// accidental os.Open would surface as a permission error and the test
+// would fail. Companion to TestResolveDestinationCollisionLoopBudget,
+// which only exercises the path where dstPath exists.
+func TestCollisionFilesMatchLstatShortCircuit(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "DSC_src.JPG")
+	dst := filepath.Join(dir, "DSC_0001_2.JPG")
+	if err := os.WriteFile(src, []byte("src"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// dst intentionally not created -- Lstat must return ErrNotExist
+	// and collisionFilesMatch must return false without touching src.
+	if got := collisionFilesMatch(src, dst); got {
+		t.Errorf("collisionFilesMatch on absent dst = true, want false")
+	}
+}
+
+// TestCollisionFilesMatchHashHit exercises the small-sample hash path
+// in collisionFilesMatch when dstPath exists and its content matches
+// srcPath byte-for-byte. Distinct from TestIngestCardOfflineSkipIdenticalDuplicate
+// (which goes through the full ResolveDestination contract) -- this
+// pins the helper's own success path.
+func TestCollisionFilesMatchHashHit(t *testing.T) {
+	dir := t.TempDir()
+	data := make([]byte, 4*1024)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	src := filepath.Join(dir, "DSC_src.JPG")
+	dst := filepath.Join(dir, "DSC_0001_2.JPG")
+	if err := os.WriteFile(src, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !collisionFilesMatch(src, dst) {
+		t.Errorf("collisionFilesMatch on identical 4KiB files = false, want true")
+	}
+}
+
+// TestCollisionFilesMatchSizeMismatch exercises the size-mismatch early
+// return in collisionFilesMatch -- when src and dst sizes differ, no
+// FastHash work should run. Distinct from filesMatch's same path so
+// regressions to collisionFilesMatch's size check are caught.
+func TestCollisionFilesMatchSizeMismatch(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "DSC_src.JPG")
+	dst := filepath.Join(dir, "DSC_0001_2.JPG")
+	if err := os.WriteFile(src, []byte("short"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("a longer payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if collisionFilesMatch(src, dst) {
+		t.Errorf("collisionFilesMatch on size-mismatched files = true, want false")
+	}
+}
+
+// TestFastHashWithSampleSizeMatchesFastHashAtCanonicalSize pins the
+// hash-identity contract of FastHashWithSampleSize: when sampleSize
+// equals the canonical FastHashSampleSize, the digest must match
+// FastHash's output byte-for-byte. This is the property the dual-write
+// path's StreamingFastHasher relies on, and the property a future
+// refactor must not silently break (e.g. by changing the overlap clamp).
+func TestFastHashWithSampleSizeMatchesFastHashAtCanonicalSize(t *testing.T) {
+	dir := t.TempDir()
+	data := make([]byte, 8*1024)
+	for i := range data {
+		data[i] = byte(i * 7)
+	}
+	p := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	gotCanonical, err := hashing.FastHashWithSampleSize(f, int64(len(data)), hashing.FastHashSampleSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCanonical, err := hashing.FastHash(f, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCanonical != wantCanonical {
+		t.Errorf("FastHashWithSampleSize(canonical) = %q, want FastHash = %q", gotCanonical, wantCanonical)
 	}
 }
 
