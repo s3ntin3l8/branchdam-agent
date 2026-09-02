@@ -228,10 +228,6 @@ func runTrayCmd(args []string) int {
 	}
 
 	runner.SetDetectorInterval(time.Duration(cfg.Ingest.PollIntervalSecs) * time.Second)
-	var detector *ingest.Detector
-	if len(cfg.Ingest.CardRoots) > 0 {
-		detector = ingest.NewDetector(cfg.Ingest.CardRoots, time.Duration(cfg.Ingest.PollIntervalSecs)*time.Second)
-	}
 
 	if cfg.Tray.StartOnLogin {
 		if err := enableStartOnLogin(resolvedPath); err != nil {
@@ -284,7 +280,7 @@ func runTrayCmd(args []string) int {
 	}
 
 	var outcome tray.Outcome
-	outcome, trayErr = tray.Run(ctx, runner, detector, statusSrv.StatusURL(), updater, settings)
+	outcome, trayErr = tray.Run(ctx, runner, statusSrv.StatusURL(), updater, settings)
 	stop() // make sure the status server's ctx.Done() fires even if tray.Run returned on its own (e.g. Quit clicked)
 	wg.Wait()
 
@@ -293,10 +289,15 @@ func runTrayCmd(args []string) int {
 		// reported the same way as any other tray error -- see this
 		// function's doc comment for why that's a normal exit, not a
 		// panic.
-		return fail("%v", trayErr)
+		if errors.Is(trayErr, tray.ErrUnsupported) {
+			slog.Error("tray not supported on this platform", "err", trayErr)
+			fmt.Fprintln(os.Stderr, trayErr)
+			return 1
+		}
+		return fail("tray run failed: %v", trayErr)
 	}
 	if statusErr != nil {
-		return fail("status page: %v", statusErr)
+		return fail("status server failed: %v", statusErr)
 	}
 
 	// The successor process cannot bind statusSrv.Addr until this
@@ -306,10 +307,10 @@ func runTrayCmd(args []string) int {
 	// loop) safe.
 	if outcome.RestartRequested {
 		// AppliedVersion is empty for a settings-driven restart (issue #31:
-		// tray.statusAddr or ingest.cardRoots changed, neither
-		// hot-reloadable -- see Runner.Reconfigure's doc comment) as
-		// opposed to a successful self-update or rollback (issue #33) --
-		// RolledBack distinguishes the latter two from each other.
+		// tray.statusAddr changed, not hot-reloadable -- see
+		// Runner.Reconfigure's doc comment) as opposed to a successful
+		// self-update or rollback (issue #33) -- RolledBack distinguishes
+		// the latter two from each other.
 		reason := "a settings change that requires a restart"
 		switch {
 		case outcome.RolledBack:
