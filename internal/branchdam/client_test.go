@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestServer builds an httptest.Server plus a Client pointed at it. h is
@@ -397,6 +398,28 @@ func TestWithHTTPClientOption(t *testing.T) {
 	c := New("http://localhost:8080", "key", WithHTTPClient(custom))
 	if c.httpClient != custom {
 		t.Error("WithHTTPClient did not override the default http.Client")
+	}
+}
+
+// TestWithHTTPClientDocumentedOverrideWarning pins the security
+// contract documented on WithHTTPClient: a caller-supplied *http.Client
+// replaces the entire wire layer including the TLS 1.2 floor
+// secureTransport() installs on the default. The contract is
+// "power-user only" / "production should not use this option"; the
+// test asserts that the override is the caller's, not the package's,
+// so a future change to New that re-applies secureTransport to
+// every Client (including overrides) doesn't happen silently.
+func TestWithHTTPClientDocumentedOverrideWarning(t *testing.T) {
+	custom := &http.Client{Timeout: 999 * time.Second}
+	c := New("http://localhost:8080", "key", WithHTTPClient(custom))
+	if c.httpClient != custom {
+		t.Fatal("WithHTTPClient should not be silently wrapped/replaced by New")
+	}
+	// The custom Timeout is preserved through the override -- this is
+	// what a power-user actually wants when they pass their own
+	// http.Client, and is the point of the override existing at all.
+	if c.httpClient.Timeout != 999*time.Second {
+		t.Errorf("custom http.Client Timeout not preserved: got %v, want 999s", c.httpClient.Timeout)
 	}
 }
 
