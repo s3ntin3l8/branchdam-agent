@@ -25,7 +25,7 @@ The issue body lists the graduation candidates in its acceptance-criteria checkl
 
 These are in the audit comment block in [`internal/tray/settings.go`](../internal/tray/settings.go) and are not part of the issue's graduation pipeline:
 
-- **`pathMappings` (config.go:41, 453-456)** — each rule is a workstation-to-container prefix pair, not a single value. A wrong entry silently misroutes every event whose path falls under that prefix. The hand-edit gate (plus `preflight`'s resolved-map print) is the audit trail; a single-line menu edit would not give an operator enough context to verify the rewrite.
+- **`pathMappings` (config.go:446-456)** — each rule is a workstation-to-container prefix pair, not a single value. A wrong entry silently misroutes every event whose path falls under that prefix. The hand-edit gate (plus `preflight`'s resolved-map print) is the audit trail; a single-line menu edit would not give an operator enough context to verify the rewrite.
 - **`ingest.pollIntervalSecs` (config.go:413)** — low-frequency, restart-only knob. Not worth a menu slot. Operators adjust via `OpenConfigFile`.
 - **`prune.*` (config.go:148-165)** — `enabled`, `minAgeHours`, `intervalMinutes`. Destructive subcommand gating; the hand-edit gate is the audit trail. A stray click on "Enable prune" with a wrong `minAgeHours` would be a one-step path to deleting verified archive mirrors.
 - **`offline.*` (config.go:103-125)** — `queueDbPath`, `tier0ContainerRoot`, `drainIntervalSecs`. Changing the SQLite path or the staging container root mid-run breaks in-flight drain state; `drainIntervalSecs` is a tuning knob operators rarely touch.
