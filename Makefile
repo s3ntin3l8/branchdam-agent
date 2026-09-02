@@ -1,4 +1,8 @@
 .DEFAULT_GOAL := help
+# Use bash explicitly for recipe shells: default `/bin/sh` is dash on Debian/Ubuntu
+# and lacks `mapfile`/`arrays` needed by the `vulncheck` allowlist logic.
+SHELL := /usr/bin/env bash
+.SHELLFLAGS := -eu -o pipefail -c
 .PHONY: help install-hooks test lint fmt vet tidy vulncheck build build-windows build-darwin build-darwin-app clean check
 
 # VERSION stamps main.version via -X ldflags -- unset (the default "dev")
@@ -32,9 +36,43 @@ vet: ## Run go vet
 tidy: ## Tidy Go modules
 	go mod tidy
 
-vulncheck: ## Check for known vulnerabilities
+VULNCHECK_IGNORE ?= GO-2026-5932
+
+# govulncheck is in Go's x/vuln module family, so we install on the fly
+# rather than committing a pre-installed binary. JSON output is used instead
+# of relying on govulncheck's own exit code -- that code is still 3 on
+# findings even in -format json mode, so the pass/fail decision (and the
+# VULNCHECK_IGNORE allowlist) is applied here against the parsed findings,
+# mirroring what ci-go.yml does in CI. Set VULNCHECK_IGNORE="" to fail on
+# every finding; comma-separate IDs to allowlist specific ones.
+#
+# Default allowlist mirrors ci-cd.yml's `govulncheck-ignore` input:
+# GO-2026-5932 (golang.org/x/crypto/openpgp, unmaintained, no upstream fix
+# -- tracked in issue #14). Re-check periodically and drop the ID once a
+# real fix exists.
+vulncheck: ## Check for known vulnerabilities (allowlist via VULNCHECK_IGNORE, default matches ci-cd.yml)
 	go install golang.org/x/vuln/cmd/govulncheck@latest
-	$$(go env GOPATH)/bin/govulncheck ./...
+	$$(go env GOPATH)/bin/govulncheck -format json ./... > govulncheck.json || true
+	@ignore_clean=(); \
+	IFS=, read -ra parts <<<"$(VULNCHECK_IGNORE)" || true; \
+	for ig in "$${parts[@]}"; do \
+	  ig="$${ig// /}"; \
+	  if [ -n "$$ig" ]; then ignore_clean+=( "$$ig" ); fi; \
+	done; \
+	if [ "$${#ignore_clean[@]}" -gt 0 ]; then echo "vulncheck-ignore allowlist: $${ignore_clean[*]}"; fi; \
+	mapfile -t found < <(jq -r 'select(.finding != null) | .finding.osv' govulncheck.json | sort -u); \
+	reported=(); suppressed=(); \
+	for id in "$${found[@]}"; do \
+	  matched=0; \
+	  for ig in "$${ignore_clean[@]}"; do \
+	    if [ "$$id" = "$$ig" ]; then matched=1; break; fi; \
+	  done; \
+	  if [ "$$matched" -eq 1 ]; then suppressed+=( "$$id" ); else reported+=( "$$id" ); fi; \
+	done; \
+	if [ "$${#suppressed[@]}" -gt 0 ]; then echo "vulncheck-ignore suppressed: $${suppressed[*]}"; fi; \
+	if [ "$${#reported[@]}" -gt 0 ]; then echo "::error::govulncheck found unignored vulnerabilities: $${reported[*]}"; rm -f govulncheck.json; exit 1; fi; \
+	echo "govulncheck: clean"; \
+	rm -f govulncheck.json
 
 build: ## Build all packages
 	go build ./...
@@ -52,7 +90,7 @@ build-darwin-app: ## Build + assemble the .app bundle -- macOS host only (intern
 	go build -ldflags="-X main.version=$(VERSION)" -o dist/branchdam-agent ./cmd/branchdam-agent
 	go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -version "$(VERSION)"
 
-check: build vet test build-windows build-darwin ## One-shot pre-PR gate: build + vet + test + cross-build checks (does not require pre-commit -- see `lint`)
+check: build vet test vulncheck build-windows build-darwin ## One-shot pre-PR gate: build + vet + test + vulncheck + cross-build checks (does not require pre-commit -- see `lint`)
 
 clean: ## Remove build artifacts and caches
 	rm -f coverage.txt
