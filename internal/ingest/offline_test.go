@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/zeebo/blake3"
 
@@ -611,5 +614,72 @@ func TestIngestCardOfflineAllowedExtensionsFilter(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Errorf("got %d queue rows, want 2 (jpg+mp4 only)", len(all))
+	}
+}
+
+// TestIngestCardOfflineChtimesFailureIsLogged is the offline twin of
+// TestIngestCardChtimesFailureIsLogged (issue #103): the offline path
+// has exactly one os.Chtimes call (on the local edit copy, because the
+// archive copy is deferred to Drain). Same soft contract -- failure
+// logs, doesn't fail -- but here the local-path mtime IS the one the
+// prune-safety half of invariant #8 reads back (see internal/prune/
+// prune.go's TOCTOU re-stat), so the warn is the operator's only signal
+// that a queue row's MtimeUnix may diverge from the actual file's mtime.
+func TestIngestCardOfflineChtimesFailureIsLogged(t *testing.T) {
+	origChtimes := cHtimesFn
+	t.Cleanup(func() { cHtimesFn = origChtimes })
+	cHtimesFn = func(path string, atime, mtime time.Time) error {
+		return &os.PathError{Op: "chtimes", Path: path, Err: syscall.ENOENT}
+	}
+
+	logBuf := captureSlog(t)
+
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "IMG_0001.jpg"), []byte("fake-jpeg-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openStoreT(t)
+	e := newOfflineTestEngine(t, failingClient{}, filepath.Join(dir, "archive"), filepath.Join(dir, "local"), "/storage/staging/agent-1", store)
+
+	res, err := e.IngestCardOffline(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCardOffline: %v", err)
+	}
+	if len(res.Files) != 1 {
+		t.Fatalf("got %d files, want 1", len(res.Files))
+	}
+	fr := res.Files[0]
+
+	// Soft contract: the local file is on disk, hashes verified, queue row
+	// inserted -- a Chtimes failure must not abort any of that.
+	if fr.Err != nil {
+		t.Fatalf("offline ingest must NOT fail on chtimes error; got %v", fr.Err)
+	}
+	if !fr.Queued {
+		t.Error("expected Queued=true (the durability boundary must still complete)")
+	}
+	if !fr.LocalVerify.Verified {
+		t.Error("expected local copy to verify")
+	}
+
+	wantDest := filepath.Join(dir, "local", "IMG_0001.jpg")
+	warn := findCHtimesWarn(t, logBuf, wantDest)
+	if warn == nil {
+		t.Fatalf("expected slog.Warn for local destination %q; got log: %s", wantDest, logBuf.String())
+	}
+	if warn["level"] != "WARN" {
+		t.Errorf("warn level = %v, want WARN", warn["level"])
+	}
+	if warn["source"] != filepath.Join(cardRoot, "IMG_0001.jpg") {
+		t.Errorf("warn source = %v", warn["source"])
+	}
+	errMsg, ok := warn["err"].(string)
+	if !ok || !strings.Contains(errMsg, "no such file") {
+		t.Errorf("warn err = %v, want something containing 'no such file'", warn["err"])
 	}
 }
