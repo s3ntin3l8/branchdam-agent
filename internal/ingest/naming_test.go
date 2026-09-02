@@ -1,6 +1,8 @@
 package ingest
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -161,6 +163,140 @@ func TestSuffixedFilename(t *testing.T) {
 		got := SuffixedFilename(tc.orig, tc.suffix)
 		if got != tc.want {
 			t.Errorf("SuffixedFilename(%q, %q) = %q, want %q", tc.orig, tc.suffix, got, tc.want)
+		}
+	}
+}
+
+// populateCollidingFixture writes n colliding files to root -- each named
+// DSC_0001.JPG, DSC_0001_2.JPG, DSC_0001_3.JPG, ..., content distinct and
+// all guaranteed distinct from the source -- so ResolveDestination, when
+// asked to resolve a fresh source against root, must walk the counter loop
+// discovering the n prior collisions before allocating the next slot.
+// sizeBytes is the per-file byte length; larger values make FastHash's
+// 6MiB read budget (3 × 2MiB regions) actually expensive and reproduce
+// issue #105's O(N^2) read traffic in the unoptimized implementation.
+func populateCollidingFixture(t testing.TB, root string, n, sizeBytes int) string {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(t.TempDir(), "DSC_src.JPG")
+	srcBytes := make([]byte, sizeBytes)
+	for j := range srcBytes {
+		// source's cubic seed -- intentionally distinct from the
+		// colliding files' linear-prime+quadratic salt below so no
+		// counter can produce a matching pattern.
+		srcBytes[j] = byte(j*j*j + 0x5a)
+	}
+	if err := os.WriteFile(src, srcBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= n; i++ {
+		name := filepath.Join(root, "DSC_0001.JPG")
+		if i > 1 {
+			name = filepath.Join(root, SuffixedFilename("DSC_0001.JPG", suffixForCounter(i)))
+		}
+		data := make([]byte, sizeBytes)
+		for j := range data {
+			// 7919 is prime; salt per file ensures FastHash windows
+			// never collide with the source's seed.
+			data[j] = byte(i*7919 + j*j + 0x11)
+		}
+		if err := os.WriteFile(name, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return src
+}
+
+func suffixForCounter(n int) string {
+	if n <= 1 {
+		return ""
+	}
+	return "_" + itoa(n)
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
+// TestResolveDestinationCollisionLoopBudget asserts the user-visible
+// contract from issue #105: a directory containing N colliding distinct
+// files must resolve a fresh source in bounded read traffic (the
+// hashBudget cap), not in unbounded O(N^2) I/O. File size 4 MiB matches
+// the issue's quoted worst case ("10000 × 2 reads × 4 MiB = 80 TB"),
+// ensuring FastHash's 6 MiB read window is fully exercised on each
+// call. With 500 such collisions the unoptimized implementation reads
+// ~6 GiB and takes many seconds; the budget-bounded implementation
+// reads at most ~768 KiB × 500 = ~375 MiB and completes in ~1s. The
+// 8s allowance accounts for race-detector overhead (the test runs with
+// `-race` via `make test`) and CI SSD variability; the *budget* is the
+// hashBudget constant in naming.go, the time figure is a soft target.
+func TestResolveDestinationCollisionLoopBudget(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "archive")
+	const (
+		n         = 500
+		sizeBytes = 4 * 1024 * 1024
+	)
+	src := populateCollidingFixture(t, archive, n, sizeBytes)
+
+	vars := TemplateVars{
+		CapturedAt:   time.Now(),
+		CameraModel:  "ILCE-7M4",
+		OriginalName: "DSC_0001.JPG",
+	}
+	start := time.Now()
+	res := ResolveDestination([]string{archive}, "{original_name}", vars, src, "")
+	elapsed := time.Since(start)
+
+	if res.AlreadyIngested {
+		t.Fatalf("expected a fresh collision slot, got AlreadyIngested (suffix=%q)", res.Suffix)
+	}
+	wantSuffix := suffixForCounter(n + 1)
+	if res.Suffix != wantSuffix {
+		t.Errorf("suffix = %q, want %q (counter=%d)", res.Suffix, wantSuffix, n+1)
+	}
+	if elapsed > 8*time.Second {
+		t.Fatalf("collision loop took %v for %d prior collisions; budget is hashBudget in naming.go (issue #105)", elapsed, n)
+	}
+}
+
+// BenchmarkResolveDestination1000Collisions drives the 1000-file collision
+// case from issue #105 with 256KiB files (matches the new
+// collisionSampleSize, so each FastHash region covers the whole file and
+// no read can be silently elided). Reports allocs/op and ns/op; the
+// budget assertion lives in TestResolveDestinationCollisionLoopBudget
+// because benchmarks skip the failure path by default.
+func BenchmarkResolveDestination1000Collisions(b *testing.B) {
+	dir := b.TempDir()
+	archive := filepath.Join(dir, "archive")
+	src := populateCollidingFixture(b, archive, 1000, 256*1024)
+
+	vars := TemplateVars{
+		CapturedAt:   time.Now(),
+		CameraModel:  "ILCE-7M4",
+		OriginalName: "DSC_0001.JPG",
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res := ResolveDestination([]string{archive}, "{original_name}", vars, src, "")
+		if res.AlreadyIngested {
+			b.Fatal("expected a fresh collision slot")
+		}
+		if res.Suffix != suffixForCounter(1001) {
+			b.Fatalf("suffix = %q, want %q", res.Suffix, suffixForCounter(1001))
 		}
 	}
 }
