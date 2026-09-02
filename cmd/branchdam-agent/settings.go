@@ -266,8 +266,27 @@ func (s *configSettings) validateStringChange(key, v string) error {
 }
 
 func firstValidateProblem(cfg config.Config) error {
-	if problems := cfg.Validate(); len(problems) > 0 {
-		return fmt.Errorf("config problem: %s", problems[0])
+	if problem := firstBlockingProblem(cfg); problem != nil {
+		return fmt.Errorf("config problem: %s", problem)
+	}
+	return nil
+}
+
+// firstBlockingProblem returns the first Validate() Problem that should
+// block a settings-driven config mutation or reload -- i.e. a structural
+// failure, not a Problem marked Advisory(). Used by firstValidateProblem
+// (SetBool/SetInt/PromptAndSet path) and reload (Reload config / Restart
+// Required path), so they share one definition of "blocking" instead of
+// each diverging independently (Hermes review finding on the PR that
+// introduced SeverityWarning, issue #96).
+//
+// Returns nil when every Problem is advisory or when Validate() found
+// nothing at all.
+func firstBlockingProblem(cfg config.Config) *config.Problem {
+	for _, p := range cfg.Validate() {
+		if !p.Advisory() {
+			return &p
+		}
 	}
 	return nil
 }
@@ -449,8 +468,8 @@ func (s *configSettings) reload() error {
 	if err != nil {
 		return fmt.Errorf("reload config %q: %w", s.path, err)
 	}
-	if problems := newCfg.Validate(); len(problems) > 0 {
-		return fmt.Errorf("config problem: %s", problems[0])
+	if problem := firstBlockingProblem(newCfg); problem != nil {
+		return fmt.Errorf("config problem: %s", problem)
 	}
 
 	client := branchdam.New(newCfg.Server.BaseURL, newCfg.Server.APIKey)

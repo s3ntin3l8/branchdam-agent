@@ -111,6 +111,10 @@ func runTrayCmd(args []string) int {
 	// otherwise surface as a confusing auth failure once ingest actually
 	// tries to talk to the server), anything else is advisory.
 	for _, p := range cfg.Validate() {
+		if p.Advisory() {
+			slog.Warn("config problem", "field", p.Field, "message", p.Message)
+			continue
+		}
 		if strings.HasPrefix(p.Field, "server.") {
 			return fail("config problem: %s", p)
 		}

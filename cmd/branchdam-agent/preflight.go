@@ -71,10 +71,13 @@ func runPreflightChecks(
 	// apiKey), not the local one it actually is. Anything under "server."
 	// fails the report outright since it would otherwise surface as a
 	// confusing connectivity failure in check 1 below; everything else is
-	// advisory.
+	// advisory. A Problem marked Advisory() stays advisory even on a
+	// server.* field -- used today for cleartext http on a loopback host,
+	// which is legitimate local-dev posture (issue #96) and must not block
+	// an agent run.
 	for _, p := range cfg.Validate() {
 		status := "WARN"
-		if strings.HasPrefix(p.Field, "server.") {
+		if !p.Advisory() && strings.HasPrefix(p.Field, "server.") {
 			status = "FAIL"
 			ok = false
 		}
