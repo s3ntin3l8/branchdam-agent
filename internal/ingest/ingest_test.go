@@ -770,12 +770,13 @@ func TestIngestCardChtimesFailureIsLogged(t *testing.T) {
 
 // TestIngestCardChtimesSuccessEmitsNoWarn is the regression guard for
 // the OTHER direction: a healthy os.Chtimes call must not emit the
-// warning. We do this by leaving cHtimesFn pointing at the real
-// os.Chtimes and asserting the buffer contains no chtimes record at
-// all.
+// warning. We install the real os.Chtimes and assert the buffer
+// contains no chtimes record at all.
 func TestIngestCardChtimesSuccessEmitsNoWarn(t *testing.T) {
-	// If a previous test substituted cHtimesFn and its t.Cleanup hasn't
-	// restored it yet (it has, but defensively), reinstall the real one.
+	// Save/restore-through-t.Cleanup for symmetry with the sibling tests
+	// that DO substitute cHtimesFn (Hermes review note on #130).
+	origChtimes := cHtimesFn
+	t.Cleanup(func() { cHtimesFn = origChtimes })
 	cHtimesFn = os.Chtimes
 
 	logBuf := captureSlog(t)
