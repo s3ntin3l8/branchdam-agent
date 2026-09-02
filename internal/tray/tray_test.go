@@ -1162,6 +1162,37 @@ func TestReconfigureSameRootsDoesNotRestartDetector(t *testing.T) {
 	r.StopDetector()
 }
 
+func TestReconfigureDetectorErrorHandler(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+
+	var gotErr error
+	r.SetDetectorErrorHandler(func(err error) {
+		gotErr = err
+	})
+
+	testErr := errors.New("detector test error")
+	r.mu.Lock()
+	handler := r.detectorErrHandler
+	r.mu.Unlock()
+
+	if handler == nil {
+		t.Fatal("expected detectorErrHandler to be set")
+	}
+	handler(testErr)
+	if gotErr != testErr {
+		t.Errorf("gotErr = %v, want %v", gotErr, testErr)
+	}
+
+	r.SetDetectorErrorHandler(nil)
+	r.mu.Lock()
+	handler = r.detectorErrHandler
+	r.mu.Unlock()
+	if handler != nil {
+		t.Error("expected detectorErrHandler to be nil after clearing")
+	}
+}
+
 // fakeSelfUpdater is a no-op SelfUpdater shared by tests across build
 // tags (run_unsupported_test.go's Linux stub test and, eventually,
 // run_supported_test.go's windows/darwin ones).

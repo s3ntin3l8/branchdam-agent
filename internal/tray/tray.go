@@ -13,6 +13,7 @@ package tray
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -265,10 +266,11 @@ type Runner struct {
 	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
 	detectorMu       sync.Mutex
 	detectorCancel   context.CancelFunc
-	detectorDone     chan struct{}
-	detectorBaseCtx  context.Context
-	detectorInterval time.Duration
-	onCardIngested   func()
+	detectorDone       chan struct{}
+	detectorBaseCtx    context.Context
+	detectorInterval   time.Duration
+	onCardIngested     func()
+	detectorErrHandler func(err error)
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -677,6 +679,14 @@ func (r *Runner) SetDetectorInterval(d time.Duration) {
 	r.detectorInterval = d
 }
 
+// SetDetectorErrorHandler registers a handler for non-cancellation errors
+// returned by the Detector.Watch loop (run_supported.go forwards these to errCh).
+func (r *Runner) SetDetectorErrorHandler(fn func(err error)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.detectorErrHandler = fn
+}
+
 // ReconfigureDetector stops any currently running Detector.Watch goroutine,
 // waits for it to exit, and if roots is non-empty, starts a new Detector.Watch
 // goroutine polling roots (issue #78). If ctx is non-nil, it becomes the parent context
@@ -724,7 +734,7 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 	detector := ingest.NewDetector(roots, interval)
 	go func() {
 		defer close(done)
-		_ = detector.Watch(dctx, func(diff ingest.Diff) {
+		err := detector.Watch(dctx, func(diff ingest.Diff) {
 			for _, path := range diff.Inserted {
 				r.TriggerIngest(dctx, path)
 				r.mu.Lock()
@@ -735,6 +745,14 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 				}
 			}
 		})
+		if err != nil && !errors.Is(err, context.Canceled) {
+			r.mu.Lock()
+			handler := r.detectorErrHandler
+			r.mu.Unlock()
+			if handler != nil {
+				handler(err)
+			}
+		}
 	}()
 }
 

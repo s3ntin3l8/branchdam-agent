@@ -17,6 +17,7 @@ package tray
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -297,6 +298,14 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		defer ticker.Stop()
 
 		r.SetOnCardIngested(refresh)
+		r.SetDetectorErrorHandler(func(err error) {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
+		})
 		if detector != nil || len(r.WatchDirs()) > 0 {
 			r.ReconfigureDetector(ctx, r.WatchDirs())
 		}
@@ -636,6 +645,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 
 	onExit := func() {
 		r.SetOnCardIngested(nil)
+		r.SetDetectorErrorHandler(nil)
 		r.StopDetector()
 		close(errCh)
 	}

@@ -227,6 +227,7 @@ func runTrayCmd(args []string) int {
 		}
 	}
 
+	runner.SetDetectorInterval(time.Duration(cfg.Ingest.PollIntervalSecs) * time.Second)
 	var detector *ingest.Detector
 	if len(cfg.Ingest.CardRoots) > 0 {
 		detector = ingest.NewDetector(cfg.Ingest.CardRoots, time.Duration(cfg.Ingest.PollIntervalSecs)*time.Second)
