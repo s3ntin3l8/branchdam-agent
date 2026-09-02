@@ -53,6 +53,22 @@ VULNCHECK_IGNORE ?= GO-2026-5932
 vulncheck: ## Check for known vulnerabilities (allowlist via VULNCHECK_IGNORE, default matches ci-cd.yml)
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 	$$(go env GOPATH)/bin/govulncheck -format json ./... > govulncheck.json || true
+	@# govulncheck v1.7's exit code in -format json mode is 0 for findings
+	@# (and non-zero only for tool-level failures like a load error), so the
+	@# `|| true` above is required to keep the recipe going at all -- but it
+	@# also masks a missing or crash-truncated output file. With `set -e`,
+	@# jq failing inside the `<(...)` process substitution does NOT propagate
+	@# up to abort the recipe, so an empty file would silently fall through
+	@# to "clean". Validate the JSON before treating the run as parseable:
+	@# the file must exist & be non-empty, AND its first object must be the
+	@# govulncheck `config` envelope. Anything else is a tool failure and
+	@# must not be reported as clean.
+	@if ! [ -s govulncheck.json ] \
+	  || ! jq -e 'select(.config.scanner_name == "govulncheck")' govulncheck.json >/dev/null; then \
+	  echo "::error::govulncheck produced no parseable output (govulncheck.json is missing, empty, or not a valid govulncheck JSON stream)"; \
+	  rm -f govulncheck.json; \
+	  exit 1; \
+	fi
 	@ignore_clean=(); \
 	IFS=, read -ra parts <<<"$(VULNCHECK_IGNORE)" || true; \
 	for ig in "$${parts[@]}"; do \
