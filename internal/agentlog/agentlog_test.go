@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -199,5 +200,40 @@ func TestSlogBridgePrintAndPrintf(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "formatted message 42") {
 		t.Errorf("Printf's message missing from log, got: %s", data)
+	}
+}
+
+// TestSetupLogFileModeIsOwnerOnly pins the S-1 fix from issue #95: the
+// agent log file carries no secret today, but X-API-Key and other
+// sensitive strings flow through it in INFO-level traces -- a 0o644 log
+// file would re-leak anything logged into world-readable territory.
+// OpenFile must request 0o600; the resolved file mode after Setup
+// closes the loop.
+func TestSetupLogFileModeIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits don't apply on Windows; agentlog uses ACLs there")
+	}
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+
+	origDefault := slog.Default()
+	defer slog.SetDefault(origDefault)
+
+	path, closeFn, err := Setup()
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := closeFn(); err != nil {
+		t.Fatalf("closeFn: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat log file: %v", err)
+	}
+	want := os.FileMode(0o600)
+	got := info.Mode().Perm()
+	if got != want {
+		t.Errorf("log file mode = %#o, want %#o (owner-only)", got, want)
 	}
 }

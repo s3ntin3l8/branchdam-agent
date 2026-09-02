@@ -97,7 +97,7 @@ func Setup() (path string, closeFn func() error, err error) {
 
 	rotateIfLarge(path)
 
-	f, ferr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, ferr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if ferr != nil {
 		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 		return path, noopClose, fmt.Errorf("agentlog: open log file: %w", ferr)

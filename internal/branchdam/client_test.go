@@ -394,7 +394,7 @@ func TestClientHelloBadJSONResponse(t *testing.T) {
 
 func TestWithHTTPClientOption(t *testing.T) {
 	custom := &http.Client{}
-	c := New("http://example.invalid", "key", WithHTTPClient(custom))
+	c := New("http://localhost:8080", "key", WithHTTPClient(custom))
 	if c.httpClient != custom {
 		t.Error("WithHTTPClient did not override the default http.Client")
 	}
