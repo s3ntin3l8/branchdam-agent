@@ -340,6 +340,96 @@ func TestCollisionFilesMatchSizeMismatch(t *testing.T) {
 	}
 }
 
+// TestResolveDestinationBudgetExhaustionFallsBackToLstatWalk pins the
+// Hermes-review fix on PR #129: when the FastHash budget is exhausted
+// mid-sweep, ResolveDestination must NOT return the current counter's
+// rel -- that path may already be occupied by an existing suffixed
+// file, and downstream createExclusive(O_EXCL) would fail with EEXIST.
+// Instead, the loop must fall back to an Lstat-only walk that returns
+// the next genuinely free counter.
+//
+// The test temporarily shrinks hashBudget via the var seam (declared in
+// naming.go) so the budget is exhausted on the second counter; pre-
+// occupies counters 1..4 so the fallback cannot return any of them;
+// then verifies the returned suffix is the next free counter (>= "_5")
+// and that the returned RelPath does not already exist on disk.
+func TestResolveDestinationBudgetExhaustionFallsBackToLstatWalk(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "archive")
+	if err := os.MkdirAll(archive, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Occupy counter=1 (no suffix) and counter=2..4. The fresh source
+	// will then need at least suffix "_5".
+	for _, name := range []string{
+		"DSC_0001.JPG",
+		"DSC_0001_2.JPG",
+		"DSC_0001_3.JPG",
+		"DSC_0001_4.JPG",
+	} {
+		if err := os.WriteFile(filepath.Join(archive, name), []byte("prior-"+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := filepath.Join(dir, "DSC_src.JPG")
+	if err := os.WriteFile(src, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Force budget exhaustion after the first counter's full-sample
+	// comparison: a budget of fullBytesPerIter accommodates counter=1
+	// but not counter=2.
+	origBudget := hashBudget
+	hashBudget = int64(hashing.FastHashSampleSize) * 3 * 2 // one full-sample comparison
+	t.Cleanup(func() { hashBudget = origBudget })
+
+	vars := TemplateVars{
+		CapturedAt:   time.Now(),
+		CameraModel:  "ILCE-7M4",
+		OriginalName: "DSC_0001.JPG",
+	}
+	res := ResolveDestination([]string{archive}, "{original_name}", vars, src, "")
+
+	if res.AlreadyIngested {
+		t.Fatalf("expected a fresh collision slot, got AlreadyIngested (suffix=%q)", res.Suffix)
+	}
+	for _, occupied := range []string{"", "_2", "_3", "_4"} {
+		if res.Suffix == occupied {
+			t.Errorf("suffix=%q points at an occupied counter; budget fallback did not Lstat-walk past it", res.Suffix)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(archive, res.RelPath)); err == nil {
+		t.Errorf("returned RelPath %q already exists on disk; downstream O_EXCL would EEXIST", res.RelPath)
+	}
+}
+
+// TestFindNextFreeSuffixEmptyArchive pins the simplest path: with no
+// prior files, the Lstat fallback should return counter=1 (no suffix),
+// matching the unoptimized loop's behavior. Sanity check for the
+// fallback itself.
+func TestFindNextFreeSuffixEmptyArchive(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "archive")
+	if err := os.MkdirAll(archive, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	vars := TemplateVars{
+		CapturedAt:   time.Now(),
+		CameraModel:  "ILCE-7M4",
+		OriginalName: "DSC_0001.JPG",
+	}
+	res := findNextFreeSuffix([]string{archive}, "{original_name}", vars)
+	if res.Suffix != "" {
+		t.Errorf("suffix = %q, want \"\" (empty archive -> counter=1)", res.Suffix)
+	}
+	if res.AlreadyIngested {
+		t.Errorf("AlreadyIngested = true, want false")
+	}
+	if res.RelPath != "DSC_0001.JPG" {
+		t.Errorf("RelPath = %q, want \"DSC_0001.JPG\"", res.RelPath)
+	}
+}
+
 // TestFastHashWithSampleSizeMatchesFastHashAtCanonicalSize pins the
 // hash-identity contract of FastHashWithSampleSize: when sampleSize
 // equals the canonical FastHashSampleSize, the digest must match

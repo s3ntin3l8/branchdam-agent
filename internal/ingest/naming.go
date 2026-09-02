@@ -121,7 +121,20 @@ const collisionSampleSize = 256 * 1024
 // issue #105 with margin to spare -- while bounding the worst case to a
 // single-digit-second pause instead of the unbounded 80 TB worst case
 // the unfixed 10000-iteration loop permitted.
-const hashBudget = 2 * 1024 * 1024 * 1024
+//
+// On exhaustion the loop falls back to an Lstat-only walk to find the
+// next free counter, never returning a DestinationResolution whose
+// RelPath already exists on disk (Hermes review on PR #129: returning
+// the current counter's rel on budget exhaustion would point the
+// downstream createExclusive(O_EXCL) write at a path that is already
+// taken once the archive carries more than ~1365 prior suffixed
+// collisions, and the ingest would fail with EEXIST instead of
+// allocating the next free slot).
+//
+// Declared as a var (not const) so tests can shrink it locally to
+// force the budget-exhaustion path without provisioning 1500 colliding
+// 4 MiB files.
+var hashBudget int64 = 2 * 1024 * 1024 * 1024
 
 // fastHashFile opens p and calculates its FastHash with size using the
 // canonical 2MiB per-region sample. Used for the final-destination match
@@ -331,34 +344,86 @@ func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath s
 		// checkCollisionRoots (Lstat short-circuit + small-sample
 		// FastHash) so the read traffic stays inside hashBudget even
 		// when thousands of suffixed entries exist.
-		var allExist, allMatch bool
+		var (
+			allExist, allMatch bool
+			budgetExhausted     bool
+		)
 		if counter == 1 {
 			if hashesDone+fullBytesPerIter > hashBudget {
 				// Even the first match is over budget -- an
-				// over-budget archive is pathological. Allocate
-				// the unsuffixed slot and skip byte-identity
-				// confirmation; downstream Verify on the actual
-				// write will surface any duplication through
-				// the per-file Err.
-				return DestinationResolution{RelPath: rel, Suffix: suffix, AlreadyIngested: false}
+				// over-budget archive is pathological. Defer
+				// to the Lstat-only fallback walk below
+				// (findNextFreeSuffix) which never returns a
+				// path that already exists on disk.
+				budgetExhausted = true
+			} else {
+				allExist, allMatch = checkRoots(roots, rel, srcPath)
+				hashesDone += fullBytesPerIter
 			}
-			allExist, allMatch = checkRoots(roots, rel, srcPath)
-			hashesDone += fullBytesPerIter
 		} else {
 			if hashesDone+collisionBytesPerItr > hashBudget {
-				return DestinationResolution{RelPath: rel, Suffix: suffix, AlreadyIngested: false}
+				budgetExhausted = true
+			} else {
+				allExist, allMatch = checkCollisionRoots(roots, rel, srcPath)
+				hashesDone += collisionBytesPerItr
 			}
-			allExist, allMatch = checkCollisionRoots(roots, rel, srcPath)
-			hashesDone += collisionBytesPerItr
 		}
 
-		if allExist && allMatch {
-			return DestinationResolution{
-				RelPath:         rel,
-				Suffix:          suffix,
-				AlreadyIngested: true,
+		if !budgetExhausted {
+			if allExist && allMatch {
+				return DestinationResolution{
+					RelPath:         rel,
+					Suffix:          suffix,
+					AlreadyIngested: true,
+				}
+			}
+			anyExists := false
+			for _, root := range roots {
+				if root == "" {
+					continue
+				}
+				if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
+					anyExists = true
+					break
+				}
+			}
+			if !anyExists {
+				return DestinationResolution{
+					RelPath:         rel,
+					Suffix:          suffix,
+					AlreadyIngested: false,
+				}
 			}
 		}
+	}
+
+	// Fallback path: either the loop ran out of counters (counter >
+	// 10000) or the FastHash budget was exhausted mid-sweep. In both
+	// cases the budget is no longer protecting us from taking an
+	// already-occupied suffix, so use an Lstat-only walk to find the
+	// next free slot. Returning a RelPath that already exists on disk
+	// would surface downstream as an O_EXCL EEXIST on createExclusive
+	// -- silent corruption-of-the-next-attempt rather than a graceful
+	// failure (Hermes review on PR #129).
+	return findNextFreeSuffix(roots, tpl, vars)
+}
+
+// findNextFreeSuffix walks the counter space with Lstat only (no
+// FastHash) starting at counter=1 and returns the first slot whose
+// destination does not exist in any root. Bypassed under normal
+// operation by the FastHash loop above; reached only when hashBudget
+// has been exhausted or the 10000-iteration cap is hit. AlreadyIngested
+// is always false here -- the budget was spent without confirming
+// byte-identity, so we cannot claim a duplicate-match.
+func findNextFreeSuffix(roots []string, tpl string, vars TemplateVars) DestinationResolution {
+	for counter := 1; counter <= 10000; counter++ {
+		suffix := ""
+		if counter > 1 {
+			suffix = fmt.Sprintf("_%d", counter)
+		}
+		candidateVars := vars
+		candidateVars.OriginalName = SuffixedFilename(vars.OriginalName, suffix)
+		rel := RenderPath(tpl, candidateVars)
 		anyExists := false
 		for _, root := range roots {
 			if root == "" {
@@ -370,14 +435,12 @@ func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath s
 			}
 		}
 		if !anyExists {
-			return DestinationResolution{
-				RelPath:         rel,
-				Suffix:          suffix,
-				AlreadyIngested: false,
-			}
+			return DestinationResolution{RelPath: rel, Suffix: suffix, AlreadyIngested: false}
 		}
 	}
-
+	// Worst case: every counter 1..10000 is occupied. Return the
+	// unsuffixed render so the caller surfaces a clear downstream
+	// failure rather than silently picking something arbitrary.
 	rel := RenderPath(tpl, vars)
 	return DestinationResolution{RelPath: rel, Suffix: ""}
 }
