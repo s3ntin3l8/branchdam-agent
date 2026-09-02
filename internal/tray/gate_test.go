@@ -1,12 +1,12 @@
-//go:build !windows && !darwin
-
 // Tests for the confirmation-gate logic around the four destructive tray
 // menu actions (issue #108 / E3 #S2-14: "Drain queue now", "Prune now",
 // "Install and restart", "Roll back"). The actual menu wiring only
 // compiles on windows/darwin (run_supported.go's build tag), but the
-// gate decision is pure -- it takes a confirmation function, a bool, and
-// returns whether to proceed -- so it's testable from this build tag
-// without ever touching fyne.io/systray.
+// gate decision itself is pure -- it takes a confirmation function, a
+// bool, and returns whether to proceed -- so gate.go carries no build
+// tag and neither does this file: the exact code that ships on
+// windows/darwin is what runs here, on the Linux CI runner, without
+// ever touching fyne.io/systray.
 package tray
 
 import (
