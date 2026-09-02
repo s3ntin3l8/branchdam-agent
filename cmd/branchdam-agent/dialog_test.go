@@ -43,6 +43,7 @@ func fakeDialogFuncs() dialogFuncs {
 		file: func(title, defaultPath string, patterns []string) (string, error) {
 			return "/chosen/file.db", nil
 		},
+		question: func(title, message string) error { return nil },
 	}
 }
 
@@ -194,6 +195,71 @@ func TestSplitPatternsEmptyAndWhitespaceOnly(t *testing.T) {
 		if got := splitPatterns(in); got != nil {
 			t.Errorf("splitPatterns(%q) = %v, want nil", in, got)
 		}
+	}
+}
+
+// TestRunDialogCmdQuestionOK covers the success half of the new
+// -kind question dispatch (issue #108 / E3 #S2-14): dlg.question
+// returns nil (operator clicked OK), and runDialogCmd must surface
+// that as dialogExitOK so the tray's confirm callback (cmd/branchdam-agent/tray.go's
+// trayConfirm) maps it to "proceed with the destructive action."
+func TestRunDialogCmdQuestionOK(t *testing.T) {
+	dlg := fakeDialogFuncs()
+	got := runDialogCmd([]string{"-kind", "question", "-title", "Confirm", "-message", "Are you sure?"}, dlg)
+	if got != dialogExitOK {
+		t.Errorf("got exit %d, want %d", got, dialogExitOK)
+	}
+}
+
+// TestRunDialogCmdQuestionCanceled pins the cancel half: dlg.question
+// returns zenity.ErrCanceled (the standard "Cancel/window-close" sentinel
+// from github.com/ncruces/zenity), and runDialogCmd must surface that as
+// dialogExitCanceled so the tray's confirm callback refuses the action
+// without logging it as a render failure.
+func TestRunDialogCmdQuestionCanceled(t *testing.T) {
+	dlg := fakeDialogFuncs()
+	dlg.question = func(title, message string) error { return zenity.ErrCanceled }
+	got := runDialogCmd([]string{"-kind", "question", "-title", "T", "-message", "M"}, dlg)
+	if got != dialogExitCanceled {
+		t.Errorf("got exit %d, want %d (canceled)", got, dialogExitCanceled)
+	}
+}
+
+// TestRunDialogCmdQuestionFailure pins the "dialog did not even render"
+// branch: a question dialog that returns any non-ErrCanceled error
+// (the subprocess failed to spawn, no display, zenity backend missing)
+// must come back as dialogExitFailed. The tray's confirm callback
+// treats that the same as Cancel -- refuse the action -- but a
+// different exit code lets the callback's slog line (if any caller
+// surfaces one) distinguish "operator said no" from "this host
+// can't show a dialog."
+func TestRunDialogCmdQuestionFailure(t *testing.T) {
+	dlg := fakeDialogFuncs()
+	dlg.question = func(title, message string) error { return errors.New("no display") }
+	got := runDialogCmd([]string{"-kind", "question", "-title", "T", "-message", "M"}, dlg)
+	if got != dialogExitFailed {
+		t.Errorf("got exit %d, want %d (failed)", got, dialogExitFailed)
+	}
+}
+
+// TestRunDialogCmdQuestionPassesTitleAndMessage proves the new -kind
+// question actually threads its -title and -message into dlg.question,
+// not just that it dispatches by kind. Without this, a wiring bug that
+// swapped title/message at the call site (or dropped -title) would
+// silently render a blank dialog and stay green.
+func TestRunDialogCmdQuestionPassesTitleAndMessage(t *testing.T) {
+	var gotTitle, gotMessage string
+	dlg := fakeDialogFuncs()
+	dlg.question = func(title, message string) error {
+		gotTitle, gotMessage = title, message
+		return nil
+	}
+	runDialogCmd([]string{"-kind", "question", "-title", "Confirm prune", "-message", "Delete files?"}, dlg)
+	if gotTitle != "Confirm prune" {
+		t.Errorf("got title %q, want %q", gotTitle, "Confirm prune")
+	}
+	if gotMessage != "Delete files?" {
+		t.Errorf("got message %q, want %q", gotMessage, "Delete files?")
 	}
 }
 
