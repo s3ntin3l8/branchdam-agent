@@ -2,7 +2,7 @@ module github.com/s3ntin3l8/branchdam-agent
 
 go 1.26.0
 
-toolchain go1.26.5
+toolchain go1.26.7
 
 require (
 	fyne.io/systray v1.12.2
