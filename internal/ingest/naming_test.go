@@ -112,23 +112,71 @@ func TestRenderPathAllFiveTokensTogether(t *testing.T) {
 	}
 }
 
-// TestRenderPathTraversalSequenceNotStripped documents a known, filed gap
-// rather than asserting desired behavior: sanitizeSegment's replacer list
-// does not include "..", so a ".." sequence in CameraModel or
-// OriginalName survives into the rendered path unchanged, despite
-// RenderPath's own doc comment claiming the result never contains "..".
-// This test exists so a future fix has a red test to turn green, and so a
-// well-intentioned refactor doesn't accidentally "fix" this without
-// updating the doc comment and this test together.
-func TestRenderPathTraversalSequenceNotStripped(t *testing.T) {
-	vars := TemplateVars{
-		CapturedAt:   time.Now(),
-		CameraModel:  "../../etc",
-		OriginalName: "f.jpg",
+func TestRenderPathStripsTraversalSequence(t *testing.T) {
+	// RenderPath's doc comment promises the result never contains "..",
+	// so a CameraModel like "../../etc" or an OriginalName that contains
+	// "..", "/", or bare "." segments must be neutralized into something
+	// safe before being joined into the rendered path. sanitizeSegment
+	// replaces path separators and the unsafe-character set with "_", and
+	// also rejects segments that resolve to "." or "..", or still contain
+	// a literal ".." substring after the slash-to-underscore pass, falling
+	// back to "_" so the path component is never empty and never
+	// traverses (issue #99).
+	tests := []struct {
+		name string
+		vars TemplateVars
+		tpl  string
+	}{
+		{
+			name: "camera_model traversal segments",
+			vars: TemplateVars{
+				CapturedAt:   time.Now(),
+				CameraModel:  "../../etc",
+				OriginalName: "f.jpg",
+			},
+			tpl: "{camera_model}/{original_name}",
+		},
+		{
+			name: "original_name traversal segments",
+			vars: TemplateVars{
+				CapturedAt:   time.Now(),
+				CameraModel:  "ILCE-7M4",
+				OriginalName: "../../passwd.jpg",
+			},
+			tpl: "{camera_model}/{original_name}",
+		},
+		{
+			name: "original_name bare dot segments",
+			vars: TemplateVars{
+				CapturedAt:   time.Now(),
+				CameraModel:  "ILCE-7M4",
+				OriginalName: "./././f.jpg",
+			},
+			tpl: "{camera_model}/{original_name}",
+		},
+		{
+			name: "stem and ext traversal",
+			vars: TemplateVars{
+				CapturedAt:   time.Now(),
+				CameraModel:  "ILCE-7M4",
+				OriginalName: "../foo.bar",
+			},
+			tpl: "{camera_model}/{stem}.{ext}",
+		},
 	}
-	got := RenderPath("{camera_model}/{original_name}", vars)
-	if !strings.Contains(got, "..") {
-		t.Skip("sanitizeSegment now strips \"..\" -- update RenderPath's doc comment to match and delete this test's stale framing")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RenderPath(tc.tpl, tc.vars)
+			if strings.Contains(got, "..") {
+				t.Errorf("RenderPath(%q, %+v) = %q, must not contain %q", tc.tpl, tc.vars, got, "..")
+			}
+			for _, seg := range strings.Split(got, "/") {
+				switch seg {
+				case "", ".", "..":
+					t.Errorf("RenderPath(%q, %+v) = %q, contains unsafe segment %q", tc.tpl, tc.vars, got, seg)
+				}
+			}
+		})
 	}
 }
 

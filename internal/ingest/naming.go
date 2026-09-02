@@ -53,8 +53,14 @@ func SuffixedFilename(original, suffix string) string {
 
 // sanitizeSegment replaces path separators and other characters that would
 // either escape the destination root or produce an invalid path component
-// on Windows (the plan's stated second target platform) with "_". Templates
-// are config-supplied, not attacker-controlled, but CameraModel and
+// on Windows (the plan's stated second target platform) with "_", then runs
+// filepath.Clean on the result and rejects any segment that would resolve
+// to ".", "..", or that still contains a literal ".." substring by
+// returning a literal "_" instead. The Clean + reject pass is what
+// enforces RenderPath's "never contains .." invariant (issue #99) against
+// CameraModel/OriginalName values like "../../etc" that the
+// character-only replacer would otherwise pass through. Templates are
+// config-supplied, not attacker-controlled, but CameraModel and
 // OriginalName both originate from file content/names on a removable card,
 // which this agent does not otherwise trust.
 func sanitizeSegment(s string) string {
@@ -65,14 +71,27 @@ func sanitizeSegment(s string) string {
 		"/", "_", "\\", "_", ":", "_", "*", "_", "?", "_",
 		"\"", "_", "<", "_", ">", "_", "|", "_",
 	)
-	return replacer.Replace(s)
+	cleaned := filepath.Clean(replacer.Replace(s))
+	// filepath.Clean only resolves ".." in path context (with separators).
+	// After the slash-replacement above, any ".." that remains is a
+	// literal substring inside an otherwise-safe segment, so reject it
+	// directly to close issue #99 -- e.g. "../../etc" becomes
+	// ".._.._etc", which still contains "..".
+	if cleaned == "." || cleaned == ".." || strings.Contains(cleaned, "..") {
+		return "_"
+	}
+	return cleaned
 }
 
 // RenderPath expands tpl against vars, returning a slash-separated relative
-// path (never absolute, never containing ".." after sanitization) suitable
-// for joining under either ArchiveRoot or LocalEditRoot. Both destinations
-// call this with the identical vars, which is what makes the local copy
-// mirror the archive subtree by construction (issue #2's stated design).
+// path (never absolute, never containing "..") suitable for joining under
+// either ArchiveRoot or LocalEditRoot. Both destinations call this with
+// the identical vars, which is what makes the local copy mirror the
+// archive subtree by construction (issue #2's stated design). The
+// "never containing .." guarantee is enforced by sanitizeSegment, which
+// runs filepath.Clean on each token and falls back to "_" when the
+// cleaned segment would be ".", "..", or would still contain a literal
+// ".." substring (issue #99).
 func RenderPath(tpl string, vars TemplateVars) string {
 	if tpl == "" {
 		tpl = DefaultPathTemplate
