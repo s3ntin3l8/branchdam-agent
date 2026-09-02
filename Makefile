@@ -44,17 +44,22 @@ tidy: ## Tidy Go modules
 	go mod tidy
 
 VULNCHECK_IGNORE ?= GO-2026-5932
+VULNCHECK_VERSION ?= v1.7.0
 
 # govulncheck is in Go's x/vuln module family, so we install on the fly
-# rather than committing a pre-installed binary. JSON output is used instead
-# of relying on govulncheck's own exit code: verified against govulncheck
-# v1.7 (the version pinned by `go install ...@latest` on this host),
-# `-format json` exits 0 for both clean and findings-present runs (it only
-# exits non-zero on a tool-level failure like a package-load error). The
-# pass/fail decision (and the VULNCHECK_IGNORE allowlist) is therefore
-# applied here against the parsed findings, mirroring what ci-go.yml does
-# in CI. Set VULNCHECK_IGNORE="" to fail on every finding; comma-separate
-# IDs to allowlist specific ones.
+# rather than committing a pre-installed binary. Pinned to a released
+# version (VULNCHECK_VERSION, default v1.7.0) rather than @latest so
+# the allowlist semantics and JSON schema (`.config.scanner_name`,
+# `.finding.osv`) are deterministic -- a future govulncheck release
+# that changes either would otherwise drift the gate silently. JSON
+# output is used instead of relying on govulncheck's own exit code:
+# verified against govulncheck v1.7, `-format json` exits 0 for both
+# clean and findings-present runs (it only exits non-zero on a tool-level
+# failure like a package-load error). The pass/fail decision (and the
+# VULNCHECK_IGNORE allowlist) is therefore applied here against the
+# parsed findings, mirroring what ci-go.yml does in CI. Set
+# VULNCHECK_IGNORE="" to fail on every finding; comma-separate IDs to
+# allowlist specific ones.
 #
 # Default allowlist mirrors ci-cd.yml's `govulncheck-ignore` input:
 # GO-2026-5932 (golang.org/x/crypto/openpgp, unmaintained, no upstream fix
@@ -68,9 +73,10 @@ VULNCHECK_IGNORE ?= GO-2026-5932
 # would break the `\` continuation chain, so the rationale lives up
 # here in the Make-comment block instead.)
 vulncheck: ## Check for known vulnerabilities (allowlist via VULNCHECK_IGNORE, default matches ci-cd.yml)
-	go install golang.org/x/vuln/cmd/govulncheck@latest
+	@command -v jq >/dev/null 2>&1 || { echo "::error::vulncheck: \`jq\` is required but not installed. Install via 'brew install jq' (macOS), 'apt-get install jq' (Linux), or 'choco install jq' (Windows)."; exit 1; }
+	go install golang.org/x/vuln/cmd/govulncheck@$(VULNCHECK_VERSION)
 	$$(go env GOPATH)/bin/govulncheck -format json ./... > govulncheck.json || true
-	@# govulncheck v1.7's exit code in -format json mode is 0 for findings
+	@# govulncheck's exit code in -format json mode is 0 for findings
 	@# (and non-zero only for tool-level failures like a load error), so the
 	@# `|| true` above is required to keep the recipe going at all -- but it
 	@# also masks a missing or crash-truncated output file. With `set -e`,
