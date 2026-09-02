@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -374,7 +375,7 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 		args = append(args, "-patterns", strings.Join(prompt.patterns, ","))
 	}
 
-	value, exitCode, err := s.dialog(args...)
+	value, exitCode, err := s.dialog(context.Background(), args...)
 	if err != nil {
 		return false, fmt.Errorf("run settings dialog for %s: %w", prompt.key, err)
 	}
@@ -425,7 +426,7 @@ func (s *configSettings) PromptAndSetIntegrationPath(id tray.IntegrationID) (boo
 		args = append(args, "-patterns", strings.Join(b.CatalogFilePatterns, ","))
 	}
 
-	value, exitCode, err := s.dialog(args...)
+	value, exitCode, err := s.dialog(context.Background(), args...)
 	key := b.ConfigKey("catalogPath")
 	if err != nil {
 		return false, fmt.Errorf("run settings dialog for %s: %w", key, err)

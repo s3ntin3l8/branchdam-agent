@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,7 +26,7 @@ import (
 func stubTrayDialog(t *testing.T, run dialogRunner) {
 	t.Helper()
 	if run == nil {
-		run = func(args ...string) (string, int, error) { return "", dialogExitFailed, nil }
+		run = func(_ context.Context, args ...string) (string, int, error) { return "", dialogExitFailed, nil }
 	}
 	orig := trayDialogSetup
 	trayDialogSetup = func() (dialogRunner, string, error) {
@@ -185,7 +186,7 @@ func TestRunTrayFirstRunBootstrapAppliesAnswers(t *testing.T) {
 		"ingest.localEditRoot":  "/edit",
 		pathMappingContainerKey: "/storage/archive",
 	}
-	stubTrayDialog(t, func(args ...string) (string, int, error) {
+	stubTrayDialog(t, func(_ context.Context, args ...string) (string, int, error) {
 		var title string
 		for i, a := range args {
 			if a == "-title" && i+1 < len(args) {

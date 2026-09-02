@@ -118,7 +118,18 @@ type menuActionResult struct {
 // restart" affordance; settings drives the "Settings" submenu (issue #31) --
 // Run itself does not know how to check for updates or persist config,
 // matching Runner's own separation from the ingest core (see tray.go).
-func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, settings Settings) (Outcome, error) {
+//
+// confirm and confirmDestructive gate the four destructive menu actions
+// (issue #108 / E3 #S2-14: "Drain queue now", "Prune now", "Install
+// and restart", "Roll back"). When confirmDestructive is true, every
+// one of those four click handlers calls confirm(title, body) before
+// dispatching the work, and skips the action on a Cancel/false answer.
+// When false, the prompt is skipped entirely -- power users who want
+// fire-and-forget clicks set tray.confirmDestructive: false in
+// config. confirm itself is a function the production wiring supplies
+// (a re-exec of `dialog -kind question ...`); Run never imports a
+// dialog backend directly.
+func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, settings Settings, confirm func(ctx context.Context, title, body string) bool, confirmDestructive bool) (Outcome, error) {
 	errCh := make(chan error, 1)
 	var outcome Outcome
 
@@ -480,6 +491,18 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 			case <-ingestDoneCh:
 				refresh()
 			case <-drainNow.ClickedCh:
+				// Confirmation gate (issue #108 / E3 #S2-14): a drain
+				// pass POSTs all pending node_created events to the
+				// server and rebases eligible rows -- destructive in
+				// the sense that re-running it on a queue the operator
+				// didn't realize was ready would surprise them. The
+				// default in title/body matches the issue's exact
+				// wording.
+				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+					"Confirm drain queue",
+					"Drain the offline queue now? This will POST all pending node_created events to branchDAM. Cancel to defer.") {
+					continue
+				}
 				select {
 				case drainRequestCh <- struct{}{}:
 				default:
@@ -492,6 +515,17 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 				}
 				refresh()
 			case <-pruneNow.ClickedCh:
+				// Confirmation gate (issue #108 / E3 #S2-14): prune
+				// DELETES from ingest.LocalEditRoot. A double-click
+				// against the wrong mount is the canonical "silent
+				// data loss" the issue was filed to fix -- AGENTS.md
+				// invariant #9 (prune safety) names this exact
+				// scenario.
+				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+					"Confirm prune",
+					"Delete verified local files matching LocalEditRoot? This is destructive and cannot be undone. Cancel to keep them.") {
+					continue
+				}
 				select {
 				case pruneRequestCh <- struct{}{}:
 				default:
@@ -546,6 +580,16 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 				if applying || rollingBack {
 					continue
 				}
+				// Confirmation gate (issue #108 / E3 #S2-14): a
+				// successful apply restarts the tray (~5s of unavailability
+				// for the status page and any in-flight menu actions) and
+				// is irreversible except by `Roll back`. The default
+				// in title/body matches the issue's exact wording.
+				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+					"Confirm install and restart",
+					"Apply the downloaded update and restart the tray? The tray will be unavailable for ~5 seconds.") {
+					continue
+				}
 				rel, ok := r.TryLockIdle()
 				if !ok {
 					refresh()
@@ -595,6 +639,27 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 				return
 			case <-rollbackItem.ClickedCh:
 				if applying || rollingBack {
+					continue
+				}
+				// Confirmation gate (issue #108 / E3 #S2-14): a
+				// successful rollback restarts the tray AND downgrades
+				// the running version. Like install, the ~5s restart
+				// window and the irreversibility (one more
+				// update-and-restart to undo) make it destructive
+				// enough to warrant a prompt. The body interpolates
+				// the actual current version (the user-visible label
+				// the menu also shows) so the operator can verify
+				// they're rolling back FROM the right one. us (the
+				// up.Status snapshot) is local to refresh() above, so
+				// re-read it here for the prompt body -- the version
+				// can't change between refresh ticks in a meaningful
+				// way for a confirmation, and the alternative is
+				// carrying an extra closure variable through every
+				// case in this select.
+				currentVersion := up.Status().CurrentVersion
+				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+					"Confirm roll back",
+					fmt.Sprintf("Roll back to the previous version? Current version: %s.", currentVersion)) {
 					continue
 				}
 				rel, ok := r.TryLockIdle()

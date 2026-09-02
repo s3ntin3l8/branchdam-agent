@@ -126,6 +126,11 @@ func TestTrayAndSelfUpdateDefaults(t *testing.T) {
 	if cfg.Tray.StartOnLogin {
 		t.Error("StartOnLogin must default to false")
 	}
+	// Tray.ConfirmDestructive is NOT checked here -- the zero value
+	// (false) and the operator-visible default (true) deliberately
+	// disagree. The zero-value-false test is in
+	// TestLoadTrayConfirmDestructiveDefaultsToTrue's mirror:
+	// defaultConfig() must turn it on, not the Go zero value.
 	if cfg.SelfUpdate.Enabled {
 		t.Error("the zero-value Config's SelfUpdate.Enabled must be false")
 	}
@@ -198,6 +203,80 @@ selfUpdate:
 	}
 	if !cfg.SelfUpdate.Enabled || cfg.SelfUpdate.RepoOrDefault() != "someone/fork" {
 		t.Errorf("got %+v", cfg.SelfUpdate)
+	}
+}
+
+// TestLoadTrayConfirmDestructiveDefaultsToTrue pins the operator-visible
+// default for issue #108's tray.confirmDestructive: a config that never
+// mentions the field at all still gets confirmations on. A destructive
+// click -- "Prune now" against the wrong mount, a self-update restart
+// mid-render -- is the very reason #108 exists, and an opt-OUT default
+// would re-introduce the same silent-data-loss hazard the issue was
+// filed to fix. Power users who want to skip the prompt set
+// tray.confirmDestructive: false explicitly.
+//
+// Mirrors the SelfUpdate.Enabled-on-by-default test's exact shape (same
+// "explicit value still wins" guarantee, same zero-value-vs-default
+// distinction).
+func TestLoadTrayConfirmDestructiveDefaultsToTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("agentId: test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Tray.ConfirmDestructive {
+		t.Error("Tray.ConfirmDestructive must default to true when the config file doesn't mention tray.confirmDestructive at all")
+	}
+}
+
+// TestLoadTrayConfirmDestructiveExplicitlyDisabled is the override side:
+// tray.confirmDestructive: false in config must survive Load, just like
+// selfUpdate.enabled: false does.
+func TestLoadTrayConfirmDestructiveExplicitlyDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "tray:\n  confirmDestructive: false\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tray.ConfirmDestructive {
+		t.Error("an explicit tray.confirmDestructive: false in config must override the on-by-default confirmation prompt")
+	}
+}
+
+// TestPatchTrayConfirmDestructive verifies the new field round-trips
+// through config.Patch's dotted-key form, the same way tray.startOnLogin
+// and the other tray.* fields do. Tray.ConfirmDestructive is the
+// opt-out switch the tray menu surfaces (issue #108 / E3 #S2-14), so
+// an operator's menu-driven SetBool("tray.confirmDestructive", false)
+// must persist and re-load cleanly.
+func TestPatchTrayConfirmDestructive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("agentId: test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Patch(path, map[string]any{"tray.confirmDestructive": false}); err != nil {
+		t.Fatalf("Patch: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tray.ConfirmDestructive {
+		t.Error("patched field tray.confirmDestructive did not take effect")
 	}
 }
 
