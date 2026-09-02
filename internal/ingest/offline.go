@@ -236,7 +236,11 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		fr.Err = fmt.Errorf("write local copy: %w", err)
 		return fr
 	}
-	_ = os.Chtimes(localPath, e.now(), srcInfo.ModTime())
+	// Soft contract (issue #103): the local-path mtime is what
+	// prune.go's TOCTOU re-stat reads back, so a silently-swallowed
+	// Chtimes failure here means the prune-safety half of invariant
+	// #8 quietly stops catching anything. Log it; don't fail ingest.
+	preserveMtimeAt(srcPath, localPath, srcInfo.ModTime())
 
 	localVerify, err := Verify(localPath, writeRes.FullHash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 	if err != nil {

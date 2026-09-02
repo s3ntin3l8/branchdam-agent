@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -16,6 +17,34 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/phash"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 )
+
+// cHtimesFn is the indirection used to preserve source-mtime on
+// destinations (issue #103's soft contract). The real call is os.Chtimes;
+// tests substitute a stub that returns an error so they can assert the
+// slog.Warn is emitted. Mirrors writer.go's syncParentDirFn pattern --
+// the canonical "verify the log path without simulating a real fsync
+// failure on tmpfs" trick this package uses for the equivalent
+// dir-fsync log path.
+var cHtimesFn = os.Chtimes
+
+// preserveMtimeAt is a tiny wrapper around cHtimesFn that translates a
+// failure into a slog.Warn carrying enough context to debug. Centralising
+// the log shape here means every os.Chtimes call site in this package
+// (the two in IngestCard's online path, the one in IngestCard's
+// upload-stream path, the one in IngestCardOffline's offline path)
+// emits an identical record -- source, destination, underlying error --
+// so an operator looking for "why did my destination mtime not advance?"
+// sees one message format no matter which code path got there.
+func preserveMtimeAt(srcPath, dstPath string, mtime time.Time) {
+	atime := time.Time{}
+	if err := cHtimesFn(dstPath, atime, mtime); err != nil {
+		slog.Warn("ingest: failed to preserve source mtime on destination",
+			"source", srcPath,
+			"destination", dstPath,
+			"err", err,
+		)
+	}
+}
 
 // nodeCreator is the subset of *branchdam.Client's surface Engine needs, so
 // tests can substitute a fake without a real HTTP server.
@@ -276,8 +305,15 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	// Preserve the source's original mtime on both destinations -- an
 	// ingested master's mtime should reflect when it was captured/written
 	// on the card, not the moment this agent happened to copy it.
-	_ = os.Chtimes(archivePath, e.now(), srcInfo.ModTime())
-	_ = os.Chtimes(localPath, e.now(), srcInfo.ModTime())
+	//
+	// Soft contract (issue #103): a Chtimes failure here is logged, not
+	// fatal -- the file is on disk and verified, only its mtime
+	// preservation is best-effort. But the failure MUST be surfaced
+	// (slog.Warn), because the prune-safety half of invariant #8 depends
+	// on the destination mtime advancing past the source's, and a silent
+	// Chtimes failure is exactly the case prune silently stops deleting.
+	preserveMtimeAt(srcPath, archivePath, srcInfo.ModTime())
+	preserveMtimeAt(srcPath, localPath, srcInfo.ModTime())
 
 	archiveVerify, err := Verify(archivePath, writeRes.FullHash, e.progressOpts(archivePath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 	if err != nil {
@@ -485,7 +521,10 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 		return fr
 	}
 	fr.Write = writeRes
-	_ = os.Chtimes(localPath, e.now(), srcInfo.ModTime())
+	// Soft contract (issue #103): the archive landed server-side via
+	// Upload, so the only Chtimes call on this path is the local edit
+	// copy. Failure is logged, not fatal -- see preserveMtimeAt.
+	preserveMtimeAt(srcPath, localPath, srcInfo.ModTime())
 
 	localVerify, err := Verify(localPath, upResp.Blake3Hash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 	if err != nil {
