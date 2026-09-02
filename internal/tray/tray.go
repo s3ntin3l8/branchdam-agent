@@ -264,8 +264,8 @@ type Runner struct {
 
 	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
 	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
-	detectorMu       sync.Mutex
-	detectorCancel   context.CancelFunc
+	detectorMu         sync.Mutex
+	detectorCancel     context.CancelFunc
 	detectorDone       chan struct{}
 	detectorBaseCtx    context.Context
 	detectorInterval   time.Duration
