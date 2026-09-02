@@ -668,3 +668,56 @@ server:
 	// On POSIX the warning is expected; the platform-specific
 	// assertion is the no-warning half above.
 }
+
+// TestLoadAllowedExtensionsDefault ensures a config that never mentions
+// ingest.allowedExtensions resolves to a nil/empty list -- the "accept all"
+// default that keeps #100 backward-compatible with every existing config
+// (see IngestConfig.AllowedExtensions's doc comment).
+func TestLoadAllowedExtensionsDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  baseUrl: http://x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Ingest.AllowedExtensions) != 0 {
+		t.Errorf("expected default AllowedExtensions to be empty, got %v", cfg.Ingest.AllowedExtensions)
+	}
+}
+
+// TestLoadAllowedExtensionsOverride pins YAML -> struct round-trip for the
+// M5/#100 AllowedExtensions list. Case is preserved as-written (an operator
+// can write "JPG" in YAML), since the walk filter lowercases both sides
+// when comparing (see internal/ingest's filter helper).
+func TestLoadAllowedExtensionsOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+ingest:
+  allowedExtensions:
+    - "JPG"
+    - "arw"
+    - "mp4"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"JPG", "arw", "mp4"}
+	if len(cfg.Ingest.AllowedExtensions) != len(want) {
+		t.Fatalf("got %d entries, want %d", len(cfg.Ingest.AllowedExtensions), len(want))
+	}
+	for i, ext := range want {
+		if cfg.Ingest.AllowedExtensions[i] != ext {
+			t.Errorf("AllowedExtensions[%d] = %q, want %q", i, cfg.Ingest.AllowedExtensions[i], ext)
+		}
+	}
+}

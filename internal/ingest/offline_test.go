@@ -467,3 +467,149 @@ func TestIngestCardOfflineSkipIdenticalDuplicate(t *testing.T) {
 		t.Error("did not expect a suffixed DSC0001_2.JPG -- duplicate should have been skipped, not renamed")
 	}
 }
+
+// TestIngestCardOfflineSkipsOSMetadata is the offline mirror of
+// TestIngestCardSkipsOSMetadata: a macOS- or Windows-formatted card's
+// per-directory junk files must not become queue.db rows, must not
+// trigger exiftool, and must not write to the local edit destination.
+func TestIngestCardOfflineSkipsOSMetadata(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	subdir := filepath.Join(cardRoot, "DCIM", "100MSDCF")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subdir, "DSC0001.JPG"), []byte("photo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		filepath.Join(cardRoot, ".DS_Store"),
+		filepath.Join(cardRoot, "._DSC0001.JPG"),
+		filepath.Join(subdir, "Thumbs.db"),
+	} {
+		if err := os.WriteFile(p, []byte("os-junk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store := openStoreT(t)
+	e := newOfflineTestEngine(t, failingClient{}, filepath.Join(dir, "archive"), filepath.Join(dir, "local"), "/storage/staging/agent-1", store)
+
+	res, err := e.IngestCardOffline(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCardOffline: %v", err)
+	}
+	if len(res.Files) != 4 {
+		t.Fatalf("got %d files, want 4 (1 photo + 3 OS-metadata)", len(res.Files))
+	}
+
+	// Exactly one real photo gets queued; the 3 OS-metadata files are
+	// Skipped, have no NodeUUID, and are not in queue.db.
+	queued, junk := 0, 0
+	for _, fr := range res.Files {
+		if fr.Err != nil {
+			t.Fatalf("unexpected error for %s: %v", fr.SourcePath, fr.Err)
+		}
+		if fr.Skipped {
+			junk++
+			if fr.NodeUUID != "" {
+				t.Errorf("OS-metadata file %s was Skipped but has a NodeUUID (%s) -- it must not have been queued", filepath.Base(fr.SourcePath), fr.NodeUUID)
+			}
+			if fr.Queued {
+				t.Errorf("OS-metadata file %s marked Queued -- must not reach queue.db", filepath.Base(fr.SourcePath))
+			}
+		} else {
+			queued++
+		}
+	}
+	if queued != 1 || junk != 3 {
+		t.Errorf("got queued=%d junk=%d, want 1 and 3", queued, junk)
+	}
+
+	// queue.db must contain exactly the one real photo's row.
+	all, err := store.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Errorf("got %d queue rows, want 1 (only the real photo)", len(all))
+	}
+
+	// Local edit copy must not contain any of the OS-metadata files.
+	localRoot := filepath.Join(dir, "local")
+	for _, name := range []string{".DS_Store", "Thumbs.db", "._DSC0001.JPG"} {
+		if _, err := os.Stat(filepath.Join(localRoot, name)); err == nil {
+			t.Errorf("OS-metadata file %s leaked into local destination", name)
+		}
+	}
+}
+
+// TestIngestCardOfflineAllowedExtensionsFilter pins the offline path's
+// behavior when Ingest.AllowedExtensions is set: only matching
+// extensions are queued; rejected ones are reported as Skipped and do
+// not become queue.db rows.
+func TestIngestCardOfflineAllowedExtensionsFilter(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.jpg", "b.txt", "c.mp4"} {
+		if err := os.WriteFile(filepath.Join(cardRoot, name), []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store := openStoreT(t)
+	e := newOfflineTestEngine(t, failingClient{}, filepath.Join(dir, "archive"), filepath.Join(dir, "local"), "/storage/staging/agent-1", store)
+	e.Ingest.AllowedExtensions = []string{"jpg", "mp4"}
+	// newTestEngine's NewNodeUUID is a fixed string; the queue's
+	// node_uuid UNIQUE constraint would reject every file past the
+	// first. Use a counter that returns a unique value per call.
+	var uuidCounter int
+	e.NewNodeUUID = func() (string, error) {
+		uuidCounter++
+		return fmt.Sprintf("0000000-uuid-%d", uuidCounter), nil
+	}
+
+	res, err := e.IngestCardOffline(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCardOffline: %v", err)
+	}
+	if len(res.Files) != 3 {
+		t.Fatalf("got %d files, want 3", len(res.Files))
+	}
+	queued, filtered := 0, 0
+	for _, fr := range res.Files {
+		base := filepath.Base(fr.SourcePath)
+		switch base {
+		case "a.jpg", "c.mp4":
+			if fr.Skipped {
+				t.Errorf("%s must NOT be skipped (matches allowlist)", base)
+			}
+			if !fr.Queued {
+				t.Errorf("%s must be queued", base)
+			}
+			queued++
+		default:
+			if !fr.Skipped {
+				t.Errorf("%s must be skipped (not in allowlist)", base)
+			}
+			if fr.Queued {
+				t.Errorf("%s Skipped but marked Queued", base)
+			}
+			filtered++
+		}
+	}
+	if queued != 2 || filtered != 1 {
+		t.Errorf("got queued=%d filtered=%d, want 2 and 1", queued, filtered)
+	}
+
+	all, err := store.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Errorf("got %d queue rows, want 2 (jpg+mp4 only)", len(all))
+	}
+}
