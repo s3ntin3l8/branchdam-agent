@@ -139,17 +139,14 @@ func TestConfirmDestructiveDoubleClickBothGated(t *testing.T) {
 	}
 }
 
-// TestConfirmDestructiveConfirmError is a small regression guard: a
-// confirm function that returns an error (signaling "the dialog
-// subprocess failed to even start") must result in the action being
-// refused. The real ConfirmFunc the cmd package supplies is
-// (bool, error)-shaped via the dialog subprocess's stdout + exit code,
-// so the tray-level helper needs to handle both axes -- not just the
-// answer bool. Today confirmDestructiveAction takes a ConfirmFunc that
-// is just bool, so errors are not in scope; this test pins that
-// contract by asserting the helper does NOT proceed when the confirm
-// returns false (which is the "error OR cancel" case in production
-// wiring).
+// TestConfirmDestructiveConfirmErrorRefuses pins the bool-only confirm
+// contract: the func the gate takes is
+// `func(context.Context, string, string) bool` -- there is no error
+// return, by design. The cmd package's trayConfirm collapses both axes
+// of the dialog subprocess (a Cancel click AND a failure to run the
+// dialog at all) into a single bool, where false means
+// "cancel-or-error". This test asserts the gate honors that: false
+// never proceeds, whatever produced it.
 func TestConfirmDestructiveConfirmErrorRefuses(t *testing.T) {
 	confirm := func(_ context.Context, _, _ string) bool { return false }
 
