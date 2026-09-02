@@ -54,8 +54,8 @@ func TestTrayConfirmCancelIsRefuse(t *testing.T) {
 // didn't even render" is the same shape as Cancel.
 func TestTrayConfirmFailedRenderIsRefuse(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		run    *fakeDialogRunner
+		name string
+		run  *fakeDialogRunner
 	}{
 		{"unexpected nonzero exit", &fakeDialogRunner{exitCode: 99}},
 		{"subprocess error", &fakeDialogRunner{err: errors.New("no display")}},
