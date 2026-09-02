@@ -346,7 +346,7 @@ func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath s
 		// when thousands of suffixed entries exist.
 		var (
 			allExist, allMatch bool
-			budgetExhausted     bool
+			budgetExhausted    bool
 		)
 		if counter == 1 {
 			if hashesDone+fullBytesPerIter > hashBudget {
