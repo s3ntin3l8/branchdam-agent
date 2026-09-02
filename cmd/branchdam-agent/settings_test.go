@@ -746,7 +746,7 @@ func TestConfigSettingsAllowedExtensionsValidation(t *testing.T) {
 
 func TestConfigSettingsPromptAndSetAllowedExtensions(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return ".arw, .cr3, .jpg", dialogExitOK, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
