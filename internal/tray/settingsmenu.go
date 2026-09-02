@@ -37,6 +37,7 @@ type settingsMenu struct {
 	requireUnbuffered *systray.MenuItem
 	serverURL         *systray.MenuItem
 	apiKey            *systray.MenuItem
+	cardRoots         *systray.MenuItem
 	archiveRoot       *systray.MenuItem
 	localEditRoot     *systray.MenuItem
 	namingTemplate    *systray.MenuItem
@@ -69,6 +70,7 @@ func newSettingsMenu(settings Settings, actionCh chan<- menuAction) *settingsMen
 
 	sm.serverURL = parent.AddSubMenuItem("Server URL…", "branchDAM server URL")
 	sm.apiKey = parent.AddSubMenuItem(apiKeyTitle(sv.ServerAPIKeySet), "Agent API key")
+	sm.cardRoots = parent.AddSubMenuItem("Watch folders…", "Directories polled for mounted cards")
 	sm.archiveRoot = parent.AddSubMenuItem("Archive root…", "Workstation path backing the Tier-3 archive destination")
 	sm.localEditRoot = parent.AddSubMenuItem("Local edit root…", "Workstation path for the local edit (scratch) copy")
 	sm.namingTemplate = parent.AddSubMenuItem("Naming template…", "Destination path template")
@@ -122,6 +124,8 @@ func (sm *settingsMenu) dispatch() {
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldServerBaseURL); return err })
 		case <-sm.apiKey.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldServerAPIKey); return err })
+		case <-sm.cardRoots.ClickedCh:
+			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldCardRoots); return err })
 		case <-sm.archiveRoot.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldArchiveRoot); return err })
 		case <-sm.localEditRoot.ClickedCh:

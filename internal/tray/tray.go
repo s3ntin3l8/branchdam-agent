@@ -14,6 +14,7 @@ package tray
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -259,6 +260,14 @@ type Runner struct {
 	hookInstallers map[HookID]HookInstaller
 	hookInFlight   map[HookID]bool
 	hookState      map[HookID]*HookState
+
+	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
+	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
+	detectorMu       sync.Mutex
+	detectorCancel   context.CancelFunc
+	detectorDone     chan struct{}
+	detectorBaseCtx  context.Context
+	detectorInterval time.Duration
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -266,13 +275,14 @@ type Runner struct {
 // in the status snapshot.
 func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner {
 	return &Runner{
-		ingester:     ingester,
-		watchDirs:    watchDirs,
-		scratchDir:   scratchDir,
-		syncInFlight: map[IntegrationID]bool{},
-		lastSync:     map[IntegrationID]*SyncSummary{},
-		hookInFlight: map[HookID]bool{},
-		hookState:    map[HookID]*HookState{},
+		ingester:         ingester,
+		watchDirs:        append([]string(nil), watchDirs...),
+		scratchDir:       scratchDir,
+		detectorInterval: ingest.DefaultPollInterval,
+		syncInFlight:     map[IntegrationID]bool{},
+		lastSync:         map[IntegrationID]*SyncSummary{},
+		hookInFlight:     map[HookID]bool{},
+		hookState:        map[HookID]*HookState{},
 	}
 }
 
@@ -635,6 +645,88 @@ func (r *Runner) RevealHook(id HookID) error {
 	return installer.Reveal()
 }
 
+// SetDetectorInterval sets the poll interval used when creating a new
+// ingest.Detector. If d <= 0, ingest.DefaultPollInterval is used.
+func (r *Runner) SetDetectorInterval(d time.Duration) {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+	if d <= 0 {
+		d = ingest.DefaultPollInterval
+	}
+	r.detectorInterval = d
+}
+
+// ReconfigureDetector stops any currently running Detector.Watch goroutine,
+// waits for it to exit, and if roots is non-empty, starts a new Detector.Watch
+// goroutine polling roots (issue #78). If ctx is non-nil, it becomes the parent context
+// for the new detector goroutine (and future ReconfigureDetector calls);
+// if ctx is nil, the previously registered parent context (or context.Background())
+// is used.
+func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+
+	if ctx != nil {
+		r.detectorBaseCtx = ctx
+	}
+	baseCtx := r.detectorBaseCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
+	if r.detectorCancel != nil {
+		r.detectorCancel()
+		if r.detectorDone != nil {
+			<-r.detectorDone
+		}
+		r.detectorCancel = nil
+		r.detectorDone = nil
+	}
+
+	r.mu.Lock()
+	r.watchDirs = append([]string(nil), roots...)
+	interval := r.detectorInterval
+	if interval <= 0 {
+		interval = ingest.DefaultPollInterval
+	}
+	r.mu.Unlock()
+
+	if len(roots) == 0 {
+		return
+	}
+
+	dctx, cancel := context.WithCancel(baseCtx)
+	r.detectorCancel = cancel
+	done := make(chan struct{})
+	r.detectorDone = done
+
+	detector := ingest.NewDetector(roots, interval)
+	go func() {
+		defer close(done)
+		_ = detector.Watch(dctx, func(diff ingest.Diff) {
+			for _, path := range diff.Inserted {
+				r.TriggerIngest(dctx, path)
+			}
+		})
+	}()
+}
+
+// StopDetector cancels any running Detector.Watch goroutine and waits for it
+// to exit.
+func (r *Runner) StopDetector() {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+
+	if r.detectorCancel != nil {
+		r.detectorCancel()
+		if r.detectorDone != nil {
+			<-r.detectorDone
+		}
+		r.detectorCancel = nil
+		r.detectorDone = nil
+	}
+}
+
 // Reconfigure swaps in a freshly built Ingester plus the watch/scratch
 // description it should report going forward -- the guarded-rebuild
 // mechanism issue #31's settings menu applies every hot-reloadable config
@@ -644,22 +736,32 @@ func (r *Runner) RevealHook(id HookID) error {
 // TriggerIngest's own gate), so a config reload can never race a card
 // mid-copy the way swapping these fields without synchronization would.
 //
-// Two fields are deliberately NOT reconfigurable this way and are the
+// When watchDirs differs from the current roots, Reconfigure invokes
+// ReconfigureDetector (issue #78) to hot-restart the Detector.Watch goroutine
+// without requiring a tray restart.
+//
+// One field is deliberately NOT reconfigurable this way and is the
 // caller's responsibility to treat as restart-required instead:
 // tray.statusAddr (the embedded HTTP server's Listen() call already
 // happened and is this tray's single-instance guard -- there's nothing to
-// swap it into) and ingest.cardRoots (internal/ingest.Detector's Watch
-// call is a one-shot goroutine over the roots it started with, not
-// restartable from inside a running select loop).
+// swap it into).
 func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir string) {
 	r.gate.Lock()
 	defer r.gate.Unlock()
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	oldRoots := append([]string(nil), r.watchDirs...)
 	r.ingester = ingester
-	r.watchDirs = append([]string(nil), watchDirs...)
 	r.scratchDir = scratchDir
+	r.mu.Unlock()
+
+	if !slices.Equal(oldRoots, watchDirs) {
+		r.ReconfigureDetector(nil, watchDirs)
+	} else {
+		r.mu.Lock()
+		r.watchDirs = append([]string(nil), watchDirs...)
+		r.mu.Unlock()
+	}
 }
 
 // statusQueueReadTimeout bounds Status()'s QueueReader.Counts call -- see

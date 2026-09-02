@@ -17,7 +17,6 @@ package tray
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -183,7 +182,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		systray.AddSeparator()
 
 		sm := newSettingsMenu(settings, menuActionCh)
-		restartNowItem := sm.parent.AddSubMenuItem("Restart now", "Apply a change that needs a restart (status address or watch folders)")
+		restartNowItem := sm.parent.AddSubMenuItem("Restart now", "Apply a change that needs a restart (status address)")
 		restartNowItem.Hide()
 		systray.AddSeparator()
 
@@ -297,17 +296,8 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		ticker := time.NewTicker(menuRefreshInterval)
 		defer ticker.Stop()
 
-		var detectorErrCh chan error
-		if detector != nil {
-			detectorErrCh = make(chan error, 1)
-			go func() {
-				detectorErrCh <- detector.Watch(ctx, func(diff ingest.Diff) {
-					for _, path := range diff.Inserted {
-						r.TriggerIngest(ctx, path)
-						refresh()
-					}
-				})
-			}()
+		if detector != nil || len(r.WatchDirs()) > 0 {
+			r.ReconfigureDetector(ctx, r.WatchDirs())
 		}
 
 		// ingestNow's click used to call r.TriggerIngest inline in this
@@ -639,15 +629,12 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 				return
 			case <-ticker.C:
 				refresh()
-			case err := <-detectorErrCh:
-				if err != nil && !errors.Is(err, context.Canceled) {
-					errCh <- err
-				}
 			}
 		}
 	}
 
 	onExit := func() {
+		r.StopDetector()
 		close(errCh)
 	}
 

@@ -933,6 +933,103 @@ func TestReconfigureWaitsForInFlightIngest(t *testing.T) {
 	}
 }
 
+func TestReconfigureDetectorStartsAndStops(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{t.TempDir()})
+
+	r.detectorMu.Lock()
+	cancelFn := r.detectorCancel
+	doneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	if cancelFn == nil || doneCh == nil {
+		t.Fatal("expected detectorCancel and detectorDone to be non-nil when roots are configured")
+	}
+
+	// Reconfigure with empty roots stops the detector
+	r.ReconfigureDetector(nil, nil)
+
+	select {
+	case <-doneCh:
+		// success: old goroutine exited
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("old detector goroutine did not exit after ReconfigureDetector(nil, nil)")
+	}
+
+	r.detectorMu.Lock()
+	cancelFn = r.detectorCancel
+	doneCh = r.detectorDone
+	r.detectorMu.Unlock()
+
+	if cancelFn != nil || doneCh != nil {
+		t.Error("expected detectorCancel and detectorDone to be nil after clearing roots")
+	}
+}
+
+func TestReconfigureDetectorWaitsForPreviousGoroutine(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{t.TempDir()})
+
+	r.detectorMu.Lock()
+	firstDoneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	// Reconfigure with new roots replaces the detector and waits for previous one
+	r.ReconfigureDetector(ctx, []string{t.TempDir()})
+
+	select {
+	case <-firstDoneCh:
+		// success
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("first detector goroutine did not exit when replaced")
+	}
+
+	r.StopDetector()
+}
+
+func TestReconfigureTriggersReconfigureDetectorOnRootsChange(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, []string{"/old"}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{"/old"})
+
+	r.detectorMu.Lock()
+	firstDoneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	// Reconfigure with changed roots
+	r.Reconfigure(fi, []string{"/new"}, "")
+
+	select {
+	case <-firstDoneCh:
+		// success: old goroutine exited
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("old detector goroutine did not exit when Reconfigure changed watchDirs")
+	}
+
+	if got := r.WatchDirs(); len(got) != 1 || got[0] != "/new" {
+		t.Errorf("WatchDirs() = %v, want [/new]", got)
+	}
+
+	r.StopDetector()
+}
+
 // fakeSelfUpdater is a no-op SelfUpdater shared by tests across build
 // tags (run_unsupported_test.go's Linux stub test and, eventually,
 // run_supported_test.go's windows/darwin ones).
