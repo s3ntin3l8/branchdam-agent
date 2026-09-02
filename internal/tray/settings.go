@@ -22,6 +22,7 @@ const (
 	// integration -- see config.IntegrationsConfig.NodeIndexPath's own
 	// doc comment.
 	FieldNodeIndexPath
+	FieldCardRoots
 )
 
 // SettingsView is a read-only snapshot of the on-disk configuration
@@ -53,8 +54,8 @@ type SettingsView struct {
 	NamingTemplate string
 
 	// RestartRequired is true once a change to a restart-only field
-	// (tray.statusAddr, ingest.cardRoots) has been saved but not yet
-	// applied -- see Runner.Reconfigure's doc comment for why those two
+	// (tray.statusAddr) has been saved but not yet
+	// applied -- see Runner.Reconfigure's doc comment for why that
 	// can't be hot-reloaded. The menu surfaces "Restart now" rather than
 	// silently pretending the change already took effect.
 	RestartRequired bool
@@ -152,7 +153,7 @@ type Settings interface {
 	// "open with default app" / "reveal in file manager" commands --
 	// issue #31's minimum bar: an operator can always find and hand-edit
 	// config.yaml, even for fields this menu doesn't expose a dialog for
-	// (pathMappings, ingest.cardRoots).
+	// (pathMappings).
 	OpenConfigFile() error
 	RevealConfigFolder() error
 }

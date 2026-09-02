@@ -219,6 +219,7 @@ func TestConfigSettingsExistingKeysStillAccepted(t *testing.T) {
 		"server.apiKey":        "0123456789abcdef0123456789abcdef", // 32+ chars -- server.apiKey's own length check would otherwise reject a short value here
 		"ingest.archiveRoot":   "/archive",
 		"ingest.localEditRoot": "/local",
+		"ingest.cardRoots":     "/media/a, /media/b",
 		"ingest.pathTemplate":  "{yyyy}/{original_name}",
 	}
 	for key, value := range stringCases {
@@ -420,7 +421,7 @@ func TestConfigSettingsReloadDetectsRestartRequiredStatusAddr(t *testing.T) {
 	}
 }
 
-func TestConfigSettingsReloadDetectsRestartRequiredCardRoots(t *testing.T) {
+func TestConfigSettingsReloadCardRootsDoesNotRequireRestart(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner, nil)
 
@@ -429,8 +430,102 @@ func TestConfigSettingsReloadDetectsRestartRequiredCardRoots(t *testing.T) {
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if !s.Snapshot().RestartRequired {
-		t.Error("expected RestartRequired=true after ingest.cardRoots changed via hand-edit")
+	if s.Snapshot().RestartRequired {
+		t.Error("expected RestartRequired=false after ingest.cardRoots changed -- cardRoots is hot-reconfigurable")
+	}
+	if got := runner.WatchDirs(); len(got) != 1 || got[0] != "/a-different-path" {
+		t.Errorf("runner.WatchDirs() = %v, want [/a-different-path]", got)
+	}
+}
+
+func TestConfigSettingsPromptAndSetCardRootsHappyPath(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	var gotArgs []string
+	dialog := func(args ...string) (string, int, error) {
+		gotArgs = args
+		return "/media/new1, /media/new2", dialogExitOK, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+
+	ok, err := s.PromptAndSet(tray.FieldCardRoots)
+	if err != nil {
+		t.Fatalf("PromptAndSet(FieldCardRoots): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if s.Snapshot().RestartRequired {
+		t.Error("expected RestartRequired=false after PromptAndSet(FieldCardRoots)")
+	}
+	if got := runner.WatchDirs(); len(got) != 2 || got[0] != "/media/new1" || got[1] != "/media/new2" {
+		t.Errorf("runner.WatchDirs() = %v, want [/media/new1 /media/new2]", got)
+	}
+	if !slices.Contains(gotArgs, "entry") {
+		t.Errorf("expected -kind entry in dialog args, got %v", gotArgs)
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Ingest.CardRoots) != 2 || reloaded.Ingest.CardRoots[0] != "/media/new1" || reloaded.Ingest.CardRoots[1] != "/media/new2" {
+		t.Errorf("persisted cardRoots = %v, want [/media/new1 /media/new2]", reloaded.Ingest.CardRoots)
+	}
+}
+
+func TestConfigSettingsPromptAndSetCardRootsEmpty(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := func(args ...string) (string, int, error) {
+		return "  ", dialogExitOK, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+
+	ok, err := s.PromptAndSet(tray.FieldCardRoots)
+	if err != nil {
+		t.Fatalf("PromptAndSet(FieldCardRoots): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if got := runner.WatchDirs(); len(got) != 0 {
+		t.Errorf("expected empty WatchDirs(), got %v", got)
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Ingest.CardRoots) != 0 {
+		t.Errorf("expected empty persisted cardRoots, got %v", reloaded.Ingest.CardRoots)
+	}
+}
+
+func TestConfigSettingsValidateStringChangeCardRootsRejectsPlaceholder(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.validateStringChange("ingest.cardRoots", "/media/good, ${UNSET_VAR_XYZ}"); err == nil {
+		t.Fatal("expected validateStringChange to reject unexpanded placeholder in cardRoots")
+	}
+}
+
+func TestSplitCommaPaths(t *testing.T) {
+	cases := []struct {
+		input string
+		want  []string
+	}{
+		{"", nil},
+		{"   ", nil},
+		{",,", nil},
+		{"/a, /b, /c", []string{"/a", "/b", "/c"}},
+		{"  /a  ,  /b  ", []string{"/a", "/b"}},
+		{"/single", []string{"/single"}},
+	}
+	for _, tc := range cases {
+		got := splitCommaPaths(tc.input)
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("splitCommaPaths(%q) = %v, want %v", tc.input, got, tc.want)
+		}
 	}
 }
 

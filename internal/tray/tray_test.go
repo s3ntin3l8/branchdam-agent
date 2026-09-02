@@ -3,8 +3,11 @@ package tray
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -930,6 +933,263 @@ func TestReconfigureWaitsForInFlightIngest(t *testing.T) {
 
 	if got := r.WatchDirs(); len(got) != 1 || got[0] != "/new" {
 		t.Errorf("WatchDirs() after Reconfigure = %v, want [/new]", got)
+	}
+}
+
+func TestReconfigureDetectorStartsAndStops(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{t.TempDir()})
+
+	r.detectorMu.Lock()
+	cancelFn := r.detectorCancel
+	doneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	if cancelFn == nil || doneCh == nil {
+		t.Fatal("expected detectorCancel and detectorDone to be non-nil when roots are configured")
+	}
+
+	// Reconfigure with empty roots stops the detector
+	r.ReconfigureDetector(context.Background(), nil)
+
+	select {
+	case <-doneCh:
+		// success: old goroutine exited
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("old detector goroutine did not exit after ReconfigureDetector(context.Background(), nil)")
+	}
+
+	r.detectorMu.Lock()
+	cancelFn = r.detectorCancel
+	doneCh = r.detectorDone
+	r.detectorMu.Unlock()
+
+	if cancelFn != nil || doneCh != nil {
+		t.Error("expected detectorCancel and detectorDone to be nil after clearing roots")
+	}
+}
+
+func TestReconfigureDetectorWaitsForPreviousGoroutine(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{t.TempDir()})
+
+	r.detectorMu.Lock()
+	firstDoneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	// Reconfigure with new roots replaces the detector and waits for previous one
+	r.ReconfigureDetector(ctx, []string{t.TempDir()})
+
+	select {
+	case <-firstDoneCh:
+		// success
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("first detector goroutine did not exit when replaced")
+	}
+
+	r.StopDetector()
+}
+
+func TestReconfigureTriggersReconfigureDetectorOnRootsChange(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, []string{"/old"}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{"/old"})
+
+	r.detectorMu.Lock()
+	firstDoneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	// Reconfigure with changed roots
+	r.Reconfigure(fi, []string{"/new"}, "")
+
+	select {
+	case <-firstDoneCh:
+		// success: old goroutine exited
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("old detector goroutine did not exit when Reconfigure changed watchDirs")
+	}
+
+	if got := r.WatchDirs(); len(got) != 1 || got[0] != "/new" {
+		t.Errorf("WatchDirs() = %v, want [/new]", got)
+	}
+
+	r.StopDetector()
+}
+
+func TestReconfigureNoDeadlockWithInFlightIngest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, []string{"/old"}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{"/old"})
+
+	// Start an ingest that holds gate
+	go r.TriggerIngest(context.Background(), "/old/card")
+	<-started
+
+	// Reconfigure with changed roots while ingest is in flight
+	done := make(chan struct{})
+	go func() {
+		r.Reconfigure(fi, []string{"/new"}, "")
+		close(done)
+	}()
+
+	// Release the in-flight ingest
+	close(release)
+
+	select {
+	case <-done:
+		// success: Reconfigure completed without deadlock
+	case <-time.After(2 * time.Second):
+		t.Fatal("Reconfigure deadlocked with in-flight ingest")
+	}
+
+	r.StopDetector()
+}
+
+func TestSetDetectorIntervalAndBaseContext(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetDetectorInterval(0)
+	if r.detectorInterval != ingest.DefaultPollInterval {
+		t.Errorf("detectorInterval = %v, want default %v", r.detectorInterval, ingest.DefaultPollInterval)
+	}
+
+	r.SetDetectorInterval(-5 * time.Second)
+	if r.detectorInterval != ingest.DefaultPollInterval {
+		t.Errorf("detectorInterval = %v, want default %v", r.detectorInterval, ingest.DefaultPollInterval)
+	}
+
+	r.SetDetectorInterval(500 * time.Millisecond)
+	if r.detectorInterval != 500*time.Millisecond {
+		t.Errorf("detectorInterval = %v, want 500ms", r.detectorInterval)
+	}
+
+	if r.BaseContext() != context.Background() {
+		t.Errorf("BaseContext() when unset = %v, want context.Background()", r.BaseContext())
+	}
+
+	customCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.detectorBaseCtx = customCtx
+	if r.BaseContext() != customCtx {
+		t.Errorf("BaseContext() = %v, want customCtx", r.BaseContext())
+	}
+}
+
+func TestReconfigureDetectorInvokesOnCardIngested(t *testing.T) {
+	fi := &fakeIngester{}
+	dir := t.TempDir()
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	var hit int32
+	r.SetOnCardIngested(func() {
+		atomic.AddInt32(&hit, 1)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{dir})
+
+	// Create a subdirectory to trigger detector
+	cardDir := filepath.Join(dir, "CARD1")
+	if err := os.Mkdir(cardDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 50; i++ {
+		if atomic.LoadInt32(&hit) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if atomic.LoadInt32(&hit) == 0 {
+		t.Error("expected onCardIngested callback to be invoked after card detection")
+	}
+
+	r.StopDetector()
+}
+
+func TestReconfigureSameRootsDoesNotRestartDetector(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, []string{"/same"}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{"/same"})
+
+	r.detectorMu.Lock()
+	firstDoneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	// Reconfigure with identical roots
+	r.Reconfigure(fi, []string{"/same"}, "/new-scratch")
+
+	r.detectorMu.Lock()
+	secondDoneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	if firstDoneCh != secondDoneCh {
+		t.Error("expected Reconfigure with same roots to preserve running detector goroutine")
+	}
+
+	r.StopDetector()
+}
+
+func TestReconfigureDetectorErrorHandler(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+
+	var gotErr error
+	r.SetDetectorErrorHandler(func(err error) {
+		gotErr = err
+	})
+
+	testErr := errors.New("detector test error")
+	r.mu.Lock()
+	handler := r.detectorErrHandler
+	r.mu.Unlock()
+
+	if handler == nil {
+		t.Fatal("expected detectorErrHandler to be set")
+	}
+	handler(testErr)
+	if gotErr != testErr {
+		t.Errorf("gotErr = %v, want %v", gotErr, testErr)
+	}
+
+	r.SetDetectorErrorHandler(nil)
+	r.mu.Lock()
+	handler = r.detectorErrHandler
+	r.mu.Unlock()
+	if handler != nil {
+		t.Error("expected detectorErrHandler to be nil after clearing")
 	}
 }
 

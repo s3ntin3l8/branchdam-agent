@@ -13,12 +13,20 @@ package tray
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 )
+
+// ErrUnsupported is returned by Run on any platform other than
+// windows/darwin. The tray is scoped to those two per the plan doc and
+// issue #3; a Linux workstation still has the fully-tested headless
+// `ingest`/`ingest --watch` path, just no tray icon.
+var ErrUnsupported = errors.New("tray: unsupported on this platform (windows and darwin only); use `branchdam-agent ingest` instead")
 
 // Ingester is the subset of *ingest.Engine's surface Runner needs, so tests
 // can substitute a fake without touching a real card or a real branchDAM
@@ -259,6 +267,16 @@ type Runner struct {
 	hookInstallers map[HookID]HookInstaller
 	hookInFlight   map[HookID]bool
 	hookState      map[HookID]*HookState
+
+	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
+	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
+	detectorMu         sync.Mutex
+	detectorCancel     context.CancelFunc
+	detectorDone       chan struct{}
+	detectorBaseCtx    context.Context
+	detectorInterval   time.Duration
+	onCardIngested     func()
+	detectorErrHandler func(err error)
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -266,13 +284,14 @@ type Runner struct {
 // in the status snapshot.
 func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner {
 	return &Runner{
-		ingester:     ingester,
-		watchDirs:    watchDirs,
-		scratchDir:   scratchDir,
-		syncInFlight: map[IntegrationID]bool{},
-		lastSync:     map[IntegrationID]*SyncSummary{},
-		hookInFlight: map[HookID]bool{},
-		hookState:    map[HookID]*HookState{},
+		ingester:         ingester,
+		watchDirs:        append([]string(nil), watchDirs...),
+		scratchDir:       scratchDir,
+		detectorInterval: ingest.DefaultPollInterval,
+		syncInFlight:     map[IntegrationID]bool{},
+		lastSync:         map[IntegrationID]*SyncSummary{},
+		hookInFlight:     map[HookID]bool{},
+		hookState:        map[HookID]*HookState{},
 	}
 }
 
@@ -635,6 +654,130 @@ func (r *Runner) RevealHook(id HookID) error {
 	return installer.Reveal()
 }
 
+// SetOnCardIngested registers a callback invoked when a card is detected
+// and ingested by the Detector.Watch goroutine (run_supported.go uses this
+// to trigger an immediate menu refresh).
+func (r *Runner) SetOnCardIngested(fn func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onCardIngested = fn
+}
+
+// BaseContext returns the registered lifecycle context for the detector
+// goroutine, or context.Background() if none was set.
+func (r *Runner) BaseContext() context.Context {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+	if r.detectorBaseCtx != nil {
+		return r.detectorBaseCtx
+	}
+	return context.Background()
+}
+
+// SetDetectorInterval sets the poll interval used when creating a new
+// ingest.Detector. If d <= 0, ingest.DefaultPollInterval is used.
+func (r *Runner) SetDetectorInterval(d time.Duration) {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+	if d <= 0 {
+		d = ingest.DefaultPollInterval
+	}
+	r.detectorInterval = d
+}
+
+// SetDetectorErrorHandler registers a handler for non-cancellation errors
+// returned by the Detector.Watch loop (run_supported.go forwards these to errCh).
+func (r *Runner) SetDetectorErrorHandler(fn func(err error)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.detectorErrHandler = fn
+}
+
+// ReconfigureDetector stops any currently running Detector.Watch goroutine,
+// waits for it to exit, and if roots is non-empty, starts a new Detector.Watch
+// goroutine polling roots (issue #78). If ctx is non-nil, it becomes the parent context
+// for the new detector goroutine (and future ReconfigureDetector calls);
+// if ctx is nil, the previously registered parent context (or context.Background())
+// is used.
+func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+
+	if ctx != nil {
+		r.detectorBaseCtx = ctx
+	}
+	baseCtx := r.detectorBaseCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
+	if r.detectorCancel != nil {
+		r.detectorCancel()
+		if r.detectorDone != nil {
+			<-r.detectorDone
+		}
+		r.detectorCancel = nil
+		r.detectorDone = nil
+	}
+
+	r.mu.Lock()
+	r.watchDirs = append([]string(nil), roots...)
+	interval := r.detectorInterval
+	if interval <= 0 {
+		interval = ingest.DefaultPollInterval
+	}
+	r.mu.Unlock()
+
+	if len(roots) == 0 {
+		return
+	}
+
+	dctx, cancel := context.WithCancel(baseCtx)
+	r.detectorCancel = cancel
+	done := make(chan struct{})
+	r.detectorDone = done
+
+	detector := ingest.NewDetector(roots, interval)
+	go func() {
+		defer close(done)
+		err := detector.Watch(dctx, func(diff ingest.Diff) {
+			for _, path := range diff.Inserted {
+				r.TriggerIngest(dctx, path)
+				r.mu.Lock()
+				cb := r.onCardIngested
+				r.mu.Unlock()
+				if cb != nil {
+					cb()
+				}
+			}
+		})
+		if err != nil && !errors.Is(err, context.Canceled) {
+			r.mu.Lock()
+			handler := r.detectorErrHandler
+			r.mu.Unlock()
+			if handler != nil {
+				handler(err)
+			}
+		}
+	}()
+}
+
+// StopDetector cancels any running Detector.Watch goroutine and waits for it
+// to exit.
+func (r *Runner) StopDetector() {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+
+	if r.detectorCancel != nil {
+		r.detectorCancel()
+		if r.detectorDone != nil {
+			<-r.detectorDone
+		}
+		r.detectorCancel = nil
+		r.detectorDone = nil
+	}
+}
+
 // Reconfigure swaps in a freshly built Ingester plus the watch/scratch
 // description it should report going forward -- the guarded-rebuild
 // mechanism issue #31's settings menu applies every hot-reloadable config
@@ -644,22 +787,36 @@ func (r *Runner) RevealHook(id HookID) error {
 // TriggerIngest's own gate), so a config reload can never race a card
 // mid-copy the way swapping these fields without synchronization would.
 //
-// Two fields are deliberately NOT reconfigurable this way and are the
+// When watchDirs differs from the current roots, Reconfigure invokes
+// ReconfigureDetector (issue #78) AFTER releasing gate, so waiting on the
+// previous detector goroutine to exit cannot deadlock against an in-flight
+// TriggerIngest call.
+//
+// One field is deliberately NOT reconfigurable this way and is the
 // caller's responsibility to treat as restart-required instead:
 // tray.statusAddr (the embedded HTTP server's Listen() call already
 // happened and is this tray's single-instance guard -- there's nothing to
-// swap it into) and ingest.cardRoots (internal/ingest.Detector's Watch
-// call is a one-shot goroutine over the roots it started with, not
-// restartable from inside a running select loop).
+// swap it into).
 func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir string) {
-	r.gate.Lock()
-	defer r.gate.Unlock()
+	var rootsChanged bool
+	var newRoots []string
 
+	r.gate.Lock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	oldRoots := append([]string(nil), r.watchDirs...)
 	r.ingester = ingester
-	r.watchDirs = append([]string(nil), watchDirs...)
 	r.scratchDir = scratchDir
+	if !slices.Equal(oldRoots, watchDirs) {
+		rootsChanged = true
+		newRoots = append([]string(nil), watchDirs...)
+		r.watchDirs = newRoots
+	}
+	r.mu.Unlock()
+	r.gate.Unlock()
+
+	if rootsChanged {
+		r.ReconfigureDetector(r.BaseContext(), newRoots)
+	}
 }
 
 // statusQueueReadTimeout bounds Status()'s QueueReader.Counts call -- see

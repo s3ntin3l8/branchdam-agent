@@ -24,8 +24,6 @@ import (
 	"time"
 
 	"fyne.io/systray"
-
-	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 )
 
 // menuRefreshInterval is how often the informational (disabled) menu items
@@ -109,16 +107,18 @@ type menuActionResult struct {
 	err    error
 }
 
-// Run starts the tray icon and blocks until ctx is cancelled, the user
-// chooses Quit, or an update is installed (or a settings change that
-// requires one is applied). detector may be nil to disable automatic
-// card-insertion ingest (menu-triggered "Ingest now" against watchDirs
-// still works); statusURL is shown in the menu and opened by "Open status
-// page". up drives the "Install and restart" affordance; settings drives
-// the "Settings" submenu (issue #31) -- Run itself does not know how to
-// check for updates or persist config, matching Runner's own separation
-// from the ingest core (see tray.go).
-func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL string, up SelfUpdater, settings Settings) (Outcome, error) {
+// Run starts the tray application on supported platforms (windows/darwin).
+//
+// Blocks until the user quits or a fatal error occurs (e.g. self-update
+// failure or unexpected detector crash). Returns Outcome describing whether
+// a self-update requested a restart, so main() can exit with the right code.
+//
+// r drives the tray's state snapshot and ingest triggers; statusURL is shown
+// in the menu and opened by "Open status page". up drives the "Install and
+// restart" affordance; settings drives the "Settings" submenu (issue #31) --
+// Run itself does not know how to check for updates or persist config,
+// matching Runner's own separation from the ingest core (see tray.go).
+func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, settings Settings) (Outcome, error) {
 	errCh := make(chan error, 1)
 	var outcome Outcome
 
@@ -183,7 +183,7 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		systray.AddSeparator()
 
 		sm := newSettingsMenu(settings, menuActionCh)
-		restartNowItem := sm.parent.AddSubMenuItem("Restart now", "Apply a change that needs a restart (status address or watch folders)")
+		restartNowItem := sm.parent.AddSubMenuItem("Restart now", "Apply a change that needs a restart (status address)")
 		restartNowItem.Hide()
 		systray.AddSeparator()
 
@@ -297,17 +297,17 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 		ticker := time.NewTicker(menuRefreshInterval)
 		defer ticker.Stop()
 
-		var detectorErrCh chan error
-		if detector != nil {
-			detectorErrCh = make(chan error, 1)
-			go func() {
-				detectorErrCh <- detector.Watch(ctx, func(diff ingest.Diff) {
-					for _, path := range diff.Inserted {
-						r.TriggerIngest(ctx, path)
-						refresh()
-					}
-				})
-			}()
+		r.SetOnCardIngested(refresh)
+		r.SetDetectorErrorHandler(func(err error) {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
+		})
+		if len(r.WatchDirs()) > 0 {
+			r.ReconfigureDetector(ctx, r.WatchDirs())
 		}
 
 		// ingestNow's click used to call r.TriggerIngest inline in this
@@ -639,15 +639,14 @@ func Run(ctx context.Context, r *Runner, detector *ingest.Detector, statusURL st
 				return
 			case <-ticker.C:
 				refresh()
-			case err := <-detectorErrCh:
-				if err != nil && !errors.Is(err, context.Canceled) {
-					errCh <- err
-				}
 			}
 		}
 	}
 
 	onExit := func() {
+		r.SetOnCardIngested(nil)
+		r.SetDetectorErrorHandler(nil)
+		r.StopDetector()
 		close(errCh)
 	}
 

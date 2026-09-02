@@ -6,9 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/autostart"
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -29,18 +29,17 @@ type configSettings struct {
 	runner *tray.Runner
 	dialog dialogRunner
 
-	// appliedStatusAddr/appliedCardRoots are what THIS PROCESS actually
-	// bound/started watching at launch -- fixed for the whole process
-	// lifetime, unlike s.cfg below (which reload() overwrites on every
-	// call). RestartRequired is derived by diffing the current config
-	// against these two, not against the previous s.cfg snapshot: a Hermes
-	// review finding on this PR caught that diffing against the mutable
-	// snapshot made the flag latch permanently after the first reload,
-	// even if an operator reverted a hand-edit back to the original value
-	// on a second reload -- the "previous" snapshot by then was already
-	// the changed one, so the diff against it saw nothing.
+	// appliedStatusAddr is what THIS PROCESS actually bound at launch
+	// -- fixed for the whole process lifetime, unlike s.cfg below
+	// (which reload() overwrites on every call). RestartRequired is
+	// derived by diffing the current config against this, not against
+	// the previous s.cfg snapshot: a Hermes review finding on this PR
+	// caught that diffing against the mutable snapshot made the flag
+	// latch permanently after the first reload, even if an operator
+	// reverted a hand-edit back to the original value on a second reload
+	// -- the "previous" snapshot by then was already the changed one,
+	// so the diff against it saw nothing.
 	appliedStatusAddr string
-	appliedCardRoots  []string
 
 	mu              sync.Mutex
 	cfg             config.Config
@@ -69,7 +68,6 @@ func newConfigSettings(path string, cfg config.Config, runner *tray.Runner, dial
 		runner:            runner,
 		dialog:            dialog,
 		appliedStatusAddr: cfg.Tray.StatusAddrOrDefault(),
-		appliedCardRoots:  append([]string(nil), cfg.Ingest.CardRoots...),
 	}
 }
 
@@ -246,6 +244,8 @@ func (s *configSettings) validateStringChange(key, v string) error {
 		cfg.Ingest.ArchiveRoot = v
 	case "ingest.localEditRoot":
 		cfg.Ingest.LocalEditRoot = v
+	case "ingest.cardRoots":
+		cfg.Ingest.CardRoots = splitCommaPaths(v)
 	case "ingest.pathTemplate":
 		cfg.Ingest.PathTemplate = v
 	case "integrations.nodeIndexPath":
@@ -327,6 +327,14 @@ func settingsPromptFor(field tray.SettingsField) (settingsPrompt, error) {
 		return settingsPrompt{
 			key: "ingest.localEditRoot", kind: "directory", title: "Select the local edit (scratch) folder",
 		}, nil
+	case tray.FieldCardRoots:
+		return settingsPrompt{
+			key: "ingest.cardRoots", kind: "entry", title: "Watch Folders",
+			message: "Directories polled for mounted camera cards (comma-separated):",
+			defaultValue: func(cfg config.Config) string {
+				return strings.Join(cfg.Ingest.CardRoots, ", ")
+			},
+		}, nil
 	case tray.FieldNamingTemplate:
 		return settingsPrompt{
 			key: "ingest.pathTemplate", kind: "entry", title: "Naming Template",
@@ -382,7 +390,11 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 	if err := s.validateStringChange(prompt.key, value); err != nil {
 		return false, err
 	}
-	if err := config.Patch(s.path, map[string]any{prompt.key: value}); err != nil {
+	var patchVal any = value
+	if prompt.key == "ingest.cardRoots" {
+		patchVal = splitCommaPaths(value)
+	}
+	if err := config.Patch(s.path, map[string]any{prompt.key: patchVal}); err != nil {
 		return false, fmt.Errorf("save %s: %w", prompt.key, err)
 	}
 	return true, s.reload()
@@ -459,10 +471,10 @@ func (s *configSettings) PromptAndSetIntegrationPath(id tray.IntegrationID) (boo
 // specific change before ever calling config.Patch, so a menu-driven
 // change should never reach this rejection in practice.
 //
-// RestartRequired is re-derived by diffing against appliedStatusAddr/
-// appliedCardRoots (fixed at construction -- what THIS PROCESS actually
-// has bound/running), not against the mutable previous s.cfg snapshot --
-// see those fields' own doc comment for why that distinction matters.
+// RestartRequired is re-derived by diffing against appliedStatusAddr
+// (fixed at construction -- what THIS PROCESS actually bound), not against
+// the mutable previous s.cfg snapshot -- see that field's own doc comment
+// for why that distinction matters.
 func (s *configSettings) reload() error {
 	newCfg, err := config.Load(s.path)
 	if err != nil {
@@ -477,11 +489,11 @@ func (s *configSettings) reload() error {
 
 	s.mu.Lock()
 	s.cfg = newCfg
-	s.restartRequired = s.appliedStatusAddr != newCfg.Tray.StatusAddrOrDefault() ||
-		!slices.Equal(s.appliedCardRoots, newCfg.Ingest.CardRoots)
+	s.restartRequired = s.appliedStatusAddr != newCfg.Tray.StatusAddrOrDefault()
 	queueStore := s.queueStore
 	s.mu.Unlock()
 
+	s.runner.SetDetectorInterval(time.Duration(newCfg.Ingest.PollIntervalSecs) * time.Second)
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
 
 	// Rebuild every integration syncer against the freshly reloaded
@@ -531,4 +543,16 @@ func openWithDefaultApp(path string) error {
 	default:
 		return exec.Command("xdg-open", path).Start()
 	}
+}
+
+// splitCommaPaths parses a comma-separated string of directories, trimming
+// whitespace and dropping empty segments.
+func splitCommaPaths(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
