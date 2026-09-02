@@ -47,12 +47,25 @@ func shouldSkipByName(path string) (bool, string) {
 // "JPG", "jpg", or ".JPG" in YAML and all three resolve to the same
 // match against a file's "jpg" extension.
 //
-// Returns false when allowed is nil/empty (the "accept all" default --
-// callers can short-circuit on len(allowed) == 0, but this function
-// also behaves correctly if called directly, so unit tests don't have
-// to mirror that optimization).
+// An empty ext (a file with no extension, e.g. "LICENSE", "README",
+// or a media file the camera wrote without one) is NOT skipped by an
+// allowlist: the allowlist only filters KNOWN-EXTENSION files whose
+// extension isn't on the list. The intent of the allowlist is
+// "ingest only media types the operator enumerated", and the
+// unstated corollary is "files that have no extension at all
+// haven't been positively identified as a media type yet, so
+// surfacing them via ingestFile (which will run isImageExt/
+// isVideoExt and produce a real FileResult) is the safer default
+// than silently dropping them". Returns false when allowed is
+// nil/empty (the "accept all" default -- callers can short-circuit
+// on len(allowed) == 0, but this function also behaves correctly if
+// called directly, so unit tests don't have to mirror that
+// optimization).
 func shouldSkipByExtension(allowed []string, ext string) bool {
 	if len(allowed) == 0 {
+		return false
+	}
+	if ext == "" {
 		return false
 	}
 	lowerExt := strings.ToLower(ext)

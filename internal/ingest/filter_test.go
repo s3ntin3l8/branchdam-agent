@@ -44,6 +44,16 @@ func TestShouldSkipByName(t *testing.T) {
 // AllowedExtensions comparison. An empty/nil list means "accept all"
 // (caller short-circuits before this is invoked, but the function must
 // also behave correctly if called directly).
+//
+// Files with NO extension ("LICENSE", "README", or a media file the
+// camera wrote without one) are NOT skipped by an allowlist, even a
+// non-empty one: the allowlist only filters KNOWN-EXTENSION files
+// whose extension isn't on the list. Extension-less files fall
+// through to ingestFile, which runs isImageExt/isVideoExt and
+// produces a real FileResult. This pins the Hermes review decision
+// on #127: positive identification (via isImageExt etc.) is safer
+// than silently dropping files the allowlist's listed extensions
+// can't match against.
 func TestShouldSkipByExtension(t *testing.T) {
 	cases := []struct {
 		label    string
@@ -59,7 +69,8 @@ func TestShouldSkipByExtension(t *testing.T) {
 		{"multi list match", []string{"jpg", "mp4"}, "mp4", false},
 		{"single jpg, file png", []string{"jpg"}, "png", true},
 		{"single jpg, file txt", []string{"jpg"}, "txt", true},
-		{"single jpg, file no ext", []string{"jpg"}, "", true},
+		{"single jpg, file no ext: NOT skipped, falls through to ingestFile", []string{"jpg"}, "", false},
+		{"multi list, file no ext: NOT skipped", []string{"jpg", "arw", "mp4"}, "", false},
 		{"leading dot in list, file jpg", []string{".jpg"}, "jpg", false},
 		{"leading dot JPG in list, file jpg", []string{".JPG"}, "jpg", false},
 	}

@@ -135,13 +135,33 @@ type CardResult struct {
 //     (basename starting with "."). Case-insensitive on the named files.
 //  2. by-extension: when Ingest.AllowedExtensions is non-empty, only
 //     files whose extension is in that list are ingested (case-
-//     insensitive, leading dot optional on either side).
+//     insensitive, leading dot optional on either side). Files with
+//     no extension are NOT filtered out by the allowlist; they fall
+//     through to ingestFile so isImageExt/isVideoExt can positively
+//     identify them.
 //
 // Filtered files appear in the result as FileResult{Skipped: true,
 // SkipReason: "OS metadata: ..."} so an operator running
 // `ingest --card <path>` and eyeballing res.Files can see what was
 // rejected and why. They do NOT become media_nodes rows and do NOT
 // trigger an exiftool subprocess.
+//
+// Partial-application semantics: ingestFile runs inline inside the
+// WalkDir callback, so a mid-walk error (permission denied on a
+// later directory, card yanked mid-scan, ...) propagates back as
+// the returned err. By the time the walk errors, files already
+// visited have already been DualWrite'd and submitted -- side
+// effects are NOT rolled back. The function returns
+// (CardResult{...}, err) where result.Files reflects whatever was
+// processed before the error. The previous two-phase design
+// (collect paths, then process after WalkDir returned) avoided
+// this by collecting no side effects during the walk, at the
+// cost of holding every path in memory and re-walking the dir's
+// metadata twice. The current design favors throughput over
+// atomicity: re-running on the same card is always safe (the
+// queue.db BySourcePath check in offline's twin path; the
+// AlreadyIngested fast-path in this one), so a partial run
+// followed by a re-run is a known-good recovery.
 func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, error) {
 	stemSuffix := make(map[string]string)
 	var result CardResult

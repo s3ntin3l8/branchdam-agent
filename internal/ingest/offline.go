@@ -70,6 +70,12 @@ type OfflineCardResult struct {
 // Skipped files still appear in OfflineCardResult.Files, marked
 // OfflineFileResult{Skipped: true, SkipReason: "OS metadata: ..."}, so
 // `ingest -offline --card <path>` is symmetric with the online path.
+//
+// Partial-application semantics mirror IngestCard's exactly:
+// ingestFileOffline runs inline inside the WalkDir callback, so a
+// mid-walk error leaves already-queued rows durable and a re-run
+// is always safe (BySourcePath at the top of each per-file path
+// short-circuits the re-run, no work redone).
 func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (OfflineCardResult, error) {
 	if e.Queue == nil {
 		return OfflineCardResult{}, fmt.Errorf("ingest: IngestCardOffline requires a non-nil Engine.Queue")

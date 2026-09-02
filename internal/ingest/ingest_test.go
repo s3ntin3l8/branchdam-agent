@@ -519,9 +519,14 @@ func TestIngestCardSkipsOSMetadata(t *testing.T) {
 
 // TestIngestCardAllowedExtensionsFilter pins the M5/#100 extension
 // allowlist: a non-empty Ingest.AllowedExtensions narrows the walk to
-// only those extensions, case-insensitively. An empty list (the
-// default, the regression guard for older configs) accepts everything
-// the OS-metadata skip doesn't rule out.
+// only KNOWN-EXTENSION files whose extension is on the list, case-
+// insensitively. Files with no extension are NOT filtered by the
+// allowlist (Hermes review on #127): positive identification via
+// ingestFile's isImageExt/isVideoExt is the safer default than
+// silently dropping them.
+//
+// An empty list (the default, the regression guard for older
+// configs) accepts everything the OS-metadata skip doesn't rule out.
 func TestIngestCardAllowedExtensionsFilter(t *testing.T) {
 	dir := t.TempDir()
 	cardRoot := filepath.Join(dir, "card")
@@ -529,12 +534,12 @@ func TestIngestCardAllowedExtensionsFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{
-		"a.jpg", // matches
-		"b.JPG", // matches (case)
-		"c.mp4", // matches
-		"d.txt", // filtered out
-		"e.png", // filtered out
-		"f",     // no ext -- filtered out
+		"a.jpg",  // matches
+		"b.JPG",  // matches (case)
+		"c.mp4",  // matches
+		"d.txt",  // filtered out
+		"e.png",  // filtered out
+		"f",      // no ext -- NOT filtered by allowlist, falls through
 	} {
 		if err := os.WriteFile(filepath.Join(cardRoot, name), []byte("data"), 0o644); err != nil {
 			t.Fatal(err)
@@ -550,14 +555,15 @@ func TestIngestCardAllowedExtensionsFilter(t *testing.T) {
 		t.Fatalf("IngestCard: %v", err)
 	}
 
-	// All 6 files appear in res.Files (the walk still visits them), but
-	// only the 3 matching extensions are submitted. Skipped is set on
-	// the rejected ones with the right reason.
+	// All 6 files appear in res.Files (the walk still visits them).
+	// 3 matching extensions are submitted. 2 wrong-extension files
+	// are filtered. 1 extension-less file falls through and is
+	// submitted.
 	if len(res.Files) != 6 {
 		t.Fatalf("got %d files, want 6", len(res.Files))
 	}
-	if len(client.calls) != 3 {
-		t.Errorf("got %d PostNodeCreated calls, want 3 (jpg/JPG/mp4)", len(client.calls))
+	if len(client.calls) != 4 {
+		t.Errorf("got %d PostNodeCreated calls, want 4 (jpg/JPG/mp4 + extension-less f)", len(client.calls))
 	}
 	submitted, filtered := 0, 0
 	for _, fr := range res.Files {
@@ -566,9 +572,12 @@ func TestIngestCardAllowedExtensionsFilter(t *testing.T) {
 		}
 		base := filepath.Base(fr.SourcePath)
 		switch base {
-		case "a.jpg", "b.JPG", "c.mp4":
+		case "a.jpg", "b.JPG", "c.mp4", "f":
+			// f (extension-less) falls through the allowlist per
+			// Hermes review on #127. It still goes through
+			// ingestFile normally.
 			if fr.Skipped {
-				t.Errorf("%s must NOT be skipped (matches allowlist)", base)
+				t.Errorf("%s must NOT be skipped (matches allowlist, or no extension)", base)
 			}
 			if fr.EventID == "" {
 				t.Errorf("%s missing EventID", base)
@@ -587,13 +596,15 @@ func TestIngestCardAllowedExtensionsFilter(t *testing.T) {
 			filtered++
 		}
 	}
-	if submitted != 3 || filtered != 3 {
-		t.Errorf("got submitted=%d filtered=%d, want 3 and 3", submitted, filtered)
+	if submitted != 4 || filtered != 2 {
+		t.Errorf("got submitted=%d filtered=%d, want 4 and 2", submitted, filtered)
 	}
 
-	// Rejected files must not have been copied to either destination.
+	// Rejected files (wrong-extension) must not have been copied.
+	// The extension-less file f IS expected to be copied -- it falls
+	// through the allowlist per Hermes review on #127.
 	archiveRoot := filepath.Join(dir, "archive")
-	for _, name := range []string{"d.txt", "e.png", "f"} {
+	for _, name := range []string{"d.txt", "e.png"} {
 		if _, err := os.Stat(filepath.Join(archiveRoot, name)); err == nil {
 			t.Errorf("rejected file %s leaked into archive destination", name)
 		}
