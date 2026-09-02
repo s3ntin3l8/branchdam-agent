@@ -166,20 +166,23 @@ func (c *Client) signRequest(method, path, nonce, timestamp string, body []byte)
 // window will be a small multiple of typical NTP drift). Nonce is 16
 // random bytes hex-encoded -- collision probability is negligible at
 // 2^128 per pair, and uniqueness is asserted by a unit test.
-func newReplayProtectionFields() (timestamp, nonce string) {
+//
+// On crypto/rand failure the call returns an error rather than a
+// deterministic nonce. The earlier implementation fell back to a
+// timestamp-derived nonce so the request still went out, but a
+// deterministic nonce defeats the entire S-3 protection: an attacker
+// observing one signed request could forge a re-send with the same
+// nonce/timestamp (and therefore the same signature), and the
+// server-side replay window would also miss it because the signature
+// matches. Dropping the request on rand.Read failure is the only way
+// to keep the guarantee honest.
+func newReplayProtectionFields() (timestamp, nonce string, err error) {
 	ts := strconv.FormatInt(time.Now().UnixNano(), 10)
 	var nonceBytes [16]byte
-	if _, err := rand.Read(nonceBytes[:]); err != nil {
-		// crypto/rand failing on Linux is a near-impossible event, but
-		// the alternative -- silently signing with a zero nonce --
-		// would defeat the protection. Fall back to a timestamp-derived
-		// nonce so the request still goes out; the worst case is
-		// duplicate-signature exposure for one request, which the
-		// server-side replay window catches.
-		nonce = strconv.FormatInt(time.Now().UnixNano(), 16)
-		return ts, nonce
+	if _, rerr := rand.Read(nonceBytes[:]); rerr != nil {
+		return "", "", fmt.Errorf("branchdam: read crypto/rand for replay nonce: %w", rerr)
 	}
-	return ts, hex.EncodeToString(nonceBytes[:])
+	return ts, hex.EncodeToString(nonceBytes[:]), nil
 }
 
 // post issues a POST to c.baseURL+path with body JSON-marshalled (or no
@@ -216,7 +219,10 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	timestamp, nonce := newReplayProtectionFields()
+	timestamp, nonce, rerr := newReplayProtectionFields()
+	if rerr != nil {
+		return fmt.Errorf("branchdam: build replay protection fields: %w", rerr)
+	}
 	req.Header.Set("X-Timestamp", timestamp)
 	req.Header.Set("X-Nonce", nonce)
 	req.Header.Set("X-Signature", c.signRequest(req.Method, path, nonce, timestamp, bodyBytes))
