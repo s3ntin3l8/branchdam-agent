@@ -2,6 +2,13 @@
 # Use bash explicitly for recipe shells: default `/bin/sh` is dash on Debian/Ubuntu
 # and lacks `mapfile`/`arrays` needed by the `vulncheck` allowlist logic.
 SHELL := /usr/bin/env bash
+# `.SHELLFLAGS` is global: every recipe inherits -eu/-o pipefail. Today
+# every target tolerates that, but a future target that legitimately
+# wants an intermediate non-zero (e.g. an explicit "skip-if-absent" probe)
+# should override locally with `SHELL := /usr/bin/env bash` +
+# `.SHELLFLAGS := -eu -o pipefail -c` plus an explicit `|| true` at the
+# failing step, not by relaxing the global flag. Leave this as-is unless
+# a concrete target needs the override.
 .SHELLFLAGS := -eu -o pipefail -c
 .PHONY: help install-hooks test lint fmt vet tidy vulncheck build build-windows build-darwin build-darwin-app clean check
 
