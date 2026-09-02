@@ -699,7 +699,7 @@ func (r *Runner) SetDetectorRequireDCIM(v bool) {
 		r.mu.Lock()
 		roots := append([]string(nil), r.watchDirs...)
 		r.mu.Unlock()
-		r.ReconfigureDetector(nil, roots)
+		r.ReconfigureDetector(r.BaseContext(), roots)
 	}
 }
 

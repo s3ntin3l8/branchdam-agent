@@ -409,9 +409,10 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 		return false, err
 	}
 	var patchVal any = value
-	if prompt.key == "ingest.cardRoots" {
+	switch prompt.key {
+	case "ingest.cardRoots":
 		patchVal = splitCommaPaths(value)
-	} else if prompt.key == "ingest.allowedExtensions" {
+	case "ingest.allowedExtensions":
 		exts, _ := splitCommaExtensions(value)
 		patchVal = exts
 	}
