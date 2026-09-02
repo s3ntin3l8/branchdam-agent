@@ -143,10 +143,19 @@ func TestClassifyErrorUnknown(t *testing.T) {
 }
 
 func TestHTTPErrorError(t *testing.T) {
+	// Error() must NOT echo the response body verbatim (S-7): a server
+	// that reflects a request payload back, or names the X-API-Key in
+	// its debug output, would otherwise be re-leaked into logs and
+	// crash dumps via the error message. Body is preserved as a field
+	// for Classification() and for structured callers; only the
+	// user-facing string is sanitized.
 	e := &HTTPError{StatusCode: 400, Body: "bad request"}
-	want := "branchdam: server returned 400: bad request"
+	want := "branchdam: server returned HTTP 400"
 	if got := e.Error(); got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	if e.Body != "bad request" {
+		t.Errorf("Body field unexpectedly mutated by Error() = %q, want \"bad request\"", e.Body)
 	}
 }
 

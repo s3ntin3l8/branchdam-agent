@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -199,5 +200,112 @@ func TestSlogBridgePrintAndPrintf(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "formatted message 42") {
 		t.Errorf("Printf's message missing from log, got: %s", data)
+	}
+}
+
+// TestSetupLogFileModeIsOwnerOnly pins the S-1 fix from issue #95: the
+// agent log file carries no secret today, but X-API-Key and other
+// sensitive strings flow through it in INFO-level traces -- a 0o644 log
+// file would re-leak anything logged into world-readable territory.
+// OpenFile must request 0o600; the resolved file mode after Setup
+// closes the loop.
+func TestSetupLogFileModeIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits don't apply on Windows; agentlog uses ACLs there")
+	}
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+
+	origDefault := slog.Default()
+	defer slog.SetDefault(origDefault)
+
+	path, closeFn, err := Setup()
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := closeFn(); err != nil {
+		t.Fatalf("closeFn: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat log file: %v", err)
+	}
+	want := os.FileMode(0o600)
+	got := info.Mode().Perm()
+	if got != want {
+		t.Errorf("log file mode = %#o, want %#o (owner-only)", got, want)
+	}
+}
+
+// TestAgentLogChmodsExistingFileOnOpen pins the S-1 follow-on from review
+// feedback on #95: the 0o600 mode OpenFile requests only applies when
+// O_CREATE actually creates the file. An existing agent.log written by a
+// pre-#95 build (or any other world-readable log) would otherwise stay at
+// its old mode on append -- re-leaking any secret logged into it. Setup
+// must chmod the file to 0o600 after OpenFile succeeds.
+func TestAgentLogChmodsExistingFileOnOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits don't apply on Windows; agentlog uses ACLs there")
+	}
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "xdg-state"))
+
+	// Pre-create an agent.log in the world-readable mode a pre-#95 build
+	// would have left behind, simulating an upgrade-in-place scenario.
+	path := filepath.Join(dir, "xdg-state", "branchdam-agent", "agent.log")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("previously written by an older build\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDefault := slog.Default()
+	defer slog.SetDefault(origDefault)
+
+	_, closeFn, err := Setup()
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := closeFn(); err != nil {
+		t.Fatalf("closeFn: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat log file: %v", err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
+		t.Errorf("after Setup, log file mode = %#o, want %#o (existing 0o644 file should be tightened)", got, want)
+	}
+}
+
+// TestRotateIfLargeChmodsRotatedFile pins the S-1 follow-on for the
+// rotation path: an oversized agent.log that gets renamed to agent.log.1
+// would otherwise carry its old (pre-#95, world-readable) mode into the
+// rotated copy -- and the .1 sibling is the more likely container for
+// any X-API-Key logged shortly before rotation, since it holds recent
+// activity. rotateIfLarge must chmod the .1 file to 0o600 after the
+// rename succeeds.
+func TestRotateIfLargeChmodsRotatedFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits don't apply on Windows; agentlog uses ACLs there")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.log")
+	big := make([]byte, maxSizeBytes+1)
+	if err := os.WriteFile(path, big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rotateIfLarge(path)
+
+	info, err := os.Stat(path + ".1")
+	if err != nil {
+		t.Fatalf("stat rotated log file: %v", err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
+		t.Errorf("rotated log file mode = %#o, want %#o (renamed .1 should be tightened to 0o600)", got, want)
 	}
 }

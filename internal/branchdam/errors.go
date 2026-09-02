@@ -127,13 +127,32 @@ func ClassifyError(msg string) Classification {
 // missing X-API-Key", "agent authentication is not configured"), not JSON --
 // Body is always the raw response body, never assumed to be a parsed error
 // struct.
+//
+// Body is preserved as a field so HTTPError.Classification() can apply
+// the fatalSubstrings/transientSubstrings rule, but Error() deliberately
+// does NOT echo the body verbatim (audit S-7): a server that reflects
+// the request payload back, or names the X-API-Key in its debug output,
+// would otherwise be re-leaked into slog/crash-dump paths. The body is
+// always available to callers via the Body field for structured logging
+// or replay-driven debugging.
+//
+// IMPORTANT: callers logging this error MUST log err.Error() (the
+// status-only message) rather than the *HTTPError struct via %+v or
+// %#v -- both of those would dump the raw Body field verbatim,
+// re-introducing the S-7 leak that Error()'s sanitization exists to
+// prevent. To capture the body for diagnostic purposes, read httpErr.Body
+// explicitly under a redactor-aware logger, never via the error's own
+// formatted representation.
 type HTTPError struct {
 	StatusCode int
 	Body       string
 }
 
+// Error returns a short, status-only message. The body is intentionally
+// omitted -- see HTTPError's doc comment. Callers that need the body
+// for logging or Classification read the Body field directly.
 func (e *HTTPError) Error() string {
-	return fmt.Sprintf("branchdam: server returned %d: %s", e.StatusCode, e.Body)
+	return fmt.Sprintf("branchdam: server returned HTTP %d", e.StatusCode)
 }
 
 // Retryable reports whether the HTTP status code alone suggests a retry is

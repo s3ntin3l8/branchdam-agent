@@ -41,7 +41,7 @@ func TestRegistryCompleteness(t *testing.T) {
 }
 
 func TestBuildIntegrationDepsLuminarReadiness(t *testing.T) {
-	client := branchdam.New("http://example.invalid", "0123456789abcdef0123456789abcdef")
+	client := branchdam.New("http://localhost:8080", "0123456789abcdef0123456789abcdef")
 
 	cases := []struct {
 		name string
