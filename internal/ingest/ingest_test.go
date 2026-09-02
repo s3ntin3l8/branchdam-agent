@@ -534,12 +534,12 @@ func TestIngestCardAllowedExtensionsFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{
-		"a.jpg",  // matches
-		"b.JPG",  // matches (case)
-		"c.mp4",  // matches
-		"d.txt",  // filtered out
-		"e.png",  // filtered out
-		"f",      // no ext -- NOT filtered by allowlist, falls through
+		"a.jpg", // matches
+		"b.JPG", // matches (case)
+		"c.mp4", // matches
+		"d.txt", // filtered out
+		"e.png", // filtered out
+		"f",     // no ext -- NOT filtered by allowlist, falls through
 	} {
 		if err := os.WriteFile(filepath.Join(cardRoot, name), []byte("data"), 0o644); err != nil {
 			t.Fatal(err)
