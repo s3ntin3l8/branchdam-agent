@@ -77,6 +77,13 @@ func sanitizeSegment(s string) string {
 	// literal substring inside an otherwise-safe segment, so reject it
 	// directly to close issue #99 -- e.g. "../../etc" becomes
 	// ".._.._etc", which still contains "..".
+	//
+	// The Contains check is deliberately broader than a strict traversal
+	// guard -- it also flattens a legit segment like "report..final.jpg"
+	// to "_". The threat model (issue #99) is untrusted camera-card
+	// content, where filenames containing ".." are vanishingly rare; the
+	// conservative choice prioritizes the no-".." invariant over
+	// preserving such names verbatim.
 	if cleaned == "." || cleaned == ".." || strings.Contains(cleaned, "..") {
 		return "_"
 	}
