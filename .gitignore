@@ -70,3 +70,6 @@ compose.override.yml
 # audit-conclusions that survive triage should be filed as tracked
 # issues or docs elsewhere.
 /docs/audit/
+
+# govulncheck JSON output (transient, written by `make vulncheck`)
+/govulncheck.json

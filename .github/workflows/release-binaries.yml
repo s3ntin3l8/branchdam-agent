@@ -172,6 +172,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # id-token: write is required for `cosign sign-blob --yes` in keyless
+      # (OIDC) mode -- cosign mints a short-lived certificate bound to this
+      # job's OIDC token and submits it to Fulcio. Without this permission
+      # the step fails with "failed to get OIDC token: permission denied".
+      id-token: write
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -199,4 +204,51 @@ jobs:
             dist/windows-amd64/branchdam-agent-windows-amd64.zip \
             dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz \
             SHA256SUMS.txt \
+            --repo "${{ github.repository }}" --clobber
+
+      # Keyless Sigstore attestation of every release asset (plus the
+      # combined SHA256SUMS.txt). Each artifact gets a paired .sig + .cert
+      # uploaded alongside it; an operator (or a future branchDAM client
+      # verifier -- see issue #111 C-3 for the server-side follow-up) can
+      # then `cosign verify-blob --certificate <cert> --signature <sig>
+      # --certificate-identity-regexp ... --certificate-oidc-issuer
+      # https://token.actions.githubusercontent.com <artifact>` against
+      # the public Sigstore transparency log without any certificate
+      # purchase or managed-key ceremony.
+      #
+      # `cosign sign-blob --yes` is used (not `sign`/`sign-image`) because
+      # these are loose files, not OCI images. The Fulcio-signed
+      # certificate's SubjectAlternativeName is the workflow's OIDC
+      # identity (repo + ref + job), and the OIDC issuer is pinned to
+      # `https://token.actions.githubusercontent.com` to keep verification
+      # deterministic across signers.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - name: Sign release assets (Sigstore keyless)
+        run: |
+          set -euo pipefail
+          assets=(
+            "dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz"
+            "dist/windows-amd64/branchdam-agent-windows-amd64.zip"
+            "dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz"
+            "SHA256SUMS.txt"
+          )
+          for asset in "${assets[@]}"; do
+            cosign sign-blob --yes "$asset" \
+              --output-signature "${asset}.sig" \
+              --output-certificate "${asset}.cert"
+          done
+      - name: Upload signatures and certificates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ inputs.release-tag }}" \
+            dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz.sig \
+            dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz.cert \
+            dist/windows-amd64/branchdam-agent-windows-amd64.zip.sig \
+            dist/windows-amd64/branchdam-agent-windows-amd64.zip.cert \
+            dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz.sig \
+            dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz.cert \
+            SHA256SUMS.txt.sig \
+            SHA256SUMS.txt.cert \
             --repo "${{ github.repository }}" --clobber
