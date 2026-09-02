@@ -12,6 +12,7 @@ package tray
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestConfirmDestructiveDisabledSkipsPrompt(t *testing.T) {
@@ -154,5 +155,76 @@ func TestConfirmDestructiveConfirmErrorRefuses(t *testing.T) {
 
 	if confirmDestructiveAction(context.Background(), confirm, true, "t", "b") {
 		t.Error("expected a confirm func that returns false (whether for cancel or for an upstream error) to refuse the action")
+	}
+}
+
+// TestConfirmDestructiveTimesOutRefuses covers the wedged-dialog case
+// (a headless/wonky display, a frozen zenity): the gate is called from
+// run_supported.go's GUI select loop, so a confirm that never returns
+// must not hold the whole tray -- Quit included -- hostage. The gate
+// runs confirm on its own goroutine under a confirmTimeout-bounded
+// child context; when that context fires, the gate gives up and
+// refuses. Rather than sleeping for the real 60s bound, this test
+// drives the equivalent path through an already-short caller context.
+func TestConfirmDestructiveTimesOutRefuses(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	confirm := func(ctx context.Context, _, _ string) bool {
+		close(started)
+		select {
+		case <-ctx.Done(): // the gate must cancel us on its way out
+		case <-release:
+		}
+		return true // an answer that arrives too late must not proceed
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	done := make(chan bool, 1)
+	go func() { done <- confirmDestructiveAction(ctx, confirm, true, "t", "b") }()
+
+	<-started
+	select {
+	case got := <-done:
+		if got {
+			t.Error("expected a confirm that never answers to refuse the action once the context is done")
+		}
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("confirmDestructiveAction blocked past its context deadline -- the tray select loop would be wedged")
+	}
+}
+
+// TestConfirmDestructiveCancelsConfirmContext asserts the gate hands
+// confirm a context it actually cancels when it gives up, so the
+// dialog subprocess the production trayConfirm re-execs is torn down
+// with it rather than lingering for the full 5-minute dialogTimeout.
+func TestConfirmDestructiveCancelsConfirmContext(t *testing.T) {
+	cancelled := make(chan struct{})
+	confirm := func(ctx context.Context, _, _ string) bool {
+		<-ctx.Done()
+		close(cancelled)
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	confirmDestructiveAction(ctx, confirm, true, "t", "b")
+
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected the gate to cancel the context it passed to confirm")
+	}
+}
+
+// TestConfirmDestructiveTimeoutBound documents the per-click bound
+// itself: it must stay well under cmd/branchdam-agent's dialogTimeout
+// (5 minutes), which bounds the subprocess, not the GUI loop.
+func TestConfirmDestructiveTimeoutBound(t *testing.T) {
+	if confirmTimeout <= 0 || confirmTimeout >= 5*time.Minute {
+		t.Errorf("confirmTimeout = %v, want a positive bound well under the 5m dialogTimeout", confirmTimeout)
 	}
 }

@@ -48,9 +48,13 @@ var trayDialogSetup = func() (run dialogRunner, selfExe string, err error) {
 // default: a misconfigured host (no display, no zenity backend) is
 // exactly when a destructive action should NOT fire.
 //
-// The ctx parameter is accepted to match tray.Run's signature; run
-// already bounds its own wait with dialogTimeout, and there's no
-// caller-side deadline we'd want to honor separately here today.
+// The ctx parameter is accepted to match tray.Run's signature. run
+// bounds the subprocess itself with dialogTimeout (5 minutes), which is
+// deliberately NOT the bound the tray's GUI loop waits on: the gate
+// (internal/tray/gate.go) runs this callback on its own goroutine under
+// a much shorter confirmTimeout and refuses the action if it hasn't
+// answered by then, so a wedged dialog backend can leave this
+// subprocess to expire on its own without freezing the menu.
 // Logging on the failed-render path is delegated to slog (no UI side
 // effect) so the menu isn't disturbed mid-click.
 func trayConfirm(run dialogRunner) func(ctx context.Context, title, body string) bool {
