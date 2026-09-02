@@ -37,6 +37,50 @@ var trayDialogSetup = func() (run dialogRunner, selfExe string, err error) {
 	return selfDialogRunner(selfExe), selfExe, err
 }
 
+// trayConfirm builds the destructive-action confirmation callback the
+// tray's select loop (internal/tray/run_supported.go) hands each of the
+// four gated click handlers. It re-execs `dialog -kind question
+// -title <title> -message <body>` via run, and maps runDialogSubprocess's
+// exit-code contract to the callback's bool: dialogExitOK (operator
+// clicked OK / "Yes") -> true, dialogExitCanceled (Cancel / window
+// close) -> false, anything else (the dialog subprocess failed to even
+// render) -> false. The last is the "refuse rather than proceed"
+// default: a misconfigured host (no display, no zenity backend) is
+// exactly when a destructive action should NOT fire.
+//
+// The ctx parameter is accepted to match tray.Run's signature. run
+// bounds the subprocess itself with dialogTimeout (5 minutes), which is
+// deliberately NOT the bound the tray's GUI loop waits on: the gate
+// (internal/tray/gate.go) runs this callback on its own goroutine under
+// a much shorter confirmTimeout and refuses the action if it hasn't
+// answered by then, so a wedged dialog backend can leave this
+// subprocess to expire on its own without freezing the menu.
+// Logging on the failed-render path is delegated to slog (no UI side
+// effect) so the menu isn't disturbed mid-click.
+func trayConfirm(run dialogRunner) func(ctx context.Context, title, body string) bool {
+	return func(ctx context.Context, title, body string) bool {
+		// Thread ctx through to the dialog subprocess so the gate's
+		// 60s confirmTimeout actually tears down a wedged dialog
+		// (Hermes review on #134). Without this, the dialog was bounded
+		// only by the 5-minute dialogTimeout in runDialogSubprocess,
+		// not by the gate's much shorter bound.
+		_, exitCode, err := run(ctx, "-kind", "question", "-title", title, "-message", body)
+		if err != nil {
+			slog.Warn("destructive-action confirm dialog failed to render; refusing the action", "title", title, "err", err)
+			return false
+		}
+		switch exitCode {
+		case dialogExitOK:
+			return true
+		case dialogExitCanceled:
+			return false
+		default:
+			slog.Warn("destructive-action confirm dialog returned unexpected exit; refusing the action", "title", title, "exit", exitCode)
+			return false
+		}
+	}
+}
+
 // runTrayCmd implements `branchdam-agent tray -config <path>`: the
 // tray-resident shell around internal/ingest.Engine (issue #3). It drives
 // the exact same Engine.IngestCard code path runIngestCmd (ingest.go) does
@@ -281,7 +325,15 @@ func runTrayCmd(args []string) int {
 	}
 
 	var outcome tray.Outcome
-	outcome, trayErr = tray.Run(ctx, runner, statusSrv.StatusURL(), updater, settings)
+	// Destructive-action confirmation gate (issue #108 / E3 #S2-14):
+	// tray.confirmDestructive (default true) gates the four destructive
+	// menu items behind an OK/Cancel dialog. A disabled runner (selfExe
+	// couldn't be resolved earlier) yields a trayConfirm that always
+	// refuses -- which matches confirmDestructive=true's "refuse on
+	// anything but a clean OK" behavior, so the disabled-dialog case
+	// can't accidentally turn into a silent proceed.
+	confirmDestructive := cfg.Tray.ConfirmDestructive
+	outcome, trayErr = tray.Run(ctx, runner, statusSrv.StatusURL(), updater, settings, trayConfirm(dialog), confirmDestructive)
 	stop() // make sure the status server's ctx.Done() fires even if tray.Run returned on its own (e.g. Quit clicked)
 	wg.Wait()
 

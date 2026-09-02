@@ -97,11 +97,20 @@ func Setup() (path string, closeFn func() error, err error) {
 
 	rotateIfLarge(path)
 
-	f, ferr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, ferr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if ferr != nil {
 		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 		return path, noopClose, fmt.Errorf("agentlog: open log file: %w", ferr)
 	}
+	// OpenFile only applies 0o600 when O_CREATE actually creates the
+	// file; an existing agents.log written by a pre-#95 build would
+	// otherwise stay at its old (world-readable) mode on append and
+	// re-leak anything INFO-level traces logged into it. chmodOwnerOnly
+	// closes that gap and is best-effort: a chmod failure must not stop
+	// the agent from writing its log, since on some platforms (Windows
+	// ACLs, FAT32 camera cards mounted as USB storage) chmod is a no-op
+	// or returns an error that should not block logging.
+	chmodOwnerOnly(path)
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, f), nil)))
 	return path, f.Close, nil
@@ -111,12 +120,38 @@ func Setup() (path string, closeFn func() error, err error) {
 // just means the file keeps growing, not that logging stops working) when
 // it already exceeds maxSizeBytes. Errors from Stat (including "file
 // doesn't exist yet," the common case) are treated as "nothing to rotate."
+//
+// On a successful rename the rotated sibling is chmod'd to 0o600 via
+// chmodOwnerOnly, since os.Rename preserves the original (possibly
+// world-readable, pre-#95) mode and the .1 file is the more likely
+// container for any X-API-Key logged shortly before rotation.
 func rotateIfLarge(path string) {
 	info, err := os.Stat(path)
 	if err != nil || info.Size() < maxSizeBytes {
 		return
 	}
-	_ = os.Rename(path, path+".1")
+	if rerr := os.Rename(path, path+".1"); rerr == nil {
+		chmodOwnerOnly(path + ".1")
+	}
+}
+
+// chmodOwnerOnly best-effort tightens path's mode to 0o600, logging a
+// warning on failure rather than returning the error: on some platforms
+// (Windows ACLs, FAT32 camera cards mounted as USB storage) chmod is a
+// no-op or returns an error that should not block the agent from
+// continuing to write to its log file.
+//
+// The 0o600 mode OpenFile requests only applies when O_CREATE actually
+// creates the file. An existing agent.log written by a pre-#95 build, or
+// a rotated agent.log.1 from rotateIfLarge, would otherwise stay at its
+// pre-fix (world-readable) mode on append -- re-leaking the X-API-Key
+// and any other secret that flows through agent INFO-level traces (S-1).
+// This helper is the S-1 follow-on that actually closes that gap for
+// both the existing-file path and the rotated-sibling path.
+func chmodOwnerOnly(path string) {
+	if err := os.Chmod(path, 0o600); err != nil {
+		slog.Warn("agentlog: could not tighten log file mode to 0600", "path", path, "err", err)
+	}
 }
 
 // SlogBridge adapts slog.Default() to the classic Print/Printf logger

@@ -193,6 +193,17 @@ type TrayConfig struct {
 	// starts automatically at login. Off by default; an operator opts in
 	// explicitly. No effect on platforms other than windows/darwin.
 	StartOnLogin bool `yaml:"startOnLogin"`
+	// ConfirmDestructive gates the four destructive tray menu actions --
+	// "Drain queue now", "Prune now", "Install and restart", "Roll back"
+	// (issue #108 / E3 #S2-14) -- behind an explicit OK/Cancel dialog.
+	// Defaults to true via defaultConfig(): destructive clicks are the
+	// reason this flag exists, and an opt-OUT default would re-introduce
+	// the silent-data-loss hazard the issue was filed to fix (a
+	// double-click on "Prune now" with LocalEditRoot on the wrong mount
+	// silently deletes files; the headless `update` command already
+	// prompts by default and only bypasses with -yes). Power users who
+	// want to skip the prompt set this to false explicitly.
+	ConfirmDestructive bool `yaml:"confirmDestructive"`
 }
 
 // SelfUpdateConfig gates github.com/creativeprojects/go-selfupdate.
@@ -484,6 +495,14 @@ func defaultConfig() Config {
 		Integrations: IntegrationsConfig{
 			Luminar: CatalogSyncConfig{DryRun: true},
 		},
+		// ConfirmDestructive ON by default (issue #108 / E3 #S2-14): a
+		// destructive click -- "Prune now" against the wrong mount, a
+		// self-update restart mid-render -- is the very reason the
+		// field exists, and an opt-OUT default would re-introduce the
+		// silent-data-loss hazard the issue was filed to fix. Mirrors
+		// SelfUpdate.Enabled's own "on by default" pattern, same
+		// "explicit value still wins" guarantee.
+		Tray: TrayConfig{ConfirmDestructive: true},
 	}
 }
 

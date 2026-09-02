@@ -155,8 +155,47 @@ type Settings interface {
 	// OpenConfigFile and RevealConfigFolder shell out to the OS's own
 	// "open with default app" / "reveal in file manager" commands --
 	// issue #31's minimum bar: an operator can always find and hand-edit
-	// config.yaml, even for fields this menu doesn't expose a dialog for
-	// (pathMappings).
+	// config.yaml, even for fields this menu doesn't expose a dialog for.
+	//
+	// Hand-edit only, on purpose (issue #110 / audit F-14 inventory).
+	// The list below enumerates every config field intentionally NOT
+	// surfaced by SettingsView, with the reason for each. Fields graduate
+	// to SettingsView as their M5/E3 sub-issue lands -- see
+	// docs/tray-settings-inventory.md for the per-field tracking table.
+	// When a field graduates, remove the matching entry below in the
+	// same PR so this comment and the inventory doc never disagree.
+	//
+	//   * pathMappings: hand-edit by design (config.go:446-456 -- each
+	//     rule is a workstation-to-container prefix pair, not a single
+	//     value, and a wrong entry silently misroutes every event for
+	//     a prefix). OpenConfigFile/Pre-flight stay the operator path.
+	//   * ingest.cardRoots: pending M5 #78 (graduates once a tray-side
+	//     Detector restart lands; see the "cardRoots" line in
+	//     docs/tray-settings-inventory.md).
+	//   * ingest.pollIntervalSecs: low-frequency, restart-only knob;
+	//     not worth a menu slot. Operators adjust via OpenConfigFile.
+	//   * prune.* (enabled, minAgeHours, intervalMinutes): destructive
+	//     subcommand gating; the hand-edit gate is the audit trail.
+	//     Toggles here would let a stray click disable a safety check.
+	//   * offline.* (queueDbPath, tier0ContainerRoot, drainIntervalSecs):
+	//     same shape -- changing the SQLite path or the staging
+	//     container root mid-run breaks in-flight drain state, and
+	//     drainIntervalSecs is a tuning knob operators rarely touch.
+	//   * selfUpdate.repo: a typo in the "owner/name" slug causes the
+	//     next update check to fetch from a non-existent or wrong
+	//     repo; the hand-edit gate (with a selfupdate log line naming
+	//     the resolved repo on every check) is the safety net.
+	//   * tray.statusAddr: loopback bind address; a non-loopback
+	//     value here would expose the unauthenticated status page on
+	//     the network. Restart-only and intentionally hand-edit.
+	//
+	// Fields the issue (#110) lists as future graduates but that do
+	// not yet exist in the Config struct (no M5 sub-issue has landed):
+	// ingest.autoEject (#87), ingest.requireDCIM (#81),
+	// ingest.pauseUploadOnMetered (#84), ingest.autoImportPaths (#79),
+	// tray.confirmDestructive (E3 #S2-14). Each appears in
+	// docs/tray-settings-inventory.md's table as a not-yet-applicable
+	// row -- it is a settings.go follow-up, not a pre-existing gap.
 	OpenConfigFile() error
 	RevealConfigFolder() error
 }
