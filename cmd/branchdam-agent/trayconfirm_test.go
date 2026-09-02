@@ -17,7 +17,7 @@ type fakeDialogRunner struct {
 	err      error
 }
 
-func (f *fakeDialogRunner) Run(args ...string) (string, int, error) {
+func (f *fakeDialogRunner) Run(_ context.Context, args ...string) (string, int, error) {
 	f.calls = append(f.calls, append([]string(nil), args...))
 	return f.stdout, f.exitCode, f.err
 }

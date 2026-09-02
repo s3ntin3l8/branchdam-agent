@@ -59,7 +59,12 @@ var trayDialogSetup = func() (run dialogRunner, selfExe string, err error) {
 // effect) so the menu isn't disturbed mid-click.
 func trayConfirm(run dialogRunner) func(ctx context.Context, title, body string) bool {
 	return func(ctx context.Context, title, body string) bool {
-		_, exitCode, err := run("-kind", "question", "-title", title, "-message", body)
+		// Thread ctx through to the dialog subprocess so the gate's
+		// 60s confirmTimeout actually tears down a wedged dialog
+		// (Hermes review on #134). Without this, the dialog was bounded
+		// only by the 5-minute dialogTimeout in runDialogSubprocess,
+		// not by the gate's much shorter bound.
+		_, exitCode, err := run(ctx, "-kind", "question", "-title", title, "-message", body)
 		if err != nil {
 			slog.Warn("destructive-action confirm dialog failed to render; refusing the action", "title", title, "err", err)
 			return false

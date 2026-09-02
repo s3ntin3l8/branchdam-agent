@@ -232,7 +232,7 @@ func TestConfigSettingsExistingKeysStillAccepted(t *testing.T) {
 func TestConfigSettingsPromptAndSetHappyPath(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	var gotArgs []string
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		gotArgs = args
 		return "https://branchdam.example.com", dialogExitOK, nil
 	}
@@ -255,7 +255,7 @@ func TestConfigSettingsPromptAndSetHappyPath(t *testing.T) {
 
 func TestConfigSettingsPromptAndSetCanceled(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return "", dialogExitCanceled, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
@@ -274,7 +274,7 @@ func TestConfigSettingsPromptAndSetCanceled(t *testing.T) {
 
 func TestConfigSettingsPromptAndSetDialogFailure(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return "", dialogExitFailed, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
@@ -291,7 +291,7 @@ func TestConfigSettingsPromptAndSetDialogFailure(t *testing.T) {
 func TestConfigSettingsAPIKeyNeverPassedAsDialogDefault(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	var gotArgs []string
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		gotArgs = args
 		return "new-key-value-0123456789abcdef0123456789", dialogExitOK, nil
 	}
@@ -350,7 +350,7 @@ func TestConfigSettingsSnapshotIntegrationsDefaultsUnconfigured(t *testing.T) {
 func TestConfigSettingsPromptAndSetIntegrationPathHappyPath(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	var gotArgs []string
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		gotArgs = args
 		return "/data/catalog.db", dialogExitOK, nil
 	}
@@ -377,7 +377,7 @@ func TestConfigSettingsPromptAndSetIntegrationPathHappyPath(t *testing.T) {
 
 func TestConfigSettingsPromptAndSetIntegrationPathCanceled(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return "", dialogExitCanceled, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
@@ -441,7 +441,7 @@ func TestConfigSettingsReloadCardRootsDoesNotRequireRestart(t *testing.T) {
 func TestConfigSettingsPromptAndSetCardRootsHappyPath(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	var gotArgs []string
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		gotArgs = args
 		return "/media/new1, /media/new2", dialogExitOK, nil
 	}
@@ -475,7 +475,7 @@ func TestConfigSettingsPromptAndSetCardRootsHappyPath(t *testing.T) {
 
 func TestConfigSettingsPromptAndSetCardRootsEmpty(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return "  ", dialogExitOK, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
@@ -602,7 +602,7 @@ func TestConfigSettingsPromptAndSetRejectsInvalidValueBeforePersisting(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return "too-short", dialogExitOK, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
@@ -666,7 +666,7 @@ func TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange(t *testing
 	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
 	queueStore := openTestQueueStore(t)
 
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return newSrv.URL, dialogExitOK, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
