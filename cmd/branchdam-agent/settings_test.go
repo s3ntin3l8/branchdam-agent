@@ -695,3 +695,80 @@ func TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange(t *testing
 		t.Errorf("expected the rebuilt drainer to hit the new server after a server.baseUrl change, hitNew=%d -- stale-client regression", hitNew)
 	}
 }
+
+func TestConfigSettingsSetBoolRequireDCIM(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetBool("ingest.requireDCIM", true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+
+	if !s.Snapshot().RequireDCIM {
+		t.Error("expected Snapshot to reflect RequireDCIM=true")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Ingest.RequireDCIM {
+		t.Error("expected RequireDCIM=true to be persisted to disk")
+	}
+}
+
+func TestConfigSettingsAllowedExtensionsValidation(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	// Valid cases
+	if err := s.validateStringChange("ingest.allowedExtensions", ".arw, .cr3, .jpg"); err != nil {
+		t.Errorf("expected valid extensions to pass, got %v", err)
+	}
+	if err := s.validateStringChange("ingest.allowedExtensions", ""); err != nil {
+		t.Errorf("expected empty string to pass, got %v", err)
+	}
+	if err := s.validateStringChange("ingest.allowedExtensions", "  .arw ,  .dng  "); err != nil {
+		t.Errorf("expected padded extensions to pass, got %v", err)
+	}
+
+	// Invalid cases (missing leading dot or bare dot)
+	if err := s.validateStringChange("ingest.allowedExtensions", "arw"); err == nil {
+		t.Error("expected error for extension without leading dot")
+	}
+	if err := s.validateStringChange("ingest.allowedExtensions", "."); err == nil {
+		t.Error("expected error for bare dot extension")
+	}
+	if err := s.validateStringChange("ingest.allowedExtensions", ".arw, jpg"); err == nil {
+		t.Error("expected error for mixed valid/invalid extensions")
+	}
+}
+
+func TestConfigSettingsPromptAndSetAllowedExtensions(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := func(args ...string) (string, int, error) {
+		return ".arw, .cr3, .jpg", dialogExitOK, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+
+	ok, err := s.PromptAndSet(tray.FieldAllowedExtensions)
+	if err != nil {
+		t.Fatalf("PromptAndSet: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+
+	want := []string{".arw", ".cr3", ".jpg"}
+	if !slices.Equal(s.Snapshot().AllowedExtensions, want) {
+		t.Errorf("Snapshot AllowedExtensions = %v, want %v", s.Snapshot().AllowedExtensions, want)
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(reloaded.Ingest.AllowedExtensions, want) {
+		t.Errorf("persisted AllowedExtensions = %v, want %v", reloaded.Ingest.AllowedExtensions, want)
+	}
+}

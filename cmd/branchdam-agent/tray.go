@@ -228,6 +228,7 @@ func runTrayCmd(args []string) int {
 	}
 
 	runner.SetDetectorInterval(time.Duration(cfg.Ingest.PollIntervalSecs) * time.Second)
+	runner.SetDetectorRequireDCIM(cfg.Ingest.RequireDCIM)
 
 	if cfg.Tray.StartOnLogin {
 		if err := enableStartOnLogin(resolvedPath); err != nil {

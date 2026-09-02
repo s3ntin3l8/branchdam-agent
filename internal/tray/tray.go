@@ -270,13 +270,14 @@ type Runner struct {
 
 	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
 	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
-	detectorMu         sync.Mutex
-	detectorCancel     context.CancelFunc
-	detectorDone       chan struct{}
-	detectorBaseCtx    context.Context
-	detectorInterval   time.Duration
-	onCardIngested     func()
-	detectorErrHandler func(err error)
+	detectorMu          sync.Mutex
+	detectorCancel      context.CancelFunc
+	detectorDone        chan struct{}
+	detectorBaseCtx     context.Context
+	detectorInterval    time.Duration
+	detectorRequireDCIM bool
+	onCardIngested      func()
+	detectorErrHandler  func(err error)
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -685,6 +686,23 @@ func (r *Runner) SetDetectorInterval(d time.Duration) {
 	r.detectorInterval = d
 }
 
+// SetDetectorRequireDCIM sets whether the card detector requires a DCIM/
+// subdirectory to detect a volume.
+func (r *Runner) SetDetectorRequireDCIM(v bool) {
+	r.detectorMu.Lock()
+	changed := r.detectorRequireDCIM != v
+	r.detectorRequireDCIM = v
+	running := r.detectorCancel != nil
+	r.detectorMu.Unlock()
+
+	if changed && running {
+		r.mu.Lock()
+		roots := append([]string(nil), r.watchDirs...)
+		r.mu.Unlock()
+		r.ReconfigureDetector(nil, roots)
+	}
+}
+
 // SetDetectorErrorHandler registers a handler for non-cancellation errors
 // returned by the Detector.Watch loop (run_supported.go forwards these to errCh).
 func (r *Runner) SetDetectorErrorHandler(fn func(err error)) {
@@ -737,7 +755,7 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 	done := make(chan struct{})
 	r.detectorDone = done
 
-	detector := ingest.NewDetector(roots, interval)
+	detector := ingest.NewDetector(roots, interval, r.detectorRequireDCIM)
 	go func() {
 		defer close(done)
 		err := detector.Watch(dctx, func(diff ingest.Diff) {

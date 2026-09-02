@@ -124,11 +124,13 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		SelfUpdateEnabled:          cfg.SelfUpdate.Enabled,
 		SelfUpdateCheckIntervalHrs: cfg.SelfUpdate.CheckIntervalHours,
 		RequireUnbuffered:          cfg.Ingest.RequireUnbuffered,
+		RequireDCIM:                cfg.Ingest.RequireDCIM,
 		ServerBaseURL:              cfg.Server.BaseURL,
 		ServerAPIKeySet:            cfg.Server.APIKey != "",
 		ArchiveRoot:                cfg.Ingest.ArchiveRoot,
 		LocalEditRoot:              cfg.Ingest.LocalEditRoot,
 		NamingTemplate:             cfg.Ingest.PathTemplate,
+		AllowedExtensions:          cfg.Ingest.AllowedExtensions,
 		RestartRequired:            s.restartRequired,
 		NodeIndexPath:              cfg.Integrations.NodeIndexPath,
 		NodeIndexPathSet:           cfg.Integrations.NodeIndexPath != "",
@@ -193,6 +195,8 @@ func (s *configSettings) validateBoolChange(key string, v bool) error {
 		cfg.SelfUpdate.Enabled = v
 	case "ingest.requireUnbuffered":
 		cfg.Ingest.RequireUnbuffered = v
+	case "ingest.requireDCIM":
+		cfg.Ingest.RequireDCIM = v
 	default:
 		// config.Patch does no schema validation of its own -- these three
 		// switches (this one plus validateIntChange/validateStringChange
@@ -246,6 +250,12 @@ func (s *configSettings) validateStringChange(key, v string) error {
 		cfg.Ingest.LocalEditRoot = v
 	case "ingest.cardRoots":
 		cfg.Ingest.CardRoots = splitCommaPaths(v)
+	case "ingest.allowedExtensions":
+		exts, err := splitCommaExtensions(v)
+		if err != nil {
+			return err
+		}
+		cfg.Ingest.AllowedExtensions = exts
 	case "ingest.pathTemplate":
 		cfg.Ingest.PathTemplate = v
 	case "integrations.nodeIndexPath":
@@ -335,6 +345,14 @@ func settingsPromptFor(field tray.SettingsField) (settingsPrompt, error) {
 				return strings.Join(cfg.Ingest.CardRoots, ", ")
 			},
 		}, nil
+	case tray.FieldAllowedExtensions:
+		return settingsPrompt{
+			key: "ingest.allowedExtensions", kind: "entry", title: "Allowed Extensions",
+			message: "File extensions to ingest (comma-separated, e.g. .arw, .jpg, or empty for all):",
+			defaultValue: func(cfg config.Config) string {
+				return strings.Join(cfg.Ingest.AllowedExtensions, ", ")
+			},
+		}, nil
 	case tray.FieldNamingTemplate:
 		return settingsPrompt{
 			key: "ingest.pathTemplate", kind: "entry", title: "Naming Template",
@@ -393,6 +411,9 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 	var patchVal any = value
 	if prompt.key == "ingest.cardRoots" {
 		patchVal = splitCommaPaths(value)
+	} else if prompt.key == "ingest.allowedExtensions" {
+		exts, _ := splitCommaExtensions(value)
+		patchVal = exts
 	}
 	if err := config.Patch(s.path, map[string]any{prompt.key: patchVal}); err != nil {
 		return false, fmt.Errorf("save %s: %w", prompt.key, err)
@@ -494,6 +515,7 @@ func (s *configSettings) reload() error {
 	s.mu.Unlock()
 
 	s.runner.SetDetectorInterval(time.Duration(newCfg.Ingest.PollIntervalSecs) * time.Second)
+	s.runner.SetDetectorRequireDCIM(newCfg.Ingest.RequireDCIM)
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
 
 	// Rebuild every integration syncer against the freshly reloaded
@@ -555,4 +577,23 @@ func splitCommaPaths(s string) []string {
 		}
 	}
 	return out
+}
+
+// splitCommaExtensions parses a comma-separated string of file extensions,
+// trimming whitespace and verifying that each non-empty extension starts
+// with a leading dot. An empty or all-whitespace input returns an empty slice
+// without error (meaning all extensions are allowed).
+func splitCommaExtensions(s string) ([]string, error) {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		ext := strings.TrimSpace(p)
+		if ext == "" {
+			continue
+		}
+		if !strings.HasPrefix(ext, ".") || len(ext) == 1 {
+			return nil, fmt.Errorf("extension %q must start with a leading dot (e.g. %q)", ext, "."+strings.TrimPrefix(ext, "."))
+		}
+		out = append(out, ext)
+	}
+	return out, nil
 }

@@ -35,9 +35,11 @@ type settingsMenu struct {
 	interval24h       *systray.MenuItem
 	intervalNever     *systray.MenuItem
 	requireUnbuffered *systray.MenuItem
+	requireDCIM       *systray.MenuItem
 	serverURL         *systray.MenuItem
 	apiKey            *systray.MenuItem
 	cardRoots         *systray.MenuItem
+	allowedExtensions *systray.MenuItem
 	archiveRoot       *systray.MenuItem
 	localEditRoot     *systray.MenuItem
 	namingTemplate    *systray.MenuItem
@@ -65,12 +67,14 @@ func newSettingsMenu(settings Settings, actionCh chan<- menuAction) *settingsMen
 	sm.intervalNever = intervalParent.AddSubMenuItemCheckbox("Never", "", sv.SelfUpdateCheckIntervalHrs < 0)
 
 	sm.requireUnbuffered = parent.AddSubMenuItemCheckbox("Require unbuffered verify", "Fail ingest instead of silently falling back to a buffered re-read", sv.RequireUnbuffered)
+	sm.requireDCIM = parent.AddSubMenuItemCheckbox("Require DCIM folder", "Skip volumes that do not contain a DCIM folder", sv.RequireDCIM)
 
 	parent.AddSeparator()
 
 	sm.serverURL = parent.AddSubMenuItem("Server URL…", "branchDAM server URL")
 	sm.apiKey = parent.AddSubMenuItem(apiKeyTitle(sv.ServerAPIKeySet), "Agent API key")
 	sm.cardRoots = parent.AddSubMenuItem("Watch folders…", "Directories polled for mounted cards")
+	sm.allowedExtensions = parent.AddSubMenuItem("Allowed extensions…", "File extensions to ingest (comma-separated, empty for all)")
 	sm.archiveRoot = parent.AddSubMenuItem("Archive root…", "Workstation path backing the Tier-3 archive destination")
 	sm.localEditRoot = parent.AddSubMenuItem("Local edit root…", "Workstation path for the local edit (scratch) copy")
 	sm.namingTemplate = parent.AddSubMenuItem("Naming template…", "Destination path template")
@@ -120,12 +124,17 @@ func (sm *settingsMenu) dispatch() {
 		case <-sm.requireUnbuffered.ClickedCh:
 			v := !sm.requireUnbuffered.Checked()
 			sm.send(func() error { return sm.settings.SetBool("ingest.requireUnbuffered", v) })
+		case <-sm.requireDCIM.ClickedCh:
+			v := !sm.requireDCIM.Checked()
+			sm.send(func() error { return sm.settings.SetBool("ingest.requireDCIM", v) })
 		case <-sm.serverURL.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldServerBaseURL); return err })
 		case <-sm.apiKey.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldServerAPIKey); return err })
 		case <-sm.cardRoots.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldCardRoots); return err })
+		case <-sm.allowedExtensions.ClickedCh:
+			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldAllowedExtensions); return err })
 		case <-sm.archiveRoot.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldArchiveRoot); return err })
 		case <-sm.localEditRoot.ClickedCh:
@@ -153,6 +162,7 @@ func (sm *settingsMenu) sync(sv SettingsView) {
 	setChecked(sm.interval24h, sv.SelfUpdateCheckIntervalHrs == 0 || sv.SelfUpdateCheckIntervalHrs == 24)
 	setChecked(sm.intervalNever, sv.SelfUpdateCheckIntervalHrs < 0)
 	setChecked(sm.requireUnbuffered, sv.RequireUnbuffered)
+	setChecked(sm.requireDCIM, sv.RequireDCIM)
 
 	sm.apiKey.SetTitle(apiKeyTitle(sv.ServerAPIKeySet))
 
