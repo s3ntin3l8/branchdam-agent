@@ -43,6 +43,7 @@ type IngestGate interface {
 // interface and cmd/branchdam-agent/preflight.go's helloCaller.
 type Ingester interface {
 	IngestCard(ctx context.Context, cardRoot string) (ingest.CardResult, error)
+	IngestCardOffline(ctx context.Context, cardRoot string) (ingest.OfflineCardResult, error)
 }
 
 // IngestSummary is a condensed, human-readable view of the most recent
@@ -55,6 +56,7 @@ type IngestSummary struct {
 	Skipped   int
 	Failed    int
 	Err       error
+	Offline   bool
 }
 
 // OK reports whether every file that should have been submitted succeeded
@@ -299,6 +301,15 @@ type Runner struct {
 	skipped map[string]bool
 	// notifier emits user-facing OS desktop notifications (issue #79).
 	notifier func(title, message string)
+	// archiveRoot is the configured ingest.archiveRoot destination path,
+	// probed before an online ingest pass.
+	archiveRoot string
+	// archiveProber is the probe function called by TriggerIngest to verify
+	// reachability before attempting an online dual-write ingest pass.
+	archiveProber func(ctx context.Context, archiveRoot string) bool
+	// notifyError is called when an ingest fails (e.g. NAS unreachable with
+	// no offline queue configured).
+	notifyError func(title, message string)
 
 	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
 	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
@@ -354,6 +365,30 @@ func (r *Runner) SetOnPauseChange(fn func(paused bool)) {
 	r.onPauseChange = fn
 }
 
+// SetArchiveRoot updates the archive destination directory (ingest.archiveRoot)
+// probed before an online ingest.
+func (r *Runner) SetArchiveRoot(root string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.archiveRoot = root
+}
+
+// SetArchiveProber sets a custom reachability prober called before IngestCard.
+// If nil, no probe is performed and IngestCard is called directly.
+func (r *Runner) SetArchiveProber(prober func(ctx context.Context, archiveRoot string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.archiveProber = prober
+}
+
+// SetErrorNotifier sets a callback invoked when an ingest cannot proceed
+// (e.g. archive unreachable and no offline queue configured).
+func (r *Runner) SetErrorNotifier(fn func(title, message string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notifyError = fn
+}
+
 // WatchDirs returns a defensive copy of the directories currently
 // described as watched -- run_supported.go's menu rendering and its
 // "Ingest now" worker both read this rather than a raw field, since
@@ -373,6 +408,12 @@ func (r *Runner) WatchDirs() []string {
 // gate. Manual triggers bypass the confirmation dialog and session skip set.
 // When paused (issue #83), triggerIngest returns early without acquiring gate
 // so both manual and detection-driven calls drop the volume.
+//
+// If the archive destination is probed and found unreachable:
+//   - If offline queueing is configured (queueReader != nil), it transparently
+//     falls back to IngestCardOffline.
+//   - If offline queueing is not configured, it records an error and invokes
+//     the registered error notification handler.
 func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSummary {
 	return r.triggerIngest(ctx, cardPath, false)
 }
@@ -390,10 +431,6 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		log.Printf("tray: ingest paused, skipping %s", cardPath)
 		return IngestSummary{CardPath: cardPath}
 	}
-
-	r.gate.Lock()
-	defer r.gate.Unlock()
-
 	if isDetection {
 		r.mu.Lock()
 		if r.skipped != nil && r.skipped[cardPath] {
@@ -420,6 +457,38 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		}
 	}
 
+	r.mu.Lock()
+	prober := r.archiveProber
+	archiveRoot := r.archiveRoot
+	hasQueue := r.queueReader != nil
+	notifyErr := r.notifyError
+	r.mu.Unlock()
+
+	summary := IngestSummary{CardPath: cardPath}
+	reachable := prober == nil || prober(ctx, archiveRoot)
+	if !reachable && !hasQueue {
+		summary.StartedAt = time.Now()
+		summary.Elapsed = 0
+		msg := "NAS unreachable. Set offline.queueDbPath to enable field ingest"
+		summary.Err = errors.New(msg)
+		if notifyErr != nil {
+			notifyErr("branchDAM Ingest", msg)
+		}
+		r.gate.Lock()
+		r.mu.Lock()
+		r.last = &summary
+		r.mu.Unlock()
+		r.gate.Unlock()
+		return summary
+	}
+	if !reachable {
+		summary.Offline = true
+	}
+
+	r.gate.Lock()
+	defer r.gate.Unlock()
+	summary.StartedAt = time.Now()
+
 	r.lastProgress.Store(nil)
 	r.setBusy(true, cardPath)
 	defer func() {
@@ -430,24 +499,40 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 	r.mu.Lock()
 	ingester := r.ingester
 	r.mu.Unlock()
-
 	r.wireProgress(ingester)
 
-	summary := IngestSummary{CardPath: cardPath, StartedAt: time.Now()}
-
-	result, err := ingester.IngestCard(ctx, cardPath)
-	summary.Elapsed = time.Since(summary.StartedAt)
-	if err != nil {
-		summary.Err = err
+	if reachable {
+		result, err := ingester.IngestCard(ctx, cardPath)
+		summary.Elapsed = time.Since(summary.StartedAt)
+		if err != nil {
+			summary.Err = err
+		} else {
+			for _, f := range result.Files {
+				switch {
+				case f.Err != nil:
+					summary.Failed++
+				case f.Skipped:
+					summary.Skipped++
+				default:
+					summary.Submitted++
+				}
+			}
+		}
 	} else {
-		for _, f := range result.Files {
-			switch {
-			case f.Err != nil:
-				summary.Failed++
-			case f.Skipped:
-				summary.Skipped++
-			default:
-				summary.Submitted++
+		result, err := ingester.IngestCardOffline(ctx, cardPath)
+		summary.Elapsed = time.Since(summary.StartedAt)
+		if err != nil {
+			summary.Err = err
+		} else {
+			for _, f := range result.Files {
+				switch {
+				case f.Err != nil:
+					summary.Failed++
+				case f.Skipped:
+					summary.Skipped++
+				default:
+					summary.Submitted++
+				}
 			}
 		}
 	}
@@ -459,11 +544,15 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 
 	if notifier != nil && summary.OK() && summary.Submitted > 0 {
 		volName := filepath.Base(cardPath)
+		action := "imported"
+		if summary.Offline {
+			action = "queued offline"
+		}
 		var msg string
 		if summary.Submitted == 1 {
-			msg = fmt.Sprintf("1 photo imported from %s", volName)
+			msg = fmt.Sprintf("1 photo %s from %s", action, volName)
 		} else {
-			msg = fmt.Sprintf("%d photos imported from %s", summary.Submitted, volName)
+			msg = fmt.Sprintf("%d photos %s from %s", summary.Submitted, action, volName)
 		}
 		notifier("branchDAM Agent", msg)
 	}

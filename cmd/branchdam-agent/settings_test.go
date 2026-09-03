@@ -26,6 +26,10 @@ func (noopIngester) IngestCard(_ context.Context, _ string) (ingest.CardResult, 
 	return ingest.CardResult{}, nil
 }
 
+func (noopIngester) IngestCardOffline(_ context.Context, _ string) (ingest.OfflineCardResult, error) {
+	return ingest.OfflineCardResult{}, nil
+}
+
 func settingsTestFixture(t *testing.T) (path string, cfg config.Config, runner *tray.Runner) {
 	t.Helper()
 	dir := t.TempDir()
@@ -418,6 +422,17 @@ func TestConfigSettingsReloadDetectsRestartRequiredStatusAddr(t *testing.T) {
 	}
 	if !s.Snapshot().RestartRequired {
 		t.Error("expected RestartRequired=true after tray.statusAddr changed via hand-edit")
+	}
+}
+
+func TestConfigSettingsReloadRejectsMissingOfflineTier0ContainerRoot(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	editConfigFile(t, path, "tray:\n", "offline:\n  queueDbPath: \""+filepath.Join(t.TempDir(), "queue.db")+"\"\n  tier0ContainerRoot: /storage\ntray:\n")
+	editConfigFile(t, path, "  tier0ContainerRoot: /storage", "  tier0ContainerRoot: ")
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.Reload(); err == nil {
+		t.Fatal("expected Reload to reject an offline queue with an empty tier0ContainerRoot")
 	}
 }
 

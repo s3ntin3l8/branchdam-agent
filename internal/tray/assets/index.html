@@ -111,6 +111,8 @@
           card <code>{{.CardPath}}</code>, {{since .StartedAt}} ago, took {{.Elapsed}}<br>
           {{if .Err}}
             <span class="fail">failed: {{.Err}}</span>
+          {{else if .Offline}}
+            <span class="ok">{{.Submitted}} queued offline, pending upload</span>, {{.Skipped}} skipped, {{if gt .Failed 0}}<span class="fail">{{.Failed}} failed</span>{{else}}0 failed{{end}}
           {{else}}
             <span class="ok">{{.Submitted}} submitted</span>, {{.Skipped}} skipped, {{if gt .Failed 0}}<span class="fail">{{.Failed}} failed</span>{{else}}0 failed{{end}}
           {{end}}

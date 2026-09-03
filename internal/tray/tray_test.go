@@ -18,14 +18,22 @@ import (
 // pattern internal/ingest.Engine's own nodeCreator interface and
 // cmd/branchdam-agent/preflight.go's helloCaller use.
 type fakeIngester struct {
-	result ingest.CardResult
-	err    error
-	calls  []string
+	result        ingest.CardResult
+	offlineResult ingest.OfflineCardResult
+	err           error
+	offlineErr    error
+	calls         []string
+	offlineCalls  []string
 }
 
 func (f *fakeIngester) IngestCard(_ context.Context, cardRoot string) (ingest.CardResult, error) {
 	f.calls = append(f.calls, cardRoot)
 	return f.result, f.err
+}
+
+func (f *fakeIngester) IngestCardOffline(_ context.Context, cardRoot string) (ingest.OfflineCardResult, error) {
+	f.offlineCalls = append(f.offlineCalls, cardRoot)
+	return f.offlineResult, f.offlineErr
 }
 
 func TestTriggerIngestCountsOutcomes(t *testing.T) {
@@ -64,6 +72,169 @@ func TestTriggerIngestEngineError(t *testing.T) {
 	}
 	if summary.OK() {
 		t.Error("expected OK()=false on engine error")
+	}
+}
+
+func TestTriggerIngestOfflineFallbackWhenArchiveUnreachable(t *testing.T) {
+	fi := &fakeIngester{
+		offlineResult: ingest.OfflineCardResult{
+			Files: []ingest.OfflineFileResult{
+				{SourcePath: "a.jpg", LocalPath: "/scratch/a.jpg"},
+				{SourcePath: "b.xmp", Skipped: true},
+			},
+		},
+	}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(ctx context.Context, archiveRoot string) bool {
+		return false // simulate NAS unreachable
+	})
+	qr := &fakeQueueReader{counts: QueueCounts{AwaitingUpload: 2}}
+	r.SetQueueDeps(qr, nil, nil)
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if !summary.Offline {
+		t.Error("expected summary.Offline=true when falling back to offline ingest")
+	}
+	if summary.Submitted != 1 || summary.Skipped != 1 || summary.Failed != 0 {
+		t.Fatalf("got summary %+v, want 1 submitted, 1 skipped, 0 failed", summary)
+	}
+	if !summary.OK() {
+		t.Error("expected summary.OK()=true when offline files queued cleanly")
+	}
+	if len(fi.calls) != 0 {
+		t.Errorf("expected IngestCard NOT called, got %v", fi.calls)
+	}
+	if len(fi.offlineCalls) != 1 || fi.offlineCalls[0] != "/media/card" {
+		t.Errorf("expected IngestCardOffline called once with /media/card, got %v", fi.offlineCalls)
+	}
+
+	st := r.Status(UpdateStatus{})
+	if st.LastIngest == nil || !st.LastIngest.Offline {
+		t.Error("expected st.LastIngest.Offline=true")
+	}
+	if st.QueueStatus.Counts.Pending() != 2 {
+		t.Errorf("expected QueueStatus.Pending=2, got %d", st.QueueStatus.Counts.Pending())
+	}
+}
+
+func TestTriggerIngestOfflineFallbackUnconfiguredShowsError(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(ctx context.Context, archiveRoot string) bool {
+		return false // simulate NAS unreachable
+	})
+	// Queue is NOT configured (SetQueueDeps not called)
+
+	var notifiedTitle, notifiedMsg string
+	r.SetErrorNotifier(func(title, message string) {
+		notifiedTitle = title
+		notifiedMsg = message
+	})
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if summary.Err == nil {
+		t.Fatal("expected summary.Err when NAS unreachable and queue not configured")
+	}
+	wantMsg := "NAS unreachable. Set offline.queueDbPath to enable field ingest"
+	if summary.Err.Error() != wantMsg {
+		t.Errorf("got err %q, want %q", summary.Err.Error(), wantMsg)
+	}
+	if len(fi.calls) != 0 || len(fi.offlineCalls) != 0 {
+		t.Errorf("expected neither IngestCard nor IngestCardOffline to be called")
+	}
+	if notifiedTitle != "branchDAM Ingest" {
+		t.Errorf("expected notifyError title %q, got %q", "branchDAM Ingest", notifiedTitle)
+	}
+	if notifiedMsg != wantMsg {
+		t.Errorf("expected notifyError called with message %q, got %q (title %q)", wantMsg, notifiedMsg, notifiedTitle)
+	}
+}
+
+func TestTriggerIngestProberTrueRunsOnline(t *testing.T) {
+	fi := &fakeIngester{
+		result: ingest.CardResult{
+			Files: []ingest.FileResult{
+				{SourcePath: "a.jpg"},
+			},
+		},
+	}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(ctx context.Context, archiveRoot string) bool {
+		return true // simulate NAS reachable
+	})
+	qr := &fakeQueueReader{counts: QueueCounts{AwaitingUpload: 1}}
+	r.SetQueueDeps(qr, nil, nil)
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if summary.Offline {
+		t.Error("expected summary.Offline=false when prober returns true")
+	}
+	if len(fi.calls) != 1 || fi.calls[0] != "/media/card" {
+		t.Errorf("expected IngestCard called once, got %v", fi.calls)
+	}
+	if len(fi.offlineCalls) != 0 {
+		t.Errorf("expected IngestCardOffline NOT called, got %v", fi.offlineCalls)
+	}
+
+	st := r.Status(UpdateStatus{})
+	if st.LastIngest == nil || st.LastIngest.Offline {
+		t.Error("expected st.LastIngest.Offline=false")
+	}
+}
+
+func TestTriggerIngestProberTrueButIngestFails(t *testing.T) {
+	wantErr := errors.New("copy failed")
+	fi := &fakeIngester{err: wantErr}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(ctx context.Context, archiveRoot string) bool {
+		return true
+	})
+	r.SetQueueDeps(&fakeQueueReader{}, nil, nil)
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if !errors.Is(summary.Err, wantErr) {
+		t.Fatalf("summary.Err = %v, want %v", summary.Err, wantErr)
+	}
+	if summary.Offline {
+		t.Error("expected prober=true to keep the ingest online even when IngestCard fails")
+	}
+	if len(fi.calls) != 1 {
+		t.Errorf("expected one online ingest call, got %d", len(fi.calls))
+	}
+	if len(fi.offlineCalls) != 0 {
+		t.Errorf("expected no offline fallback after a reachable probe, got %d calls", len(fi.offlineCalls))
+	}
+}
+
+func TestTriggerIngestOfflineFallbackUsesOfflineNotification(t *testing.T) {
+	fi := &fakeIngester{
+		offlineResult: ingest.OfflineCardResult{
+			Files: []ingest.OfflineFileResult{{SourcePath: "a.jpg", LocalPath: "/scratch/a.jpg"}},
+		},
+	}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveProber(func(context.Context, string) bool { return false })
+	r.SetQueueDeps(&fakeQueueReader{}, nil, nil)
+	var notification string
+	r.SetNotifier(func(_, message string) {
+		notification = message
+	})
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if !summary.Offline {
+		t.Fatal("expected offline summary")
+	}
+	if notification != "1 photo queued offline from card" {
+		t.Fatalf("notification = %q, want offline wording", notification)
 	}
 }
 
@@ -846,6 +1017,53 @@ func TestStatusInFlightPruneFalseWhenIdle(t *testing.T) {
 	}
 }
 
+func TestTriggerIngestProbeDoesNotHoldGate(t *testing.T) {
+	started := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetArchiveProber(func(context.Context, string) bool {
+		close(started)
+		<-releaseProbe
+		return true
+	})
+
+	done := make(chan IngestSummary, 1)
+	go func() {
+		done <- r.TriggerIngest(context.Background(), "/media/card")
+	}()
+	<-started
+
+	releaseGate, ok := r.TryLockIdle()
+	if !ok {
+		close(releaseProbe)
+		<-done
+		t.Fatal("reachability probe held Runner.gate")
+	}
+	releaseGate()
+	close(releaseProbe)
+	<-done
+}
+
+func TestTriggerIngestStartsClockAfterGate(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	releaseGate, ok := r.TryLockIdle()
+	if !ok {
+		t.Fatal("expected to acquire idle gate")
+	}
+
+	done := make(chan IngestSummary, 1)
+	go func() {
+		done <- r.TriggerIngest(context.Background(), "/media/card")
+	}()
+	time.Sleep(100 * time.Millisecond)
+	releaseGate()
+
+	summary := <-done
+	if summary.Elapsed >= 50*time.Millisecond {
+		t.Fatalf("ingest elapsed time %s includes gate-wait time", summary.Elapsed)
+	}
+}
+
 func TestTriggerIngestSerializesConcurrentCalls(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -1231,6 +1449,10 @@ func (b *blockingIngester) IngestCard(_ context.Context, _ string) (ingest.CardR
 		<-b.release
 	})
 	return ingest.CardResult{}, nil
+}
+
+func (b *blockingIngester) IngestCardOffline(_ context.Context, _ string) (ingest.OfflineCardResult, error) {
+	return ingest.OfflineCardResult{}, nil
 }
 
 func TestSetDetectorRequireDCIM(t *testing.T) {
@@ -1727,6 +1949,30 @@ func TestFormatTooltipBusyWithProgress(t *testing.T) {
 	}
 	if !strings.Contains(got, "MB/s") {
 		t.Errorf("FormatTooltip got %q, want it to contain speed MB/s", got)
+	}
+}
+
+func TestFormatTooltipBusyWithProgressAndOfflineQueue(t *testing.T) {
+	busySince := time.Now().Add(-5 * time.Second)
+	ev := ingest.ProgressEvent{
+		Path:       "/local/DSC_0042.ARW",
+		Phase:      ingest.ProgressPhaseCopying,
+		BytesDone:  2469606195,
+		TotalBytes: 8697308774,
+	}
+	st := Status{
+		Busy:           true,
+		BusyCard:       "/Volumes/CANON R5",
+		BusySince:      busySince,
+		IngestProgress: &ev,
+		QueueStatus: QueueStatus{
+			Configured: true,
+			Counts:     QueueCounts{AwaitingUpload: 1},
+		},
+	}
+
+	if got := FormatTooltip(st); !strings.Contains(got, "(1 file queued offline)") {
+		t.Errorf("FormatTooltip = %q, want queued-offline suffix", got)
 	}
 }
 

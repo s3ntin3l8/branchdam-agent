@@ -13,8 +13,16 @@ import (
 // depending on whether an ingest is currently in flight and what progress
 // has been reported.
 func FormatTooltip(st Status) string {
+	pending := st.QueueStatus.Counts.Pending()
+	var offlineSuffix string
+	if pending == 1 {
+		offlineSuffix = " (1 file queued offline)"
+	} else if pending > 1 {
+		offlineSuffix = fmt.Sprintf(" (%d files queued offline)", pending)
+	}
+
 	if !st.Busy {
-		return "branchDAM agent"
+		return "branchDAM agent" + offlineSuffix
 	}
 	if st.IngestProgress == nil {
 		card := filepath.Base(st.BusyCard)
@@ -22,11 +30,11 @@ func FormatTooltip(st Status) string {
 			card = st.BusyCard
 		}
 		if card != "" {
-			return fmt.Sprintf("Ingesting %s...", card)
+			return fmt.Sprintf("Ingesting %s...%s", card, offlineSuffix)
 		}
-		return "Ingesting..."
+		return "Ingesting..." + offlineSuffix
 	}
-	return FormatIngestProgress(st.BusyCard, st.BusySince, st.IngestProgress)
+	return FormatIngestProgress(st.BusyCard, st.BusySince, st.IngestProgress) + offlineSuffix
 }
 
 // FormatIngestProgress formats a live ingest progress readout into:

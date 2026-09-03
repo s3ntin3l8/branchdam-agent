@@ -533,6 +533,9 @@ func (s *configSettings) reload() error {
 	if problem := firstBlockingProblem(newCfg); problem != nil {
 		return fmt.Errorf("config problem: %s", problem)
 	}
+	if newCfg.Offline.QueueDBPath != "" && newCfg.Offline.Tier0ContainerRoot == "" {
+		return fmt.Errorf("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")
+	}
 
 	client := branchdam.New(newCfg.Server.BaseURL, newCfg.Server.APIKey)
 
@@ -554,6 +557,15 @@ func (s *configSettings) reload() error {
 	queueStore := s.queueStore
 	s.mu.Unlock()
 
+	if queueStore != nil {
+		engine.Queue = queueStore
+		engine.Tier0ContainerRoot = newCfg.Offline.Tier0ContainerRoot
+	}
+
+	s.runner.SetArchiveRoot(newCfg.Ingest.ArchiveRoot)
+	s.runner.SetArchiveProber(func(pctx context.Context, root string) bool {
+		return probeArchive(pctx, root, client, newCfg.Ingest.UploadStream)
+	})
 	s.runner.SetDetectorInterval(time.Duration(newCfg.Ingest.PollIntervalSecs) * time.Second)
 	s.runner.SetDetectorRequireDCIM(newCfg.Ingest.RequireDCIM)
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)

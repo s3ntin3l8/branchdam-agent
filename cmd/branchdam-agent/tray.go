@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+
 	"os"
 	"os/exec"
 	"os/signal"
@@ -361,6 +362,9 @@ func runTrayCmd(args []string) int {
 	if cfg.Ingest.ArchiveRoot == "" || cfg.Ingest.LocalEditRoot == "" {
 		return fail("ingest.archiveRoot and ingest.localEditRoot must both be set in config")
 	}
+	if cfg.Offline.QueueDBPath != "" && cfg.Offline.Tier0ContainerRoot == "" {
+		return fail("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")
+	}
 	// preflight only WARNs on an empty pathMappings (an operator running
 	// it hasn't necessarily configured ingest yet); the tray is about to
 	// actually ingest, where a missing mapping fails downstream with a
@@ -391,6 +395,17 @@ func runTrayCmd(args []string) int {
 
 	engine := ingest.NewEngine(client, cfg.AgentID, cfg.Ingest, cfg.PathMappings)
 	runner := tray.NewRunner(engine, cfg.Ingest.CardRoots, cfg.Ingest.LocalEditRoot)
+	runner.SetArchiveRoot(cfg.Ingest.ArchiveRoot)
+	runner.SetArchiveProber(func(pctx context.Context, root string) bool {
+		return probeArchive(pctx, root, client, cfg.Ingest.UploadStream)
+	})
+	runner.SetErrorNotifier(func(title, message string) {
+		go func() {
+			if dialog != nil {
+				_, _, _ = dialog(context.Background(), "-kind", "error", "-title", title, "-message", message)
+			}
+		}()
+	})
 	settings := newConfigSettings(resolvedPath, cfg, runner, dialog)
 
 	// Integration syncers (issue #57): started unconditionally, unlike the
@@ -444,6 +459,8 @@ func runTrayCmd(args []string) int {
 			queueStore = nil
 		} else {
 			defer func() { _ = queueStore.Close() }()
+			engine.Queue = queueStore
+			engine.Tier0ContainerRoot = cfg.Offline.Tier0ContainerRoot
 			settings.SetQueueStore(queueStore)
 
 			var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: cfg.AgentID}
@@ -606,4 +623,38 @@ func enableStartOnLogin(configPath string) error {
 		return fmt.Errorf("resolve config path %q: %w", configPath, err)
 	}
 	return autostart.Enable(execPath, []string{"tray", "-config", absConfigPath})
+}
+
+// probeArchive tests whether the archive destination is reachable before an
+// online ingest pass is attempted. If uploadStream is true, it verifies the
+// authenticated branchDAM hello endpoint within a 2-second timeout; otherwise,
+// it verifies that archiveRoot can be stat'd within 2 seconds.
+func probeArchive(ctx context.Context, archiveRoot string, client *branchdam.Client, uploadStream bool) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	if uploadStream {
+		if client == nil {
+			return false
+		}
+		_, err := client.Hello(probeCtx)
+		return err == nil
+	}
+
+	if archiveRoot == "" {
+		return false
+	}
+
+	statCh := make(chan error, 1)
+	go func() {
+		_, err := os.Stat(archiveRoot)
+		statCh <- err
+	}()
+
+	select {
+	case <-probeCtx.Done():
+		return false
+	case err := <-statCh:
+		return err == nil
+	}
 }

@@ -6,9 +6,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 )
 
@@ -318,5 +320,109 @@ func TestRunTrayHandshakeUnreachableContinuesStartup(t *testing.T) {
 	got := run([]string{"tray", "-config", cfgPath})
 	if got != 1 {
 		t.Errorf("run([tray]) = %d, want 1 (tray.ErrUnsupported on this platform)", got)
+	}
+}
+
+func TestRunTrayMissingOfflineTier0ContainerRoot(t *testing.T) {
+	var messages []string
+	stubTrayDialog(t, func(_ context.Context, args ...string) (string, int, error) {
+		for i := 0; i < len(args)-1; i++ {
+			if args[i] == "-message" {
+				messages = append(messages, args[i+1])
+			}
+		}
+		return "", dialogExitFailed, nil
+	})
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: test-agent\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
+		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"  cardRoots: [\"/media/card\"]\n" +
+		"offline:\n" +
+		"  queueDbPath: \"" + filepath.Join(dir, "queue.db") + "\"\n" +
+		"pathMappings:\n" +
+		"  - workstationPath: \"" + filepath.Join(dir, "archive") + "\"\n" +
+		"    containerPath: /storage/archive\n" +
+		"tray:\n" +
+		"  statusAddr: \"127.0.0.1:0\"\n" +
+		"selfUpdate:\n" +
+		"  enabled: false\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := run([]string{"tray", "-config", cfgPath}); got != 1 {
+		t.Fatalf("run([tray]) = %d, want 1", got)
+	}
+	found := false
+	for _, message := range messages {
+		if strings.Contains(message, "offline.tier0ContainerRoot must be set") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("startup dialog messages = %v, want missing tier0 container root", messages)
+	}
+}
+
+func TestProbeArchiveLocal(t *testing.T) {
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, "archive")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if !probeArchive(context.Background(), archiveDir, nil, false) {
+		t.Errorf("probeArchive(%q) = false, want true for existing directory", archiveDir)
+	}
+
+	missingDir := filepath.Join(dir, "nonexistent")
+	if probeArchive(context.Background(), missingDir, nil, false) {
+		t.Errorf("probeArchive(%q) = true, want false for missing directory", missingDir)
+	}
+
+	if probeArchive(context.Background(), "", nil, false) {
+		t.Error("probeArchive(\"\") = true, want false for empty archiveRoot")
+	}
+}
+
+func TestProbeArchiveUploadStream(t *testing.T) {
+	srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/agent/hello" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"version":"test"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srvOK.Close()
+	if !probeArchive(context.Background(), "", branchdam.New(srvOK.URL, "0123456789abcdef0123456789abcdef"), true) {
+		t.Errorf("probeArchive with authenticated hello 200 returned false, want true")
+	}
+
+	srvErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srvErr.Close()
+	if probeArchive(context.Background(), "", branchdam.New(srvErr.URL, "0123456789abcdef0123456789abcdef"), true) {
+		t.Errorf("probeArchive with hello 500 returned true, want false")
+	}
+
+	if probeArchive(context.Background(), "", nil, true) {
+		t.Error("probeArchive with nil client returned true, want false")
+	}
+
+	srvClosed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	closedURL := srvClosed.URL
+	srvClosed.Close()
+	if probeArchive(context.Background(), "", branchdam.New(closedURL, "0123456789abcdef0123456789abcdef"), true) {
+		t.Error("probeArchive with closed server returned true, want false")
 	}
 }
