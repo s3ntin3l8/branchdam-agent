@@ -6,7 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
+
 	"os"
 	"os/exec"
 	"os/signal"
@@ -362,6 +362,9 @@ func runTrayCmd(args []string) int {
 	if cfg.Ingest.ArchiveRoot == "" || cfg.Ingest.LocalEditRoot == "" {
 		return fail("ingest.archiveRoot and ingest.localEditRoot must both be set in config")
 	}
+	if cfg.Offline.QueueDBPath != "" && cfg.Offline.Tier0ContainerRoot == "" {
+		return fail("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")
+	}
 	// preflight only WARNs on an empty pathMappings (an operator running
 	// it hasn't necessarily configured ingest yet); the tray is about to
 	// actually ingest, where a missing mapping fails downstream with a
@@ -394,12 +397,14 @@ func runTrayCmd(args []string) int {
 	runner := tray.NewRunner(engine, cfg.Ingest.CardRoots, cfg.Ingest.LocalEditRoot)
 	runner.SetArchiveRoot(cfg.Ingest.ArchiveRoot)
 	runner.SetArchiveProber(func(pctx context.Context, root string) bool {
-		return probeArchive(pctx, root, cfg.Server.BaseURL, cfg.Ingest.UploadStream)
+		return probeArchive(pctx, root, client, cfg.Ingest.UploadStream)
 	})
 	runner.SetErrorNotifier(func(title, message string) {
-		if dialog != nil {
-			_, _, _ = dialog(context.Background(), "-kind", "error", "-title", title, "-message", message)
-		}
+		go func() {
+			if dialog != nil {
+				_, _, _ = dialog(context.Background(), "-kind", "error", "-title", title, "-message", message)
+			}
+		}()
 	})
 	settings := newConfigSettings(resolvedPath, cfg, runner, dialog)
 
@@ -621,28 +626,19 @@ func enableStartOnLogin(configPath string) error {
 }
 
 // probeArchive tests whether the archive destination is reachable before an
-// online ingest pass is attempted. If uploadStream is true, it verifies that
-// server.baseUrl/healthz answers with HTTP 200 within a 2-second timeout;
-// otherwise, it verifies that archiveRoot can be stat'd within 2 seconds.
-func probeArchive(ctx context.Context, archiveRoot, baseURL string, uploadStream bool) bool {
+// online ingest pass is attempted. If uploadStream is true, it verifies the
+// authenticated branchDAM hello endpoint within a 2-second timeout; otherwise,
+// it verifies that archiveRoot can be stat'd within 2 seconds.
+func probeArchive(ctx context.Context, archiveRoot string, client *branchdam.Client, uploadStream bool) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
 	if uploadStream {
-		if baseURL == "" {
+		if client == nil {
 			return false
 		}
-		healthzURL := strings.TrimRight(baseURL, "/") + "/healthz"
-		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, healthzURL, nil)
-		if err != nil {
-			return false
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return false
-		}
-		defer func() { _ = resp.Body.Close() }()
-		return resp.StatusCode == http.StatusOK
+		_, err := client.Hello(probeCtx)
+		return err == nil
 	}
 
 	if archiveRoot == "" {

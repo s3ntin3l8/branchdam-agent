@@ -201,7 +201,6 @@ type Status struct {
 	// isn't in Integrations()'s own registry (see HookID's own doc
 	// comment). Ordered by the compile-time Hooks() registry.
 	Hooks []HookStatus `json:"hooks,omitempty"`
-
 }
 
 // Runner owns the state a tray-resident process needs: the ingest engine
@@ -294,23 +293,23 @@ type Runner struct {
 	hookInFlight   map[HookID]bool
 	hookState      map[HookID]*HookState
 
- 	// ingestGate gates card ingest on detection (issue #79). Nil means
- 	// always proceed (used by tests and headless CLI).
- 	ingestGate IngestGate
- 	// skipped holds the in-memory session-scoped ignore set of volumes
- 	// the operator dismissed with "Skip this time" (issue #79).
- 	skipped map[string]bool
- 	// notifier emits user-facing OS desktop notifications (issue #79).
- 	notifier func(title, message string)
- 	// archiveRoot is the configured ingest.archiveRoot destination path,
- 	// probed before an online ingest pass.
- 	archiveRoot string
- 	// archiveProber is the probe function called by TriggerIngest to verify
- 	// reachability before attempting an online dual-write ingest pass.
- 	archiveProber func(ctx context.Context, archiveRoot string) bool
- 	// notifyError is called when an ingest fails (e.g. NAS unreachable with
- 	// no offline queue configured).
- 	notifyError func(title, message string)
+	// ingestGate gates card ingest on detection (issue #79). Nil means
+	// always proceed (used by tests and headless CLI).
+	ingestGate IngestGate
+	// skipped holds the in-memory session-scoped ignore set of volumes
+	// the operator dismissed with "Skip this time" (issue #79).
+	skipped map[string]bool
+	// notifier emits user-facing OS desktop notifications (issue #79).
+	notifier func(title, message string)
+	// archiveRoot is the configured ingest.archiveRoot destination path,
+	// probed before an online ingest pass.
+	archiveRoot string
+	// archiveProber is the probe function called by TriggerIngest to verify
+	// reachability before attempting an online dual-write ingest pass.
+	archiveProber func(ctx context.Context, archiveRoot string) bool
+	// notifyError is called when an ingest fails (e.g. NAS unreachable with
+	// no offline queue configured).
+	notifyError func(title, message string)
 
 	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
 	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
@@ -536,7 +535,7 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 				}
 			}
 		}
- 	}
+	}
 
 	r.mu.Lock()
 	r.last = &summary

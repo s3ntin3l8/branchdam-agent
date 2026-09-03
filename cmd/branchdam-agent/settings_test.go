@@ -425,6 +425,17 @@ func TestConfigSettingsReloadDetectsRestartRequiredStatusAddr(t *testing.T) {
 	}
 }
 
+func TestConfigSettingsReloadRejectsMissingOfflineTier0ContainerRoot(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	editConfigFile(t, path, "tray:\n", "offline:\n  queueDbPath: \""+filepath.Join(t.TempDir(), "queue.db")+"\"\n  tier0ContainerRoot: /storage\ntray:\n")
+	editConfigFile(t, path, "  tier0ContainerRoot: /storage", "  tier0ContainerRoot: ")
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.Reload(); err == nil {
+		t.Fatal("expected Reload to reject an offline queue with an empty tier0ContainerRoot")
+	}
+}
+
 func TestConfigSettingsReloadCardRootsDoesNotRequireRestart(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner, nil)
