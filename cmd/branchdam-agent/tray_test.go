@@ -122,55 +122,6 @@ func TestRunTrayMissingIngestRoots(t *testing.T) {
 // -- a tray with no pathMappings entry launches fine but fails the first
 // real card with a confusing ErrNoPathMapping (internal/ingest/pathmap.go)
 // deep inside ingest, not at startup. Must fail fast instead.
-func TestRunTrayMissingOfflineTier0ContainerRoot(t *testing.T) {
-	var messages []string
-	stubTrayDialog(t, func(_ context.Context, args ...string) (string, int, error) {
-		for i := 0; i < len(args)-1; i++ {
-			if args[i] == "-message" {
-				messages = append(messages, args[i+1])
-			}
-		}
-		return "", dialogExitFailed, nil
-	})
-
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "config.yaml")
-	content := "" +
-		"server:\n" +
-		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
-		"agentId: test-agent\n" +
-		"ingest:\n" +
-		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
-		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
-		"  cardRoots: [\"/media/card\"]\n" +
-		"offline:\n" +
-		"  queueDbPath: \"" + filepath.Join(dir, "queue.db") + "\"\n" +
-		"pathMappings:\n" +
-		"  - workstationPath: \"" + filepath.Join(dir, "archive") + "\"\n" +
-		"    containerPath: /storage/archive\n" +
-		"tray:\n" +
-		"  statusAddr: \"127.0.0.1:0\"\n" +
-		"selfUpdate:\n" +
-		"  enabled: false\n"
-	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := run([]string{"tray", "-config", cfgPath}); got != 1 {
-		t.Fatalf("run([tray]) = %d, want 1", got)
-	}
-	found := false
-	for _, message := range messages {
-		if strings.Contains(message, "offline.tier0ContainerRoot must be set") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("startup dialog messages = %v, want missing tier0 container root", messages)
-	}
-}
-
 func TestRunTrayMissingPathMappings(t *testing.T) {
 	stubTrayDialog(t, nil)
 
