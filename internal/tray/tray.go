@@ -421,7 +421,7 @@ func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSumma
 		}
 	} else {
 		summary.Elapsed = time.Since(summary.StartedAt)
-		msg := "NAS unreachable. Set offline.queueDbPath to enable field ingest."
+		msg := "NAS unreachable. Set offline.queueDbPath to enable field ingest"
 		summary.Err = errors.New(msg)
 		if notifyErr != nil {
 			notifyErr("branchDAM Ingest", msg)

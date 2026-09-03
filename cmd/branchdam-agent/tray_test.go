@@ -287,8 +287,9 @@ func TestProbeArchiveUploadStream(t *testing.T) {
 	}
 
 	// Closed server (connection refused) returns false
-	closedURL := srvOK.URL
-	srvOK.Close()
+	srvClosed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	closedURL := srvClosed.URL
+	srvClosed.Close()
 	if probeArchive(context.Background(), "", closedURL, true) {
 		t.Error("probeArchive with closed server returned true, want false")
 	}
