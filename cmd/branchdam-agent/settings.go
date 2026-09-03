@@ -535,6 +535,17 @@ func (s *configSettings) reload() error {
 	}
 
 	client := branchdam.New(newCfg.Server.BaseURL, newCfg.Server.APIKey)
+
+	// Synchronize naming template from server handshake if available (issue #86).
+	// Handshake failure must not block settings reload -- continue with config-file template.
+	hsCtx, hsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: newCfg.AgentID}); err != nil {
+		slog.Warn("could not sync naming template from server handshake on reload; using config value", "err", err)
+	} else if hs.NamingTemplate != "" {
+		newCfg.Ingest.PathTemplate = hs.NamingTemplate
+	}
+	hsCancel()
+
 	engine := ingest.NewEngine(client, newCfg.AgentID, newCfg.Ingest, newCfg.PathMappings)
 
 	s.mu.Lock()
