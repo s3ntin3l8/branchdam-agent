@@ -15,7 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
+	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
 )
 
 // ErrUnsupported is returned by Run on any platform other than
@@ -322,14 +323,16 @@ type Runner struct {
 
 	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
 	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
-	detectorMu          sync.Mutex
-	detectorCancel      context.CancelFunc
-	detectorDone        chan struct{}
-	detectorBaseCtx     context.Context
-	detectorInterval    time.Duration
-	detectorRequireDCIM bool
-	onCardIngested      func()
-	detectorErrHandler  func(err error)
+	detectorMu           sync.Mutex
+	detectorCancel       context.CancelFunc
+	detectorDone         chan struct{}
+	detectorBaseCtx      context.Context
+	detectorInterval     time.Duration
+	detectorRequireDCIM  bool
+	onCardIngested       func()
+	detectorErrHandler   func(err error)
+	pauseUploadOnMetered bool
+	isMeteredFn          func() (bool, error)
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -437,7 +440,7 @@ func (r *Runner) TriggerDetectedIngest(ctx context.Context, cardPath string) Ing
 
 func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection bool) IngestSummary {
 	if r.paused.Load() {
-		log.Printf("tray: ingest paused, skipping %s", cardPath)
+		slog.Info("tray: ingest paused, skipping", "path", cardPath)
 		return IngestSummary{CardPath: cardPath}
 	}
 	if isDetection {
@@ -628,6 +631,28 @@ func (r *Runner) SetQueueDeps(reader QueueReader, drainer Drainer, pruner Pruner
 	r.pruner = pruner
 }
 
+// SetPauseUploadOnMetered sets whether queue drain and streaming upload
+// operations should be deferred when connected to a metered network.
+func (r *Runner) SetPauseUploadOnMetered(v bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pauseUploadOnMetered = v
+}
+
+// PauseUploadOnMetered reports whether pause-on-metered is currently enabled.
+func (r *Runner) PauseUploadOnMetered() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.pauseUploadOnMetered
+}
+
+// SetIsMeteredFunc overrides the network meteredness probe function (useful for tests).
+func (r *Runner) SetIsMeteredFunc(fn func() (bool, error)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.isMeteredFn = fn
+}
+
 // TriggerDrain runs one internal/ingest.Drain pass via the configured
 // Drainer, if one is wired and no other drain pass is currently running.
 // drainMu is a DEDICATED mutex, deliberately never Runner.gate: gate is
@@ -654,10 +679,25 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 
 	r.mu.Lock()
 	drainer := r.drainer
+	pauseMetered := r.pauseUploadOnMetered
+	isMetered := r.isMeteredFn
+	if isMetered == nil {
+		isMetered = netgate.IsMetered
+	}
 	r.mu.Unlock()
 
 	if drainer == nil {
 		return DrainSummary{}, false
+	}
+
+	if pauseMetered {
+		if metered, mErr := isMetered(); metered || mErr != nil {
+			if mErr != nil {
+				slog.Debug("metered probe failed, treating as metered (fail-closed)", "err", mErr)
+			}
+			slog.Info("upload skipped on metered connection")
+			return DrainSummary{}, false
+		}
 	}
 
 	// Set inFlightDrain AFTER the nil-drainer guard. A periodic timer

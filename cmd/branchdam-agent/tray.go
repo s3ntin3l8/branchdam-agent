@@ -498,6 +498,7 @@ func runTrayCmd(args []string) int {
 			_, _, _ = dialog(context.Background(), "-kind", "notify", "-title", title, "-message", message)
 		}()
 	})
+	runner.SetPauseUploadOnMetered(cfg.Ingest.PauseUploadOnMetered)
 
 	if cfg.Tray.StartOnLogin {
 		if err := enableStartOnLogin(resolvedPath); err != nil {

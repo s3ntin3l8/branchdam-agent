@@ -45,8 +45,9 @@ type SettingsView struct {
 	// "never re-check after the initial one."
 	SelfUpdateCheckIntervalHrs int
 
-	RequireUnbuffered bool
-	RequireDCIM       bool
+	RequireUnbuffered    bool
+	RequireDCIM          bool
+	PauseUploadOnMetered bool
 
 	ServerBaseURL   string
 	ServerAPIKeySet bool
@@ -194,9 +195,10 @@ type Settings interface {
 	// not yet exist in the Config struct (no M5 sub-issue has landed):
 	// ingest.autoEject (#87), ingest.requireDCIM (#81),
 	// ingest.pauseUploadOnMetered (#84),
-	// tray.confirmDestructive (E3 #S2-14). Each appears in
-	// docs/tray-settings-inventory.md's table as a not-yet-applicable
-	// row -- it is a settings.go follow-up, not a pre-existing gap.
+	// ingest.autoImportPaths (#79), tray.confirmDestructive (E3 #S2-14).
+	// Each appears in docs/tray-settings-inventory.md's table as a
+	// not-yet-applicable row -- it is a settings.go follow-up, not a
+	// pre-existing gap.
 	OpenConfigFile() error
 	RevealConfigFolder() error
 }

@@ -1801,6 +1801,40 @@ func TestTriggerDrainSkipsWhenPaused(t *testing.T) {
 	}
 }
 
+func TestTriggerDrainPauseOnMetered(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 2}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	// Case 1: PauseUploadOnMetered=true and isMetered=true -> drain skipped
+	r.SetPauseUploadOnMetered(true)
+	r.SetIsMeteredFunc(func() (bool, error) { return true, nil })
+
+	summary, ran := r.TriggerDrain(context.Background())
+	if ran {
+		t.Error("expected TriggerDrain to return ran=false on metered network when PauseUploadOnMetered is true")
+	}
+	if summary.NodeCreatedSent != 0 {
+		t.Errorf("expected zero summary, got %+v", summary)
+	}
+	if fd.calls != 0 {
+		t.Errorf("expected 0 Drain calls, got %d", fd.calls)
+	}
+
+	// Case 2: PauseUploadOnMetered=true and isMetered=false (unmetered) -> drain proceeds
+	r.SetIsMeteredFunc(func() (bool, error) { return false, nil })
+	summary, ran = r.TriggerDrain(context.Background())
+	if !ran {
+		t.Error("expected TriggerDrain to return ran=true on unmetered network")
+	}
+	if summary.NodeCreatedSent != 2 {
+		t.Errorf("expected NodeCreatedSent=2, got %+v", summary)
+	}
+	if fd.calls != 1 {
+		t.Errorf("expected 1 Drain call, got %d", fd.calls)
+	}
+}
+
 func TestTriggerPruneSkipsWhenPaused(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, nil, "")
 	fp := &fakePruner{summary: PruneSummary{Pruned: 3}}
@@ -1876,6 +1910,23 @@ func TestReconfigureDetectorDropsEventsWhenPaused(t *testing.T) {
 	}
 
 	r.StopDetector()
+}
+
+func TestTriggerDrainPauseOnMeteredCase3(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 2}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	// Case 3: PauseUploadOnMetered=false and isMetered=true -> no behavior change, drain proceeds
+	r.SetPauseUploadOnMetered(false)
+	r.SetIsMeteredFunc(func() (bool, error) { return true, nil })
+	_, ran := r.TriggerDrain(context.Background())
+	if !ran {
+		t.Error("expected TriggerDrain to return ran=true when PauseUploadOnMetered is false")
+	}
+	if fd.calls != 1 {
+		t.Errorf("expected 1 Drain call, got %d", fd.calls)
+	}
 }
 
 func TestRunnerIngestProgressRecordedAndCleared(t *testing.T) {

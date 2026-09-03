@@ -53,6 +53,9 @@ ingest:
   # instead of advisory/logged. Linux uses O_DIRECT, macOS uses F_NOCACHE,
   # Windows uses FILE_FLAG_NO_BUFFERING. Default false.
   requireUnbuffered: false
+  # Defer upload-stream bytes and queue drain HTTP calls when on a metered
+  # or hotspot connection (e.g. cellular, tethered). Default false.
+  # pauseUploadOnMetered: false
 
 # M2's offline queue (branchdam-agent ingest --offline / queue-drain) -- see
 # docs/offline-queue.md for the full state machine this backs. Both keys are
