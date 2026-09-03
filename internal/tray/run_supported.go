@@ -19,11 +19,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"runtime"
 	"time"
 
 	"fyne.io/systray"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
 )
 
 // menuRefreshInterval is how often the informational (disabled) menu items
@@ -298,6 +301,16 @@ func Run(
 				restartNowItem.Hide()
 			}
 
+			if sv.PauseUploadOnMetered {
+				if metered, _ := netgate.IsMetered(); metered {
+					systray.SetTooltip("Upload paused (metered connection)")
+				} else {
+					systray.SetTooltip("branchDAM agent")
+				}
+			} else {
+				systray.SetTooltip("branchDAM agent")
+			}
+
 			switch {
 			case applying:
 				// Left as "Installing..." by the click handler; don't
@@ -411,6 +424,13 @@ func Run(
 		drainRequestCh := make(chan struct{}, 1)
 		go func() {
 			for range drainRequestCh {
+				if settings.Snapshot().PauseUploadOnMetered {
+					if metered, _ := netgate.IsMetered(); metered {
+						slog.Info("upload deferred (metered)")
+						drainDoneCh <- false
+						continue
+					}
+				}
 				dctx, cancel := context.WithTimeout(ctx, drainPruneClickTimeout)
 				_, ran := r.TriggerDrain(dctx)
 				cancel()

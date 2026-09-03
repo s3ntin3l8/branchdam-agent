@@ -14,6 +14,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/naming"
+	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
 	"github.com/s3ntin3l8/branchdam-agent/internal/phash"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 )
@@ -87,6 +88,8 @@ type Engine struct {
 	// real UUIDv7 mint (google/uuid.NewV7) via NewEngine.
 	Now         func() time.Time
 	NewNodeUUID func() (string, error)
+	// IsMetered is overridable for tests; default to netgate.IsMetered via NewEngine.
+	IsMetered func() (bool, error)
 
 	// Progress, if set, is called with byte-progress samples during a
 	// file's copy and verify phases (DualWrite/WriteLocal's copy, Verify's
@@ -120,6 +123,7 @@ func NewEngine(client nodeCreator, agentID string, ingestCfg config.IngestConfig
 		Exiftool:    NewExiftool(),
 		Now:         time.Now,
 		NewNodeUUID: func() (string, error) { id, err := uuid.NewV7(); return id.String(), err },
+		IsMetered:   netgate.IsMetered,
 	}
 	if u, ok := client.(uploader); ok {
 		e.Uploader = u
@@ -479,6 +483,67 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 	}
 	if exif != nil {
 		cameraModel = exif.CameraModel
+	}
+
+	if e.Ingest.PauseUploadOnMetered {
+		isMetered := e.IsMetered
+		if isMetered == nil {
+			isMetered = netgate.IsMetered
+		}
+		if metered, _ := isMetered(); metered {
+			slog.Info("upload deferred (metered)", "path", srcPath)
+
+			vars := TemplateVars{OriginalName: filepath.Base(srcPath)}
+			if exif != nil && exif.CapturedAt != nil {
+				vars.CapturedAt = *exif.CapturedAt
+			} else {
+				vars.CapturedAt = srcInfo.ModTime()
+			}
+			if exif != nil {
+				vars.CameraModel = exif.CameraModel
+			}
+
+			relPath := RenderPath(e.Ingest.PathTemplate, vars)
+			localPath := filepath.Join(e.Ingest.LocalEditRoot, relPath)
+			fr.LocalPath = localPath
+
+			writeRes, err := WriteLocal(srcPath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
+			if err != nil {
+				fr.Err = fmt.Errorf("write local copy: %w", err)
+				return fr
+			}
+			fr.Write = writeRes
+			preserveMtimeAt(srcPath, localPath, srcInfo.ModTime())
+
+			localVerify, err := Verify(localPath, writeRes.FullHash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+			if err != nil {
+				_ = os.Remove(localPath)
+				fr.Err = fmt.Errorf("verify local copy: %w", err)
+				return fr
+			}
+			fr.LocalVerify = localVerify
+
+			if !localVerify.Verified {
+				_ = os.Remove(localPath)
+				fr.Err = fmt.Errorf("ingest: verification failed for %s -- safe-eject withheld", srcPath)
+				return fr
+			}
+
+			if e.Ingest.RequireUnbuffered && localVerify.Method == VerifyMethodBufferedFloor {
+				fr.Err = fmt.Errorf("ingest: unbuffered verify required by config, but verify fell back to buffered floor (local=%s) -- safe-eject withheld", localVerify.Method)
+				return fr
+			}
+
+			if isImageExt(ext) && e.Exiftool != nil {
+				if ph, err := phash.Extract(ctx, e.Exiftool.Path(), localPath); err == nil {
+					fr.PHash = ph
+				}
+			}
+
+			fr.Skipped = true
+			fr.SkipReason = "upload deferred (metered)"
+			return fr
+		}
 	}
 
 	if e.Uploader == nil {

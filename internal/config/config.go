@@ -450,6 +450,9 @@ type IngestConfig struct {
 	// the card-detection confirmation dialog (issue #79). When a newly mounted
 	// volume matches an entry here, it is ingested immediately without prompting.
 	AutoImportPaths []string `yaml:"autoImportPaths"`
+	// PauseUploadOnMetered defers network-touching operations (upload-stream bytes,
+	// queue drain HTTP calls) when on a metered or hotspot connection. Defaults to false.
+	PauseUploadOnMetered bool `yaml:"pauseUploadOnMetered"`
 }
 
 // ServerConfig is the branchDAM server this agent reports to.

@@ -116,6 +116,34 @@ func TestConfigSettingsSetBoolPersistsAndReloads(t *testing.T) {
 	}
 }
 
+func TestConfigSettingsSetBoolPauseUploadOnMeteredPersistsAndReloads(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if s.Snapshot().PauseUploadOnMetered {
+		t.Error("expected default PauseUploadOnMetered=false")
+	}
+
+	if err := s.SetBool("ingest.pauseUploadOnMetered", true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+
+	if !s.Snapshot().PauseUploadOnMetered {
+		t.Error("expected Snapshot to reflect PauseUploadOnMetered=true immediately")
+	}
+	if !runner.PauseUploadOnMetered() {
+		t.Error("expected runner to be updated with PauseUploadOnMetered=true")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Ingest.PauseUploadOnMetered {
+		t.Error("expected PauseUploadOnMetered=true to be persisted to disk")
+	}
+}
+
 func TestConfigSettingsSetIntPersistsAndReloads(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner, nil)

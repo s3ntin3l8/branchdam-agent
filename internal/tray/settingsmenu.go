@@ -29,23 +29,24 @@ type settingsMenu struct {
 	// this one's).
 	lastErr error
 
-	startOnLogin      *systray.MenuItem
-	selfUpdateEnabled *systray.MenuItem
-	interval1h        *systray.MenuItem
-	interval24h       *systray.MenuItem
-	intervalNever     *systray.MenuItem
-	requireUnbuffered *systray.MenuItem
-	requireDCIM       *systray.MenuItem
-	serverURL         *systray.MenuItem
-	apiKey            *systray.MenuItem
-	cardRoots         *systray.MenuItem
-	allowedExtensions *systray.MenuItem
-	archiveRoot       *systray.MenuItem
-	localEditRoot     *systray.MenuItem
-	namingTemplate    *systray.MenuItem
-	reloadConfig      *systray.MenuItem
-	openConfig        *systray.MenuItem
-	revealConfig      *systray.MenuItem
+	startOnLogin         *systray.MenuItem
+	selfUpdateEnabled    *systray.MenuItem
+	interval1h           *systray.MenuItem
+	interval24h          *systray.MenuItem
+	intervalNever        *systray.MenuItem
+	requireUnbuffered    *systray.MenuItem
+	requireDCIM          *systray.MenuItem
+	pauseUploadOnMetered *systray.MenuItem
+	serverURL            *systray.MenuItem
+	apiKey               *systray.MenuItem
+	cardRoots            *systray.MenuItem
+	allowedExtensions    *systray.MenuItem
+	archiveRoot          *systray.MenuItem
+	localEditRoot        *systray.MenuItem
+	namingTemplate       *systray.MenuItem
+	reloadConfig         *systray.MenuItem
+	openConfig           *systray.MenuItem
+	revealConfig         *systray.MenuItem
 }
 
 // newSettingsMenu builds the "Settings" submenu under the current systray
@@ -68,6 +69,7 @@ func newSettingsMenu(settings Settings, actionCh chan<- menuAction) *settingsMen
 
 	sm.requireUnbuffered = parent.AddSubMenuItemCheckbox("Require unbuffered verify", "Fail ingest instead of silently falling back to a buffered re-read", sv.RequireUnbuffered)
 	sm.requireDCIM = parent.AddSubMenuItemCheckbox("Require DCIM folder", "Skip volumes that do not contain a DCIM folder", sv.RequireDCIM)
+	sm.pauseUploadOnMetered = parent.AddSubMenuItemCheckbox("Pause upload on metered connection", "Pause queue drain and upload streaming when on a metered or hotspot network", sv.PauseUploadOnMetered)
 
 	parent.AddSeparator()
 
@@ -127,6 +129,9 @@ func (sm *settingsMenu) dispatch() {
 		case <-sm.requireDCIM.ClickedCh:
 			v := !sm.requireDCIM.Checked()
 			sm.send(func() error { return sm.settings.SetBool("ingest.requireDCIM", v) })
+		case <-sm.pauseUploadOnMetered.ClickedCh:
+			v := !sm.pauseUploadOnMetered.Checked()
+			sm.send(func() error { return sm.settings.SetBool("ingest.pauseUploadOnMetered", v) })
 		case <-sm.serverURL.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldServerBaseURL); return err })
 		case <-sm.apiKey.ClickedCh:
@@ -163,6 +168,7 @@ func (sm *settingsMenu) sync(sv SettingsView) {
 	setChecked(sm.intervalNever, sv.SelfUpdateCheckIntervalHrs < 0)
 	setChecked(sm.requireUnbuffered, sv.RequireUnbuffered)
 	setChecked(sm.requireDCIM, sv.RequireDCIM)
+	setChecked(sm.pauseUploadOnMetered, sv.PauseUploadOnMetered)
 
 	sm.apiKey.SetTitle(apiKeyTitle(sv.ServerAPIKeySet))
 
