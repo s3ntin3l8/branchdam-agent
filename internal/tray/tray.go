@@ -325,36 +325,48 @@ func (r *Runner) WatchDirs() []string {
 
 // TriggerIngest runs one IngestCard pass over cardPath through the same
 // Engine the headless `ingest` subcommand uses, records the outcome, and
-// returns it. Safe to call from a menu-click handler or from the
-// card-detection watch loop -- both paths in run_supported.go go through
-// this single method, and it now also serializes them: a call blocks
-// until any other in-flight ingest (from either path) has finished, via
-// gate.
+// returns it. Safe to call from a menu-click handler -- blocks until any
+// other in-flight ingest (from either path) has finished, via gate.
+// Manual triggers bypass the confirmation dialog and session skip set.
 func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSummary {
+	return r.triggerIngest(ctx, cardPath, false)
+}
+
+// TriggerDetectedIngest runs one IngestCard pass for a newly detected card
+// path. If an IngestGate is configured, it prompts the operator for
+// confirmation (or checks the allow-list) before proceeding. Explicitly
+// skipped volumes are added to the session skip set and ignored until removed.
+func (r *Runner) TriggerDetectedIngest(ctx context.Context, cardPath string) IngestSummary {
+	return r.triggerIngest(ctx, cardPath, true)
+}
+
+func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection bool) IngestSummary {
 	r.gate.Lock()
 	defer r.gate.Unlock()
 
-	r.mu.Lock()
-	if r.skipped != nil && r.skipped[cardPath] {
-		r.mu.Unlock()
-		return IngestSummary{CardPath: cardPath}
-	}
-	gate := r.ingestGate
-	r.mu.Unlock()
-
-	if gate != nil {
-		proceed, err := gate.Confirm(ctx, cardPath, filepath.Base(cardPath))
-		if err != nil {
-			return IngestSummary{CardPath: cardPath, Err: err}
-		}
-		if !proceed {
-			r.mu.Lock()
-			if r.skipped == nil {
-				r.skipped = make(map[string]bool)
-			}
-			r.skipped[cardPath] = true
+	if isDetection {
+		r.mu.Lock()
+		if r.skipped != nil && r.skipped[cardPath] {
 			r.mu.Unlock()
 			return IngestSummary{CardPath: cardPath}
+		}
+		gate := r.ingestGate
+		r.mu.Unlock()
+
+		if gate != nil {
+			proceed, err := gate.Confirm(ctx, cardPath, filepath.Base(cardPath))
+			if err != nil {
+				return IngestSummary{CardPath: cardPath, Err: err}
+			}
+			if !proceed {
+				r.mu.Lock()
+				if r.skipped == nil {
+					r.skipped = make(map[string]bool)
+				}
+				r.skipped[cardPath] = true
+				r.mu.Unlock()
+				return IngestSummary{CardPath: cardPath}
+			}
 		}
 	}
 
@@ -854,7 +866,7 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 				r.ForgetSkipped(path)
 			}
 			for _, path := range diff.Inserted {
-				r.TriggerIngest(dctx, path)
+				r.TriggerDetectedIngest(dctx, path)
 				r.mu.Lock()
 				cb := r.onCardIngested
 				r.mu.Unlock()

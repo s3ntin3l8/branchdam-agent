@@ -1315,7 +1315,7 @@ func TestTriggerIngestWithGate(t *testing.T) {
 	r := NewRunner(fi, nil, "")
 
 	// 1. Nil gate -> proceeds unconditionally
-	summary := r.TriggerIngest(context.Background(), "/media/card1")
+	summary := r.TriggerDetectedIngest(context.Background(), "/media/card1")
 	if !summary.OK() || summary.Submitted != 1 {
 		t.Fatalf("expected submitted=1, got summary=%+v", summary)
 	}
@@ -1324,7 +1324,7 @@ func TestTriggerIngestWithGate(t *testing.T) {
 	gate := &fakeIngestGate{proceed: false, err: errors.New("zenity failed")}
 	r.SetIngestGate(gate)
 
-	summary = r.TriggerIngest(context.Background(), "/media/card2")
+	summary = r.TriggerDetectedIngest(context.Background(), "/media/card2")
 	if summary.Err == nil {
 		t.Fatal("expected summary.Err to be non-nil on gate error")
 	}
@@ -1335,13 +1335,22 @@ func TestTriggerIngestWithGate(t *testing.T) {
 		t.Fatal("expected /media/card2 NOT to be in skipped set on error")
 	}
 
-	// Next call on same path triggers gate again because it was not added to skipped set
+	// Manual TriggerIngest bypasses gate and proceeds unconditionally
+	manualSummary := r.TriggerIngest(context.Background(), "/media/card2")
+	if !manualSummary.OK() || manualSummary.Submitted != 1 {
+		t.Fatalf("expected manual TriggerIngest to proceed unconditionally, got %+v", manualSummary)
+	}
+	if len(gate.calls) != 1 {
+		t.Fatalf("expected manual TriggerIngest NOT to call gate, calls=%v", gate.calls)
+	}
+
+	// Next detection call on same path triggers gate again because it was not added to skipped set
 	gate.err = nil
 	gate.proceed = false
 	gate.calls = nil
 
 	// 3. Gate returning false (explicit "Skip this time")
-	summary = r.TriggerIngest(context.Background(), "/media/card2")
+	summary = r.TriggerDetectedIngest(context.Background(), "/media/card2")
 	if summary.Err != nil {
 		t.Fatalf("unexpected summary.Err: %v", summary.Err)
 	}
@@ -1355,13 +1364,19 @@ func TestTriggerIngestWithGate(t *testing.T) {
 		t.Fatal("expected /media/card2 in skipped set")
 	}
 
-	// 4. Second call on the same path suppresses dialog (session-scoped skip)
-	summary = r.TriggerIngest(context.Background(), "/media/card2")
+	// 4. Second detection call on the same path suppresses dialog (session-scoped skip)
+	summary = r.TriggerDetectedIngest(context.Background(), "/media/card2")
 	if summary.Submitted != 0 {
 		t.Fatalf("expected ingest skipped, got %+v", summary)
 	}
 	if len(gate.calls) != 1 {
 		t.Fatalf("expected gate NOT called again for skipped path, got calls=%v", gate.calls)
+	}
+
+	// Manual TriggerIngest still proceeds even when path is in skipped set
+	manualSummary = r.TriggerIngest(context.Background(), "/media/card2")
+	if !manualSummary.OK() || manualSummary.Submitted != 1 {
+		t.Fatalf("expected manual TriggerIngest to proceed even when path is in skipped set, got %+v", manualSummary)
 	}
 
 	// 5. ForgetSkipped clears skip set
@@ -1370,9 +1385,9 @@ func TestTriggerIngestWithGate(t *testing.T) {
 		t.Fatal("expected /media/card2 removed from skipped set")
 	}
 
-	// 6. Next call triggers gate again
+	// 6. Next detection call triggers gate again
 	gate.proceed = true
-	summary = r.TriggerIngest(context.Background(), "/media/card2")
+	summary = r.TriggerDetectedIngest(context.Background(), "/media/card2")
 	if !summary.OK() || summary.Submitted != 1 {
 		t.Fatalf("expected submitted=1 after un-skipping, got summary=%+v", summary)
 	}

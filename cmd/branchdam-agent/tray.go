@@ -193,10 +193,23 @@ func lookupVolumeLabelAndSize(ctx context.Context, path string) (label string, s
 			}
 		}
 	case "linux":
-		out, err := exec.CommandContext(ctx, "lsblk", "-no", "LABEL", path).Output()
-		if err == nil {
-			if l := strings.TrimSpace(string(out)); l != "" {
+		if lblOut, err := exec.CommandContext(ctx, "findmnt", "-n", "-o", "LABEL", path).Output(); err == nil {
+			if l := strings.TrimSpace(string(lblOut)); l != "" {
 				label = l
+			}
+		}
+		if label == filepath.Base(path) {
+			devPath := path
+			if srcOut, err := exec.CommandContext(ctx, "findmnt", "-n", "-o", "SOURCE", path).Output(); err == nil {
+				if s := strings.TrimSpace(string(srcOut)); s != "" {
+					devPath = s
+				}
+			}
+			out, err := exec.CommandContext(ctx, "lsblk", "-no", "LABEL", devPath).Output()
+			if err == nil {
+				if l := strings.TrimSpace(string(out)); l != "" {
+					label = l
+				}
 			}
 		}
 		dfOut, err := exec.CommandContext(ctx, "df", "-Pk", path).Output()
