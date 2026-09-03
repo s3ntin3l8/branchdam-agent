@@ -19,10 +19,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 	"time"
 
 	"fyne.io/systray"
@@ -131,7 +129,20 @@ type menuActionResult struct {
 // config. confirm itself is a function the production wiring supplies
 // (a re-exec of `dialog -kind question ...`); Run never imports a
 // dialog backend directly.
-func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, settings Settings, confirm func(ctx context.Context, title, body string) bool, confirmDestructive bool) (Outcome, error) {
+//
+// pickDir and notify are the OS dialog callbacks for "Import from folder…"
+// and tray notifications (issue #80).
+func Run(
+	ctx context.Context,
+	r *Runner,
+	statusURL string,
+	up SelfUpdater,
+	settings Settings,
+	confirm func(ctx context.Context, title, body string) bool,
+	confirmDestructive bool,
+	pickDir func(ctx context.Context, title string) (string, error),
+	notify func(ctx context.Context, title, message string),
+) (Outcome, error) {
 	errCh := make(chan error, 1)
 	var outcome Outcome
 
@@ -371,9 +382,14 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 		go func() {
 			for range importFolderRequestCh {
 				handleImportFolder(ctx, r, func(pctx context.Context) (string, error) {
-					return pickDirectory(pctx, "Import from folder…")
+					if pickDir == nil {
+						return "", errors.New("tray: no directory picker configured")
+					}
+					return pickDir(pctx, "Import from folder…")
 				}, func(nctx context.Context, msg string) {
-					notifyOS(nctx, "branchDAM Agent", msg)
+					if notify != nil {
+						notify(nctx, "branchDAM Agent", msg)
+					}
 				})
 				importFolderDoneCh <- struct{}{}
 			}
@@ -820,29 +836,4 @@ func openBrowser(url string) error {
 	default:
 		return exec.Command("xdg-open", url).Start()
 	}
-}
-
-// pickDirectory re-execs `dialog -kind directory` to prompt the operator
-// for an arbitrary folder. Returns the selected path on success, or an
-// error if the picker was dismissed or failed to render.
-func pickDirectory(ctx context.Context, title string) (string, error) {
-	selfExe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	cmd := exec.CommandContext(ctx, selfExe, "dialog", "-kind", "directory", "-title", title)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// notifyOS re-execs `dialog -kind notify` to show an OS notification banner/toast.
-func notifyOS(ctx context.Context, title, message string) {
-	selfExe, err := os.Executable()
-	if err != nil {
-		return
-	}
-	_ = exec.CommandContext(ctx, selfExe, "dialog", "-kind", "notify", "-title", title, "-message", message).Run()
 }

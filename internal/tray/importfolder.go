@@ -3,6 +3,8 @@ package tray
 import (
 	"context"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 // handleImportFolder executes the "Import from folder…" manual source selection
@@ -20,9 +22,8 @@ func handleImportFolder(ctx context.Context, r *Runner, pickDir func(ctx context
 		return false, IngestSummary{}
 	}
 
-	cleaned := filepath.Clean(path)
 	for _, dir := range r.WatchDirs() {
-		if filepath.Clean(dir) == cleaned {
+		if samePath(dir, path) {
 			if notify != nil {
 				notify(ctx, "Already ingesting this path")
 			}
@@ -31,4 +32,37 @@ func handleImportFolder(ctx context.Context, r *Runner, pickDir func(ctx context
 	}
 
 	return true, r.TriggerIngest(ctx, path)
+}
+
+// samePath reports whether two paths refer to the same directory path,
+// normalizing separators and accounting for case-insensitive filesystems
+// on Windows and macOS (the tray's supported platforms).
+func samePath(a, b string) bool {
+	return samePathOS(a, b, runtime.GOOS)
+}
+
+func samePathOS(a, b, goos string) bool {
+	ca := filepath.Clean(a)
+	cb := filepath.Clean(b)
+	if ca == cb {
+		return true
+	}
+	if goos == "windows" || goos == "darwin" {
+		if strings.EqualFold(ca, cb) {
+			return true
+		}
+	}
+	absA, errA := filepath.Abs(ca)
+	absB, errB := filepath.Abs(cb)
+	if errA == nil && errB == nil {
+		if absA == absB {
+			return true
+		}
+		if goos == "windows" || goos == "darwin" {
+			if strings.EqualFold(absA, absB) {
+				return true
+			}
+		}
+	}
+	return false
 }

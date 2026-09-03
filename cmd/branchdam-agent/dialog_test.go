@@ -344,7 +344,7 @@ func TestRunDialogCmdNotifyPassesTitleAndMessage(t *testing.T) {
 	if gotTitle != "Custom Title" {
 		t.Errorf("got title %q, want %q", gotTitle, "Custom Title")
 	}
-	if gotMessage != "Custom Message" && gotMessage != "Custom notification message" {
+	if gotMessage != "Custom notification message" {
 		t.Errorf("got message %q, want %q", gotMessage, "Custom notification message")
 	}
 }

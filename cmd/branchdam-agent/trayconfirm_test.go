@@ -102,6 +102,9 @@ func TestTrayConfirmForwardsTitleAndBody(t *testing.T) {
 	}
 }
 
+// TestTrayIngestGateImportIsProceed covers the OK-button branch of the
+// card-detection import confirmation dialog (issue #79): dialogExitOK
+// (Import) means proceed with the volume's ingest.
 func TestTrayIngestGateImportIsProceed(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{exitCode: dialogExitOK}
@@ -117,6 +120,8 @@ func TestTrayIngestGateImportIsProceed(t *testing.T) {
 	}
 }
 
+// TestTrayIngestGateSkipThisTimeIsRefuse covers the Cancel-button branch:
+// dialogExitCanceled (Skip this time) must mean refuse.
 func TestTrayIngestGateSkipThisTimeIsRefuse(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{exitCode: dialogExitCanceled}
@@ -132,6 +137,10 @@ func TestTrayIngestGateSkipThisTimeIsRefuse(t *testing.T) {
 	}
 }
 
+// TestTrayIngestGateAlwaysAutoImportPersistsAndProceeds covers the
+// Extra-button branch: dialogExitExtraButton (Always auto-import) means
+// proceed AND persist the volume into ingest.autoImportPaths so the next
+// detection skips the dialog entirely.
 func TestTrayIngestGateAlwaysAutoImportPersistsAndProceeds(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{exitCode: dialogExitExtraButton}
@@ -155,12 +164,14 @@ func TestTrayIngestGateAlwaysAutoImportPersistsAndProceeds(t *testing.T) {
 	}
 }
 
+// TestTrayIngestGateAutoImportPathsBypassesDialog covers the auto-import
+// hit: a volume path already in ingest.autoImportPaths must short-circuit
+// the dialog entirely and return proceed=true.
 func TestTrayIngestGateAutoImportPathsBypassesDialog(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{exitCode: dialogExitCanceled}
 	s := newConfigSettings(path, cfg, runner, dialog.Run)
 
-	// Persist autoImportPaths
 	if err := s.SetStringSlice("ingest.autoImportPaths", []string{"/media/card/CANON_R5"}); err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +190,11 @@ func TestTrayIngestGateAutoImportPathsBypassesDialog(t *testing.T) {
 	}
 }
 
+// TestTrayIngestGateForwardsLabelsAndVolumeInfo verifies that the
+// dialog's -title / -message / button labels reflect the operator-facing
+// volume label and size when the lookup helper provides them -- a
+// regression on this would make every card-detection prompt show the
+// raw mount path instead of the human-readable label.
 func TestTrayIngestGateForwardsLabelsAndVolumeInfo(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{exitCode: dialogExitOK}
@@ -221,6 +237,13 @@ func TestTrayIngestGateForwardsLabelsAndVolumeInfo(t *testing.T) {
 	}
 }
 
+// TestTrayIngestGateFailedRenderIsRefuse pins the safety-net half of
+// the gate: a dialog that didn't render must return an error and
+// proceed=false, AND must NOT mark the volume as skipped (a transient
+// dialog failure is recoverable -- a real Skip button is intentional).
+// Manual TriggerIngest bypasses the gate entirely; that's intentional
+// for the "Import from folder…" button, but the volume in this test
+// exercises it to prove the bypass is wired right.
 func TestTrayIngestGateFailedRenderIsRefuse(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{err: errors.New("no display")}
@@ -235,7 +258,6 @@ func TestTrayIngestGateFailedRenderIsRefuse(t *testing.T) {
 		t.Fatal("expected proceed=false on failed dialog render")
 	}
 
-	// TriggerDetectedIngest through the runner with this gate returns the error and does NOT mark the volume skipped
 	runner.SetIngestGate(gate)
 	summary := runner.TriggerDetectedIngest(context.Background(), "/media/card/CANON_R5")
 	if summary.Err == nil {
@@ -245,9 +267,114 @@ func TestTrayIngestGateFailedRenderIsRefuse(t *testing.T) {
 		t.Fatal("expected volume NOT to be marked skipped after transient dialog failure")
 	}
 
-	// Manual TriggerIngest bypasses gate even when gate has error
 	manualSummary := runner.TriggerIngest(context.Background(), "/media/card/CANON_R5")
 	if !manualSummary.OK() {
 		t.Fatalf("expected manual TriggerIngest to proceed unconditionally, got %+v", manualSummary)
+	}
+}
+
+// TestTrayPickDirectoryOK covers the success half of trayPickDirectory
+// (issue #80): dialogExitOK from a `dialog -kind directory` returns the
+// picked path on stdout.
+func TestTrayPickDirectoryOK(t *testing.T) {
+	run := &fakeDialogRunner{stdout: "/media/external/card\n", exitCode: dialogExitOK}
+	pick := trayPickDirectory(run.Run)
+	path, err := pick(context.Background(), "Import from folder…")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if path != "/media/external/card" {
+		t.Errorf("got path %q, want %q", path, "/media/external/card")
+	}
+}
+
+// TestTrayPickDirectoryCanceled pins the cancel half: dialogExitCanceled
+// must come back as an error and an empty path so
+// handleImportFolder's "if err != nil || path == ''" guard
+// (internal/tray/importfolder.go) aborts cleanly.
+func TestTrayPickDirectoryCanceled(t *testing.T) {
+	run := &fakeDialogRunner{exitCode: dialogExitCanceled}
+	pick := trayPickDirectory(run.Run)
+	path, err := pick(context.Background(), "Import from folder…")
+	if err == nil {
+		t.Fatal("expected error on canceled directory picker")
+	}
+	if path != "" {
+		t.Errorf("got path %q, want empty", path)
+	}
+}
+
+// TestTrayPickDirectoryFailedRender covers the "dialog did not render"
+// half: both an unexpected nonzero exit and a subprocess error must
+// surface as a non-nil error so the import-folder worker aborts
+// instead of ingesting "" or the unparsed stdout.
+func TestTrayPickDirectoryFailedRender(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  *fakeDialogRunner
+	}{
+		{"unexpected nonzero exit", &fakeDialogRunner{exitCode: 99}},
+		{"subprocess error", &fakeDialogRunner{err: errors.New("no display")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pick := trayPickDirectory(tc.run.Run)
+			_, err := pick(context.Background(), "Import from folder…")
+			if err == nil {
+				t.Fatal("expected error on failed directory picker")
+			}
+		})
+	}
+}
+
+// TestTrayPickDirectoryForwardsTitle proves the title actually threads
+// into the re-exec'd `dialog` argv -- a swap/swap/drop bug at the call
+// site would render a blank picker and pass every other assertion.
+func TestTrayPickDirectoryForwardsTitle(t *testing.T) {
+	run := &fakeDialogRunner{stdout: "/foo", exitCode: dialogExitOK}
+	pick := trayPickDirectory(run.Run)
+	_, _ = pick(context.Background(), "Import from folder…")
+
+	if len(run.calls) != 1 {
+		t.Fatalf("expected exactly one dialog call, got %d", len(run.calls))
+	}
+	args := run.calls[0]
+	seen := map[string]string{}
+	for i := 0; i+1 < len(args); i++ {
+		seen[args[i]] = args[i+1]
+	}
+	if got := seen["-kind"]; got != "directory" {
+		t.Errorf("got -kind %q, want %q", got, "directory")
+	}
+	if got := seen["-title"]; got != "Import from folder…" {
+		t.Errorf("got -title %q, want %q", got, "Import from folder…")
+	}
+}
+
+// TestTrayNotifyOSForwardsTitleAndMessage proves the notify callback
+// threads both title and message into the re-exec'd `dialog -kind
+// notify` argv -- the notify path has only one production caller
+// (handleImportFolder's "Already ingesting this path") and a wiring
+// bug here would silently render a no-op toast.
+func TestTrayNotifyOSForwardsTitleAndMessage(t *testing.T) {
+	run := &fakeDialogRunner{exitCode: dialogExitOK}
+	notify := trayNotifyOS(run.Run)
+	notify(context.Background(), "branchDAM Agent", "Already ingesting this path")
+
+	if len(run.calls) != 1 {
+		t.Fatalf("expected exactly one dialog call, got %d", len(run.calls))
+	}
+	args := run.calls[0]
+	seen := map[string]string{}
+	for i := 0; i+1 < len(args); i++ {
+		seen[args[i]] = args[i+1]
+	}
+	if got := seen["-kind"]; got != "notify" {
+		t.Errorf("got -kind %q, want %q", got, "notify")
+	}
+	if got := seen["-title"]; got != "branchDAM Agent" {
+		t.Errorf("got -title %q, want %q", got, "branchDAM Agent")
+	}
+	if got := seen["-message"]; got != "Already ingesting this path" {
+		t.Errorf("got -message %q, want %q", got, "Already ingesting this path")
 	}
 }

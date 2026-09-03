@@ -110,3 +110,29 @@ func TestHandleImportFolderNilSafeguards(t *testing.T) {
 		t.Error("expected false for nil runner/pickDir")
 	}
 }
+
+func TestSamePathOS(t *testing.T) {
+	cases := []struct {
+		a, b string
+		goos string
+		want bool
+	}{
+		{"/media/card", "/media/card", "linux", true},
+		{"/media/card", "/media/card/", "linux", true},
+		{"/media/card", "/media/card/.", "linux", true},
+		{"/media/card", "/media/CARD", "linux", false},
+		{"/media/card", "/media/CARD", "windows", true},
+		{"/media/card", "/media/CARD", "darwin", true},
+		{"C:\\Volumes\\Card", "c:\\volumes\\card", "windows", true},
+		{"/Volumes/Card", "/volumes/card", "darwin", true},
+		{"/media/card1", "/media/card2", "windows", false},
+		{"/media/card1", "/media/card2", "darwin", false},
+	}
+
+	for _, tc := range cases {
+		got := samePathOS(tc.a, tc.b, tc.goos)
+		if got != tc.want {
+			t.Errorf("samePathOS(%q, %q, %q) = %v, want %v", tc.a, tc.b, tc.goos, got, tc.want)
+		}
+	}
+}
