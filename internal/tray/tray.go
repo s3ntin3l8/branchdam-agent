@@ -165,7 +165,11 @@ type Status struct {
 	// only mirrors for display).
 	Busy     bool   `json:"busy"`
 	BusyCard string `json:"busyCard,omitempty"`
-	// BusySince is when the current ingest started (zero when not busy).
+	// BusySince is when the current ingest started (zero when not
+	// busy; reset to the zero value at ingest completion, not left
+	// stale at the last start time, so the status page's "Running…
+	// since HH:MM:SS" line cleanly hides the indicator when the
+	// tray is idle -- issue #109 / audit B-17 follow-up).
 	BusySince time.Time `json:"busySince,omitempty"`
 	// IngestProgress is the most recent progress sample from an in-flight
 	// ingest (DualWrite/WriteLocal/Verify), or nil when idle.
@@ -178,6 +182,11 @@ type Status struct {
 	// section's reachable/unreachable label, so the template does not
 	// reach into QueueStatus.LastDrain directly.
 	HandshakeOK bool `json:"handshakeOk"`
+	// LastHandshakeAt is the timestamp of the most recent successful
+	// drain pass. Zero means "never drained" -- the status page
+	// template suppresses the line in that case. Mirrors
+	// DrainSummary.LastHandshakeAt (issue #109 follow-up).
+	LastHandshakeAt time.Time `json:"lastHandshakeAt,omitempty"`
 	// HasDrained is true once at least one drain pass has completed in
 	// this session -- the "have we ever heard from the server?" signal
 	// the Server connection section uses to distinguish "no drain run
@@ -569,6 +578,15 @@ func (r *Runner) setBusy(busy bool, cardPath string) {
 		r.busySince = time.Now()
 	} else {
 		r.lastProgress.Store(nil)
+		// Reset busySince to the zero value when the ingest finishes so
+		// Status().BusySince returns a "never" sentinel rather than a
+		// stale timestamp from the last completed ingest. The zero
+		// time.Time is the same "never" pattern the template uses for
+		// LastHandshakeAt below; the status page's "Running… since
+		// HH:MM:SS" line keys off busy && !busySince.IsZero() so the
+		// reset cleanly hides the indicator when the tray is idle
+		// (issue #109 / audit B-17 follow-up).
+		r.busySince = time.Time{}
 	}
 }
 
@@ -662,6 +680,25 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 	}
 
 	r.mu.Lock()
+	// Preserve the prior successful LastHandshakeAt across failed
+	// drain passes: the Drainer leaves summary.LastHandshakeAt zero
+	// when HandshakeOK is false, but overwriting r.lastDrain with
+	// that zero would erase "successful 4h ago" the moment a 5s
+	// tick's handshake blip happens, which is exactly the freshness
+	// signal the status page's "last handshake" line is meant to
+	// preserve. Key off the preserved stamp's non-zero state, not
+	// the prior pass's HandshakeOK: at a 5s drain cadence any outage
+	// >~10s would otherwise wipe the signal after a single recovery
+	// blip already preserved it once (Hermes review on PR #148:
+	// keying on r.lastDrain.HandshakeOK only survives ONE
+	// consecutive failure, because after the carry-forward the prior
+	// summary's HandshakeOK is false, so a second failure drops the
+	// stamp). Initial failures (no prior successful stamp) stay at
+	// zero -- the "never completed a successful handshake" sentinel
+	// per DrainSummary.LastHandshakeAt's doc.
+	if summary.LastHandshakeAt.IsZero() && r.lastDrain != nil && !r.lastDrain.LastHandshakeAt.IsZero() {
+		summary.LastHandshakeAt = r.lastDrain.LastHandshakeAt
+	}
 	r.lastDrain = &summary
 	r.mu.Unlock()
 
@@ -1200,22 +1237,28 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		}
 	}
 
+	var lastHandshakeAt time.Time
+	if lastDrain != nil {
+		lastHandshakeAt = lastDrain.LastHandshakeAt
+	}
+
 	return Status{
-		WatchDirs:      watchDirs,
-		ScratchNote:    scratchNote,
-		QueueStatus:    qs,
-		LastIngest:     last,
-		SelfUpdate:     selfUpdate,
-		Paused:         r.paused.Load(),
-		Busy:           busy,
-		BusyCard:       busyCard,
-		BusySince:      busySince,
-		IngestProgress: prog,
-		HandshakeOK:    lastDrain != nil && lastDrain.HandshakeOK,
-		HasDrained:     lastDrain != nil,
-		InFlightDrain:  inFlightDrain,
-		InFlightPrune:  inFlightPrune,
-		Integrations:   integrations,
-		Hooks:          hooks,
+		WatchDirs:       watchDirs,
+		ScratchNote:     scratchNote,
+		QueueStatus:     qs,
+		LastIngest:      last,
+		SelfUpdate:      selfUpdate,
+		Paused:          r.paused.Load(),
+		Busy:            busy,
+		BusyCard:        busyCard,
+		BusySince:       busySince,
+		IngestProgress:  prog,
+		HandshakeOK:     lastDrain != nil && lastDrain.HandshakeOK,
+		LastHandshakeAt: lastHandshakeAt,
+		HasDrained:      lastDrain != nil,
+		InFlightDrain:   inFlightDrain,
+		InFlightPrune:   inFlightPrune,
+		Integrations:    integrations,
+		Hooks:           hooks,
 	}
 }

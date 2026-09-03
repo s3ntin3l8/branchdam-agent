@@ -52,6 +52,54 @@ func TestQueueDrainerWrapsIngestDrain(t *testing.T) {
 	}
 }
 
+func TestQueueDrainerStampsLastHandshakeAt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"serverVersion":"0.5.0","serverTimeUnix":1,"pendingEventsCount":0}`))
+	}))
+	defer srv.Close()
+
+	client := branchdam.New(srv.URL, "test-key")
+	store := openTestQueueStore(t)
+
+	d := &queueDrainer{client: client, store: store, agentID: "agent-01"}
+	before := time.Now()
+	summary, err := d.Drain(context.Background())
+	after := time.Now()
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if summary.LastHandshakeAt.IsZero() {
+		t.Fatal("expected LastHandshakeAt to be stamped on a successful drain pass")
+	}
+	if summary.LastHandshakeAt.Before(before) || summary.LastHandshakeAt.After(after) {
+		t.Errorf("LastHandshakeAt=%v not within drain pass window [%v, %v]", summary.LastHandshakeAt, before, after)
+	}
+}
+
+func TestQueueDrainerDoesNotStampLastHandshakeAtOnFailedHandshake(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":false,"serverVersion":"0.5.0","serverTimeUnix":1,"pendingEventsCount":0}`))
+	}))
+	defer srv.Close()
+
+	client := branchdam.New(srv.URL, "test-key")
+	store := openTestQueueStore(t)
+
+	d := &queueDrainer{client: client, store: store, agentID: "agent-01"}
+	summary, err := d.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if summary.HandshakeOK {
+		t.Fatalf("expected HandshakeOK=false to carry through from a server-side ok:false response, got %+v", summary)
+	}
+	if !summary.LastHandshakeAt.IsZero() {
+		t.Errorf("expected LastHandshakeAt to remain zero on a failed handshake, got %v", summary.LastHandshakeAt)
+	}
+}
+
 func TestQueuePrunerWrapsPrunePass(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
