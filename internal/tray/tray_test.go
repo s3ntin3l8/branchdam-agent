@@ -18,14 +18,22 @@ import (
 // pattern internal/ingest.Engine's own nodeCreator interface and
 // cmd/branchdam-agent/preflight.go's helloCaller use.
 type fakeIngester struct {
-	result ingest.CardResult
-	err    error
-	calls  []string
+	result        ingest.CardResult
+	offlineResult ingest.OfflineCardResult
+	err           error
+	offlineErr    error
+	calls         []string
+	offlineCalls  []string
 }
 
 func (f *fakeIngester) IngestCard(_ context.Context, cardRoot string) (ingest.CardResult, error) {
 	f.calls = append(f.calls, cardRoot)
 	return f.result, f.err
+}
+
+func (f *fakeIngester) IngestCardOffline(_ context.Context, cardRoot string) (ingest.OfflineCardResult, error) {
+	f.offlineCalls = append(f.offlineCalls, cardRoot)
+	return f.offlineResult, f.offlineErr
 }
 
 func TestTriggerIngestCountsOutcomes(t *testing.T) {
@@ -64,6 +72,116 @@ func TestTriggerIngestEngineError(t *testing.T) {
 	}
 	if summary.OK() {
 		t.Error("expected OK()=false on engine error")
+	}
+}
+
+func TestTriggerIngestOfflineFallbackWhenArchiveUnreachable(t *testing.T) {
+	fi := &fakeIngester{
+		offlineResult: ingest.OfflineCardResult{
+			Files: []ingest.OfflineFileResult{
+				{SourcePath: "a.jpg", LocalPath: "/scratch/a.jpg"},
+				{SourcePath: "b.xmp", Skipped: true},
+			},
+		},
+	}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(ctx context.Context, archiveRoot string) bool {
+		return false // simulate NAS unreachable
+	})
+	qr := &fakeQueueReader{counts: QueueCounts{AwaitingUpload: 2}}
+	r.SetQueueDeps(qr, nil, nil)
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if !summary.Offline {
+		t.Error("expected summary.Offline=true when falling back to offline ingest")
+	}
+	if summary.Submitted != 1 || summary.Skipped != 1 || summary.Failed != 0 {
+		t.Fatalf("got summary %+v, want 1 submitted, 1 skipped, 0 failed", summary)
+	}
+	if !summary.OK() {
+		t.Error("expected summary.OK()=true when offline files queued cleanly")
+	}
+	if len(fi.calls) != 0 {
+		t.Errorf("expected IngestCard NOT called, got %v", fi.calls)
+	}
+	if len(fi.offlineCalls) != 1 || fi.offlineCalls[0] != "/media/card" {
+		t.Errorf("expected IngestCardOffline called once with /media/card, got %v", fi.offlineCalls)
+	}
+
+	st := r.Status(UpdateStatus{})
+	if !st.LastIngestWasOffline {
+		t.Error("expected st.LastIngestWasOffline=true")
+	}
+	if st.PendingOfflineCount != 2 {
+		t.Errorf("expected st.PendingOfflineCount=2, got %d", st.PendingOfflineCount)
+	}
+}
+
+func TestTriggerIngestOfflineFallbackUnconfiguredShowsError(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(ctx context.Context, archiveRoot string) bool {
+		return false // simulate NAS unreachable
+	})
+	// Queue is NOT configured (SetQueueDeps not called)
+
+	var notifiedTitle, notifiedMsg string
+	r.SetErrorNotifier(func(title, message string) {
+		notifiedTitle = title
+		notifiedMsg = message
+	})
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if summary.Err == nil {
+		t.Fatal("expected summary.Err when NAS unreachable and queue not configured")
+	}
+	wantMsg := "NAS unreachable. Set offline.queueDbPath to enable field ingest."
+	if summary.Err.Error() != wantMsg {
+		t.Errorf("got err %q, want %q", summary.Err.Error(), wantMsg)
+	}
+	if len(fi.calls) != 0 || len(fi.offlineCalls) != 0 {
+		t.Errorf("expected neither IngestCard nor IngestCardOffline to be called")
+	}
+	if notifiedMsg != wantMsg {
+		t.Errorf("expected notifyError called with message %q, got %q (title %q)", wantMsg, notifiedMsg, notifiedTitle)
+	}
+}
+
+func TestTriggerIngestProberTrueRunsOnline(t *testing.T) {
+	fi := &fakeIngester{
+		result: ingest.CardResult{
+			Files: []ingest.FileResult{
+				{SourcePath: "a.jpg"},
+			},
+		},
+	}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(ctx context.Context, archiveRoot string) bool {
+		return true // simulate NAS reachable
+	})
+	qr := &fakeQueueReader{counts: QueueCounts{AwaitingUpload: 1}}
+	r.SetQueueDeps(qr, nil, nil)
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if summary.Offline {
+		t.Error("expected summary.Offline=false when prober returns true")
+	}
+	if len(fi.calls) != 1 || fi.calls[0] != "/media/card" {
+		t.Errorf("expected IngestCard called once, got %v", fi.calls)
+	}
+	if len(fi.offlineCalls) != 0 {
+		t.Errorf("expected IngestCardOffline NOT called, got %v", fi.offlineCalls)
+	}
+
+	st := r.Status(UpdateStatus{})
+	if st.LastIngestWasOffline {
+		t.Error("expected st.LastIngestWasOffline=false")
 	}
 }
 
@@ -1230,6 +1348,10 @@ func (b *blockingIngester) IngestCard(_ context.Context, _ string) (ingest.CardR
 		<-b.release
 	})
 	return ingest.CardResult{}, nil
+}
+
+func (b *blockingIngester) IngestCardOffline(_ context.Context, _ string) (ingest.OfflineCardResult, error) {
+	return ingest.OfflineCardResult{}, nil
 }
 
 func TestSetDetectorRequireDCIM(t *testing.T) {

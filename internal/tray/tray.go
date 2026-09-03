@@ -34,6 +34,7 @@ var ErrUnsupported = errors.New("tray: unsupported on this platform (windows and
 // interface and cmd/branchdam-agent/preflight.go's helloCaller.
 type Ingester interface {
 	IngestCard(ctx context.Context, cardRoot string) (ingest.CardResult, error)
+	IngestCardOffline(ctx context.Context, cardRoot string) (ingest.OfflineCardResult, error)
 }
 
 // IngestSummary is a condensed, human-readable view of the most recent
@@ -46,6 +47,7 @@ type IngestSummary struct {
 	Skipped   int
 	Failed    int
 	Err       error
+	Offline   bool
 }
 
 // OK reports whether every file that should have been submitted succeeded
@@ -185,6 +187,13 @@ type Status struct {
 	// isn't in Integrations()'s own registry (see HookID's own doc
 	// comment). Ordered by the compile-time Hooks() registry.
 	Hooks []HookStatus
+
+	// LastIngestWasOffline reports whether the most recent ingest took the
+	// offline fallback path.
+	LastIngestWasOffline bool
+	// PendingOfflineCount is the number of pending items in the offline
+	// queue (convenience for tooltip and status display).
+	PendingOfflineCount int
 }
 
 // Runner owns the state a tray-resident process needs: the ingest engine
@@ -268,6 +277,16 @@ type Runner struct {
 	hookInFlight   map[HookID]bool
 	hookState      map[HookID]*HookState
 
+	// archiveRoot is the configured ingest.archiveRoot destination path,
+	// probed before an online ingest pass.
+	archiveRoot string
+	// archiveProber is the probe function called by TriggerIngest to verify
+	// reachability before attempting an online dual-write ingest pass.
+	archiveProber func(ctx context.Context, archiveRoot string) bool
+	// notifyError is called when an ingest fails (e.g. NAS unreachable with
+	// no offline queue configured).
+	notifyError func(title, message string)
+
 	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
 	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
 	detectorMu          sync.Mutex
@@ -296,6 +315,30 @@ func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner
 	}
 }
 
+// SetArchiveRoot updates the archive destination directory (ingest.archiveRoot)
+// probed before an online ingest.
+func (r *Runner) SetArchiveRoot(root string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.archiveRoot = root
+}
+
+// SetArchiveProber sets a custom reachability prober called before IngestCard.
+// If nil, no probe is performed and IngestCard is called directly.
+func (r *Runner) SetArchiveProber(prober func(ctx context.Context, archiveRoot string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.archiveProber = prober
+}
+
+// SetErrorNotifier sets a callback invoked when an ingest cannot proceed
+// (e.g. archive unreachable and no offline queue configured).
+func (r *Runner) SetErrorNotifier(fn func(title, message string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notifyError = fn
+}
+
 // WatchDirs returns a defensive copy of the directories currently
 // described as watched -- run_supported.go's menu rendering and its
 // "Ingest now" worker both read this rather than a raw field, since
@@ -313,6 +356,12 @@ func (r *Runner) WatchDirs() []string {
 // this single method, and it now also serializes them: a call blocks
 // until any other in-flight ingest (from either path) has finished, via
 // gate.
+//
+// If the archive destination is probed and found unreachable:
+//   - If offline queueing is configured (queueReader != nil), it transparently
+//     falls back to IngestCardOffline.
+//   - If offline queueing is not configured, it records an error and invokes
+//     the registered error notification handler.
 func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSummary {
 	r.gate.Lock()
 	defer r.gate.Unlock()
@@ -322,24 +371,60 @@ func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSumma
 
 	r.mu.Lock()
 	ingester := r.ingester
+	prober := r.archiveProber
+	archiveRoot := r.archiveRoot
+	hasQueue := r.queueReader != nil
+	notifyErr := r.notifyError
 	r.mu.Unlock()
 
 	summary := IngestSummary{CardPath: cardPath, StartedAt: time.Now()}
 
-	result, err := ingester.IngestCard(ctx, cardPath)
-	summary.Elapsed = time.Since(summary.StartedAt)
-	if err != nil {
-		summary.Err = err
-	} else {
-		for _, f := range result.Files {
-			switch {
-			case f.Err != nil:
-				summary.Failed++
-			case f.Skipped:
-				summary.Skipped++
-			default:
-				summary.Submitted++
+	reachable := true
+	if prober != nil {
+		reachable = prober(ctx, archiveRoot)
+	}
+
+	if reachable {
+		result, err := ingester.IngestCard(ctx, cardPath)
+		summary.Elapsed = time.Since(summary.StartedAt)
+		if err != nil {
+			summary.Err = err
+		} else {
+			for _, f := range result.Files {
+				switch {
+				case f.Err != nil:
+					summary.Failed++
+				case f.Skipped:
+					summary.Skipped++
+				default:
+					summary.Submitted++
+				}
 			}
+		}
+	} else if hasQueue {
+		summary.Offline = true
+		result, err := ingester.IngestCardOffline(ctx, cardPath)
+		summary.Elapsed = time.Since(summary.StartedAt)
+		if err != nil {
+			summary.Err = err
+		} else {
+			for _, f := range result.Files {
+				switch {
+				case f.Err != nil:
+					summary.Failed++
+				case f.Skipped:
+					summary.Skipped++
+				default:
+					summary.Submitted++
+				}
+			}
+		}
+	} else {
+		summary.Elapsed = time.Since(summary.StartedAt)
+		msg := "NAS unreachable. Set offline.queueDbPath to enable field ingest."
+		summary.Err = errors.New(msg)
+		if notifyErr != nil {
+			notifyErr("branchDAM Ingest", msg)
 		}
 	}
 
@@ -914,20 +999,31 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		}
 	}
 
+	var lastIngestWasOffline bool
+	if last != nil && last.Offline {
+		lastIngestWasOffline = true
+	}
+	var pendingOfflineCount int
+	if qs.Configured && qs.Err == nil {
+		pendingOfflineCount = qs.Counts.Pending()
+	}
+
 	return Status{
-		WatchDirs:     watchDirs,
-		ScratchNote:   scratchNote,
-		QueueStatus:   qs,
-		LastIngest:    last,
-		SelfUpdate:    selfUpdate,
-		Busy:          busy,
-		BusyCard:      busyCard,
-		BusySince:     busySince,
-		HandshakeOK:   lastDrain != nil && lastDrain.HandshakeOK,
-		HasDrained:    lastDrain != nil,
-		InFlightDrain: inFlightDrain,
-		InFlightPrune: inFlightPrune,
-		Integrations:  integrations,
-		Hooks:         hooks,
+		WatchDirs:            watchDirs,
+		ScratchNote:          scratchNote,
+		QueueStatus:          qs,
+		LastIngest:           last,
+		SelfUpdate:           selfUpdate,
+		Busy:                 busy,
+		BusyCard:             busyCard,
+		BusySince:            busySince,
+		HandshakeOK:          lastDrain != nil && lastDrain.HandshakeOK,
+		HasDrained:           lastDrain != nil,
+		InFlightDrain:        inFlightDrain,
+		InFlightPrune:        inFlightPrune,
+		Integrations:         integrations,
+		Hooks:                hooks,
+		LastIngestWasOffline: lastIngestWasOffline,
+		PendingOfflineCount:  pendingOfflineCount,
 	}
 }

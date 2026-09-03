@@ -215,6 +215,16 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 			statusItem.SetTitle("Status: " + summarize(st))
 			updateItem.SetTitle("Self-update: " + us.Note())
 
+			if st.PendingOfflineCount > 0 {
+				if st.PendingOfflineCount == 1 {
+					systray.SetTooltip("branchDAM agent (1 file queued offline)")
+				} else {
+					systray.SetTooltip(fmt.Sprintf("branchDAM agent (%d files queued offline)", st.PendingOfflineCount))
+				}
+			} else {
+				systray.SetTooltip("branchDAM agent")
+			}
+
 			// Watch dirs can change out from under this menu now that
 			// Reconfigure exists (issue #31's settings menu) -- re-render
 			// on every tick rather than only at startup.
@@ -737,6 +747,18 @@ func summarize(st Status) string {
 	li := st.LastIngest
 	if li.Err != nil {
 		return fmt.Sprintf("last ingest FAILED: %v", li.Err)
+	}
+	if st.LastIngestWasOffline || li.Offline {
+		if li.Failed == 0 && li.Skipped == 0 {
+			if li.Submitted == 1 {
+				return fmt.Sprintf("last ingest %s ago: 1 file queued offline, pending upload",
+					time.Since(li.StartedAt).Round(time.Second))
+			}
+			return fmt.Sprintf("last ingest %s ago: %d files queued offline, pending upload",
+				time.Since(li.StartedAt).Round(time.Second), li.Submitted)
+		}
+		return fmt.Sprintf("last ingest %s ago (offline): %d queued offline, %d skipped, %d failed",
+			time.Since(li.StartedAt).Round(time.Second), li.Submitted, li.Skipped, li.Failed)
 	}
 	return fmt.Sprintf("last ingest %s ago: %d ok, %d skipped, %d failed",
 		time.Since(li.StartedAt).Round(time.Second), li.Submitted, li.Skipped, li.Failed)

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -189,6 +190,15 @@ func runTrayCmd(args []string) int {
 	client := branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
 	engine := ingest.NewEngine(client, cfg.AgentID, cfg.Ingest, cfg.PathMappings)
 	runner := tray.NewRunner(engine, cfg.Ingest.CardRoots, cfg.Ingest.LocalEditRoot)
+	runner.SetArchiveRoot(cfg.Ingest.ArchiveRoot)
+	runner.SetArchiveProber(func(pctx context.Context, root string) bool {
+		return probeArchive(pctx, root, cfg.Server.BaseURL, cfg.Ingest.UploadStream)
+	})
+	runner.SetErrorNotifier(func(title, message string) {
+		if dialog != nil {
+			_, _, _ = dialog(context.Background(), "-kind", "error", "-title", title, "-message", message)
+		}
+	})
 	settings := newConfigSettings(resolvedPath, cfg, runner, dialog)
 
 	// Integration syncers (issue #57): started unconditionally, unlike the
@@ -242,6 +252,8 @@ func runTrayCmd(args []string) int {
 			queueStore = nil
 		} else {
 			defer func() { _ = queueStore.Close() }()
+			engine.Queue = queueStore
+			engine.Tier0ContainerRoot = cfg.Offline.Tier0ContainerRoot
 			settings.SetQueueStore(queueStore)
 
 			var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: cfg.AgentID}
@@ -398,4 +410,47 @@ func enableStartOnLogin(configPath string) error {
 		return fmt.Errorf("resolve config path %q: %w", configPath, err)
 	}
 	return autostart.Enable(execPath, []string{"tray", "-config", absConfigPath})
+}
+
+// probeArchive tests whether the archive destination is reachable before an
+// online ingest pass is attempted. If uploadStream is true, it verifies that
+// server.baseUrl/healthz answers with HTTP 200 within a 2-second timeout;
+// otherwise, it verifies that archiveRoot can be stat'd within 2 seconds.
+func probeArchive(ctx context.Context, archiveRoot, baseURL string, uploadStream bool) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	if uploadStream {
+		if baseURL == "" {
+			return false
+		}
+		healthzURL := strings.TrimRight(baseURL, "/") + "/healthz"
+		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, healthzURL, nil)
+		if err != nil {
+			return false
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}
+
+	if archiveRoot == "" {
+		return false
+	}
+
+	statCh := make(chan error, 1)
+	go func() {
+		_, err := os.Stat(archiveRoot)
+		statCh <- err
+	}()
+
+	select {
+	case <-probeCtx.Done():
+		return false
+	case err := <-statCh:
+		return err == nil
+	}
 }

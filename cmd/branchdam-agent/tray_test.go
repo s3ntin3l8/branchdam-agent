@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -227,5 +229,67 @@ func TestRunTrayFirstRunBootstrapAppliesAnswers(t *testing.T) {
 	}
 	if len(cfg.PathMappings) != 1 || cfg.PathMappings[0].ContainerPath != answers[pathMappingContainerKey] {
 		t.Errorf("pathMappings = %+v, want one entry with containerPath %q", cfg.PathMappings, answers[pathMappingContainerKey])
+	}
+}
+
+func TestProbeArchiveLocal(t *testing.T) {
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, "archive")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Existing directory passes probe
+	if !probeArchive(context.Background(), archiveDir, "", false) {
+		t.Errorf("probeArchive(%q) = false, want true for existing directory", archiveDir)
+	}
+
+	// Missing directory fails probe
+	missingDir := filepath.Join(dir, "nonexistent")
+	if probeArchive(context.Background(), missingDir, "", false) {
+		t.Errorf("probeArchive(%q) = true, want false for missing directory", missingDir)
+	}
+
+	// Empty path fails probe
+	if probeArchive(context.Background(), "", "", false) {
+		t.Error("probeArchive(\"\") = true, want false for empty archiveRoot")
+	}
+}
+
+func TestProbeArchiveUploadStream(t *testing.T) {
+	// Server returns 200 OK on /healthz
+	srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srvOK.Close()
+
+	if !probeArchive(context.Background(), "", srvOK.URL, true) {
+		t.Errorf("probeArchive with healthz 200 OK returned false, want true")
+	}
+
+	// Server returns 500 Internal Server Error
+	srvErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srvErr.Close()
+
+	if probeArchive(context.Background(), "", srvErr.URL, true) {
+		t.Errorf("probeArchive with healthz 500 returned true, want false")
+	}
+
+	// Empty baseURL returns false
+	if probeArchive(context.Background(), "", "", true) {
+		t.Error("probeArchive with empty baseURL returned true, want false")
+	}
+
+	// Closed server (connection refused) returns false
+	closedURL := srvOK.URL
+	srvOK.Close()
+	if probeArchive(context.Background(), "", closedURL, true) {
+		t.Error("probeArchive with closed server returned true, want false")
 	}
 }

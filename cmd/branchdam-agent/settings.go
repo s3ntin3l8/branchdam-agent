@@ -516,6 +516,15 @@ func (s *configSettings) reload() error {
 	queueStore := s.queueStore
 	s.mu.Unlock()
 
+	if queueStore != nil {
+		engine.Queue = queueStore
+		engine.Tier0ContainerRoot = newCfg.Offline.Tier0ContainerRoot
+	}
+
+	s.runner.SetArchiveRoot(newCfg.Ingest.ArchiveRoot)
+	s.runner.SetArchiveProber(func(pctx context.Context, root string) bool {
+		return probeArchive(pctx, root, newCfg.Server.BaseURL, newCfg.Ingest.UploadStream)
+	})
 	s.runner.SetDetectorInterval(time.Duration(newCfg.Ingest.PollIntervalSecs) * time.Second)
 	s.runner.SetDetectorRequireDCIM(newCfg.Ingest.RequireDCIM)
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
