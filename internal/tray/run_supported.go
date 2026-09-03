@@ -19,8 +19,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"fyne.io/systray"
@@ -155,6 +157,7 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 		watchItem.Disable()
 		ingestNow := systray.AddMenuItem("Ingest now", "Run one ingest pass over every configured watch directory")
 		pauseItem := systray.AddMenuItemCheckbox("⏸ Pause ingest", "Temporarily suspend automatic card detection and queue draining", false)
+		importFolder := systray.AddMenuItem("Import from folder…", "Ingest files from a selected folder")
 		systray.AddSeparator()
 
 		queueItem := systray.AddMenuItem("Queue: not configured", "Offline queue backlog (offline.queueDbPath)")
@@ -357,6 +360,25 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 			}
 		}()
 
+		// "Import from folder…" manual source selection (issue #80): opens
+		// an OS directory picker dialog, checks whether the chosen directory
+		// is already being watched/ingested (showing an OS notification if so),
+		// and passes it to TriggerIngest directly. Running it in a worker
+		// goroutine avoids freezing the GUI loop while the picker is open or
+		// while ingest is running.
+		importFolderDoneCh := make(chan struct{}, 1)
+		importFolderRequestCh := make(chan struct{}, 1)
+		go func() {
+			for range importFolderRequestCh {
+				handleImportFolder(ctx, r, func(pctx context.Context) (string, error) {
+					return pickDirectory(pctx, "Import from folder…")
+				}, func(nctx context.Context, msg string) {
+					notifyOS(nctx, "branchDAM Agent", msg)
+				})
+				importFolderDoneCh <- struct{}{}
+			}
+		}()
+
 		// "Drain queue now" and "Prune now" follow the exact same
 		// non-blocking-request / worker-goroutine shape as ingestNow above,
 		// for the same reason: TriggerDrain/TriggerPrune do blocking I/O
@@ -510,6 +532,15 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 					// this click rather than pile up requests.
 				}
 			case <-ingestDoneCh:
+				refresh()
+			case <-importFolder.ClickedCh:
+				select {
+				case importFolderRequestCh <- struct{}{}:
+				default:
+					// a folder import is already queued/running; drop
+					// this click rather than pile up requests.
+				}
+			case <-importFolderDoneCh:
 				refresh()
 			case <-drainNow.ClickedCh:
 				// Confirmation gate (issue #108 / E3 #S2-14): a drain
@@ -789,4 +820,29 @@ func openBrowser(url string) error {
 	default:
 		return exec.Command("xdg-open", url).Start()
 	}
+}
+
+// pickDirectory re-execs `dialog -kind directory` to prompt the operator
+// for an arbitrary folder. Returns the selected path on success, or an
+// error if the picker was dismissed or failed to render.
+func pickDirectory(ctx context.Context, title string) (string, error) {
+	selfExe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, selfExe, "dialog", "-kind", "directory", "-title", title)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// notifyOS re-execs `dialog -kind notify` to show an OS notification banner/toast.
+func notifyOS(ctx context.Context, title, message string) {
+	selfExe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	_ = exec.CommandContext(ctx, selfExe, "dialog", "-kind", "notify", "-title", title, "-message", message).Run()
 }

@@ -325,6 +325,30 @@ func TestRunDialogCmdNotifyFailure(t *testing.T) {
 	}
 }
 
+func TestRunDialogCmdNotifyOK(t *testing.T) {
+	dlg := fakeDialogFuncs()
+	got := runDialogCmd([]string{"-kind", "notify", "-title", "branchDAM Agent", "-message", "Already ingesting this path"}, dlg)
+	if got != dialogExitOK {
+		t.Errorf("got exit %d, want %d", got, dialogExitOK)
+	}
+}
+
+func TestRunDialogCmdNotifyPassesTitleAndMessage(t *testing.T) {
+	var gotTitle, gotMessage string
+	dlg := fakeDialogFuncs()
+	dlg.notify = func(title, message string) error {
+		gotTitle, gotMessage = title, message
+		return nil
+	}
+	runDialogCmd([]string{"-kind", "notify", "-title", "Custom Title", "-message", "Custom notification message"}, dlg)
+	if gotTitle != "Custom Title" {
+		t.Errorf("got title %q, want %q", gotTitle, "Custom Title")
+	}
+	if gotMessage != "Custom Message" && gotMessage != "Custom notification message" {
+		t.Errorf("got message %q, want %q", gotMessage, "Custom notification message")
+	}
+}
+
 func TestRunDialogCmdUnknownKind(t *testing.T) {
 	dlg := fakeDialogFuncs()
 	got := runDialogCmd([]string{"-kind", "bogus"}, dlg)
