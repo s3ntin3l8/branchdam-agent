@@ -264,15 +264,7 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	}
 	fr.Exif = exif
 
-	vars := TemplateVars{OriginalName: filepath.Base(srcPath)}
-	if exif != nil && exif.CapturedAt != nil {
-		vars.CapturedAt = *exif.CapturedAt
-	} else {
-		vars.CapturedAt = srcInfo.ModTime()
-	}
-	if exif != nil {
-		vars.CameraModel = exif.CameraModel
-	}
+	vars := buildTemplateVars(exif, srcPath, srcInfo.ModTime())
 
 	stem, _ := splitBase(filepath.Base(srcPath))
 	stemKey := filepath.Join(filepath.Dir(srcPath), stem)
@@ -486,22 +478,13 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 	}
 
 	if e.Ingest.PauseUploadOnMetered {
-		isMetered := e.IsMetered
-		if isMetered == nil {
-			isMetered = netgate.IsMetered
-		}
-		if metered, _ := isMetered(); metered {
-			slog.Info("upload deferred (metered)", "path", srcPath)
+		if metered, mErr := e.IsMetered(); metered || mErr != nil {
+			if mErr != nil {
+				slog.Debug("metered probe failed, treating as metered (fail-closed)", "err", mErr)
+			}
+			slog.Info("upload skipped on metered connection -- re-insert card to retry", "path", srcPath)
 
-			vars := TemplateVars{OriginalName: filepath.Base(srcPath)}
-			if exif != nil && exif.CapturedAt != nil {
-				vars.CapturedAt = *exif.CapturedAt
-			} else {
-				vars.CapturedAt = srcInfo.ModTime()
-			}
-			if exif != nil {
-				vars.CameraModel = exif.CameraModel
-			}
+			vars := buildTemplateVars(exif, srcPath, srcInfo.ModTime())
 
 			relPath := RenderPath(e.Ingest.PathTemplate, vars)
 			localPath := filepath.Join(e.Ingest.LocalEditRoot, relPath)
@@ -541,7 +524,7 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 			}
 
 			fr.Skipped = true
-			fr.SkipReason = "upload deferred (metered)"
+			fr.SkipReason = "upload skipped on metered connection -- re-insert card to retry"
 			return fr
 		}
 	}

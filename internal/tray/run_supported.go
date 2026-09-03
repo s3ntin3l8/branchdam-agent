@@ -279,7 +279,7 @@ func Run(
 			}
 
 			if drainSkipped {
-				drainNow.SetTitle("Drain queue now (skipped just now -- a pass was already running)")
+				drainNow.SetTitle("Drain queue now (skipped -- already running, metered, or paused)")
 				drainSkipped = false
 			} else {
 				drainNow.SetTitle("Drain queue now")
@@ -302,7 +302,10 @@ func Run(
 			}
 
 			if sv.PauseUploadOnMetered {
-				if metered, _ := netgate.IsMetered(); metered {
+				if metered, mErr := netgate.IsMetered(); metered || mErr != nil {
+					if mErr != nil {
+						slog.Debug("metered probe failed for tooltip", "err", mErr)
+					}
 					systray.SetTooltip("Upload paused (metered connection)")
 				} else {
 					systray.SetTooltip("branchDAM agent")
@@ -424,13 +427,6 @@ func Run(
 		drainRequestCh := make(chan struct{}, 1)
 		go func() {
 			for range drainRequestCh {
-				if settings.Snapshot().PauseUploadOnMetered {
-					if metered, _ := netgate.IsMetered(); metered {
-						slog.Info("upload deferred (metered)")
-						drainDoneCh <- false
-						continue
-					}
-				}
 				dctx, cancel := context.WithTimeout(ctx, drainPruneClickTimeout)
 				_, ran := r.TriggerDrain(dctx)
 				cancel()

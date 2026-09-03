@@ -20,6 +20,7 @@ type nlNetworkConnectivityHint struct {
 	ApproachingDataLimit byte
 	OverDataLimit        byte
 	Roaming              byte
+	Reserved1            byte
 	CostModifier         byte
 }
 

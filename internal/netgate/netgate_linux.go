@@ -64,6 +64,7 @@ func checkNetworkManagerDBus() (bool, error) {
 	// Check any active connections
 	var activeConnections []dbus.ObjectPath
 	if err := obj.Call("org.freedesktop.DBus.Properties.Get", 0, "org.freedesktop.NetworkManager", "ActiveConnections").Store(&activeConnections); err == nil {
+		allDefinitivelyUnmetered := len(activeConnections) > 0
 		for _, acPath := range activeConnections {
 			if acPath == "/" || acPath == "" {
 				continue
@@ -74,7 +75,15 @@ func checkNetworkManagerDBus() (bool, error) {
 				if meteredVal == nmMeteredYes || meteredVal == nmMeteredGuessYes {
 					return true, nil
 				}
+				if meteredVal != nmMeteredNo && meteredVal != nmMeteredGuessNo {
+					allDefinitivelyUnmetered = false
+				}
+			} else {
+				allDefinitivelyUnmetered = false
 			}
+		}
+		if allDefinitivelyUnmetered {
+			return false, nil
 		}
 	}
 
@@ -140,7 +149,7 @@ func checkSysfsWWAN() (bool, error) {
 
 func isWWANDriver(name string) bool {
 	switch name {
-	case "qmi_wwan", "cdc_mbim", "cdc_ncm", "cdc_ether", "sierra_net", "option", "huawei_cdc_ncm", "rndis_host":
+	case "qmi_wwan", "cdc_mbim", "cdc_ncm", "cdc_ether", "sierra_net", "option", "huawei_cdc_ncm", "rndis_host", "ipheth":
 		return true
 	default:
 		return false

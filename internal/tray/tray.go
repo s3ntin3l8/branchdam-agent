@@ -440,7 +440,7 @@ func (r *Runner) TriggerDetectedIngest(ctx context.Context, cardPath string) Ing
 
 func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection bool) IngestSummary {
 	if r.paused.Load() {
-		log.Printf("tray: ingest paused, skipping %s", cardPath)
+		slog.Info("tray: ingest paused, skipping", "path", cardPath)
 		return IngestSummary{CardPath: cardPath}
 	}
 	if isDetection {
@@ -691,8 +691,11 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 	}
 
 	if pauseMetered {
-		if metered, _ := isMetered(); metered {
-			slog.Info("upload deferred (metered)")
+		if metered, mErr := isMetered(); metered || mErr != nil {
+			if mErr != nil {
+				slog.Debug("metered probe failed, treating as metered (fail-closed)", "err", mErr)
+			}
+			slog.Info("upload skipped on metered connection")
 			return DrainSummary{}, false
 		}
 	}

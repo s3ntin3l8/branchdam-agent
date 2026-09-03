@@ -13,6 +13,9 @@ var scutilCmd = func(args ...string) ([]byte, error) {
 }
 
 // scutilDynamicStoreQuery queries scutil for a DynamicStore key, overridable in tests.
+// Uses stdin piping instead of CGO-backed CoreFoundation bindings — avoids the CGO
+// dependency but is slower per call and the text output format could change across
+// macOS versions.
 var scutilDynamicStoreQuery = func(key string) ([]byte, error) {
 	cmd := exec.Command("scutil")
 	cmd.Stdin = strings.NewReader("show " + key + "\n")
@@ -25,12 +28,12 @@ var networksetupCmd = func(args ...string) ([]byte, error) {
 }
 
 func isMetered() (bool, error) {
-	// 1. Check SCNetworkReachability flags via `scutil -r 0.0.0.0`
-	out, err := scutilCmd("-r", "0.0.0.0")
+	// 1. Check SCNetworkReachability flags via `scutil -r www.apple.com`
+	out, err := scutilCmd("-r", "www.apple.com")
 	if err == nil {
 		s := string(out)
 		// Flags: kSCNetworkReachabilityFlagsIsWWAN (0x40000), Transient Connection (0x4)
-		if strings.Contains(s, "Is WWAN") || strings.Contains(s, "0x40000") || strings.Contains(s, "Transient Connection") || strings.Contains(s, "0x4") {
+		if strings.Contains(s, "Is WWAN") || strings.Contains(s, "0x40000") || strings.Contains(s, "Transient Connection") {
 			return true, nil
 		}
 	}
@@ -46,7 +49,9 @@ func isMetered() (bool, error) {
 		}
 	}
 
-	// 3. Check for active PPP / Cellular services via `scutil --nc list`
+	// 3. Heuristic: check service names from `scutil --nc list` for PPP/cellular
+	//    keywords. This matches on the human-assigned VPN service name, not actual
+	//    connection state, so it may false-positive on oddly named services.
 	ncOut, err := scutilCmd("--nc", "list")
 	if err == nil {
 		for _, line := range strings.Split(string(ncOut), "\n") {
