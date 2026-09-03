@@ -215,10 +215,11 @@ func TestConfigSettingsExistingKeysStillAccepted(t *testing.T) {
 		t.Errorf("selfUpdate.checkIntervalHours: %v", err)
 	}
 	stringCases := map[string]string{
-		"server.baseUrl":       "http://example.invalid",
+		"server.baseUrl":       "https://example.invalid",
 		"server.apiKey":        "0123456789abcdef0123456789abcdef", // 32+ chars -- server.apiKey's own length check would otherwise reject a short value here
 		"ingest.archiveRoot":   "/archive",
 		"ingest.localEditRoot": "/local",
+		"ingest.cardRoots":     "/media/a, /media/b",
 		"ingest.pathTemplate":  "{yyyy}/{original_name}",
 	}
 	for key, value := range stringCases {
@@ -231,7 +232,7 @@ func TestConfigSettingsExistingKeysStillAccepted(t *testing.T) {
 func TestConfigSettingsPromptAndSetHappyPath(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	var gotArgs []string
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		gotArgs = args
 		return "https://branchdam.example.com", dialogExitOK, nil
 	}
@@ -254,7 +255,7 @@ func TestConfigSettingsPromptAndSetHappyPath(t *testing.T) {
 
 func TestConfigSettingsPromptAndSetCanceled(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return "", dialogExitCanceled, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
@@ -273,7 +274,7 @@ func TestConfigSettingsPromptAndSetCanceled(t *testing.T) {
 
 func TestConfigSettingsPromptAndSetDialogFailure(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return "", dialogExitFailed, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
@@ -290,7 +291,7 @@ func TestConfigSettingsPromptAndSetDialogFailure(t *testing.T) {
 func TestConfigSettingsAPIKeyNeverPassedAsDialogDefault(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	var gotArgs []string
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		gotArgs = args
 		return "new-key-value-0123456789abcdef0123456789", dialogExitOK, nil
 	}
@@ -349,7 +350,7 @@ func TestConfigSettingsSnapshotIntegrationsDefaultsUnconfigured(t *testing.T) {
 func TestConfigSettingsPromptAndSetIntegrationPathHappyPath(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	var gotArgs []string
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		gotArgs = args
 		return "/data/catalog.db", dialogExitOK, nil
 	}
@@ -376,7 +377,7 @@ func TestConfigSettingsPromptAndSetIntegrationPathHappyPath(t *testing.T) {
 
 func TestConfigSettingsPromptAndSetIntegrationPathCanceled(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return "", dialogExitCanceled, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
@@ -420,7 +421,7 @@ func TestConfigSettingsReloadDetectsRestartRequiredStatusAddr(t *testing.T) {
 	}
 }
 
-func TestConfigSettingsReloadDetectsRestartRequiredCardRoots(t *testing.T) {
+func TestConfigSettingsReloadCardRootsDoesNotRequireRestart(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner, nil)
 
@@ -429,8 +430,102 @@ func TestConfigSettingsReloadDetectsRestartRequiredCardRoots(t *testing.T) {
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if !s.Snapshot().RestartRequired {
-		t.Error("expected RestartRequired=true after ingest.cardRoots changed via hand-edit")
+	if s.Snapshot().RestartRequired {
+		t.Error("expected RestartRequired=false after ingest.cardRoots changed -- cardRoots is hot-reconfigurable")
+	}
+	if got := runner.WatchDirs(); len(got) != 1 || got[0] != "/a-different-path" {
+		t.Errorf("runner.WatchDirs() = %v, want [/a-different-path]", got)
+	}
+}
+
+func TestConfigSettingsPromptAndSetCardRootsHappyPath(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	var gotArgs []string
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
+		gotArgs = args
+		return "/media/new1, /media/new2", dialogExitOK, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+
+	ok, err := s.PromptAndSet(tray.FieldCardRoots)
+	if err != nil {
+		t.Fatalf("PromptAndSet(FieldCardRoots): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if s.Snapshot().RestartRequired {
+		t.Error("expected RestartRequired=false after PromptAndSet(FieldCardRoots)")
+	}
+	if got := runner.WatchDirs(); len(got) != 2 || got[0] != "/media/new1" || got[1] != "/media/new2" {
+		t.Errorf("runner.WatchDirs() = %v, want [/media/new1 /media/new2]", got)
+	}
+	if !slices.Contains(gotArgs, "entry") {
+		t.Errorf("expected -kind entry in dialog args, got %v", gotArgs)
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Ingest.CardRoots) != 2 || reloaded.Ingest.CardRoots[0] != "/media/new1" || reloaded.Ingest.CardRoots[1] != "/media/new2" {
+		t.Errorf("persisted cardRoots = %v, want [/media/new1 /media/new2]", reloaded.Ingest.CardRoots)
+	}
+}
+
+func TestConfigSettingsPromptAndSetCardRootsEmpty(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
+		return "  ", dialogExitOK, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+
+	ok, err := s.PromptAndSet(tray.FieldCardRoots)
+	if err != nil {
+		t.Fatalf("PromptAndSet(FieldCardRoots): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if got := runner.WatchDirs(); len(got) != 0 {
+		t.Errorf("expected empty WatchDirs(), got %v", got)
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Ingest.CardRoots) != 0 {
+		t.Errorf("expected empty persisted cardRoots, got %v", reloaded.Ingest.CardRoots)
+	}
+}
+
+func TestConfigSettingsValidateStringChangeCardRootsRejectsPlaceholder(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.validateStringChange("ingest.cardRoots", "/media/good, ${UNSET_VAR_XYZ}"); err == nil {
+		t.Fatal("expected validateStringChange to reject unexpanded placeholder in cardRoots")
+	}
+}
+
+func TestSplitCommaPaths(t *testing.T) {
+	cases := []struct {
+		input string
+		want  []string
+	}{
+		{"", nil},
+		{"   ", nil},
+		{",,", nil},
+		{"/a, /b, /c", []string{"/a", "/b", "/c"}},
+		{"  /a  ,  /b  ", []string{"/a", "/b"}},
+		{"/single", []string{"/single"}},
+	}
+	for _, tc := range cases {
+		got := splitCommaPaths(tc.input)
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("splitCommaPaths(%q) = %v, want %v", tc.input, got, tc.want)
+		}
 	}
 }
 
@@ -507,7 +602,7 @@ func TestConfigSettingsPromptAndSetRejectsInvalidValueBeforePersisting(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return "too-short", dialogExitOK, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
@@ -571,7 +666,7 @@ func TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange(t *testing
 	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
 	queueStore := openTestQueueStore(t)
 
-	dialog := func(args ...string) (string, int, error) {
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
 		return newSrv.URL, dialogExitOK, nil
 	}
 	s := newConfigSettings(path, cfg, runner, dialog)
@@ -598,5 +693,82 @@ func TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange(t *testing
 	}
 	if atomic.LoadInt32(&hitNew) != 1 {
 		t.Errorf("expected the rebuilt drainer to hit the new server after a server.baseUrl change, hitNew=%d -- stale-client regression", hitNew)
+	}
+}
+
+func TestConfigSettingsSetBoolRequireDCIM(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetBool("ingest.requireDCIM", true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+
+	if !s.Snapshot().RequireDCIM {
+		t.Error("expected Snapshot to reflect RequireDCIM=true")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Ingest.RequireDCIM {
+		t.Error("expected RequireDCIM=true to be persisted to disk")
+	}
+}
+
+func TestConfigSettingsAllowedExtensionsValidation(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	// Valid cases
+	if err := s.validateStringChange("ingest.allowedExtensions", ".arw, .cr3, .jpg"); err != nil {
+		t.Errorf("expected valid extensions to pass, got %v", err)
+	}
+	if err := s.validateStringChange("ingest.allowedExtensions", ""); err != nil {
+		t.Errorf("expected empty string to pass, got %v", err)
+	}
+	if err := s.validateStringChange("ingest.allowedExtensions", "  .arw ,  .dng  "); err != nil {
+		t.Errorf("expected padded extensions to pass, got %v", err)
+	}
+
+	// Invalid cases (missing leading dot or bare dot)
+	if err := s.validateStringChange("ingest.allowedExtensions", "arw"); err == nil {
+		t.Error("expected error for extension without leading dot")
+	}
+	if err := s.validateStringChange("ingest.allowedExtensions", "."); err == nil {
+		t.Error("expected error for bare dot extension")
+	}
+	if err := s.validateStringChange("ingest.allowedExtensions", ".arw, jpg"); err == nil {
+		t.Error("expected error for mixed valid/invalid extensions")
+	}
+}
+
+func TestConfigSettingsPromptAndSetAllowedExtensions(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
+		return ".arw, .cr3, .jpg", dialogExitOK, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+
+	ok, err := s.PromptAndSet(tray.FieldAllowedExtensions)
+	if err != nil {
+		t.Fatalf("PromptAndSet: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+
+	want := []string{".arw", ".cr3", ".jpg"}
+	if !slices.Equal(s.Snapshot().AllowedExtensions, want) {
+		t.Errorf("Snapshot AllowedExtensions = %v, want %v", s.Snapshot().AllowedExtensions, want)
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(reloaded.Ingest.AllowedExtensions, want) {
+		t.Errorf("persisted AllowedExtensions = %v, want %v", reloaded.Ingest.AllowedExtensions, want)
 	}
 }

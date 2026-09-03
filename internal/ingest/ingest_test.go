@@ -1,11 +1,16 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -429,5 +434,438 @@ func TestIngestCardUploadStream_VerifyFailure(t *testing.T) {
 	expectedLocal := filepath.Join(localRoot, "2026", "2026-08-29", "IMG_0042.jpg")
 	if _, err := os.Stat(expectedLocal); !os.IsNotExist(err) {
 		t.Error("expected local file to be removed after verification failure")
+	}
+}
+
+// TestIngestCardSkipsOSMetadata pins issue #100's #1 footgun: a card
+// formatted by macOS leaves a .DS_Store in every directory; a card
+// touched by Windows leaves Thumbs.db. Pre-#100, every such file became
+// a media_nodes row and an exiftool fork. With #100 the walk short-
+// circuits them and reports them as Skipped.
+func TestIngestCardSkipsOSMetadata(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	subdir := filepath.Join(cardRoot, "DCIM", "100MSDCF")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Real photo -- must be ingested, not skipped.
+	if err := os.WriteFile(filepath.Join(subdir, "DSC0001.JPG"), []byte("photo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// OS-metadata files the walk must skip, scattered in two
+	// directories so the directory count vs. file count would be
+	// visibly wrong if any leak through.
+	for _, p := range []string{
+		filepath.Join(cardRoot, ".DS_Store"),
+		filepath.Join(cardRoot, "._DSC0001.JPG"), // AppleDouble
+		filepath.Join(cardRoot, ".Spotlight-V100"),
+		filepath.Join(subdir, "Thumbs.db"),
+		filepath.Join(subdir, ".DS_Store"),
+	} {
+		if err := os.WriteFile(p, []byte("os-junk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	client := &fakeClient{}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	// Walk produces one FileResult per non-dir entry, including the
+	// OS-metadata ones (so the operator sees them in the result). The
+	// real assertion is on Skipped + EventID + client.calls.
+	if len(res.Files) != 6 {
+		t.Fatalf("got %d files, want 6 (1 photo + 5 OS-metadata)", len(res.Files))
+	}
+
+	// Exactly one real photo gets submitted; the 5 OS-metadata files
+	// are Skipped and have no EventID.
+	if len(client.calls) != 1 {
+		t.Fatalf("got %d PostNodeCreated calls, want 1 (only the real photo)", len(client.calls))
+	}
+	real, junk := 0, 0
+	for _, fr := range res.Files {
+		if fr.Err != nil {
+			t.Fatalf("unexpected error for %s: %v", fr.SourcePath, fr.Err)
+		}
+		if fr.Skipped {
+			junk++
+			if fr.EventID != "" {
+				t.Errorf("OS-metadata file %s was Skipped but has an EventID (%s) -- it must not have been submitted", filepath.Base(fr.SourcePath), fr.EventID)
+			}
+			if !strings.HasPrefix(fr.SkipReason, "OS metadata:") {
+				t.Errorf("OS-metadata file %s has wrong skip reason %q", filepath.Base(fr.SourcePath), fr.SkipReason)
+			}
+		} else {
+			real++
+			if fr.EventID == "" {
+				t.Errorf("real file %s missing EventID", filepath.Base(fr.SourcePath))
+			}
+		}
+	}
+	if real != 1 || junk != 5 {
+		t.Errorf("got real=%d junk=%d, want 1 and 5", real, junk)
+	}
+
+	// Destination tree must not contain the OS-metadata files: skipping
+	// means the walk never invokes ingestFile, so DualWrite never ran.
+	archiveRoot := filepath.Join(dir, "archive")
+	for _, name := range []string{".DS_Store", "Thumbs.db", "._DSC0001.JPG", ".Spotlight-V100"} {
+		if _, err := os.Stat(filepath.Join(archiveRoot, name)); err == nil {
+			t.Errorf("OS-metadata file %s leaked into archive destination", name)
+		}
+	}
+}
+
+// TestIngestCardAllowedExtensionsFilter pins the M5/#100 extension
+// allowlist: a non-empty Ingest.AllowedExtensions narrows the walk to
+// only KNOWN-EXTENSION files whose extension is on the list, case-
+// insensitively. Files with no extension are NOT filtered by the
+// allowlist (Hermes review on #127): positive identification via
+// ingestFile's isImageExt/isVideoExt is the safer default than
+// silently dropping them.
+//
+// An empty list (the default, the regression guard for older
+// configs) accepts everything the OS-metadata skip doesn't rule out.
+func TestIngestCardAllowedExtensionsFilter(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"a.jpg", // matches
+		"b.JPG", // matches (case)
+		"c.mp4", // matches
+		"d.txt", // filtered out
+		"e.png", // filtered out
+		"f",     // no ext -- NOT filtered by allowlist, falls through
+	} {
+		if err := os.WriteFile(filepath.Join(cardRoot, name), []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	client := &fakeClient{}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+	e.Ingest.AllowedExtensions = []string{"jpg", "MP4"}
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+
+	// All 6 files appear in res.Files (the walk still visits them).
+	// 3 matching extensions are submitted. 2 wrong-extension files
+	// are filtered. 1 extension-less file falls through and is
+	// submitted.
+	if len(res.Files) != 6 {
+		t.Fatalf("got %d files, want 6", len(res.Files))
+	}
+	if len(client.calls) != 4 {
+		t.Errorf("got %d PostNodeCreated calls, want 4 (jpg/JPG/mp4 + extension-less f)", len(client.calls))
+	}
+	submitted, filtered := 0, 0
+	for _, fr := range res.Files {
+		if fr.Err != nil {
+			t.Fatalf("unexpected error for %s: %v", fr.SourcePath, fr.Err)
+		}
+		base := filepath.Base(fr.SourcePath)
+		switch base {
+		case "a.jpg", "b.JPG", "c.mp4", "f":
+			// f (extension-less) falls through the allowlist per
+			// Hermes review on #127. It still goes through
+			// ingestFile normally.
+			if fr.Skipped {
+				t.Errorf("%s must NOT be skipped (matches allowlist, or no extension)", base)
+			}
+			if fr.EventID == "" {
+				t.Errorf("%s missing EventID", base)
+			}
+			submitted++
+		default:
+			if !fr.Skipped {
+				t.Errorf("%s must be skipped (not in allowlist)", base)
+			}
+			if fr.EventID != "" {
+				t.Errorf("%s Skipped but has an EventID", base)
+			}
+			if !strings.Contains(fr.SkipReason, "extension") {
+				t.Errorf("%s skip reason = %q, want something mentioning extension", base, fr.SkipReason)
+			}
+			filtered++
+		}
+	}
+	if submitted != 4 || filtered != 2 {
+		t.Errorf("got submitted=%d filtered=%d, want 4 and 2", submitted, filtered)
+	}
+
+	// Rejected files (wrong-extension) must not have been copied.
+	// The extension-less file f IS expected to be copied -- it falls
+	// through the allowlist per Hermes review on #127.
+	archiveRoot := filepath.Join(dir, "archive")
+	for _, name := range []string{"d.txt", "e.png"} {
+		if _, err := os.Stat(filepath.Join(archiveRoot, name)); err == nil {
+			t.Errorf("rejected file %s leaked into archive destination", name)
+		}
+	}
+}
+
+// TestIngestCardAllowedExtensionsAcceptsAllWhenEmpty is the backward-
+// compat guard: a config that never mentions AllowedExtensions must
+// behave exactly like pre-#100 (everything not matching an OS-metadata
+// rule gets ingested).
+func TestIngestCardAllowedExtensionsAcceptsAllWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.jpg", "b.txt", "c.unknown"} {
+		if err := os.WriteFile(filepath.Join(cardRoot, name), []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	client := &fakeClient{}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+	if len(e.Ingest.AllowedExtensions) != 0 {
+		t.Fatalf("test setup wrong: AllowedExtensions=%v, want empty", e.Ingest.AllowedExtensions)
+	}
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	if len(client.calls) != 3 {
+		t.Errorf("got %d PostNodeCreated calls, want 3 (no allowlist = accept all)", len(client.calls))
+	}
+	for _, fr := range res.Files {
+		if fr.Skipped {
+			t.Errorf("%s should NOT be skipped when AllowedExtensions is empty", filepath.Base(fr.SourcePath))
+		}
+	}
+}
+
+// captureSlog swaps slog.Default() for a JSON-handler writing to buf for
+// the duration of the test, restoring the prior default on cleanup.
+// Mirrors internal/config's captureSlog helper so the chtimes-logging
+// assertions can be done with the same level/msg/path/destination/error
+// shape config_test.go uses.
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	buf := &bytes.Buffer{}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	return buf
+}
+
+// findCHtimesWarn scans a captured slog buffer for a chtimes-failure Warn
+// record matching the given destination. Returns the decoded record so the
+// caller can assert on level/path/source/destination/err fields; nil if
+// no matching record was emitted (which is the failure mode the test is
+// trying to pin down -- a silently-swallowed error).
+func findCHtimesWarn(t *testing.T, buf *bytes.Buffer, destination string) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("slog emitted a non-JSON line: %q", line)
+		}
+		if rec["msg"] == "ingest: failed to preserve source mtime on destination" &&
+			rec["destination"] == destination {
+			return rec
+		}
+	}
+	return nil
+}
+
+// TestIngestCardChtimesFailureIsLogged is the issue #103 contract: when
+// os.Chtimes fails on a destination (the soft-mtime contract the prune-
+// safety half of invariant #8 depends on), ingest must NOT fail -- the
+// file is on disk, only its mtime preservation is best-effort -- but the
+// failure MUST be surfaced via slog.Warn carrying source path,
+// destination path, and the underlying error. Silent swallowing is the
+// regression we're guarding against.
+//
+// We inject the failure via the cHtimesFn indirection (mirroring
+// writer.go's syncParentDirFn pattern) rather than trying to make a real
+// os.Chtimes call fail in a unit test -- chmod-based approaches are
+// racy (they need to land between DualWrite and the Chtimes call) and
+// platform-dependent (0o500 vs EACCES behavior differs across Linux/
+// macOS/Windows).
+func TestIngestCardChtimesFailureIsLogged(t *testing.T) {
+	origChtimes := cHtimesFn
+	t.Cleanup(func() { cHtimesFn = origChtimes })
+	cHtimesFn = func(path string, atime, mtime time.Time) error {
+		return &os.PathError{Op: "chtimes", Path: path, Err: syscall.ENOENT}
+	}
+
+	logBuf := captureSlog(t)
+
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "IMG_0001.jpg"), []byte("fake-jpeg-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeClient{}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	if len(res.Files) != 1 {
+		t.Fatalf("got %d files, want 1", len(res.Files))
+	}
+	fr := res.Files[0]
+
+	// Soft contract: chtimes failure must NOT fail the ingest. The file
+	// is on disk, the hashes verified, the event submitted.
+	if fr.Err != nil {
+		t.Fatalf("ingest must NOT fail on chtimes error (soft mtime contract); got %v", fr.Err)
+	}
+	if fr.EventID == "" {
+		t.Error("expected an EventID -- ingest should have proceeded past the failed chtimes")
+	}
+
+	// Both destinations must have a Warn emitted with source +
+	// destination + err. We expect two (one for archive, one for local)
+	// because the production code calls Chtimes twice per file.
+	archiveWarn := findCHtimesWarn(t, logBuf, filepath.Join(dir, "archive", "IMG_0001.jpg"))
+	if archiveWarn == nil {
+		t.Fatalf("expected slog.Warn for archive destination; got log: %s", logBuf.String())
+	}
+	if archiveWarn["level"] != "WARN" {
+		t.Errorf("archive warn level = %v, want WARN", archiveWarn["level"])
+	}
+	if archiveWarn["source"] != filepath.Join(cardRoot, "IMG_0001.jpg") {
+		t.Errorf("archive warn source = %v", archiveWarn["source"])
+	}
+	errMsg, ok := archiveWarn["err"].(string)
+	if !ok || !strings.Contains(errMsg, "no such file") {
+		t.Errorf("archive warn err = %v, want something containing 'no such file'", archiveWarn["err"])
+	}
+
+	localWarn := findCHtimesWarn(t, logBuf, filepath.Join(dir, "local", "IMG_0001.jpg"))
+	if localWarn == nil {
+		t.Fatalf("expected slog.Warn for local destination; got log: %s", logBuf.String())
+	}
+	if localWarn["level"] != "WARN" {
+		t.Errorf("local warn level = %v, want WARN", localWarn["level"])
+	}
+}
+
+// TestIngestCardChtimesSuccessEmitsNoWarn is the regression guard for
+// the OTHER direction: a healthy os.Chtimes call must not emit the
+// warning. We install the real os.Chtimes and assert the buffer
+// contains no chtimes record at all.
+func TestIngestCardChtimesSuccessEmitsNoWarn(t *testing.T) {
+	// Save/restore-through-t.Cleanup for symmetry with the sibling tests
+	// that DO substitute cHtimesFn (Hermes review note on #130).
+	origChtimes := cHtimesFn
+	t.Cleanup(func() { cHtimesFn = origChtimes })
+	cHtimesFn = os.Chtimes
+
+	logBuf := captureSlog(t)
+
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "IMG_0001.jpg"), []byte("fake-jpeg-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeClient{}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	if len(res.Files) != 1 || res.Files[0].Err != nil {
+		t.Fatalf("ingest should have succeeded: %+v", res.Files)
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(logBuf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		if rec["msg"] == "ingest: failed to preserve source mtime on destination" {
+			t.Errorf("did not expect a chtimes-failure warning on a successful ingest; got: %s", line)
+		}
+	}
+}
+
+// TestIngestCardUploadStreamChtimesFailureIsLogged is the upload-stream
+// twin of TestIngestCardChtimesFailureIsLogged: the upload path only
+// writes a local copy (archive lands server-side), so there is exactly
+// one os.Chtimes call to assert on. Same soft contract: failure must
+// log, not fail.
+func TestIngestCardUploadStreamChtimesFailureIsLogged(t *testing.T) {
+	origChtimes := cHtimesFn
+	t.Cleanup(func() { cHtimesFn = origChtimes })
+	cHtimesFn = func(path string, atime, mtime time.Time) error {
+		return &os.PathError{Op: "chtimes", Path: path, Err: syscall.ENOENT}
+	}
+
+	logBuf := captureSlog(t)
+
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "IMG_0042.jpg"), []byte("streaming-photo-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	uploader := &fakeUploaderClient{}
+	localRoot := filepath.Join(dir, "local")
+	e := NewEngine(uploader, "test-agent", config.IngestConfig{
+		LocalEditRoot: localRoot,
+		UploadStream:  true,
+	}, nil)
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	fr := res.Files[0]
+	if fr.Err != nil {
+		t.Fatalf("upload-stream ingest must NOT fail on chtimes error; got %v", fr.Err)
+	}
+	if fr.NodeUUID != "018f9999-upload-node-uuid" {
+		t.Errorf("fr.NodeUUID = %q, want %q", fr.NodeUUID, "018f9999-upload-node-uuid")
+	}
+
+	wantDest := filepath.Join(localRoot, "2026", "2026-08-29", "IMG_0042.jpg")
+	warn := findCHtimesWarn(t, logBuf, wantDest)
+	if warn == nil {
+		t.Fatalf("expected slog.Warn for local destination %q; got log: %s", wantDest, logBuf.String())
+	}
+	if warn["level"] != "WARN" {
+		t.Errorf("warn level = %v, want WARN", warn["level"])
+	}
+	if warn["source"] != filepath.Join(cardRoot, "IMG_0042.jpg") {
+		t.Errorf("warn source = %v", warn["source"])
 	}
 }

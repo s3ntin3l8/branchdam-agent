@@ -23,6 +23,11 @@ import (
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
 
+// currentSchemaVersion is the latest schema version Open/migrate must bring
+// a queue.db to. Bump this and add a migration entry to the migrations
+// slice whenever the schema changes in a backward-incompatible way.
+const currentSchemaVersion = 1
+
 // Status values for the three independent per-step columns.
 const (
 	StatusPending = "PENDING"
@@ -150,44 +155,8 @@ func (s *Store) init() error {
 		}
 	}
 
-	const schema = `
-CREATE TABLE IF NOT EXISTS queue_nodes (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	node_uuid TEXT NOT NULL UNIQUE,
-	kind TEXT NOT NULL CHECK (kind IN ('MEDIA','SIDECAR')),
-	source_path TEXT NOT NULL,
-	local_path TEXT NOT NULL,
-	archive_path TEXT NOT NULL,
-	archive_container_path TEXT NOT NULL,
-	tier0_container_path TEXT NOT NULL DEFAULT '',
-	file_name TEXT NOT NULL,
-	file_ext TEXT NOT NULL,
-	size_bytes INTEGER NOT NULL,
-	mtime_unix INTEGER NOT NULL,
-	full_hash TEXT NOT NULL,
-	fast_hash TEXT NOT NULL,
-	node_created_payload_json TEXT NOT NULL DEFAULT '',
-	node_created_status TEXT NOT NULL DEFAULT 'PENDING',
-	node_created_event_id TEXT NOT NULL DEFAULT '',
-	node_created_submitted_at_unix INTEGER NOT NULL DEFAULT 0,
-	node_created_attempts INTEGER NOT NULL DEFAULT 0,
-	node_created_next_attempt_unix INTEGER NOT NULL DEFAULT 0,
-	node_created_last_error TEXT NOT NULL DEFAULT '',
-	archive_copy_status TEXT NOT NULL DEFAULT 'PENDING',
-	archive_copy_attempts INTEGER NOT NULL DEFAULT 0,
-	archive_copy_next_attempt_unix INTEGER NOT NULL DEFAULT 0,
-	archive_copy_last_error TEXT NOT NULL DEFAULT '',
-	rebase_status TEXT NOT NULL DEFAULT 'PENDING',
-	rebase_attempts INTEGER NOT NULL DEFAULT 0,
-	rebase_next_attempt_unix INTEGER NOT NULL DEFAULT 0,
-	rebase_last_error TEXT NOT NULL DEFAULT '',
-	created_at_unix INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_queue_nodes_source_path ON queue_nodes(source_path);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_nodes_node_uuid ON queue_nodes(node_uuid);
-`
-	if _, err := s.db.Exec(schema); err != nil {
-		return fmt.Errorf("queue: create schema: %w", err)
+	if err := s.migrate(); err != nil {
+		return err
 	}
 	return nil
 }

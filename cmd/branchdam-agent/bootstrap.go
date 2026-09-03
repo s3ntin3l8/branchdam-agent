@@ -26,7 +26,15 @@ const dialogTimeout = 5 * time.Minute
 // notifyStartupFailure's own logic (prompt order, cancel/error handling,
 // message formatting) is unit-testable without ever invoking a real
 // dialog backend.
-type dialogRunner func(args ...string) (stdout string, exitCode int, err error)
+//
+// The first parameter is the caller's context, threaded all the way
+// through to the subprocess so cancellation actually tears down the
+// re-exec'd `dialog` (Hermes review on #134: a context.Background in
+// runDialogSubprocess meant the gate's 60s confirmTimeout never reached
+// the dialog subprocess, which then hung up to the full 5-minute
+// dialogTimeout bound). Callers that don't care about cancellation
+// (bootstrap, notifyStartupFailure) pass context.Background.
+type dialogRunner func(ctx context.Context, args ...string) (stdout string, exitCode int, err error)
 
 // selfDialogRunner returns a dialogRunner that re-execs selfExe. selfExe
 // empty (os.Executable itself failed before this could even be attempted)
@@ -35,12 +43,12 @@ type dialogRunner func(args ...string) (stdout string, exitCode int, err error)
 // without a separate nil/empty check at each call site.
 func selfDialogRunner(selfExe string) dialogRunner {
 	if selfExe == "" {
-		return func(args ...string) (string, int, error) {
+		return func(_ context.Context, _ ...string) (string, int, error) {
 			return "", -1, errors.New("own executable path is unknown")
 		}
 	}
-	return func(args ...string) (string, int, error) {
-		return runDialogSubprocess(selfExe, args...)
+	return func(ctx context.Context, args ...string) (string, int, error) {
+		return runDialogSubprocess(ctx, selfExe, args...)
 	}
 }
 
@@ -50,11 +58,25 @@ func selfDialogRunner(selfExe string) dialogRunner {
 // dialog that rendered and was answered, canceled, or failed to display
 // all come back as (value, dialogExit*, nil); see dialog.go's
 // dialogExitOK/Failed/Canceled.
-func runDialogSubprocess(selfExe string, args ...string) (stdout string, exitCode int, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), dialogTimeout)
+//
+// ctx is the caller's context (typically the gate's confirmTimeout-bounded
+// context for `trayConfirm`, context.Background for the bootstrap
+// wizard / startup-failure dialog). It's threaded through to
+// exec.CommandContext so cancellation of ctx tears down the dialog
+// subprocess -- without this, the gate's 60s timeout had no effect on
+// the 5-minute dialog subprocess, which then hung until the OS cleaned
+// up. The dialogTimeout here is a SECOND, longer deadline applied to
+// ctx via WithTimeout, so the subprocess is bounded both by the
+// caller's deadline AND by dialogTimeout, whichever fires first.
+// This is the right shape for trayConfirm (where the caller's
+// confirmTimeout is the binding bound) and harmless for
+// bootstrapConfigInteractive (where context.Background never
+// cancels, so dialogTimeout alone bounds the wait).
+func runDialogSubprocess(ctx context.Context, selfExe string, args ...string) (stdout string, exitCode int, err error) {
+	subCtx, cancel := context.WithTimeout(ctx, dialogTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, selfExe, append([]string{"dialog"}, args...)...)
+	cmd := exec.CommandContext(subCtx, selfExe, append([]string{"dialog"}, args...)...)
 	out, runErr := cmd.Output()
 	if runErr == nil {
 		return strings.TrimRight(string(out), "\n"), dialogExitOK, nil
@@ -77,7 +99,7 @@ func notifyStartupFailure(run dialogRunner, message, logPath string) {
 	if logPath != "" {
 		full = fmt.Sprintf("%s\n\nSee %s for details.", message, logPath)
 	}
-	if _, _, err := run("-kind", "error", "-title", "branchDAM Agent", "-message", full); err != nil {
+	if _, _, err := run(context.Background(), "-kind", "error", "-title", "branchDAM Agent", "-message", full); err != nil {
 		slog.Warn("could not show startup-error dialog", "err", err)
 	}
 }
@@ -143,7 +165,7 @@ func bootstrapConfigInteractive(run dialogRunner, path string) error {
 		if p.def != "" {
 			args = append(args, "-default", p.def)
 		}
-		value, exitCode, err := run(args...)
+		value, exitCode, err := run(context.Background(), args...)
 		if err != nil {
 			return fmt.Errorf("run setup dialog for %s: %w", p.key, err)
 		}

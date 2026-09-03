@@ -1,4 +1,15 @@
 .DEFAULT_GOAL := help
+# Use bash explicitly for recipe shells: default `/bin/sh` is dash on Debian/Ubuntu
+# and lacks `mapfile`/`arrays` needed by the `vulncheck` allowlist logic.
+SHELL := /usr/bin/env bash
+# `.SHELLFLAGS` is global: every recipe inherits -eu/-o pipefail. Today
+# every target tolerates that, but a future target that legitimately
+# wants an intermediate non-zero (e.g. an explicit "skip-if-absent" probe)
+# should override locally with `SHELL := /usr/bin/env bash` +
+# `.SHELLFLAGS := -eu -o pipefail -c` plus an explicit `|| true` at the
+# failing step, not by relaxing the global flag. Leave this as-is unless
+# a concrete target needs the override.
+.SHELLFLAGS := -eu -o pipefail -c
 .PHONY: help install-hooks test lint fmt vet tidy vulncheck build build-windows build-darwin build-darwin-app clean check
 
 # VERSION stamps main.version via -X ldflags -- unset (the default "dev")
@@ -32,9 +43,78 @@ vet: ## Run go vet
 tidy: ## Tidy Go modules
 	go mod tidy
 
-vulncheck: ## Check for known vulnerabilities
-	go install golang.org/x/vuln/cmd/govulncheck@latest
-	$$(go env GOPATH)/bin/govulncheck ./...
+VULNCHECK_IGNORE ?= GO-2026-5932
+VULNCHECK_VERSION ?= v1.7.0
+
+# govulncheck is in Go's x/vuln module family, so we install on the fly
+# rather than committing a pre-installed binary. Pinned to a released
+# version (VULNCHECK_VERSION, default v1.7.0) rather than @latest so
+# the allowlist semantics and JSON schema (`.config.scanner_name`,
+# `.finding.osv`) are deterministic -- a future govulncheck release
+# that changes either would otherwise drift the gate silently. JSON
+# output is used instead of relying on govulncheck's own exit code:
+# verified against govulncheck v1.7, `-format json` exits 0 for both
+# clean and findings-present runs (it only exits non-zero on a tool-level
+# failure like a package-load error). The pass/fail decision (and the
+# VULNCHECK_IGNORE allowlist) is therefore applied here against the
+# parsed findings, mirroring what ci-go.yml does in CI. Set
+# VULNCHECK_IGNORE="" to fail on every finding; comma-separate IDs to
+# allowlist specific ones.
+#
+# Default allowlist mirrors ci-cd.yml's `govulncheck-ignore` input:
+# GO-2026-5932 (golang.org/x/crypto/openpgp, unmaintained, no upstream fix
+# -- tracked in issue #14). Re-check periodically and drop the ID once a
+# real fix exists.
+#
+# `mapfile` is bash 4+ only; stock macOS `/usr/bin/env bash` is 3.2, and
+# branchdam-agent's macOS/Windows desktop users do `make check` on it.
+# The findings-array population below uses a portable `while read` loop
+# so the recipe works on bash 3.2 too. (Comments INSIDE the recipe body
+# would break the `\` continuation chain, so the rationale lives up
+# here in the Make-comment block instead.)
+vulncheck: ## Check for known vulnerabilities (allowlist via VULNCHECK_IGNORE, default matches ci-cd.yml)
+	@command -v jq >/dev/null 2>&1 || { echo "::error::vulncheck: \`jq\` is required but not installed. Install via 'brew install jq' (macOS), 'apt-get install jq' (Linux), or 'choco install jq' (Windows)."; exit 1; }
+	go install golang.org/x/vuln/cmd/govulncheck@$(VULNCHECK_VERSION)
+	$$(go env GOPATH)/bin/govulncheck -format json ./... > govulncheck.json || true
+	@# govulncheck's exit code in -format json mode is 0 for findings
+	@# (and non-zero only for tool-level failures like a load error), so the
+	@# `|| true` above is required to keep the recipe going at all -- but it
+	@# also masks a missing or crash-truncated output file. With `set -e`,
+	@# jq failing inside the `<(...)` process substitution does NOT propagate
+	@# up to abort the recipe, so an empty file would silently fall through
+	@# to "clean". Validate the JSON before treating the run as parseable:
+	@# the file must exist & be non-empty, AND its first object must be the
+	@# govulncheck `config` envelope. Anything else is a tool failure and
+	@# must not be reported as clean.
+	@if ! [ -s govulncheck.json ] \
+	  || ! jq -e 'select(.config.scanner_name == "govulncheck")' govulncheck.json >/dev/null; then \
+	  echo "::error::govulncheck produced no parseable output (govulncheck.json is missing, empty, or not a valid govulncheck JSON stream)"; \
+	  rm -f govulncheck.json; \
+	  exit 1; \
+	fi
+	@ignore_clean=(); \
+	IFS=, read -ra parts <<<"$(VULNCHECK_IGNORE)" || true; \
+	for ig in "$${parts[@]}"; do \
+	  ig="$${ig// /}"; \
+	  if [ -n "$$ig" ]; then ignore_clean+=( "$$ig" ); fi; \
+	done; \
+	if [ "$${#ignore_clean[@]}" -gt 0 ]; then echo "vulncheck-ignore allowlist: $${ignore_clean[*]}"; fi; \
+	found=(); \
+	while IFS= read -r id; do \
+	  [ -n "$$id" ] && found+=( "$$id" ); \
+	done < <(jq -r 'select(.finding != null) | .finding.osv' govulncheck.json | sort -u); \
+	reported=(); suppressed=(); \
+	for id in "$${found[@]}"; do \
+	  matched=0; \
+	  for ig in "$${ignore_clean[@]}"; do \
+	    if [ "$$id" = "$$ig" ]; then matched=1; break; fi; \
+	  done; \
+	  if [ "$$matched" -eq 1 ]; then suppressed+=( "$$id" ); else reported+=( "$$id" ); fi; \
+	done; \
+	if [ "$${#suppressed[@]}" -gt 0 ]; then echo "vulncheck-ignore suppressed: $${suppressed[*]}"; fi; \
+	if [ "$${#reported[@]}" -gt 0 ]; then echo "::error::govulncheck found unignored vulnerabilities: $${reported[*]}"; rm -f govulncheck.json; exit 1; fi; \
+	echo "govulncheck: clean"; \
+	rm -f govulncheck.json
 
 build: ## Build all packages
 	go build ./...
@@ -52,7 +132,7 @@ build-darwin-app: ## Build + assemble the .app bundle -- macOS host only (intern
 	go build -ldflags="-X main.version=$(VERSION)" -o dist/branchdam-agent ./cmd/branchdam-agent
 	go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -version "$(VERSION)"
 
-check: build vet test build-windows build-darwin ## One-shot pre-PR gate: build + vet + test + cross-build checks (does not require pre-commit -- see `lint`)
+check: build vet test vulncheck build-windows build-darwin ## One-shot pre-PR gate: build + vet + test + vulncheck + cross-build checks (does not require pre-commit -- see `lint`)
 
 clean: ## Remove build artifacts and caches
 	rm -f coverage.txt

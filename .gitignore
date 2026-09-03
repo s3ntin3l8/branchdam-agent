@@ -64,3 +64,12 @@ compose.override.yml
 # Agent workspace (superpowers plans, scratch) -- mirrors branchDAM's own
 # .gitignore; no such directory exists in this repo yet.
 /docs/superpowers/
+
+# WIP audit reports -- not to be committed. The audit directory exists
+# locally as a scratch space for in-progress code reviews; only the
+# audit-conclusions that survive triage should be filed as tracked
+# issues or docs elsewhere.
+/docs/audit/
+
+# govulncheck JSON output (transient, written by `make vulncheck`)
+/govulncheck.json

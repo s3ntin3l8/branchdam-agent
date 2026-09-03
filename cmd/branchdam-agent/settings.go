@@ -1,14 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/autostart"
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -29,18 +30,17 @@ type configSettings struct {
 	runner *tray.Runner
 	dialog dialogRunner
 
-	// appliedStatusAddr/appliedCardRoots are what THIS PROCESS actually
-	// bound/started watching at launch -- fixed for the whole process
-	// lifetime, unlike s.cfg below (which reload() overwrites on every
-	// call). RestartRequired is derived by diffing the current config
-	// against these two, not against the previous s.cfg snapshot: a Hermes
-	// review finding on this PR caught that diffing against the mutable
-	// snapshot made the flag latch permanently after the first reload,
-	// even if an operator reverted a hand-edit back to the original value
-	// on a second reload -- the "previous" snapshot by then was already
-	// the changed one, so the diff against it saw nothing.
+	// appliedStatusAddr is what THIS PROCESS actually bound at launch
+	// -- fixed for the whole process lifetime, unlike s.cfg below
+	// (which reload() overwrites on every call). RestartRequired is
+	// derived by diffing the current config against this, not against
+	// the previous s.cfg snapshot: a Hermes review finding on this PR
+	// caught that diffing against the mutable snapshot made the flag
+	// latch permanently after the first reload, even if an operator
+	// reverted a hand-edit back to the original value on a second reload
+	// -- the "previous" snapshot by then was already the changed one,
+	// so the diff against it saw nothing.
 	appliedStatusAddr string
-	appliedCardRoots  []string
 
 	mu              sync.Mutex
 	cfg             config.Config
@@ -69,7 +69,6 @@ func newConfigSettings(path string, cfg config.Config, runner *tray.Runner, dial
 		runner:            runner,
 		dialog:            dialog,
 		appliedStatusAddr: cfg.Tray.StatusAddrOrDefault(),
-		appliedCardRoots:  append([]string(nil), cfg.Ingest.CardRoots...),
 	}
 }
 
@@ -126,11 +125,13 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		SelfUpdateEnabled:          cfg.SelfUpdate.Enabled,
 		SelfUpdateCheckIntervalHrs: cfg.SelfUpdate.CheckIntervalHours,
 		RequireUnbuffered:          cfg.Ingest.RequireUnbuffered,
+		RequireDCIM:                cfg.Ingest.RequireDCIM,
 		ServerBaseURL:              cfg.Server.BaseURL,
 		ServerAPIKeySet:            cfg.Server.APIKey != "",
 		ArchiveRoot:                cfg.Ingest.ArchiveRoot,
 		LocalEditRoot:              cfg.Ingest.LocalEditRoot,
 		NamingTemplate:             cfg.Ingest.PathTemplate,
+		AllowedExtensions:          cfg.Ingest.AllowedExtensions,
 		RestartRequired:            s.restartRequired,
 		NodeIndexPath:              cfg.Integrations.NodeIndexPath,
 		NodeIndexPathSet:           cfg.Integrations.NodeIndexPath != "",
@@ -195,6 +196,8 @@ func (s *configSettings) validateBoolChange(key string, v bool) error {
 		cfg.SelfUpdate.Enabled = v
 	case "ingest.requireUnbuffered":
 		cfg.Ingest.RequireUnbuffered = v
+	case "ingest.requireDCIM":
+		cfg.Ingest.RequireDCIM = v
 	default:
 		// config.Patch does no schema validation of its own -- these three
 		// switches (this one plus validateIntChange/validateStringChange
@@ -246,6 +249,14 @@ func (s *configSettings) validateStringChange(key, v string) error {
 		cfg.Ingest.ArchiveRoot = v
 	case "ingest.localEditRoot":
 		cfg.Ingest.LocalEditRoot = v
+	case "ingest.cardRoots":
+		cfg.Ingest.CardRoots = splitCommaPaths(v)
+	case "ingest.allowedExtensions":
+		exts, err := splitCommaExtensions(v)
+		if err != nil {
+			return err
+		}
+		cfg.Ingest.AllowedExtensions = exts
 	case "ingest.pathTemplate":
 		cfg.Ingest.PathTemplate = v
 	case "integrations.nodeIndexPath":
@@ -266,8 +277,27 @@ func (s *configSettings) validateStringChange(key, v string) error {
 }
 
 func firstValidateProblem(cfg config.Config) error {
-	if problems := cfg.Validate(); len(problems) > 0 {
-		return fmt.Errorf("config problem: %s", problems[0])
+	if problem := firstBlockingProblem(cfg); problem != nil {
+		return fmt.Errorf("config problem: %s", problem)
+	}
+	return nil
+}
+
+// firstBlockingProblem returns the first Validate() Problem that should
+// block a settings-driven config mutation or reload -- i.e. a structural
+// failure, not a Problem marked Advisory(). Used by firstValidateProblem
+// (SetBool/SetInt/PromptAndSet path) and reload (Reload config / Restart
+// Required path), so they share one definition of "blocking" instead of
+// each diverging independently (Hermes review finding on the PR that
+// introduced SeverityWarning, issue #96).
+//
+// Returns nil when every Problem is advisory or when Validate() found
+// nothing at all.
+func firstBlockingProblem(cfg config.Config) *config.Problem {
+	for _, p := range cfg.Validate() {
+		if !p.Advisory() {
+			return &p
+		}
 	}
 	return nil
 }
@@ -308,6 +338,22 @@ func settingsPromptFor(field tray.SettingsField) (settingsPrompt, error) {
 		return settingsPrompt{
 			key: "ingest.localEditRoot", kind: "directory", title: "Select the local edit (scratch) folder",
 		}, nil
+	case tray.FieldCardRoots:
+		return settingsPrompt{
+			key: "ingest.cardRoots", kind: "entry", title: "Watch Folders",
+			message: "Directories polled for mounted camera cards (comma-separated):",
+			defaultValue: func(cfg config.Config) string {
+				return strings.Join(cfg.Ingest.CardRoots, ", ")
+			},
+		}, nil
+	case tray.FieldAllowedExtensions:
+		return settingsPrompt{
+			key: "ingest.allowedExtensions", kind: "entry", title: "Allowed Extensions",
+			message: "File extensions to ingest (comma-separated, e.g. .arw, .jpg, or empty for all):",
+			defaultValue: func(cfg config.Config) string {
+				return strings.Join(cfg.Ingest.AllowedExtensions, ", ")
+			},
+		}, nil
 	case tray.FieldNamingTemplate:
 		return settingsPrompt{
 			key: "ingest.pathTemplate", kind: "entry", title: "Naming Template",
@@ -347,7 +393,7 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 		args = append(args, "-patterns", strings.Join(prompt.patterns, ","))
 	}
 
-	value, exitCode, err := s.dialog(args...)
+	value, exitCode, err := s.dialog(context.Background(), args...)
 	if err != nil {
 		return false, fmt.Errorf("run settings dialog for %s: %w", prompt.key, err)
 	}
@@ -363,7 +409,15 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 	if err := s.validateStringChange(prompt.key, value); err != nil {
 		return false, err
 	}
-	if err := config.Patch(s.path, map[string]any{prompt.key: value}); err != nil {
+	var patchVal any = value
+	switch prompt.key {
+	case "ingest.cardRoots":
+		patchVal = splitCommaPaths(value)
+	case "ingest.allowedExtensions":
+		exts, _ := splitCommaExtensions(value)
+		patchVal = exts
+	}
+	if err := config.Patch(s.path, map[string]any{prompt.key: patchVal}); err != nil {
 		return false, fmt.Errorf("save %s: %w", prompt.key, err)
 	}
 	return true, s.reload()
@@ -394,7 +448,7 @@ func (s *configSettings) PromptAndSetIntegrationPath(id tray.IntegrationID) (boo
 		args = append(args, "-patterns", strings.Join(b.CatalogFilePatterns, ","))
 	}
 
-	value, exitCode, err := s.dialog(args...)
+	value, exitCode, err := s.dialog(context.Background(), args...)
 	key := b.ConfigKey("catalogPath")
 	if err != nil {
 		return false, fmt.Errorf("run settings dialog for %s: %w", key, err)
@@ -440,17 +494,17 @@ func (s *configSettings) PromptAndSetIntegrationPath(id tray.IntegrationID) (boo
 // specific change before ever calling config.Patch, so a menu-driven
 // change should never reach this rejection in practice.
 //
-// RestartRequired is re-derived by diffing against appliedStatusAddr/
-// appliedCardRoots (fixed at construction -- what THIS PROCESS actually
-// has bound/running), not against the mutable previous s.cfg snapshot --
-// see those fields' own doc comment for why that distinction matters.
+// RestartRequired is re-derived by diffing against appliedStatusAddr
+// (fixed at construction -- what THIS PROCESS actually bound), not against
+// the mutable previous s.cfg snapshot -- see that field's own doc comment
+// for why that distinction matters.
 func (s *configSettings) reload() error {
 	newCfg, err := config.Load(s.path)
 	if err != nil {
 		return fmt.Errorf("reload config %q: %w", s.path, err)
 	}
-	if problems := newCfg.Validate(); len(problems) > 0 {
-		return fmt.Errorf("config problem: %s", problems[0])
+	if problem := firstBlockingProblem(newCfg); problem != nil {
+		return fmt.Errorf("config problem: %s", problem)
 	}
 
 	client := branchdam.New(newCfg.Server.BaseURL, newCfg.Server.APIKey)
@@ -458,11 +512,12 @@ func (s *configSettings) reload() error {
 
 	s.mu.Lock()
 	s.cfg = newCfg
-	s.restartRequired = s.appliedStatusAddr != newCfg.Tray.StatusAddrOrDefault() ||
-		!slices.Equal(s.appliedCardRoots, newCfg.Ingest.CardRoots)
+	s.restartRequired = s.appliedStatusAddr != newCfg.Tray.StatusAddrOrDefault()
 	queueStore := s.queueStore
 	s.mu.Unlock()
 
+	s.runner.SetDetectorInterval(time.Duration(newCfg.Ingest.PollIntervalSecs) * time.Second)
+	s.runner.SetDetectorRequireDCIM(newCfg.Ingest.RequireDCIM)
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
 
 	// Rebuild every integration syncer against the freshly reloaded
@@ -512,4 +567,35 @@ func openWithDefaultApp(path string) error {
 	default:
 		return exec.Command("xdg-open", path).Start()
 	}
+}
+
+// splitCommaPaths parses a comma-separated string of directories, trimming
+// whitespace and dropping empty segments.
+func splitCommaPaths(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// splitCommaExtensions parses a comma-separated string of file extensions,
+// trimming whitespace and verifying that each non-empty extension starts
+// with a leading dot. An empty or all-whitespace input returns an empty slice
+// without error (meaning all extensions are allowed).
+func splitCommaExtensions(s string) ([]string, error) {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		ext := strings.TrimSpace(p)
+		if ext == "" {
+			continue
+		}
+		if !strings.HasPrefix(ext, ".") || len(ext) == 1 {
+			return nil, fmt.Errorf("extension %q must start with a leading dot (e.g. %q)", ext, "."+strings.TrimPrefix(ext, "."))
+		}
+		out = append(out, ext)
+	}
+	return out, nil
 }

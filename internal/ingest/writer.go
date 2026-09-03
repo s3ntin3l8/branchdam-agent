@@ -3,6 +3,7 @@ package ingest
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -10,6 +11,12 @@ import (
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/hashing"
 )
+
+// syncParentDirFn is indirected through a package var so tests can substitute
+// a recording stub (running fsync in a unit test on a temp dir is fine, but
+// the indirection lets us verify the call paths and log semantics without
+// needing power-loss simulation).
+var syncParentDirFn = syncParentDir
 
 // WriteResult is what DualWrite produces: the two destination paths it
 // wrote, the source's size, and the two hashes computed in the same pass
@@ -115,6 +122,25 @@ func DualWrite(srcPath, archivePath, localPath string, opts ...WriteOption) (res
 	}
 	if closeErr := localFile.Close(); closeErr != nil {
 		return WriteResult{}, fmt.Errorf("ingest: close local dest %s: %w", localPath, closeErr)
+	}
+
+	// Fsync both parent directories to ensure the directory entries are
+	// durable on power loss. A crash between the file's own fsync and the
+	// OS flushing the parent directory's metadata can silently lose the
+	// file. Errors are logged, not fatal -- the file is on disk; only the
+	// directory entry might not be durable, which is the same class of
+	// risk as os.Chtimes failures (#103). Dedupe when both destinations
+	// share a parent directory.
+	archiveDir := filepath.Dir(archivePath)
+	localDir := filepath.Dir(localPath)
+	dirs := []string{archiveDir}
+	if localDir != archiveDir {
+		dirs = append(dirs, localDir)
+	}
+	for _, dir := range dirs {
+		if dirErr := syncParentDirFn(dir); dirErr != nil {
+			slog.Warn("dualwrite: dir fsync failed; entry may not be durable on power loss", "dir", dir, "err", dirErr)
+		}
 	}
 
 	return WriteResult{

@@ -3,8 +3,11 @@ package tray
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -706,6 +709,143 @@ func TestStatusWatchDirsIsACopy(t *testing.T) {
 	}
 }
 
+func TestStatusSurfacesBusySince(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, nil, "")
+
+	go r.TriggerIngest(context.Background(), "/media/a")
+	<-started
+
+	st := r.Status(UpdateStatus{})
+	if !st.Busy {
+		t.Fatal("expected Busy=true during ingest")
+	}
+	if st.BusySince.IsZero() {
+		t.Error("expected BusySince to be set during ingest")
+	}
+
+	close(release)
+}
+
+func TestStatusSurfacesHandshakeOK(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	r.TriggerDrain(context.Background())
+
+	st := r.Status(UpdateStatus{})
+	if !st.HandshakeOK {
+		t.Error("expected HandshakeOK=true when last drain succeeded with handshake")
+	}
+}
+
+func TestStatusSurfacesHandshakeNOTOK(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	r.TriggerDrain(context.Background())
+
+	st := r.Status(UpdateStatus{})
+	if st.HandshakeOK {
+		t.Error("expected HandshakeOK=false when last drain had failed handshake")
+	}
+}
+
+func TestStatusHandshakeOKFalseWithNoDrains(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	st := r.Status(UpdateStatus{})
+	if st.HandshakeOK {
+		t.Error("expected HandshakeOK=false when no drains have run yet")
+	}
+}
+
+func TestStatusSurfacesInFlightDrain(t *testing.T) {
+	fd := &fakeDrainer{started: make(chan struct{}), release: make(chan struct{})}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetQueueDeps(nil, fd, nil)
+
+	done := make(chan struct{})
+	go func() {
+		r.TriggerDrain(context.Background())
+		close(done)
+	}()
+	<-fd.started
+
+	st := r.Status(UpdateStatus{})
+	if !st.InFlightDrain {
+		t.Error("expected InFlightDrain=true while a drain pass is running")
+	}
+
+	close(fd.release)
+	<-done
+
+	st = r.Status(UpdateStatus{})
+	if st.InFlightDrain {
+		t.Error("expected InFlightDrain=false once drain pass completes")
+	}
+}
+
+// TestTriggerDrainInFlightDrainStaysFalseWhenNotConfigured is the
+// regression test for the Hermes review on #123: the periodic drain
+// timer (cmd/branchdam-agent/tray.go:214) runs unconditionally, so on
+// an unconfigured queue (no drainer wired) a TriggerDrain tick must
+// leave Status().InFlightDrain strictly false. The earlier
+// implementation set the flag before the nil-drainer guard and
+// reset it via defer, briefly flashing "drain in progress..." to a
+// concurrent Status() call on every tick.
+func TestTriggerDrainInFlightDrainStaysFalseWhenNotConfigured(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	// Deliberately do NOT call SetQueueDeps with a drainer: this
+	// mirrors the "unconfigured offline queue" case.
+
+	for i := 0; i < 5; i++ {
+		_, ran := r.TriggerDrain(context.Background())
+		if ran {
+			t.Fatalf("tick %d: expected ran=false on a Runner with no drainer wired", i)
+		}
+		st := r.Status(UpdateStatus{})
+		if st.InFlightDrain {
+			t.Fatalf("tick %d: InFlightDrain must stay false on a no-drainer Runner, got true (status=%+v)", i, st)
+		}
+	}
+}
+
+// TestTriggerPruneInFlightPruneStaysFalseWhenNotConfigured is the
+// prune-side mirror of TestTriggerDrainInFlightDrainStaysFalseWhenNotConfigured:
+// a menu-click TriggerPrune on an unconfigured pruner must leave
+// Status().InFlightPrune strictly false. TriggerPrune is invoked
+// from the tray's "Prune now" menu item (run_supported.go) and would
+// otherwise briefly flash "prune in progress..." on a Runner with no
+// pruner wired.
+func TestTriggerPruneInFlightPruneStaysFalseWhenNotConfigured(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	// Deliberately do NOT call SetQueueDeps with a pruner: this
+	// mirrors the "unconfigured pruner" case (prune.enabled=false).
+
+	for i := 0; i < 5; i++ {
+		_, ran := r.TriggerPrune(context.Background())
+		if ran {
+			t.Fatalf("tick %d: expected ran=false on a Runner with no pruner wired", i)
+		}
+		st := r.Status(UpdateStatus{})
+		if st.InFlightPrune {
+			t.Fatalf("tick %d: InFlightPrune must stay false on a no-pruner Runner, got true (status=%+v)", i, st)
+		}
+	}
+}
+
+func TestStatusInFlightPruneFalseWhenIdle(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	st := r.Status(UpdateStatus{})
+	if st.InFlightPrune {
+		t.Error("expected InFlightPrune=false when nothing is running")
+	}
+}
+
 func TestTriggerIngestSerializesConcurrentCalls(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -796,6 +936,263 @@ func TestReconfigureWaitsForInFlightIngest(t *testing.T) {
 	}
 }
 
+func TestReconfigureDetectorStartsAndStops(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{t.TempDir()})
+
+	r.detectorMu.Lock()
+	cancelFn := r.detectorCancel
+	doneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	if cancelFn == nil || doneCh == nil {
+		t.Fatal("expected detectorCancel and detectorDone to be non-nil when roots are configured")
+	}
+
+	// Reconfigure with empty roots stops the detector
+	r.ReconfigureDetector(context.Background(), nil)
+
+	select {
+	case <-doneCh:
+		// success: old goroutine exited
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("old detector goroutine did not exit after ReconfigureDetector(context.Background(), nil)")
+	}
+
+	r.detectorMu.Lock()
+	cancelFn = r.detectorCancel
+	doneCh = r.detectorDone
+	r.detectorMu.Unlock()
+
+	if cancelFn != nil || doneCh != nil {
+		t.Error("expected detectorCancel and detectorDone to be nil after clearing roots")
+	}
+}
+
+func TestReconfigureDetectorWaitsForPreviousGoroutine(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{t.TempDir()})
+
+	r.detectorMu.Lock()
+	firstDoneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	// Reconfigure with new roots replaces the detector and waits for previous one
+	r.ReconfigureDetector(ctx, []string{t.TempDir()})
+
+	select {
+	case <-firstDoneCh:
+		// success
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("first detector goroutine did not exit when replaced")
+	}
+
+	r.StopDetector()
+}
+
+func TestReconfigureTriggersReconfigureDetectorOnRootsChange(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, []string{"/old"}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{"/old"})
+
+	r.detectorMu.Lock()
+	firstDoneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	// Reconfigure with changed roots
+	r.Reconfigure(fi, []string{"/new"}, "")
+
+	select {
+	case <-firstDoneCh:
+		// success: old goroutine exited
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("old detector goroutine did not exit when Reconfigure changed watchDirs")
+	}
+
+	if got := r.WatchDirs(); len(got) != 1 || got[0] != "/new" {
+		t.Errorf("WatchDirs() = %v, want [/new]", got)
+	}
+
+	r.StopDetector()
+}
+
+func TestReconfigureNoDeadlockWithInFlightIngest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, []string{"/old"}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{"/old"})
+
+	// Start an ingest that holds gate
+	go r.TriggerIngest(context.Background(), "/old/card")
+	<-started
+
+	// Reconfigure with changed roots while ingest is in flight
+	done := make(chan struct{})
+	go func() {
+		r.Reconfigure(fi, []string{"/new"}, "")
+		close(done)
+	}()
+
+	// Release the in-flight ingest
+	close(release)
+
+	select {
+	case <-done:
+		// success: Reconfigure completed without deadlock
+	case <-time.After(2 * time.Second):
+		t.Fatal("Reconfigure deadlocked with in-flight ingest")
+	}
+
+	r.StopDetector()
+}
+
+func TestSetDetectorIntervalAndBaseContext(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetDetectorInterval(0)
+	if r.detectorInterval != ingest.DefaultPollInterval {
+		t.Errorf("detectorInterval = %v, want default %v", r.detectorInterval, ingest.DefaultPollInterval)
+	}
+
+	r.SetDetectorInterval(-5 * time.Second)
+	if r.detectorInterval != ingest.DefaultPollInterval {
+		t.Errorf("detectorInterval = %v, want default %v", r.detectorInterval, ingest.DefaultPollInterval)
+	}
+
+	r.SetDetectorInterval(500 * time.Millisecond)
+	if r.detectorInterval != 500*time.Millisecond {
+		t.Errorf("detectorInterval = %v, want 500ms", r.detectorInterval)
+	}
+
+	if r.BaseContext() != context.Background() {
+		t.Errorf("BaseContext() when unset = %v, want context.Background()", r.BaseContext())
+	}
+
+	customCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.detectorBaseCtx = customCtx
+	if r.BaseContext() != customCtx {
+		t.Errorf("BaseContext() = %v, want customCtx", r.BaseContext())
+	}
+}
+
+func TestReconfigureDetectorInvokesOnCardIngested(t *testing.T) {
+	fi := &fakeIngester{}
+	dir := t.TempDir()
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	var hit int32
+	r.SetOnCardIngested(func() {
+		atomic.AddInt32(&hit, 1)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{dir})
+
+	// Create a subdirectory to trigger detector
+	cardDir := filepath.Join(dir, "CARD1")
+	if err := os.Mkdir(cardDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 50; i++ {
+		if atomic.LoadInt32(&hit) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if atomic.LoadInt32(&hit) == 0 {
+		t.Error("expected onCardIngested callback to be invoked after card detection")
+	}
+
+	r.StopDetector()
+}
+
+func TestReconfigureSameRootsDoesNotRestartDetector(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, []string{"/same"}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{"/same"})
+
+	r.detectorMu.Lock()
+	firstDoneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	// Reconfigure with identical roots
+	r.Reconfigure(fi, []string{"/same"}, "/new-scratch")
+
+	r.detectorMu.Lock()
+	secondDoneCh := r.detectorDone
+	r.detectorMu.Unlock()
+
+	if firstDoneCh != secondDoneCh {
+		t.Error("expected Reconfigure with same roots to preserve running detector goroutine")
+	}
+
+	r.StopDetector()
+}
+
+func TestReconfigureDetectorErrorHandler(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+
+	var gotErr error
+	r.SetDetectorErrorHandler(func(err error) {
+		gotErr = err
+	})
+
+	testErr := errors.New("detector test error")
+	r.mu.Lock()
+	handler := r.detectorErrHandler
+	r.mu.Unlock()
+
+	if handler == nil {
+		t.Fatal("expected detectorErrHandler to be set")
+	}
+	handler(testErr)
+	if gotErr != testErr {
+		t.Errorf("gotErr = %v, want %v", gotErr, testErr)
+	}
+
+	r.SetDetectorErrorHandler(nil)
+	r.mu.Lock()
+	handler = r.detectorErrHandler
+	r.mu.Unlock()
+	if handler != nil {
+		t.Error("expected detectorErrHandler to be nil after clearing")
+	}
+}
+
 // fakeSelfUpdater is a no-op SelfUpdater shared by tests across build
 // tags (run_unsupported_test.go's Linux stub test and, eventually,
 // run_supported_test.go's windows/darwin ones).
@@ -833,4 +1230,64 @@ func (b *blockingIngester) IngestCard(_ context.Context, _ string) (ingest.CardR
 		<-b.release
 	})
 	return ingest.CardResult{}, nil
+}
+
+func TestSetDetectorRequireDCIM(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorRequireDCIM(true)
+	if !r.detectorRequireDCIM {
+		t.Error("expected detectorRequireDCIM to be true")
+	}
+	r.SetDetectorRequireDCIM(false)
+	if r.detectorRequireDCIM {
+		t.Error("expected detectorRequireDCIM to be false")
+	}
+}
+
+func TestReconfigureDetectorWithRequireDCIM(t *testing.T) {
+	fi := &fakeIngester{}
+	dir := t.TempDir()
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+	r.SetDetectorRequireDCIM(true)
+
+	var hit int32
+	r.SetOnCardIngested(func() {
+		atomic.AddInt32(&hit, 1)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{dir})
+
+	// Create a subdirectory without DCIM -> should not trigger ingest
+	usbDir := filepath.Join(dir, "USB_STICK")
+	if err := os.Mkdir(usbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if atomic.LoadInt32(&hit) > 0 {
+		t.Error("expected USB stick without DCIM not to trigger ingest when requireDCIM=true")
+	}
+
+	// Create DCIM directory -> should trigger ingest
+	if err := os.Mkdir(filepath.Join(usbDir, "DCIM"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 50; i++ {
+		if atomic.LoadInt32(&hit) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if atomic.LoadInt32(&hit) == 0 {
+		t.Error("expected camera card with DCIM to trigger ingest when requireDCIM=true")
+	}
+
+	r.StopDetector()
 }

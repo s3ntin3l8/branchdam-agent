@@ -60,7 +60,7 @@ func TestListVolumesUnderIgnoresMissingRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := ListVolumesUnder([]string{dir + "/media", dir + "/nonexistent-root"})
+	got, err := ListVolumesUnder([]string{dir + "/media", dir + "/nonexistent-root"}, false)
 	if err != nil {
 		t.Fatalf("ListVolumesUnder: %v", err)
 	}
@@ -68,6 +68,56 @@ func TestListVolumesUnderIgnoresMissingRoots(t *testing.T) {
 	want := []string{dir + "/media/card1", dir + "/media/card2"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ListVolumesUnder = %v, want %v", got, want)
+	}
+}
+
+func TestListVolumesUnderRequireDCIM(t *testing.T) {
+	dir := t.TempDir()
+	// card1 has DCIM directory, card2 does not (e.g. USB stick or backup drive),
+	// card3 has DCIM file (not directory).
+	if err := mkdirs(dir, "media/card1/DCIM", "media/card2", "media/card3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/media/card3/DCIM", []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without requireDCIM: all 3 volumes are returned
+	gotNoDCIM, err := ListVolumesUnder([]string{dir + "/media"}, false)
+	if err != nil {
+		t.Fatalf("ListVolumesUnder(false): %v", err)
+	}
+	sort.Strings(gotNoDCIM)
+	wantNoDCIM := []string{dir + "/media/card1", dir + "/media/card2", dir + "/media/card3"}
+	if !reflect.DeepEqual(gotNoDCIM, wantNoDCIM) {
+		t.Errorf("ListVolumesUnder(false) = %v, want %v", gotNoDCIM, wantNoDCIM)
+	}
+
+	// With requireDCIM: only card1 is returned
+	gotDCIM, err := ListVolumesUnder([]string{dir + "/media"}, true)
+	if err != nil {
+		t.Fatalf("ListVolumesUnder(true): %v", err)
+	}
+	sort.Strings(gotDCIM)
+	wantDCIM := []string{dir + "/media/card1"}
+	if !reflect.DeepEqual(gotDCIM, wantDCIM) {
+		t.Errorf("ListVolumesUnder(true) = %v, want %v", gotDCIM, wantDCIM)
+	}
+}
+
+func TestNewDetectorWithRequireDCIM(t *testing.T) {
+	dir := t.TempDir()
+	if err := mkdirs(dir, "media/card1/DCIM", "media/usb_stick"); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewDetector([]string{dir + "/media"}, 0, true)
+	got, err := d.List()
+	if err != nil {
+		t.Fatalf("d.List(): %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{dir + "/media/card1"}) {
+		t.Errorf("d.List() = %v, want [%s/media/card1]", got, dir)
 	}
 }
 

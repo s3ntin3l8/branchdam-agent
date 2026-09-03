@@ -13,12 +13,20 @@ package tray
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 )
+
+// ErrUnsupported is returned by Run on any platform other than
+// windows/darwin. The tray is scoped to those two per the plan doc and
+// issue #3; a Linux workstation still has the fully-tested headless
+// `ingest`/`ingest --watch` path, just no tray icon.
+var ErrUnsupported = errors.New("tray: unsupported on this platform (windows and darwin only); use `branchdam-agent ingest` instead")
 
 // Ingester is the subset of *ingest.Engine's surface Runner needs, so tests
 // can substitute a fake without touching a real card or a real branchDAM
@@ -144,6 +152,27 @@ type Status struct {
 	// only mirrors for display).
 	Busy     bool
 	BusyCard string
+	// BusySince is when the current ingest started (zero when not busy).
+	BusySince time.Time
+	// HandshakeOK surfaces the most recent DrainSummary.HandshakeOK to the
+	// status page -- the operator's most basic "is the server reachable?"
+	// signal, which DrainSummary already computes but never exposed. False
+	// when no drain has run yet (see HasDrained for that distinction);
+	// this is the single source of truth for the "Server connection"
+	// section's reachable/unreachable label, so the template does not
+	// reach into QueueStatus.LastDrain directly.
+	HandshakeOK bool
+	// HasDrained is true once at least one drain pass has completed in
+	// this session -- the "have we ever heard from the server?" signal
+	// the Server connection section uses to distinguish "no drain run
+	// yet" from "last drain: handshake failed". Independent of
+	// HandshakeOK on purpose: a never-drained install is neither
+	// "reachable" nor "unreachable", it's "unknown".
+	HasDrained bool
+	// InFlightDrain reports whether a drain pass is currently running.
+	InFlightDrain bool
+	// InFlightPrune reports whether a prune pass is currently running.
+	InFlightPrune bool
 	// Integrations is RUNTIME state only, ordered by the compile-time
 	// Integrations() registry so the status page and (a later PR's) menu
 	// render in the same order every time. Config state (enabled, dry
@@ -203,11 +232,13 @@ type Runner struct {
 	// opened once at tray startup (cmd/branchdam-agent/tray.go) and its
 	// path is not one of the fields issue #31's settings menu can edit, so
 	// there is nothing here that needs to survive a live config reload.
-	queueReader QueueReader
-	drainer     Drainer
-	pruner      Pruner
-	lastDrain   *DrainSummary
-	lastPrune   *PruneSummary
+	queueReader   QueueReader
+	drainer       Drainer
+	pruner        Pruner
+	lastDrain     *DrainSummary
+	lastPrune     *PruneSummary
+	inFlightDrain bool
+	inFlightPrune bool
 
 	// syncers is nil-able per ID (issue #57), same contract as drainer/
 	// pruner above: an absent entry is "not configured" -- disabled, or
@@ -236,6 +267,17 @@ type Runner struct {
 	hookInstallers map[HookID]HookInstaller
 	hookInFlight   map[HookID]bool
 	hookState      map[HookID]*HookState
+
+	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
+	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
+	detectorMu          sync.Mutex
+	detectorCancel      context.CancelFunc
+	detectorDone        chan struct{}
+	detectorBaseCtx     context.Context
+	detectorInterval    time.Duration
+	detectorRequireDCIM bool
+	onCardIngested      func()
+	detectorErrHandler  func(err error)
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -243,13 +285,14 @@ type Runner struct {
 // in the status snapshot.
 func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner {
 	return &Runner{
-		ingester:     ingester,
-		watchDirs:    watchDirs,
-		scratchDir:   scratchDir,
-		syncInFlight: map[IntegrationID]bool{},
-		lastSync:     map[IntegrationID]*SyncSummary{},
-		hookInFlight: map[HookID]bool{},
-		hookState:    map[HookID]*HookState{},
+		ingester:         ingester,
+		watchDirs:        append([]string(nil), watchDirs...),
+		scratchDir:       scratchDir,
+		detectorInterval: ingest.DefaultPollInterval,
+		syncInFlight:     map[IntegrationID]bool{},
+		lastSync:         map[IntegrationID]*SyncSummary{},
+		hookInFlight:     map[HookID]bool{},
+		hookState:        map[HookID]*HookState{},
 	}
 }
 
@@ -378,9 +421,23 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 	r.mu.Lock()
 	drainer := r.drainer
 	r.mu.Unlock()
+
 	if drainer == nil {
 		return DrainSummary{}, false
 	}
+
+	// Set inFlightDrain AFTER the nil-drainer guard. A periodic timer
+	// tick on an unconfigured drainer must not flash "drain in
+	// progress" to a concurrent Status() call; setting the flag here
+	// ensures the flag is true only when an actual drain is running.
+	r.mu.Lock()
+	r.inFlightDrain = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.inFlightDrain = false
+		r.mu.Unlock()
+	}()
 
 	summary, err := drainer.Drain(ctx)
 	summary.At = time.Now()
@@ -412,9 +469,23 @@ func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bo
 	r.mu.Lock()
 	pruner := r.pruner
 	r.mu.Unlock()
+
 	if pruner == nil {
 		return PruneSummary{}, false
 	}
+
+	// Set inFlightPrune AFTER the nil-pruner guard. A menu-click
+	// TriggerPrune on an unconfigured pruner must not briefly report
+	// prune-in-flight to a concurrent Status() call; setting the flag
+	// here ensures the flag is true only when an actual prune is running.
+	r.mu.Lock()
+	r.inFlightPrune = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.inFlightPrune = false
+		r.mu.Unlock()
+	}()
 
 	summary, err := pruner.Prune(ctx)
 	summary.At = time.Now()
@@ -584,6 +655,147 @@ func (r *Runner) RevealHook(id HookID) error {
 	return installer.Reveal()
 }
 
+// SetOnCardIngested registers a callback invoked when a card is detected
+// and ingested by the Detector.Watch goroutine (run_supported.go uses this
+// to trigger an immediate menu refresh).
+func (r *Runner) SetOnCardIngested(fn func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onCardIngested = fn
+}
+
+// BaseContext returns the registered lifecycle context for the detector
+// goroutine, or context.Background() if none was set.
+func (r *Runner) BaseContext() context.Context {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+	if r.detectorBaseCtx != nil {
+		return r.detectorBaseCtx
+	}
+	return context.Background()
+}
+
+// SetDetectorInterval sets the poll interval used when creating a new
+// ingest.Detector. If d <= 0, ingest.DefaultPollInterval is used.
+func (r *Runner) SetDetectorInterval(d time.Duration) {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+	if d <= 0 {
+		d = ingest.DefaultPollInterval
+	}
+	r.detectorInterval = d
+}
+
+// SetDetectorRequireDCIM sets whether the card detector requires a DCIM/
+// subdirectory to detect a volume.
+func (r *Runner) SetDetectorRequireDCIM(v bool) {
+	r.detectorMu.Lock()
+	changed := r.detectorRequireDCIM != v
+	r.detectorRequireDCIM = v
+	running := r.detectorCancel != nil
+	r.detectorMu.Unlock()
+
+	if changed && running {
+		r.mu.Lock()
+		roots := append([]string(nil), r.watchDirs...)
+		r.mu.Unlock()
+		r.ReconfigureDetector(r.BaseContext(), roots)
+	}
+}
+
+// SetDetectorErrorHandler registers a handler for non-cancellation errors
+// returned by the Detector.Watch loop (run_supported.go forwards these to errCh).
+func (r *Runner) SetDetectorErrorHandler(fn func(err error)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.detectorErrHandler = fn
+}
+
+// ReconfigureDetector stops any currently running Detector.Watch goroutine,
+// waits for it to exit, and if roots is non-empty, starts a new Detector.Watch
+// goroutine polling roots (issue #78). If ctx is non-nil, it becomes the parent context
+// for the new detector goroutine (and future ReconfigureDetector calls);
+// if ctx is nil, the previously registered parent context (or context.Background())
+// is used.
+func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+
+	if ctx != nil {
+		r.detectorBaseCtx = ctx
+	}
+	baseCtx := r.detectorBaseCtx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
+	if r.detectorCancel != nil {
+		r.detectorCancel()
+		if r.detectorDone != nil {
+			<-r.detectorDone
+		}
+		r.detectorCancel = nil
+		r.detectorDone = nil
+	}
+
+	r.mu.Lock()
+	r.watchDirs = append([]string(nil), roots...)
+	interval := r.detectorInterval
+	if interval <= 0 {
+		interval = ingest.DefaultPollInterval
+	}
+	r.mu.Unlock()
+
+	if len(roots) == 0 {
+		return
+	}
+
+	dctx, cancel := context.WithCancel(baseCtx)
+	r.detectorCancel = cancel
+	done := make(chan struct{})
+	r.detectorDone = done
+
+	detector := ingest.NewDetector(roots, interval, r.detectorRequireDCIM)
+	go func() {
+		defer close(done)
+		err := detector.Watch(dctx, func(diff ingest.Diff) {
+			for _, path := range diff.Inserted {
+				r.TriggerIngest(dctx, path)
+				r.mu.Lock()
+				cb := r.onCardIngested
+				r.mu.Unlock()
+				if cb != nil {
+					cb()
+				}
+			}
+		})
+		if err != nil && !errors.Is(err, context.Canceled) {
+			r.mu.Lock()
+			handler := r.detectorErrHandler
+			r.mu.Unlock()
+			if handler != nil {
+				handler(err)
+			}
+		}
+	}()
+}
+
+// StopDetector cancels any running Detector.Watch goroutine and waits for it
+// to exit.
+func (r *Runner) StopDetector() {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+
+	if r.detectorCancel != nil {
+		r.detectorCancel()
+		if r.detectorDone != nil {
+			<-r.detectorDone
+		}
+		r.detectorCancel = nil
+		r.detectorDone = nil
+	}
+}
+
 // Reconfigure swaps in a freshly built Ingester plus the watch/scratch
 // description it should report going forward -- the guarded-rebuild
 // mechanism issue #31's settings menu applies every hot-reloadable config
@@ -593,22 +805,36 @@ func (r *Runner) RevealHook(id HookID) error {
 // TriggerIngest's own gate), so a config reload can never race a card
 // mid-copy the way swapping these fields without synchronization would.
 //
-// Two fields are deliberately NOT reconfigurable this way and are the
+// When watchDirs differs from the current roots, Reconfigure invokes
+// ReconfigureDetector (issue #78) AFTER releasing gate, so waiting on the
+// previous detector goroutine to exit cannot deadlock against an in-flight
+// TriggerIngest call.
+//
+// One field is deliberately NOT reconfigurable this way and is the
 // caller's responsibility to treat as restart-required instead:
 // tray.statusAddr (the embedded HTTP server's Listen() call already
 // happened and is this tray's single-instance guard -- there's nothing to
-// swap it into) and ingest.cardRoots (internal/ingest.Detector's Watch
-// call is a one-shot goroutine over the roots it started with, not
-// restartable from inside a running select loop).
+// swap it into).
 func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir string) {
-	r.gate.Lock()
-	defer r.gate.Unlock()
+	var rootsChanged bool
+	var newRoots []string
 
+	r.gate.Lock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	oldRoots := append([]string(nil), r.watchDirs...)
 	r.ingester = ingester
-	r.watchDirs = append([]string(nil), watchDirs...)
 	r.scratchDir = scratchDir
+	if !slices.Equal(oldRoots, watchDirs) {
+		rootsChanged = true
+		newRoots = append([]string(nil), watchDirs...)
+		r.watchDirs = newRoots
+	}
+	r.mu.Unlock()
+	r.gate.Unlock()
+
+	if rootsChanged {
+		r.ReconfigureDetector(r.BaseContext(), newRoots)
+	}
 }
 
 // statusQueueReadTimeout bounds Status()'s QueueReader.Counts call -- see
@@ -625,12 +851,15 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	last := r.last
 	busy := r.busy
 	busyCard := r.busyCard
+	busySince := r.busySince
 	watchDirs := append([]string(nil), r.watchDirs...)
 	scratchDir := r.scratchDir
 	queueReader := r.queueReader
 	pruneEnabled := r.pruner != nil
 	lastDrain := r.lastDrain
 	lastPrune := r.lastPrune
+	inFlightDrain := r.inFlightDrain
+	inFlightPrune := r.inFlightPrune
 
 	// Built entirely under r.mu, not after unlocking: r.syncers/r.lastSync
 	// are read map entries here, not copied whole-map references, so a
@@ -686,14 +915,19 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	}
 
 	return Status{
-		WatchDirs:    watchDirs,
-		ScratchNote:  scratchNote,
-		QueueStatus:  qs,
-		LastIngest:   last,
-		SelfUpdate:   selfUpdate,
-		Busy:         busy,
-		BusyCard:     busyCard,
-		Integrations: integrations,
-		Hooks:        hooks,
+		WatchDirs:     watchDirs,
+		ScratchNote:   scratchNote,
+		QueueStatus:   qs,
+		LastIngest:    last,
+		SelfUpdate:    selfUpdate,
+		Busy:          busy,
+		BusyCard:      busyCard,
+		BusySince:     busySince,
+		HandshakeOK:   lastDrain != nil && lastDrain.HandshakeOK,
+		HasDrained:    lastDrain != nil,
+		InFlightDrain: inFlightDrain,
+		InFlightPrune: inFlightPrune,
+		Integrations:  integrations,
+		Hooks:         hooks,
 	}
 }

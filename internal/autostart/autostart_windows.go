@@ -14,10 +14,10 @@ import (
 // required to read or write it).
 const runKeyPath = `Software\Microsoft\Windows\CurrentVersion\Run`
 
-// Enable writes a Run-key value that launches execPath with args at login.
-// Each argument is individually quoted so a path containing spaces (the
-// common case on Windows, e.g. "C:\Program Files\...") round-trips through
-// cmd's own command-line parsing correctly.
+// Enable writes a Run-key value that launches execPath with -read-args
+// pointing to a JSON sidecar containing the actual args. This avoids
+// embedding potentially dangerous characters (e.g. ;, &, >) in the
+// registry value, which cmd.exe would interpret as control metacharacters.
 func Enable(execPath string, args []string) error {
 	k, err := registry.OpenKey(registry.CURRENT_USER, runKeyPath, registry.SET_VALUE)
 	if err != nil {
@@ -25,10 +25,12 @@ func Enable(execPath string, args []string) error {
 	}
 	defer k.Close()
 
-	cmd := quoteArg(execPath)
-	for _, a := range args {
-		cmd += " " + quoteArg(a)
+	sidecar, err := WriteSidecar(args)
+	if err != nil {
+		return err
 	}
+
+	cmd := quoteArg(execPath) + " -read-args " + quoteArg(sidecar)
 
 	if err := k.SetStringValue(RunKeyName, cmd); err != nil {
 		return fmt.Errorf("autostart: set Run key value: %w", err)
@@ -36,14 +38,17 @@ func Enable(execPath string, args []string) error {
 	return nil
 }
 
-// Disable removes the Run-key value. Deleting an already-absent value is
-// not an error -- the goal state ("not launched at login") already holds.
+// Disable removes the Run-key value and the args sidecar file. Deleting
+// an already-absent value is not an error -- the goal state ("not launched
+// at login") already holds.
 func Disable() error {
 	k, err := registry.OpenKey(registry.CURRENT_USER, runKeyPath, registry.SET_VALUE)
 	if err != nil {
 		return fmt.Errorf("autostart: open Run key: %w", err)
 	}
 	defer k.Close()
+
+	RemoveSidecar()
 
 	if err := k.DeleteValue(RunKeyName); err != nil && err != registry.ErrNotExist {
 		return fmt.Errorf("autostart: delete Run key value: %w", err)

@@ -197,4 +197,3 @@ When an agent emits `EVENT_NODE_DELETED` (or when files are deleted from the DAM
 1. **Gallery Purge**: The asset is immediately removed from live UI indexing and Immich gallery libraries.
 2. **Buffer Isolation**: The server relocates the master file into the `.trash/` directory under `TIER3_MASTER_ARCHIVE` rather than permanently unlinking it from disk.
 3. **30-Day Safety Window**: The server's background prune worker retains `.trash/` files for 30 days (governed by `trash.retentionDays`), protecting against accidental deletions before final unlinking.
-

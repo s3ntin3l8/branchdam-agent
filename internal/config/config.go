@@ -8,13 +8,27 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// StrictConfigPermissionsEnv is the environment variable that forces
+// Load to refuse a config.yaml whose permission bits let group or world
+// read it, regardless of the YAML value of strictConfigPermissions. It
+// exists so a CI/scripted environment can enforce the same check the
+// config flag does without having to edit config.yaml first -- the
+// typical "I just realized this is how chmod 600" hardening step. The
+// env wins over the YAML value, so a config that explicitly sets the
+// flag to false can still be hard-failed in a hardened env.
+const StrictConfigPermissionsEnv = "BRANCHDAM_AGENT_STRICT_CONFIG_PERMISSIONS"
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 
@@ -22,15 +36,64 @@ var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 // (~/.config/branchdam-agent/config.yaml per the plan, or wherever -config
 // points).
 type Config struct {
-	Server       ServerConfig       `yaml:"server"`
-	AgentID      string             `yaml:"agentId"`
-	PathMappings []PathMapping      `yaml:"pathMappings"`
-	Ingest       IngestConfig       `yaml:"ingest"`
-	Offline      OfflineConfig      `yaml:"offline"`
-	Prune        PruneConfig        `yaml:"prune"`
-	Tray         TrayConfig         `yaml:"tray"`
-	SelfUpdate   SelfUpdateConfig   `yaml:"selfUpdate"`
-	Integrations IntegrationsConfig `yaml:"integrations"`
+	Server                  ServerConfig       `yaml:"server"`
+	AgentID                 string             `yaml:"agentId"`
+	PathMappings            []PathMapping      `yaml:"pathMappings"`
+	Ingest                  IngestConfig       `yaml:"ingest"`
+	Offline                 OfflineConfig      `yaml:"offline"`
+	Prune                   PruneConfig        `yaml:"prune"`
+	Tray                    TrayConfig         `yaml:"tray"`
+	SelfUpdate              SelfUpdateConfig   `yaml:"selfUpdate"`
+	Integrations            IntegrationsConfig `yaml:"integrations"`
+	StrictConfigPermissions bool               `yaml:"strictConfigPermissions"`
+}
+
+// strictConfigPermissionsSource is the resolved source of a Config's
+// effective strict-permission setting -- used by checkFilePermissions
+// to phrase the strict-mode error so the remediation matches whichever
+// source actually turned strict on (Hermes review on #126: a
+// "set strictConfigPermissions: false" suggestion is a no-op when the
+// env var is the trigger, so the message must reflect which one).
+type strictConfigPermissionsSource int
+
+const (
+	strictSourceYAML strictConfigPermissionsSource = iota
+	strictSourceEnv
+	strictSourceEnvUnset
+)
+
+// StrictConfigPermissionsEffective reports whether the strict permission
+// check is on for this Config, after applying the env-var override
+// (BRANCHDAM_AGENT_STRICT_CONFIG_PERMISSIONS). The env var always wins
+// over the YAML value: a config that explicitly sets the flag to false
+// can still be hard-failed in a hardened CI/scripted environment, and a
+// config that sets it to true stays strict even if the env is unset
+// (matching the operator's explicit, file-persisted intent).
+//
+// An unrecognized env value (e.g. "2", "yes " with trailing space,
+// "enabled" -- a typo, a leading/trailing space, or a synonym this
+// helper doesn't recognize) is treated as "env says nothing" and falls
+// through to the YAML value, with a one-shot slog.Warn so the operator
+// learns the env var was ignored rather than silently behaving as if
+// it were unset. The "env wins" contract is the value of the override,
+// not its interpretation: silently turning "2" into "false" because
+// the parser doesn't recognize it would re-introduce the
+// silent-insecurity the env var exists to prevent (Hermes review on
+// #126).
+func (c Config) StrictConfigPermissionsEffective() (bool, strictConfigPermissionsSource) {
+	v, ok := os.LookupEnv(StrictConfigPermissionsEnv)
+	if !ok {
+		return c.StrictConfigPermissions, strictSourceEnvUnset
+	}
+	switch {
+	case v == "" || v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") || strings.EqualFold(v, "on"):
+		return true, strictSourceEnv
+	case v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "no") || strings.EqualFold(v, "off"):
+		return false, strictSourceEnv
+	default:
+		slog.Warn("unrecognized value for "+StrictConfigPermissionsEnv+" -- falling back to config.strictConfigPermissions", "value", v)
+		return c.StrictConfigPermissions, strictSourceEnvUnset
+	}
 }
 
 // OfflineConfig configures M2's offline queue (issue #4): where queue.db
@@ -130,6 +193,17 @@ type TrayConfig struct {
 	// starts automatically at login. Off by default; an operator opts in
 	// explicitly. No effect on platforms other than windows/darwin.
 	StartOnLogin bool `yaml:"startOnLogin"`
+	// ConfirmDestructive gates the four destructive tray menu actions --
+	// "Drain queue now", "Prune now", "Install and restart", "Roll back"
+	// (issue #108 / E3 #S2-14) -- behind an explicit OK/Cancel dialog.
+	// Defaults to true via defaultConfig(): destructive clicks are the
+	// reason this flag exists, and an opt-OUT default would re-introduce
+	// the silent-data-loss hazard the issue was filed to fix (a
+	// double-click on "Prune now" with LocalEditRoot on the wrong mount
+	// silently deletes files; the headless `update` command already
+	// prompts by default and only bypasses with -yes). Power users who
+	// want to skip the prompt set this to false explicitly.
+	ConfirmDestructive bool `yaml:"confirmDestructive"`
 }
 
 // SelfUpdateConfig gates github.com/creativeprojects/go-selfupdate.
@@ -352,9 +426,26 @@ type IngestConfig struct {
 	// during verification (withholding safe-eject and failing the ingest run)
 	// rather than advisory/logged. Defaults to false.
 	RequireUnbuffered bool `yaml:"requireUnbuffered"`
+	// RequireDCIM skips volumes that do not contain a DCIM/ subdirectory.
+	// Default false. When true, only camera cards with a standard DCIM layout
+	// are auto-detected; USB sticks and backup drives are silently skipped.
+	RequireDCIM bool `yaml:"requireDCIM"`
 	// UploadStream enables direct HTTP streaming upload to POST /api/v1/agent/upload
 	// rather than writing directly to a mounted ArchiveRoot. Defaults to false.
 	UploadStream bool `yaml:"uploadStream"`
+	// AllowedExtensions is the M5/#100 allowlist of file extensions a card
+	// walk ingests; the walk also unconditionally skips OS-metadata files
+	// (Thumbs.db, System Volume Information, any dotfile) regardless of
+	// what's here, but a non-empty AllowedExtensions narrows the set
+	// further. When empty (the default), the walk accepts every file the
+	// OS-metadata skip does not rule out -- preserving the pre-#100
+	// behavior of every existing config.
+	//
+	// Matching is case-insensitive: an operator can write "JPG" or "jpg"
+	// or "Jpg" in YAML, and a file's "IMG_0001.JPG" still matches.
+	// Extensions are compared without the leading dot ("jpg" in YAML
+	// matches "IMG_0001.jpg" on disk).
+	AllowedExtensions []string `yaml:"allowedExtensions"`
 }
 
 // ServerConfig is the branchDAM server this agent reports to.
@@ -404,11 +495,30 @@ func defaultConfig() Config {
 		Integrations: IntegrationsConfig{
 			Luminar: CatalogSyncConfig{DryRun: true},
 		},
+		// ConfirmDestructive ON by default (issue #108 / E3 #S2-14): a
+		// destructive click -- "Prune now" against the wrong mount, a
+		// self-update restart mid-render -- is the very reason the
+		// field exists, and an opt-OUT default would re-introduce the
+		// silent-data-loss hazard the issue was filed to fix. Mirrors
+		// SelfUpdate.Enabled's own "on by default" pattern, same
+		// "explicit value still wins" guarantee.
+		Tray: TrayConfig{ConfirmDestructive: true},
 	}
 }
 
 // Load reads path, expands ${VAR} environment references, and parses it as
 // YAML into Config, applying defaultConfig()'s zero-value defaults first.
+//
+// After a successful parse, Load also checks the file's permission bits
+// (issue #97 / audit S-5): if path's group-or-world read bits are set
+// and the parsed config carries a real server.apiKey, Load logs a
+// slog.Warn naming the file and the recommended `chmod 600`. The
+// purpose is to surface the silent insecurity of a hand-edited
+// config.yaml left at the umask default (mode 0o644) -- Patch already
+// writes mode 0o600, so the gap is only on hand-edited files. When
+// strict mode is on (config.strictConfigPermissions or the
+// BRANCHDAM_AGENT_STRICT_CONFIG_PERMISSIONS env var), the same check
+// becomes a hard error and Load returns it instead of warning.
 func Load(path string) (Config, error) {
 	cfg := defaultConfig()
 
@@ -423,7 +533,80 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
 
+	if err := checkFilePermissions(path, cfg); err != nil {
+		return cfg, err
+	}
+
 	return cfg, nil
+}
+
+// checkFilePermissions is the post-Load security gate on config.yaml's
+// filesystem mode (issue #97 / audit S-5). It runs only when the parsed
+// config carries a real server.apiKey -- the only secret the file holds
+// today -- and only the config file itself is checked, not its parent
+// directory. A 0o077 mask catches any of the nine group+world bits
+// (group read/write/exec + world read/write/exec), so 0o640 (group
+// readable) trips the same warning as 0o644 (world readable).
+//
+// Behavior:
+//   - Permissions clean (mask == 0): no-op.
+//   - Permissions loose AND no apiKey: no-op (the file carries no
+//     secret to protect; warning would be noise).
+//   - Permissions loose AND apiKey AND !strict: slog.Warn with the
+//     path so an operator can find it. The Load call still succeeds --
+//     a warning, not an error, so an existing deployment that just
+//     noticed the gap keeps starting while the operator fixes it.
+//   - Permissions loose AND apiKey AND strict: return a hard error
+//     naming the path; the caller's start-up gate surfaces it.
+//
+// Platform notes:
+//   - Windows: os.FileMode.Perm() returns 0o666 for any non-readonly
+//     file (Windows has no POSIX mode bits; ACLs govern access), so
+//     the 0o077 mask would ALWAYS trip on Windows and the strict path
+//     would refuse every config with an apiKey, regardless of the
+//     actual ACL. The check is a no-op on Windows by design -- the
+//     same audit (S-5) recommends operator-driven ACL review on
+//     Windows (Explorer > Properties > Security), which is outside
+//     this package's scope. issue #97's acceptance criterion is
+//     silently-insecure 0o644 hand-edited files; that case is
+//     unique to POSIX umasks and cannot arise on Windows in the same
+//     way (Hermes review on #126).
+//   - POSIX: a Stat that fails silently skips the check rather than
+//     failing Load -- a successful ReadFile moments earlier proved the
+//     file exists; a missing permission check is the lesser evil vs.
+//     failing a config load the operator knows is readable.
+func checkFilePermissions(path string, cfg Config) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	if fi.Mode().Perm()&0o077 == 0 {
+		return nil
+	}
+	if cfg.Server.APIKey == "" {
+		return nil
+	}
+
+	strict, source := cfg.StrictConfigPermissionsEffective()
+	if strict {
+		// The remediation depends on which source actually turned
+		// strict on. The env wins over the YAML value, so suggesting
+		// "set strictConfigPermissions: false" when the env is the
+		// trigger is a no-op -- a Hermes review finding on #126.
+		var fix string
+		switch source {
+		case strictSourceEnv:
+			fix = fmt.Sprintf("unset %s (or set it to 0/false) to warn instead", StrictConfigPermissionsEnv)
+		default:
+			fix = fmt.Sprintf("set strictConfigPermissions: false (or unset %s) to warn instead", StrictConfigPermissionsEnv)
+		}
+		return fmt.Errorf("config file %s is group/world readable (mode %#o) and contains a server.apiKey; chmod 600 and re-run (strict mode -- %s)", path, fi.Mode().Perm(), fix)
+	}
+	slog.Warn("config.yaml is group/world-readable; consider 'chmod 600'", "path", path, "mode", fmt.Sprintf("%#o", fi.Mode().Perm()))
+	return nil
 }
 
 // DefaultPath returns the standard per-user location for config.yaml --
@@ -467,15 +650,50 @@ func ResolvePath(flagValue string) (string, error) {
 // decides for itself which of these are blocking for what it's about to
 // do (a bare `luminar-sync` run doesn't care that ingest.archiveRoot is
 // empty; `tray` does).
+//
+// Severity is advisory metadata: ZeroValueProblem (the empty string)
+// means "structural failure" -- the value is wrong in any context, and
+// callers like preflight treat it as blocking by default. SeverityWarning
+// marks a value that is suspicious-but-tolerable (e.g. cleartext http on
+// a loopback host -- legitimate for a co-located dev server) and callers
+// surface it but do not block on it.
+//
+// "Blocking or not?" is decided by Problem.Advisory(), not by comparing
+// Severity == SeverityWarning at every call site -- so adding a future
+// SeverityInfo / SeverityHint tier only needs to extend Advisory(), not
+// every reader.
 type Problem struct {
-	Field   string
-	Message string
+	Field    string
+	Message  string
+	Severity string
 }
+
+const (
+	// SeverityWarning marks a Problem as advisory: surfaced to the operator
+	// but not blocking. Used today by checkServerBaseURL for cleartext
+	// http on a loopback host (issue #96) -- a legitimate local-dev
+	// posture that no operator should have to scrub through a hard
+	// failure to use.
+	SeverityWarning = "warning"
+)
 
 // String renders p as "field: message", the form preflight and the tray's
 // startup-error surface both print.
 func (p Problem) String() string {
 	return fmt.Sprintf("%s: %s", p.Field, p.Message)
+}
+
+// Advisory reports whether p should block a settings-driven config
+// mutation or a process's startup gate. Today only SeverityWarning is
+// advisory; the zero-value Severity is the structural-failure default.
+//
+// Centralizing the "blocking or not?" decision here means call sites in
+// cmd/branchdam-agent (settings.firstBlockingProblem, preflight, the tray
+// startup gate) don't each compare Severity with `== warning` / `!= warning`
+// and silently disagree when a future SeverityInfo / SeverityHint tier
+// lands -- a Hermes review finding on the PR that introduced Severity.
+func (p Problem) Advisory() bool {
+	return p.Severity == SeverityWarning
 }
 
 // Validate runs the checks that apply regardless of which subcommand is
@@ -553,6 +771,17 @@ func (c Config) Validate() []Problem {
 		})
 	}
 
+	// Server.BaseURL is concatenated verbatim with "/api/v1/agent/..." in
+	// internal/branchdam/client.go's post() -- so a trailing slash here
+	// becomes "host//api/...", and an "http://" on a non-loopback host is
+	// a cleartext wire exposure that no operator should land on by typo.
+	// The placeholder check above runs first; if it flagged BaseURL, skip
+	// these structural checks so the operator sees the placeholder
+	// message rather than a downstream parse error against "${...}".
+	if !envVarRe.MatchString(c.Server.BaseURL) {
+		problems = append(problems, checkServerBaseURL(c.Server.BaseURL)...)
+	}
+
 	if c.Ingest.PollIntervalSecs < 0 {
 		problems = append(problems, Problem{Field: "ingest.pollIntervalSecs", Message: "must not be negative"})
 	}
@@ -574,6 +803,114 @@ func (c Config) Validate() []Problem {
 	// sanity check.
 
 	return problems
+}
+
+// checkServerBaseURL enforces the BaseURL invariants an operator can
+// silently get wrong: a typo, a missing scheme, a trailing slash, or an
+// http:// host on a public network. internal/branchdam.Client.post()
+// concatenates baseURL + "/api/v1/agent/..." verbatim, so a trailing slash
+// produces "host//api/v1/agent/..." (rejected by most servers as a path
+// normalization), and a cleartext transport on a non-loopback host is a
+// wire-exposure the agent must refuse to use rather than send the
+// X-API-Key shared secret over.
+//
+// Kept as its own function (mirroring checkCatalogSync's shape) so the
+// base URL policy can evolve without growing Validate()'s own block --
+// e.g. a future "block private-RFC1918 hosts without an opt-in" rule
+// adds one more branch here, not another inline stanza in Validate().
+func checkServerBaseURL(raw string) []Problem {
+	var problems []Problem
+
+	// Defensive: an empty BaseURL has already been flagged as a
+	// placeholder by checkPlaceholder above; this function is reached
+	// only when that check didn't fire, so a literal "" at this point
+	// is a zero-value Config (not a config-file typo) and is not
+	// something an operator needs to be told about at Validate time --
+	// defaultConfig() fills it in for the file path, and the
+	// requiredness-for-each-subcommand checks live in
+	// cmd/branchdam-agent, not here.
+	if raw == "" {
+		return nil
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		problems = append(problems, Problem{
+			Field:   "server.baseUrl",
+			Message: fmt.Sprintf("not a valid URL: %v", err),
+		})
+		return problems
+	}
+
+	// Must be absolute (have a scheme). A relative path like
+	// "/api/v1/agent/hello" or "branchdam.example.com" parses
+	// successfully but with no scheme -- which would let the HTTP client
+	// silently build a request to the wrong host.
+	if !u.IsAbs() || u.Scheme == "" {
+		problems = append(problems, Problem{
+			Field:   "server.baseUrl",
+			Message: fmt.Sprintf("must be an absolute URL with an http or https scheme (got %q)", raw),
+		})
+		return problems
+	}
+
+	if u.Scheme != "http" && u.Scheme != "https" {
+		problems = append(problems, Problem{
+			Field:   "server.baseUrl",
+			Message: fmt.Sprintf("scheme must be http or https (got %q)", u.Scheme),
+		})
+		return problems
+	}
+
+	// Trailing slash on the path would concatenate to "host//api/..."
+	// in client.go's baseURL+path. Path is empty for a bare host
+	// ("http://example.com"), in which case Path == "" is fine.
+	if strings.HasSuffix(u.Path, "/") {
+		problems = append(problems, Problem{
+			Field:   "server.baseUrl",
+			Message: "must not end with a trailing slash -- internal/branchdam/client.go concatenates this URL with \"/api/v1/...\" verbatim, producing a double-slash path",
+		})
+	}
+
+	// Cleartext http on a non-loopback host is refused outright. A
+	// shared X-API-Key is never worth sending over the wire in cleartext
+	// to anything but localhost; loopback http stays a warning, not a
+	// refusal, so a workstation pointing at a co-located dev server
+	// keeps working without an operator having to reach for TLS first.
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		problems = append(problems, Problem{
+			Field:   "server.baseUrl",
+			Message: "uses cleartext http on a non-loopback host -- the X-API-Key shared secret would be sent in cleartext; use https or a loopback host",
+		})
+		return problems
+	}
+	if u.Scheme == "http" && isLoopbackHost(u.Hostname()) {
+		problems = append(problems, Problem{
+			Field:    "server.baseUrl",
+			Severity: SeverityWarning,
+			Message:  "uses cleartext http on a loopback host -- fine for a local dev server, but use https for anything reachable beyond this workstation",
+		})
+	}
+
+	return problems
+}
+
+// isLoopbackHost reports whether h is one of the loopback host names an
+// operator is reasonably likely to type: 127.0.0.1, ::1 (any zone), and
+// "localhost". Hostnames are compared case-insensitively. net.ParseIP
+// handles bracketed-IPv6 ("::1") the same way url.URL.Hostname() strips
+// the brackets, so no extra unwrapping is needed here.
+func isLoopbackHost(h string) bool {
+	if h == "" {
+		return false
+	}
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // checkCatalogSync runs the field-agnostic checks every CatalogSyncConfig

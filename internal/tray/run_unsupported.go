@@ -11,18 +11,11 @@ package tray
 
 import (
 	"context"
-	"errors"
-
-	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 )
 
-// ErrUnsupported is returned by Run on any platform other than
-// windows/darwin. The tray is scoped to those two per the plan doc and
-// issue #3; a Linux workstation still has the fully-tested headless
-// `ingest`/`ingest --watch` path, just no tray icon.
-var ErrUnsupported = errors.New("tray: unsupported on this platform (windows and darwin only); use `branchdam-agent ingest` instead")
-
-// Run always returns ErrUnsupported on this platform.
-func Run(_ context.Context, _ *Runner, _ *ingest.Detector, _ string, _ SelfUpdater, _ Settings) (Outcome, error) {
+// Run always returns ErrUnsupported on this platform. confirm and
+// confirmDestructive are accepted but ignored on this stub -- see
+// run_supported.go for the real wiring.
+func Run(_ context.Context, _ *Runner, _ string, _ SelfUpdater, _ Settings, _ func(ctx context.Context, title, body string) bool, _ bool) (Outcome, error) {
 	return Outcome{}, ErrUnsupported
 }
