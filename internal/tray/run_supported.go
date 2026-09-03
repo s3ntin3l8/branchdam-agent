@@ -212,6 +212,7 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 		refresh := func() {
 			us := up.Status()
 			st := r.Status(us)
+			systray.SetTooltip(FormatTooltip(st))
 			statusItem.SetTitle("Status: " + summarize(st))
 			updateItem.SetTitle("Self-update: " + us.Note())
 

@@ -1491,3 +1491,131 @@ func TestDetectorWatchForgetsSkippedOnRemoval(t *testing.T) {
 
 	r.StopDetector()
 }
+
+func TestRunnerIngestProgressRecordedAndCleared(t *testing.T) {
+	fi := &fakeIngester{result: ingest.CardResult{Files: []ingest.FileResult{{SourcePath: "a.jpg"}}}}
+	r := NewRunner(fi, nil, "")
+
+	st := r.Status(UpdateStatus{})
+	if st.IngestProgress != nil {
+		t.Errorf("expected IngestProgress=nil when idle, got %+v", st.IngestProgress)
+	}
+
+	// Set progress and check busy status
+	r.setBusy(true, "/media/CANON R5")
+	ev := ingest.ProgressEvent{
+		Path:       "/local/DSC_0042.ARW",
+		Phase:      ingest.ProgressPhaseCopying,
+		BytesDone:  2469606195,
+		TotalBytes: 8697308774,
+	}
+	r.SetProgress(&ev)
+
+	st = r.Status(UpdateStatus{})
+	if st.IngestProgress == nil {
+		t.Fatal("expected IngestProgress non-nil while busy with progress set")
+	}
+	if st.IngestProgress.Path != "/local/DSC_0042.ARW" || st.IngestProgress.BytesDone != 2469606195 {
+		t.Errorf("unexpected IngestProgress: %+v", st.IngestProgress)
+	}
+
+	// Clearing busy clears progress
+	r.setBusy(false, "")
+	st = r.Status(UpdateStatus{})
+	if st.IngestProgress != nil {
+		t.Errorf("expected IngestProgress cleared after setBusy(false), got %+v", st.IngestProgress)
+	}
+}
+
+func TestFormatTooltipIdle(t *testing.T) {
+	st := Status{Busy: false}
+	if got := FormatTooltip(st); got != "branchDAM agent" {
+		t.Errorf("FormatTooltip(idle) = %q, want %q", got, "branchDAM agent")
+	}
+}
+
+func TestFormatTooltipBusyWithoutProgress(t *testing.T) {
+	st := Status{Busy: true, BusyCard: "/Volumes/CANON R5"}
+	if got := FormatTooltip(st); got != "Ingesting CANON R5..." {
+		t.Errorf("FormatTooltip(busy, no progress) = %q, want %q", got, "Ingesting CANON R5...")
+	}
+}
+
+func TestFormatTooltipBusyWithProgress(t *testing.T) {
+	busySince := time.Now().Add(-5 * time.Second) // 2.3 GB in 5s ~ 460 MB/s
+	ev := ingest.ProgressEvent{
+		Path:       "/local/DSC_0042.ARW",
+		Phase:      ingest.ProgressPhaseCopying,
+		BytesDone:  2469606195, // 2.3 GB
+		TotalBytes: 8697308774, // 8.1 GB
+	}
+	st := Status{
+		Busy:           true,
+		BusyCard:       "/Volumes/CANON R5",
+		BusySince:      busySince,
+		IngestProgress: &ev,
+	}
+
+	got := FormatTooltip(st)
+	// Must contain card, filename, bytes, pct, and speed
+	if !strings.HasPrefix(got, "Ingesting CANON R5: DSC_0042.ARW — 2.3 GB / 8.1 GB (28%") {
+		t.Errorf("FormatTooltip got %q, want it to start with %q", got, "Ingesting CANON R5: DSC_0042.ARW — 2.3 GB / 8.1 GB (28%")
+	}
+	if !strings.Contains(got, "MB/s") {
+		t.Errorf("FormatTooltip got %q, want it to contain speed MB/s", got)
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	cases := []struct {
+		bytes int64
+		want  string
+	}{
+		{0, "0 B"},
+		{500, "500 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1024 * 1024, "1.0 MB"},
+		{450 * 1024 * 1024, "450.0 MB"},
+		{2469606195, "2.3 GB"},
+		{8697308774, "8.1 GB"},
+	}
+	for _, tc := range cases {
+		if got := formatBytes(tc.bytes); got != tc.want {
+			t.Errorf("formatBytes(%d) = %q, want %q", tc.bytes, got, tc.want)
+		}
+	}
+}
+
+func TestFormatSpeed(t *testing.T) {
+	cases := []struct {
+		rate float64
+		want string
+	}{
+		{500, "500 B/s"},
+		{1500, "1 KB/s"},
+		{450 * 1024 * 1024, "450 MB/s"},
+		{2.5 * 1024 * 1024 * 1024, "2.5 GB/s"},
+	}
+	for _, tc := range cases {
+		if got := formatSpeed(tc.rate); got != tc.want {
+			t.Errorf("formatSpeed(%v) = %q, want %q", tc.rate, got, tc.want)
+		}
+	}
+}
+
+func TestFormatETA(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{30 * time.Second, "~30s"},
+		{14 * time.Minute, "~14 min"},
+		{2 * time.Hour, "~2 hr"},
+	}
+	for _, tc := range cases {
+		if got := formatETA(tc.d); got != tc.want {
+			t.Errorf("formatETA(%v) = %q, want %q", tc.d, got, tc.want)
+		}
+	}
+}

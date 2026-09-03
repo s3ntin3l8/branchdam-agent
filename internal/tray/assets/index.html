@@ -17,6 +17,9 @@
   .ok { color: #147d3c; }
   .fail { color: #b3261e; }
   code { background: #eee; padding: 0.1rem 0.3rem; border-radius: 3px; }
+  progress { width: 100%; max-width: 480px; height: 16px; margin-top: 0.3rem; accent-color: #2ba69a; }
+  .progress-container { margin-top: 0.5rem; }
+  .progress-info { font-size: 0.9rem; color: #444; margin: 0.2rem 0; }
 </style>
 </head>
 <body>
@@ -190,13 +193,63 @@
     <p>{{.Status.SelfUpdate.Note}}</p>
   </section>
 
-  <section>
+  <section id="ingest-status">
     <h2>Ingest status</h2>
     {{if .Status.Busy}}
     <p>busy: ingesting <code>{{.Status.BusyCard}}</code> (since {{since .Status.BusySince}} ago)</p>
+    {{if .Status.IngestProgress}}
+    {{with .Status.IngestProgress}}
+    <div class="progress-container">
+      <p class="progress-info">{{.Phase}}: <code>{{.Path}}</code> &mdash; {{.BytesDone}} / {{.TotalBytes}} bytes</p>
+      <progress value="{{.BytesDone}}" max="{{.TotalBytes}}"></progress>
+    </div>
+    {{end}}
+    {{end}}
     {{else}}
     <p>idle</p>
     {{end}}
   </section>
+
+  <script>
+    function updateProgress() {
+      fetch('/status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          var status = data.status || data;
+          var section = document.getElementById('ingest-status');
+          if (!section || !status) return;
+          if (status.busy) {
+            var html = '<p>busy: ingesting <code>' + escapeHtml(status.busyCard || '') + '</code></p>';
+            if (status.ingestProgress) {
+              var p = status.ingestProgress;
+              var pct = p.totalBytes > 0 ? Math.round((p.bytesDone / p.totalBytes) * 100) : 0;
+              html += '<div class="progress-container">' +
+                '<p class="progress-info">' + escapeHtml(p.phase || 'copying') + ': <code>' + escapeHtml(p.path || '') + '</code> &mdash; ' +
+                formatBytes(p.bytesDone) + ' / ' + formatBytes(p.totalBytes) + ' (' + pct + '%)</p>' +
+                '<progress value="' + p.bytesDone + '" max="' + p.totalBytes + '"></progress>' +
+                '</div>';
+            }
+            section.innerHTML = '<h2>Ingest status</h2>' + html;
+          } else {
+            section.innerHTML = '<h2>Ingest status</h2><p>idle</p>';
+          }
+        })
+        .catch(function(err) {});
+    }
+    function escapeHtml(str) {
+      var div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+    function formatBytes(bytes) {
+      if (!bytes || bytes <= 0) return '0 B';
+      var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      var i = Math.floor(Math.log(bytes) / Math.log(1024));
+      if (i >= units.length) i = units.length - 1;
+      if (i === 0) return bytes + ' ' + units[i];
+      return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
+    }
+    setInterval(updateProgress, 1000);
+  </script>
 </body>
 </html>
