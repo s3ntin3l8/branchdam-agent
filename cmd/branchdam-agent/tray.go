@@ -169,7 +169,8 @@ func lookupVolumeLabelAndSize(ctx context.Context, path string) (label string, s
 	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
 	defer cancel()
 
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		out, err := exec.CommandContext(ctx, "diskutil", "info", path).Output()
 		if err == nil {
 			for _, line := range strings.Split(string(out), "\n") {
@@ -191,7 +192,7 @@ func lookupVolumeLabelAndSize(ctx context.Context, path string) (label string, s
 				}
 			}
 		}
-	} else if runtime.GOOS == "linux" {
+	case "linux":
 		out, err := exec.CommandContext(ctx, "lsblk", "-no", "LABEL", path).Output()
 		if err == nil {
 			if l := strings.TrimSpace(string(out)); l != "" {
