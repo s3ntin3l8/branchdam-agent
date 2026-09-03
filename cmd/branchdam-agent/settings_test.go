@@ -26,6 +26,10 @@ func (noopIngester) IngestCard(_ context.Context, _ string) (ingest.CardResult, 
 	return ingest.CardResult{}, nil
 }
 
+func (noopIngester) IngestCardOffline(_ context.Context, _ string) (ingest.OfflineCardResult, error) {
+	return ingest.OfflineCardResult{}, nil
+}
+
 func settingsTestFixture(t *testing.T) (path string, cfg config.Config, runner *tray.Runner) {
 	t.Helper()
 	dir := t.TempDir()

@@ -242,7 +242,8 @@ func Run(
 				pauseItem.SetTitle("⏸ Pause ingest")
 				pauseItem.SetTooltip("Temporarily suspend automatic card detection and queue draining")
 				systray.SetIcon(buildTrayIcon())
-				systray.SetTooltip("branchDAM agent")
+
+				systray.SetTooltip(FormatTooltip(st))
 			}
 
 			// Watch dirs can change out from under this menu now that
@@ -809,6 +810,18 @@ func summarize(st Status) string {
 	li := st.LastIngest
 	if li.Err != nil {
 		return fmt.Sprintf("last ingest FAILED: %v", li.Err)
+	}
+	if li.Offline {
+		if li.Failed == 0 && li.Skipped == 0 {
+			if li.Submitted == 1 {
+				return fmt.Sprintf("last ingest %s ago: 1 file queued offline, pending upload",
+					time.Since(li.StartedAt).Round(time.Second))
+			}
+			return fmt.Sprintf("last ingest %s ago: %d files queued offline, pending upload",
+				time.Since(li.StartedAt).Round(time.Second), li.Submitted)
+		}
+		return fmt.Sprintf("last ingest %s ago (offline): %d queued offline, %d skipped, %d failed",
+			time.Since(li.StartedAt).Round(time.Second), li.Submitted, li.Skipped, li.Failed)
 	}
 	return fmt.Sprintf("last ingest %s ago: %d ok, %d skipped, %d failed",
 		time.Since(li.StartedAt).Round(time.Second), li.Submitted, li.Skipped, li.Failed)
