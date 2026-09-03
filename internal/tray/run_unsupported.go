@@ -13,9 +13,19 @@ import (
 	"context"
 )
 
-// Run always returns ErrUnsupported on this platform. confirm and
-// confirmDestructive are accepted but ignored on this stub -- see
-// run_supported.go for the real wiring.
-func Run(_ context.Context, _ *Runner, _ string, _ SelfUpdater, _ Settings, _ func(ctx context.Context, title, body string) bool, _ bool) (Outcome, error) {
+// Run always returns ErrUnsupported on this platform. confirm,
+// confirmDestructive, pickDir, and notify are accepted but ignored on this
+// stub -- see run_supported.go for the real wiring.
+func Run(
+	_ context.Context,
+	_ *Runner,
+	_ string,
+	_ SelfUpdater,
+	_ Settings,
+	_ func(ctx context.Context, title, body string) bool,
+	_ bool,
+	_ func(ctx context.Context, title string) (string, error),
+	_ func(ctx context.Context, title, message string),
+) (Outcome, error) {
 	return Outcome{}, ErrUnsupported
 }

@@ -39,11 +39,19 @@ type dialogFuncs struct {
 	// directory, which directory's zenity.Directory() option structurally
 	// cannot return.
 	file func(title, defaultPath string, patterns []string) (string, error)
-	// question shows a confirmation dialog and returns whether the operator
+	// question shows a Yes/No (or OK/Cancel on Windows / native macOS
+	// backends) confirmation dialog and returns whether the operator
 	// accepted (nil err = OK; zenity.ErrCanceled = Cancel/window-close;
-	// zenity.ErrExtraButton = Extra button; any other err = the dialog didn't render).
+	// zenity.ErrExtraButton = Extra button; any other err = the dialog
+	// didn't render). okLabel, cancelLabel, and extraButton are
+	// optional custom button labels (empty string keeps the platform
+	// default) and feed zenity.OKLabel / zenity.CancelLabel /
+	// zenity.ExtraButton.
 	question func(title, message, okLabel, cancelLabel, extraButton string) error
-	// notify shows an OS desktop notification.
+	// notify shows an OS desktop notification (toast/bubble/notification
+	// banner) with title and message. Pass an empty title to skip
+	// zenity.Title entirely; zenity.Notify on some Linux backends
+	// accepts an empty title while others ignore it.
 	notify func(title, message string) error
 }
 

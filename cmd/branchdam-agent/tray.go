@@ -246,6 +246,32 @@ func formatByteSize(bytes uint64) string {
 	return fmt.Sprintf("%.1f %s", val, unitStr)
 }
 
+// trayPickDirectory builds the directory picker callback for the tray's
+// "Import from folder…" action (issue #80). It re-execs `dialog -kind directory
+// -title <title>` via run, returning the selected path on success, or an error
+// if the operator dismissed the dialog (dialogExitCanceled) or if it failed to render.
+func trayPickDirectory(run dialogRunner) func(ctx context.Context, title string) (string, error) {
+	return func(ctx context.Context, title string) (string, error) {
+		out, exitCode, err := run(ctx, "-kind", "directory", "-title", title)
+		if err != nil {
+			return "", err
+		}
+		if exitCode != dialogExitOK {
+			return "", errors.New("directory picker dismissed or failed")
+		}
+		return strings.TrimSpace(out), nil
+	}
+}
+
+// trayNotifyOS builds the OS notification callback the tray uses to show
+// toast/bubble notifications (e.g. "Already ingesting this path"). It re-execs
+// `dialog -kind notify -title <title> -message <message>` via run.
+func trayNotifyOS(run dialogRunner) func(ctx context.Context, title, message string) {
+	return func(ctx context.Context, title, message string) {
+		_, _, _ = run(ctx, "-kind", "notify", "-title", title, "-message", message)
+	}
+}
+
 // runTrayCmd implements `branchdam-agent tray -config <path>`: the
 // tray-resident shell around internal/ingest.Engine (issue #3). It drives
 // the exact same Engine.IngestCard code path runIngestCmd (ingest.go) does
@@ -515,7 +541,7 @@ func runTrayCmd(args []string) int {
 	// anything but a clean OK" behavior, so the disabled-dialog case
 	// can't accidentally turn into a silent proceed.
 	confirmDestructive := cfg.Tray.ConfirmDestructive
-	outcome, trayErr = tray.Run(ctx, runner, statusSrv.StatusURL(), updater, settings, trayConfirm(dialog), confirmDestructive)
+	outcome, trayErr = tray.Run(ctx, runner, statusSrv.StatusURL(), updater, settings, trayConfirm(dialog), confirmDestructive, trayPickDirectory(dialog), trayNotifyOS(dialog))
 	stop() // make sure the status server's ctx.Done() fires even if tray.Run returned on its own (e.g. Quit clicked)
 	wg.Wait()
 

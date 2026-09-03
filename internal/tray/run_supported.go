@@ -129,7 +129,20 @@ type menuActionResult struct {
 // config. confirm itself is a function the production wiring supplies
 // (a re-exec of `dialog -kind question ...`); Run never imports a
 // dialog backend directly.
-func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, settings Settings, confirm func(ctx context.Context, title, body string) bool, confirmDestructive bool) (Outcome, error) {
+//
+// pickDir and notify are the OS dialog callbacks for "Import from folder…"
+// and tray notifications (issue #80).
+func Run(
+	ctx context.Context,
+	r *Runner,
+	statusURL string,
+	up SelfUpdater,
+	settings Settings,
+	confirm func(ctx context.Context, title, body string) bool,
+	confirmDestructive bool,
+	pickDir func(ctx context.Context, title string) (string, error),
+	notify func(ctx context.Context, title, message string),
+) (Outcome, error) {
 	errCh := make(chan error, 1)
 	var outcome Outcome
 
@@ -155,6 +168,7 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 		watchItem.Disable()
 		ingestNow := systray.AddMenuItem("Ingest now", "Run one ingest pass over every configured watch directory")
 		pauseItem := systray.AddMenuItemCheckbox("⏸ Pause ingest", "Temporarily suspend automatic card detection and queue draining", false)
+		importFolder := systray.AddMenuItem("Import from folder…", "Ingest files from a selected folder")
 		systray.AddSeparator()
 
 		queueItem := systray.AddMenuItem("Queue: not configured", "Offline queue backlog (offline.queueDbPath)")
@@ -357,6 +371,30 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 			}
 		}()
 
+		// "Import from folder…" manual source selection (issue #80): opens
+		// an OS directory picker dialog, checks whether the chosen directory
+		// is already being watched/ingested (showing an OS notification if so),
+		// and passes it to TriggerIngest directly. Running it in a worker
+		// goroutine avoids freezing the GUI loop while the picker is open or
+		// while ingest is running.
+		importFolderDoneCh := make(chan struct{}, 1)
+		importFolderRequestCh := make(chan struct{}, 1)
+		go func() {
+			for range importFolderRequestCh {
+				handleImportFolder(ctx, r, func(pctx context.Context) (string, error) {
+					if pickDir == nil {
+						return "", errors.New("tray: no directory picker configured")
+					}
+					return pickDir(pctx, "Import from folder…")
+				}, func(nctx context.Context, msg string) {
+					if notify != nil {
+						notify(nctx, "branchDAM Agent", msg)
+					}
+				})
+				importFolderDoneCh <- struct{}{}
+			}
+		}()
+
 		// "Drain queue now" and "Prune now" follow the exact same
 		// non-blocking-request / worker-goroutine shape as ingestNow above,
 		// for the same reason: TriggerDrain/TriggerPrune do blocking I/O
@@ -510,6 +548,15 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 					// this click rather than pile up requests.
 				}
 			case <-ingestDoneCh:
+				refresh()
+			case <-importFolder.ClickedCh:
+				select {
+				case importFolderRequestCh <- struct{}{}:
+				default:
+					// a folder import is already queued/running; drop
+					// this click rather than pile up requests.
+				}
+			case <-importFolderDoneCh:
 				refresh()
 			case <-drainNow.ClickedCh:
 				// Confirmation gate (issue #108 / E3 #S2-14): a drain
