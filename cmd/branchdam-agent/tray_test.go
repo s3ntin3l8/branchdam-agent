@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
@@ -227,5 +230,93 @@ func TestRunTrayFirstRunBootstrapAppliesAnswers(t *testing.T) {
 	}
 	if len(cfg.PathMappings) != 1 || cfg.PathMappings[0].ContainerPath != answers[pathMappingContainerKey] {
 		t.Errorf("pathMappings = %+v, want one entry with containerPath %q", cfg.PathMappings, answers[pathMappingContainerKey])
+	}
+}
+
+func TestRunTraySyncsNamingTemplateAtStartup(t *testing.T) {
+	stubTrayDialog(t, nil)
+
+	var handshakeCalled int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/agent/handshake" {
+			atomic.AddInt32(&handshakeCalled, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"ok": true,
+				"serverVersion": "0.12.0",
+				"serverTimeUnix": 1756470000,
+				"namingTemplate": "{yyyy}/{camera_model}/{original_name}"
+			}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	archiveRoot := filepath.Join(dir, "archive")
+	localRoot := filepath.Join(dir, "local")
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"" + srv.URL + "\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + archiveRoot + "\"\n" +
+		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  pathTemplate: \"{original_name}\"\n" +
+		"pathMappings:\n" +
+		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"    containerPath: \"/storage/archive\"\n" +
+		"tray:\n" +
+		"  statusAddr: \"127.0.0.1:0\"\n" +
+		"selfUpdate:\n" +
+		"  enabled: false\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := run([]string{"tray", "-config", cfgPath})
+	if got != 1 {
+		t.Errorf("run([tray]) = %d, want 1 (tray.ErrUnsupported on this platform)", got)
+	}
+	if atomic.LoadInt32(&handshakeCalled) != 1 {
+		t.Errorf("handshakeCalled = %d, want 1", handshakeCalled)
+	}
+}
+
+func TestRunTrayHandshakeUnreachableContinuesStartup(t *testing.T) {
+	stubTrayDialog(t, nil)
+
+	dir := t.TempDir()
+	archiveRoot := filepath.Join(dir, "archive")
+	localRoot := filepath.Join(dir, "local")
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"http://127.0.0.1:1\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + archiveRoot + "\"\n" +
+		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  pathTemplate: \"{original_name}\"\n" +
+		"pathMappings:\n" +
+		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"    containerPath: \"/storage/archive\"\n" +
+		"tray:\n" +
+		"  statusAddr: \"127.0.0.1:0\"\n" +
+		"selfUpdate:\n" +
+		"  enabled: false\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := run([]string{"tray", "-config", cfgPath})
+	if got != 1 {
+		t.Errorf("run([tray]) = %d, want 1 (tray.ErrUnsupported on this platform)", got)
 	}
 }

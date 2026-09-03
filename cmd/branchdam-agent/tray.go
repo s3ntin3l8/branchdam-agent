@@ -352,6 +352,17 @@ func runTrayCmd(args []string) int {
 	defer stop()
 
 	client := branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
+
+	// Synchronize naming template from server handshake if available (issue #86).
+	// Handshake failure must not block tray startup -- continue with config-file template.
+	hsCtx, hsCancel := context.WithTimeout(ctx, 5*time.Second)
+	if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: cfg.AgentID}); err != nil {
+		slog.Warn("could not sync naming template from server handshake; using config value", "err", err)
+	} else if hs.NamingTemplate != "" {
+		cfg.Ingest.PathTemplate = hs.NamingTemplate
+	}
+	hsCancel()
+
 	engine := ingest.NewEngine(client, cfg.AgentID, cfg.Ingest, cfg.PathMappings)
 	runner := tray.NewRunner(engine, cfg.Ingest.CardRoots, cfg.Ingest.LocalEditRoot)
 	settings := newConfigSettings(resolvedPath, cfg, runner, dialog)
