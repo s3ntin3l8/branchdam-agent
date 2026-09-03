@@ -23,6 +23,7 @@ const (
 	// doc comment.
 	FieldNodeIndexPath
 	FieldCardRoots
+	FieldAllowedExtensions
 )
 
 // SettingsView is a read-only snapshot of the on-disk configuration
@@ -45,13 +46,15 @@ type SettingsView struct {
 	SelfUpdateCheckIntervalHrs int
 
 	RequireUnbuffered bool
+	RequireDCIM       bool
 
 	ServerBaseURL   string
 	ServerAPIKeySet bool
 
-	ArchiveRoot    string
-	LocalEditRoot  string
-	NamingTemplate string
+	ArchiveRoot       string
+	LocalEditRoot     string
+	NamingTemplate    string
+	AllowedExtensions []string
 
 	// RestartRequired is true once a change to a restart-only field
 	// (tray.statusAddr) has been saved but not yet

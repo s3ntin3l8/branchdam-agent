@@ -800,3 +800,39 @@ ingest:
 		}
 	}
 }
+
+func TestLoadRequireDCIMDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  baseUrl: http://x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Ingest.RequireDCIM {
+		t.Error("expected default RequireDCIM to be false")
+	}
+}
+
+func TestLoadRequireDCIMOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+ingest:
+  requireDCIM: true
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Ingest.RequireDCIM {
+		t.Error("expected RequireDCIM to be true")
+	}
+}

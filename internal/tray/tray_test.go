@@ -1231,3 +1231,63 @@ func (b *blockingIngester) IngestCard(_ context.Context, _ string) (ingest.CardR
 	})
 	return ingest.CardResult{}, nil
 }
+
+func TestSetDetectorRequireDCIM(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorRequireDCIM(true)
+	if !r.detectorRequireDCIM {
+		t.Error("expected detectorRequireDCIM to be true")
+	}
+	r.SetDetectorRequireDCIM(false)
+	if r.detectorRequireDCIM {
+		t.Error("expected detectorRequireDCIM to be false")
+	}
+}
+
+func TestReconfigureDetectorWithRequireDCIM(t *testing.T) {
+	fi := &fakeIngester{}
+	dir := t.TempDir()
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+	r.SetDetectorRequireDCIM(true)
+
+	var hit int32
+	r.SetOnCardIngested(func() {
+		atomic.AddInt32(&hit, 1)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{dir})
+
+	// Create a subdirectory without DCIM -> should not trigger ingest
+	usbDir := filepath.Join(dir, "USB_STICK")
+	if err := os.Mkdir(usbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if atomic.LoadInt32(&hit) > 0 {
+		t.Error("expected USB stick without DCIM not to trigger ingest when requireDCIM=true")
+	}
+
+	// Create DCIM directory -> should trigger ingest
+	if err := os.Mkdir(filepath.Join(usbDir, "DCIM"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 50; i++ {
+		if atomic.LoadInt32(&hit) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if atomic.LoadInt32(&hit) == 0 {
+		t.Error("expected camera card with DCIM to trigger ingest when requireDCIM=true")
+	}
+
+	r.StopDetector()
+}

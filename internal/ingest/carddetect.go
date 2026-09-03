@@ -31,28 +31,27 @@ type Detector struct {
 // NewDetector builds a Detector over cardRoots (parent directories to scan
 // for currently-mounted subdirectories, e.g. "/media/$USER" on Linux,
 // "/Volumes" on macOS) using ListVolumesUnder, polling every interval
-// (DefaultPollInterval if <= 0).
-func NewDetector(cardRoots []string, interval time.Duration) *Detector {
+// (DefaultPollInterval if <= 0). Optional requireDCIM (default false)
+// filters candidate roots to those containing a DCIM/ directory.
+func NewDetector(cardRoots []string, interval time.Duration, requireDCIM ...bool) *Detector {
 	if interval <= 0 {
 		interval = DefaultPollInterval
 	}
+	dcim := len(requireDCIM) > 0 && requireDCIM[0]
 	return &Detector{
-		List:     func() ([]string, error) { return ListVolumesUnder(cardRoots) },
+		List:     func() ([]string, error) { return ListVolumesUnder(cardRoots, dcim) },
 		Interval: interval,
 	}
 }
 
 // ListVolumesUnder returns every immediate subdirectory of every root in
-// cardRoots that currently exists -- the heuristic this PR ships for "is
-// this a removable volume": any mounted directory under one of the
-// configured parent roots. This is intentionally simple (no DCIM-folder
-// sniffing, no filesystem-type check) -- see the plan doc's M1 section,
-// which scopes card detection to "poll for removable volumes," not to
-// distinguishing a card from any other mount. A root that doesn't exist
+// cardRoots that currently exists. When requireDCIM is true, it verifies
+// that a DCIM/ subdirectory exists within each candidate volume (via os.Stat)
+// and skips volumes where that check fails. A root that doesn't exist
 // (not an error -- e.g. no card reader plugged in at all means "/media/x"
 // itself may not exist yet) contributes no entries rather than failing the
 // whole call.
-func ListVolumesUnder(cardRoots []string) ([]string, error) {
+func ListVolumesUnder(cardRoots []string, requireDCIM bool) ([]string, error) {
 	var out []string
 	for _, root := range cardRoots {
 		entries, err := os.ReadDir(root)
@@ -61,7 +60,14 @@ func ListVolumesUnder(cardRoots []string) ([]string, error) {
 		}
 		for _, e := range entries {
 			if e.IsDir() {
-				out = append(out, filepath.Join(root, e.Name()))
+				vol := filepath.Join(root, e.Name())
+				if requireDCIM {
+					st, err := os.Stat(filepath.Join(vol, "DCIM"))
+					if err != nil || !st.IsDir() {
+						continue
+					}
+				}
+				out = append(out, vol)
 			}
 		}
 	}
