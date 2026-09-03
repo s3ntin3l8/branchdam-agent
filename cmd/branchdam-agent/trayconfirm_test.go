@@ -290,7 +290,7 @@ func TestTrayPickDirectoryOK(t *testing.T) {
 
 // TestTrayPickDirectoryCanceled pins the cancel half: dialogExitCanceled
 // must come back as an error and an empty path so
-// handleImportFolder's "if err != nil || path == ''" guard
+// handleImportFolder's "if err != nil || path == ”" guard
 // (internal/tray/importfolder.go) aborts cleanly.
 func TestTrayPickDirectoryCanceled(t *testing.T) {
 	run := &fakeDialogRunner{exitCode: dialogExitCanceled}
