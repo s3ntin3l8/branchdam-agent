@@ -1320,11 +1320,31 @@ func TestTriggerIngestWithGate(t *testing.T) {
 		t.Fatalf("expected submitted=1, got summary=%+v", summary)
 	}
 
-	// 2. Gate returning false (Skip this time)
-	gate := &fakeIngestGate{proceed: false}
+	// 2. Gate returning error (transient failure, e.g. render failed)
+	gate := &fakeIngestGate{proceed: false, err: errors.New("zenity failed")}
 	r.SetIngestGate(gate)
 
 	summary = r.TriggerIngest(context.Background(), "/media/card2")
+	if summary.Err == nil {
+		t.Fatal("expected summary.Err to be non-nil on gate error")
+	}
+	if summary.Submitted != 0 {
+		t.Fatalf("expected 0 submitted on error, got %+v", summary)
+	}
+	if r.IsSkipped("/media/card2") {
+		t.Fatal("expected /media/card2 NOT to be in skipped set on error")
+	}
+
+	// Next call on same path triggers gate again because it was not added to skipped set
+	gate.err = nil
+	gate.proceed = false
+	gate.calls = nil
+
+	// 3. Gate returning false (explicit "Skip this time")
+	summary = r.TriggerIngest(context.Background(), "/media/card2")
+	if summary.Err != nil {
+		t.Fatalf("unexpected summary.Err: %v", summary.Err)
+	}
 	if summary.Submitted != 0 {
 		t.Fatalf("expected ingest skipped, got %+v", summary)
 	}
@@ -1335,7 +1355,7 @@ func TestTriggerIngestWithGate(t *testing.T) {
 		t.Fatal("expected /media/card2 in skipped set")
 	}
 
-	// 3. Second call on the same path suppresses dialog (session-scoped skip)
+	// 4. Second call on the same path suppresses dialog (session-scoped skip)
 	summary = r.TriggerIngest(context.Background(), "/media/card2")
 	if summary.Submitted != 0 {
 		t.Fatalf("expected ingest skipped, got %+v", summary)
@@ -1344,13 +1364,13 @@ func TestTriggerIngestWithGate(t *testing.T) {
 		t.Fatalf("expected gate NOT called again for skipped path, got calls=%v", gate.calls)
 	}
 
-	// 4. ForgetSkipped clears skip set
+	// 5. ForgetSkipped clears skip set
 	r.ForgetSkipped("/media/card2")
 	if r.IsSkipped("/media/card2") {
 		t.Fatal("expected /media/card2 removed from skipped set")
 	}
 
-	// 5. Next call triggers gate again
+	// 6. Next call triggers gate again
 	gate.proceed = true
 	summary = r.TriggerIngest(context.Background(), "/media/card2")
 	if !summary.OK() || summary.Submitted != 1 {

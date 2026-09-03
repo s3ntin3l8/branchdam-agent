@@ -344,14 +344,17 @@ func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSumma
 
 	if gate != nil {
 		proceed, err := gate.Confirm(ctx, cardPath, filepath.Base(cardPath))
-		if err != nil || !proceed {
+		if err != nil {
+			return IngestSummary{CardPath: cardPath, Err: err}
+		}
+		if !proceed {
 			r.mu.Lock()
 			if r.skipped == nil {
 				r.skipped = make(map[string]bool)
 			}
 			r.skipped[cardPath] = true
 			r.mu.Unlock()
-			return IngestSummary{CardPath: cardPath, Err: err}
+			return IngestSummary{CardPath: cardPath}
 		}
 	}
 

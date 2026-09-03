@@ -234,4 +234,14 @@ func TestTrayIngestGateFailedRenderIsRefuse(t *testing.T) {
 	if proceed {
 		t.Fatal("expected proceed=false on failed dialog render")
 	}
+
+	// TriggerIngest through the runner with this gate returns the error and does NOT mark the volume skipped
+	runner.SetIngestGate(gate)
+	summary := runner.TriggerIngest(context.Background(), "/media/card/CANON_R5")
+	if summary.Err == nil {
+		t.Fatal("expected TriggerIngest to return error when gate fails")
+	}
+	if runner.IsSkipped("/media/card/CANON_R5") {
+		t.Fatal("expected volume NOT to be marked skipped after transient dialog failure")
+	}
 }
