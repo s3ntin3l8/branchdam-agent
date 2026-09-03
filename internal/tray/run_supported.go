@@ -154,6 +154,7 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 		watchItem := systray.AddMenuItem("Watch directories: none configured", "Directories polled for inserted cards")
 		watchItem.Disable()
 		ingestNow := systray.AddMenuItem("Ingest now", "Run one ingest pass over every configured watch directory")
+		pauseItem := systray.AddMenuItemCheckbox("⏸ Pause ingest", "Temporarily suspend automatic card detection and queue draining", false)
 		systray.AddSeparator()
 
 		queueItem := systray.AddMenuItem("Queue: not configured", "Offline queue backlog (offline.queueDbPath)")
@@ -215,6 +216,20 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 			systray.SetTooltip(FormatTooltip(st))
 			statusItem.SetTitle("Status: " + summarize(st))
 			updateItem.SetTitle("Self-update: " + us.Note())
+
+			if st.Paused {
+				pauseItem.Check()
+				pauseItem.SetTitle("▶ Resume ingest")
+				pauseItem.SetTooltip("Resume automatic card detection and queue draining")
+				systray.SetIcon(buildPausedTrayIcon())
+				systray.SetTooltip("branchDAM agent (ingest paused)")
+			} else {
+				pauseItem.Uncheck()
+				pauseItem.SetTitle("⏸ Pause ingest")
+				pauseItem.SetTooltip("Temporarily suspend automatic card detection and queue draining")
+				systray.SetIcon(buildTrayIcon())
+				systray.SetTooltip("branchDAM agent")
+			}
 
 			// Watch dirs can change out from under this menu now that
 			// Reconfigure exists (issue #31's settings menu) -- re-render
@@ -309,6 +324,9 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 		ticker := time.NewTicker(menuRefreshInterval)
 		defer ticker.Stop()
 
+		r.SetOnPauseChange(func(paused bool) {
+			refresh()
+		})
 		r.SetOnCardIngested(refresh)
 		r.SetDetectorErrorHandler(func(err error) {
 			if err != nil && !errors.Is(err, context.Canceled) {
@@ -482,6 +500,8 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 				return
 			case <-openStatus.ClickedCh:
 				_ = openBrowser(statusURL)
+			case <-pauseItem.ClickedCh:
+				r.SetPaused(!r.Paused())
 			case <-ingestNow.ClickedCh:
 				select {
 				case ingestRequestCh <- struct{}{}:
@@ -710,6 +730,7 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 	}
 
 	onExit := func() {
+		r.SetOnPauseChange(nil)
 		r.SetOnCardIngested(nil)
 		r.SetDetectorErrorHandler(nil)
 		r.StopDetector()
@@ -729,6 +750,9 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 }
 
 func summarize(st Status) string {
+	if st.Paused {
+		return "ingest paused by user"
+	}
 	if st.Busy {
 		return fmt.Sprintf("ingesting %s...", st.BusyCard)
 	}
