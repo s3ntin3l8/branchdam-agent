@@ -772,3 +772,26 @@ func TestConfigSettingsPromptAndSetAllowedExtensions(t *testing.T) {
 		t.Errorf("persisted AllowedExtensions = %v, want %v", reloaded.Ingest.AllowedExtensions, want)
 	}
 }
+
+func TestConfigSettingsSetStringSliceAutoImportPaths(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	paths := []string{"/Volumes/CANON_R5", "/media/user/SONY_A7"}
+	if err := s.SetStringSlice("ingest.autoImportPaths", paths); err != nil {
+		t.Fatalf("SetStringSlice: %v", err)
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(reloaded.Ingest.AutoImportPaths, paths) {
+		t.Errorf("persisted AutoImportPaths = %v, want %v", reloaded.Ingest.AutoImportPaths, paths)
+	}
+
+	// Invalid key should error
+	if err := s.SetStringSlice("invalid.key", paths); err == nil {
+		t.Error("expected error for invalid key")
+	}
+}

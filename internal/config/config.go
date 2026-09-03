@@ -446,6 +446,10 @@ type IngestConfig struct {
 	// Extensions are compared without the leading dot ("jpg" in YAML
 	// matches "IMG_0001.jpg" on disk).
 	AllowedExtensions []string `yaml:"allowedExtensions"`
+	// AutoImportPaths is the allowlist of volume paths or labels that bypass
+	// the card-detection confirmation dialog (issue #79). When a newly mounted
+	// volume matches an entry here, it is ingested immediately without prompting.
+	AutoImportPaths []string `yaml:"autoImportPaths"`
 }
 
 // ServerConfig is the branchDAM server this agent reports to.
@@ -751,6 +755,9 @@ func (c Config) Validate() []Problem {
 	checkPlaceholder("ingest.pathTemplate", c.Ingest.PathTemplate)
 	for i, root := range c.Ingest.CardRoots {
 		checkPlaceholder(fmt.Sprintf("ingest.cardRoots[%d]", i), root)
+	}
+	for i, path := range c.Ingest.AutoImportPaths {
+		checkPlaceholder(fmt.Sprintf("ingest.autoImportPaths[%d]", i), path)
 	}
 	checkPlaceholder("offline.queueDbPath", c.Offline.QueueDBPath)
 	checkPlaceholder("offline.tier0ContainerRoot", c.Offline.Tier0ContainerRoot)

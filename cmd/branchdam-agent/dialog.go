@@ -16,9 +16,10 @@ import (
 // notification, the first-run setup wizard) need to tell "the operator
 // said no" apart from "nothing showed up at all" (dialogExitFailed).
 const (
-	dialogExitOK       = 0
-	dialogExitFailed   = 1
-	dialogExitCanceled = 2
+	dialogExitOK          = 0
+	dialogExitFailed      = 1
+	dialogExitCanceled    = 2
+	dialogExitExtraButton = 3
 )
 
 // dialogFuncs is the subset of github.com/ncruces/zenity's surface
@@ -38,14 +39,12 @@ type dialogFuncs struct {
 	// directory, which directory's zenity.Directory() option structurally
 	// cannot return.
 	file func(title, defaultPath string, patterns []string) (string, error)
-	// question shows a Yes/No (or OK/Cancel on Windows / native macOS
-	// backends) confirmation dialog and returns whether the operator
+	// question shows a confirmation dialog and returns whether the operator
 	// accepted (nil err = OK; zenity.ErrCanceled = Cancel/window-close;
-	// any other err = the dialog didn't render). Used by the tray's
-	// destructive-action gate (issue #108 / E3 #S2-14) to require
-	// explicit confirmation before a drain/prune/install/rollback
-	// click fires.
-	question func(title, message string) error
+	// zenity.ErrExtraButton = Extra button; any other err = the dialog didn't render).
+	question func(title, message, okLabel, cancelLabel, extraButton string) error
+	// notify shows an OS desktop notification.
+	notify func(title, message string) error
 }
 
 // realDialogFuncs is dialogFuncs backed by the real zenity package: Win32
@@ -88,15 +87,29 @@ var realDialogFuncs = dialogFuncs{
 		// this from the directory func above.
 		return zenity.SelectFile(opts...)
 	},
-	// question renders a Yes/No-style confirmation dialog. We use
-	// zenity.Question rather than zenity.Warning because Question is the
-	// only zenity "message" variant that renders an OK + Cancel button
-	// pair on every backend (Warning has only OK); issue #108 / E3
-	// #S2-14 explicitly requires both. The "warning" intent is
-	// preserved by the body text -- the dialog message names the
-	// destructive action and the cancellation option, not the icon.
-	question: func(title, message string) error {
-		return zenity.Question(message, zenity.Title(title), zenity.WarningIcon)
+	question: func(title, message, okLabel, cancelLabel, extraButton string) error {
+		var opts []zenity.Option
+		if title != "" {
+			opts = append(opts, zenity.Title(title))
+		}
+		if okLabel != "" {
+			opts = append(opts, zenity.OKLabel(okLabel))
+		}
+		if cancelLabel != "" {
+			opts = append(opts, zenity.CancelLabel(cancelLabel))
+		}
+		if extraButton != "" {
+			opts = append(opts, zenity.ExtraButton(extraButton))
+		}
+		opts = append(opts, zenity.WarningIcon)
+		return zenity.Question(message, opts...)
+	},
+	notify: func(title, message string) error {
+		var opts []zenity.Option
+		if title != "" {
+			opts = append(opts, zenity.Title(title))
+		}
+		return zenity.Notify(message, opts...)
 	},
 }
 
@@ -115,14 +128,17 @@ var realDialogFuncs = dialogFuncs{
 // in its own process) and issue #30 for why this exists at all.
 func runDialogCmd(args []string, dlg dialogFuncs) int {
 	fs := flag.NewFlagSet("dialog", flag.ContinueOnError)
-	kind := fs.String("kind", "", "dialog kind: error, entry, password, directory, file, or question")
+	kind := fs.String("kind", "", "dialog kind: error, entry, password, directory, file, question, or notify")
 	title := fs.String("title", "branchDAM Agent", "dialog title")
-	message := fs.String("message", "", "dialog body text (error/entry/password/question only)")
+	message := fs.String("message", "", "dialog body text (error/entry/password/question/notify only)")
 	// -default is reused as file's pre-filled path -- unlike password,
 	// where a secret has no business appearing in a subprocess's argv, a
 	// filesystem path is not a secret.
 	defaultText := fs.String("default", "", "pre-filled text (entry/password only) or path (file only)")
 	patterns := fs.String("patterns", "", "comma-separated filename patterns for -kind file (e.g. \"*.lrcat,*.json\"); empty means no filter")
+	okLabel := fs.String("ok-label", "", "custom OK button label (question only)")
+	cancelLabel := fs.String("cancel-label", "", "custom Cancel button label (question only)")
+	extraButton := fs.String("extra-button", "", "extra button label (question only)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -149,22 +165,28 @@ func runDialogCmd(args []string, dlg dialogFuncs) int {
 
 	case "question":
 		// Issue #108 / E3 #S2-14: yes/no confirmation prompt for the
-		// tray's destructive-action gate. exit-code is the only signal
-		// the re-exec caller gets back (zenity.ErrCanceled, mapped to
-		// dialogExitCanceled, is the "Cancel" branch; any other
-		// non-zero is the "did not render" branch). No stdout to print
-		// here -- the answer is encoded in the exit code.
-		if err := dlg.question(*title, *message); err != nil {
+		// tray's destructive-action gate, and issue #79 card import confirmation.
+		if err := dlg.question(*title, *message, *okLabel, *cancelLabel, *extraButton); err != nil {
 			if errors.Is(err, zenity.ErrCanceled) {
 				return dialogExitCanceled
+			}
+			if errors.Is(err, zenity.ErrExtraButton) {
+				return dialogExitExtraButton
 			}
 			fmt.Fprintf(os.Stderr, "branchdam-agent dialog: %v\n", err)
 			return dialogExitFailed
 		}
 		return dialogExitOK
 
+	case "notify", "notification":
+		if err := dlg.notify(*title, *message); err != nil {
+			fmt.Fprintf(os.Stderr, "branchdam-agent dialog: %v\n", err)
+			return dialogExitFailed
+		}
+		return dialogExitOK
+
 	default:
-		fmt.Fprintf(os.Stderr, "branchdam-agent dialog: -kind must be one of error, entry, password, directory, file, question (got %q)\n", *kind)
+		fmt.Fprintf(os.Stderr, "branchdam-agent dialog: -kind must be one of error, entry, password, directory, file, question, notify (got %q)\n", *kind)
 		return 2
 	}
 }

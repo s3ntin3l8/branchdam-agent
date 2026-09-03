@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -79,6 +83,153 @@ func trayConfirm(run dialogRunner) func(ctx context.Context, title, body string)
 			return false
 		}
 	}
+}
+
+// trayIngestGate implements tray.IngestGate using dialogRunner (issue #79).
+type trayIngestGate struct {
+	dialog   dialogRunner
+	settings *configSettings
+	lookup   func(ctx context.Context, path string) (label string, size string)
+}
+
+func newTrayIngestGate(dialog dialogRunner, settings *configSettings) *trayIngestGate {
+	return &trayIngestGate{
+		dialog:   dialog,
+		settings: settings,
+		lookup:   lookupVolumeLabelAndSize,
+	}
+}
+
+func (g *trayIngestGate) Confirm(ctx context.Context, volumePath, volumeName string) (bool, error) {
+	cfg := g.settings.currentConfig()
+	cleanPath := filepath.Clean(volumePath)
+	baseName := filepath.Base(volumePath)
+
+	// Check if volumePath or volumeName matches any entry in ingest.autoImportPaths
+	for _, p := range cfg.Ingest.AutoImportPaths {
+		if p == volumePath || filepath.Clean(p) == cleanPath || p == volumeName || p == baseName {
+			return true, nil
+		}
+	}
+
+	label, size := baseName, ""
+	if g.lookup != nil {
+		l, s := g.lookup(ctx, volumePath)
+		if l != "" {
+			label = l
+		}
+		size = s
+	}
+	if volumeName != "" && label == baseName {
+		label = volumeName
+	}
+
+	display := label
+	if size != "" {
+		display = fmt.Sprintf("%s (%s)", label, size)
+	}
+
+	msg := fmt.Sprintf("New volume detected: %s", display)
+	_, exitCode, err := g.dialog(ctx,
+		"-kind", "question",
+		"-title", "New volume detected",
+		"-message", msg,
+		"-ok-label", "Import",
+		"-cancel-label", "Skip this time",
+		"-extra-button", "Always auto-import",
+	)
+	if err != nil {
+		slog.Warn("ingest confirm dialog failed to render; skipping ingest", "volume", volumePath, "err", err)
+		return false, err
+	}
+
+	switch exitCode {
+	case dialogExitOK:
+		return true, nil
+	case dialogExitExtraButton:
+		// Always auto-import: write the volume label/path to ingest.autoImportPaths in config
+		newPaths := append([]string(nil), cfg.Ingest.AutoImportPaths...)
+		if !slices.Contains(newPaths, volumePath) {
+			newPaths = append(newPaths, volumePath)
+		}
+		if err := g.settings.SetStringSlice("ingest.autoImportPaths", newPaths); err != nil {
+			slog.Warn("failed to persist auto-import path", "path", volumePath, "err", err)
+		}
+		return true, nil
+	case dialogExitCanceled:
+		return false, nil
+	default:
+		slog.Warn("ingest confirm dialog returned unexpected exit; skipping ingest", "volume", volumePath, "exit", exitCode)
+		return false, fmt.Errorf("dialog exit %d", exitCode)
+	}
+}
+
+func lookupVolumeLabelAndSize(ctx context.Context, path string) (label string, sizeStr string) {
+	label = filepath.Base(path)
+	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+
+	if runtime.GOOS == "darwin" {
+		out, err := exec.CommandContext(ctx, "diskutil", "info", path).Output()
+		if err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "Volume Name:") {
+					val := strings.TrimSpace(strings.TrimPrefix(line, "Volume Name:"))
+					if val != "" && val != "Not applicable (no filesystem)" {
+						label = val
+					}
+				}
+				if strings.HasPrefix(line, "Total Size:") || strings.HasPrefix(line, "Volume Total Space:") {
+					parts := strings.Split(line, ":")
+					if len(parts) >= 2 {
+						sizePart := strings.TrimSpace(parts[1])
+						if idx := strings.Index(sizePart, "("); idx > 0 {
+							sizeStr = strings.TrimSpace(sizePart[:idx])
+						}
+					}
+				}
+			}
+		}
+	} else if runtime.GOOS == "linux" {
+		out, err := exec.CommandContext(ctx, "lsblk", "-no", "LABEL", path).Output()
+		if err == nil {
+			if l := strings.TrimSpace(string(out)); l != "" {
+				label = l
+			}
+		}
+		dfOut, err := exec.CommandContext(ctx, "df", "-Pk", path).Output()
+		if err == nil {
+			lines := strings.Split(strings.TrimSpace(string(dfOut)), "\n")
+			if len(lines) >= 2 {
+				fields := strings.Fields(lines[1])
+				if len(fields) >= 2 {
+					if kbytes, err := strconv.ParseUint(fields[1], 10, 64); err == nil && kbytes > 0 {
+						sizeStr = formatByteSize(kbytes * 1024)
+					}
+				}
+			}
+		}
+	}
+	return label, sizeStr
+}
+
+func formatByteSize(bytes uint64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := uint64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	val := float64(bytes) / float64(div)
+	unitStr := []string{"KB", "MB", "GB", "TB", "PB"}[exp]
+	if val >= 10 || float64(int(val)) == val {
+		return fmt.Sprintf("%.0f %s", val, unitStr)
+	}
+	return fmt.Sprintf("%.1f %s", val, unitStr)
 }
 
 // runTrayCmd implements `branchdam-agent tray -config <path>`: the
@@ -273,6 +424,12 @@ func runTrayCmd(args []string) int {
 
 	runner.SetDetectorInterval(time.Duration(cfg.Ingest.PollIntervalSecs) * time.Second)
 	runner.SetDetectorRequireDCIM(cfg.Ingest.RequireDCIM)
+	runner.SetIngestGate(newTrayIngestGate(dialog, settings))
+	runner.SetNotifier(func(title, message string) {
+		go func() {
+			_, _, _ = dialog(context.Background(), "-kind", "notify", "-title", title, "-message", message)
+		}()
+	})
 
 	if cfg.Tray.StartOnLogin {
 		if err := enableStartOnLogin(resolvedPath); err != nil {
