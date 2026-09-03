@@ -869,3 +869,69 @@ func TestIngestCardUploadStreamChtimesFailureIsLogged(t *testing.T) {
 		t.Errorf("warn source = %v", warn["source"])
 	}
 }
+
+// TestIngestCardCameraModelTraversalE2E is the end-to-end assertion that
+// closes the last open AC item from issue #99 / PR #128: a crafted
+// camera_model of "../../evil" must not let RenderPath's output escape
+// the archiveRoot when joined under it. TestRenderPathStripsTraversalSequence
+// proves the RenderPath boundary in isolation; this test proves the same
+// invariant holds after filepath.Join, which is the half the ingest
+// pipeline actually exercises (every DualWrite destination is
+// `filepath.Join(archiveRoot, relPath)`). The blast radius is identical:
+// a traversal that survives Join would land a file above archiveRoot.
+//
+// Direct RenderPath invocation (not a full card driver) is sufficient
+// because the join operation IS the security boundary -- there is no
+// downstream check on the joined path -- and the existing test's
+// table-driven cases already cover the path-rendering side.
+func TestIngestCardCameraModelTraversalE2E(t *testing.T) {
+	archiveRoot := t.TempDir()
+
+	cases := []struct {
+		name        string
+		cameraModel string
+	}{
+		{"traversal_segments", "../../etc"},
+		{"evil_literal", "../../evil"},
+		{"bare_dot_segments", "./././"},
+		{"mixed_traversal_and_literal", ".././../evil"},
+	}
+
+	tpl := "{camera_model}/{original_name}"
+	now := time.Now()
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vars := TemplateVars{
+				CapturedAt:   now,
+				CameraModel:  tc.cameraModel,
+				OriginalName: "f.jpg",
+			}
+			rel := RenderPath(tpl, vars)
+			joined := filepath.Join(archiveRoot, rel)
+
+			// Blast-radius assertion: filepath.Rel must produce a
+			// path that starts with ".." if the traversal survived
+			// Join -- that, and only that, is the security
+			// boundary. A relative rel would land the file above
+			// archiveRoot. (filepath.IsAbs(joined) is always true
+			// because t.TempDir() is absolute, so the test does
+			// not assert on it; the Rel check above subsumes the
+			// "joined is under archiveRoot" property.)
+			relFromRoot, err := filepath.Rel(archiveRoot, joined)
+			if err != nil {
+				t.Fatalf("filepath.Rel(%q, %q): %v", archiveRoot, joined, err)
+			}
+			if relFromRoot == ".." || strings.HasPrefix(relFromRoot, ".."+string(filepath.Separator)) {
+				t.Errorf("RenderPath(%q, %+v) = %q; joined = %q escapes archiveRoot (rel = %q)",
+					tpl, vars, rel, joined, relFromRoot)
+			}
+
+			// Sanity check: the literal ".." must not appear in the
+			// joined path, mirroring TestRenderPathStripsTraversalSequence.
+			if strings.Contains(joined, "..") {
+				t.Errorf("joined path %q still contains %q", joined, "..")
+			}
+		})
+	}
+}
