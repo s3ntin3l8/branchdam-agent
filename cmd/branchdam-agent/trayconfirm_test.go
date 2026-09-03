@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 )
 
 // fakeDialogRunner is a dialogRunner that returns whatever the test
@@ -97,5 +99,155 @@ func TestTrayConfirmForwardsTitleAndBody(t *testing.T) {
 	}
 	if got := seen["-message"]; got != "Delete files?" {
 		t.Errorf("got -message %q, want %q", got, "Delete files?")
+	}
+}
+
+func TestTrayIngestGateImportIsProceed(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := &fakeDialogRunner{exitCode: dialogExitOK}
+	s := newConfigSettings(path, cfg, runner, dialog.Run)
+	gate := newTrayIngestGate(dialog.Run, s)
+
+	proceed, err := gate.Confirm(context.Background(), "/media/card/CANON_R5", "CANON_R5")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !proceed {
+		t.Fatal("expected proceed=true on dialogExitOK (Import)")
+	}
+}
+
+func TestTrayIngestGateSkipThisTimeIsRefuse(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := &fakeDialogRunner{exitCode: dialogExitCanceled}
+	s := newConfigSettings(path, cfg, runner, dialog.Run)
+	gate := newTrayIngestGate(dialog.Run, s)
+
+	proceed, err := gate.Confirm(context.Background(), "/media/card/CANON_R5", "CANON_R5")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if proceed {
+		t.Fatal("expected proceed=false on dialogExitCanceled (Skip this time)")
+	}
+}
+
+func TestTrayIngestGateAlwaysAutoImportPersistsAndProceeds(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := &fakeDialogRunner{exitCode: dialogExitExtraButton}
+	s := newConfigSettings(path, cfg, runner, dialog.Run)
+	gate := newTrayIngestGate(dialog.Run, s)
+
+	proceed, err := gate.Confirm(context.Background(), "/media/card/CANON_R5", "CANON_R5")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !proceed {
+		t.Fatal("expected proceed=true on dialogExitExtraButton (Always auto-import)")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Ingest.AutoImportPaths) != 1 || reloaded.Ingest.AutoImportPaths[0] != "/media/card/CANON_R5" {
+		t.Errorf("expected autoImportPaths persisted to config, got %v", reloaded.Ingest.AutoImportPaths)
+	}
+}
+
+func TestTrayIngestGateAutoImportPathsBypassesDialog(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := &fakeDialogRunner{exitCode: dialogExitCanceled}
+	s := newConfigSettings(path, cfg, runner, dialog.Run)
+
+	// Persist autoImportPaths
+	if err := s.SetStringSlice("ingest.autoImportPaths", []string{"/media/card/CANON_R5"}); err != nil {
+		t.Fatal(err)
+	}
+
+	gate := newTrayIngestGate(dialog.Run, s)
+
+	proceed, err := gate.Confirm(context.Background(), "/media/card/CANON_R5", "CANON_R5")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !proceed {
+		t.Fatal("expected proceed=true when path is in autoImportPaths")
+	}
+	if len(dialog.calls) != 0 {
+		t.Errorf("expected no dialog shown for auto-imported path, got %d calls", len(dialog.calls))
+	}
+}
+
+func TestTrayIngestGateForwardsLabelsAndVolumeInfo(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := &fakeDialogRunner{exitCode: dialogExitOK}
+	s := newConfigSettings(path, cfg, runner, dialog.Run)
+	gate := newTrayIngestGate(dialog.Run, s)
+	gate.lookup = func(_ context.Context, _ string) (string, string) {
+		return "CANON R5", "32 GB"
+	}
+
+	proceed, err := gate.Confirm(context.Background(), "/Volumes/CANON_R5", "CANON_R5")
+	if err != nil || !proceed {
+		t.Fatalf("unexpected proceed=%v err=%v", proceed, err)
+	}
+
+	if len(dialog.calls) != 1 {
+		t.Fatalf("expected 1 dialog call, got %d", len(dialog.calls))
+	}
+	args := dialog.calls[0]
+	seen := map[string]string{}
+	for i := 0; i+1 < len(args); i++ {
+		seen[args[i]] = args[i+1]
+	}
+	if got := seen["-kind"]; got != "question" {
+		t.Errorf("got -kind %q, want %q", got, "question")
+	}
+	if got := seen["-title"]; got != "New volume detected" {
+		t.Errorf("got -title %q, want %q", got, "New volume detected")
+	}
+	if got := seen["-message"]; got != "New volume detected: CANON R5 (32 GB)" {
+		t.Errorf("got -message %q, want %q", got, "New volume detected: CANON R5 (32 GB)")
+	}
+	if got := seen["-ok-label"]; got != "Import" {
+		t.Errorf("got -ok-label %q, want %q", got, "Import")
+	}
+	if got := seen["-cancel-label"]; got != "Skip this time" {
+		t.Errorf("got -cancel-label %q, want %q", got, "Skip this time")
+	}
+	if got := seen["-extra-button"]; got != "Always auto-import" {
+		t.Errorf("got -extra-button %q, want %q", got, "Always auto-import")
+	}
+}
+
+func TestTrayIngestGateFailedRenderIsRefuse(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := &fakeDialogRunner{err: errors.New("no display")}
+	s := newConfigSettings(path, cfg, runner, dialog.Run)
+	gate := newTrayIngestGate(dialog.Run, s)
+
+	proceed, err := gate.Confirm(context.Background(), "/media/card/CANON_R5", "CANON_R5")
+	if err == nil {
+		t.Fatal("expected error on failed dialog render")
+	}
+	if proceed {
+		t.Fatal("expected proceed=false on failed dialog render")
+	}
+
+	// TriggerDetectedIngest through the runner with this gate returns the error and does NOT mark the volume skipped
+	runner.SetIngestGate(gate)
+	summary := runner.TriggerDetectedIngest(context.Background(), "/media/card/CANON_R5")
+	if summary.Err == nil {
+		t.Fatal("expected TriggerDetectedIngest to return error when gate fails")
+	}
+	if runner.IsSkipped("/media/card/CANON_R5") {
+		t.Fatal("expected volume NOT to be marked skipped after transient dialog failure")
+	}
+
+	// Manual TriggerIngest bypasses gate even when gate has error
+	manualSummary := runner.TriggerIngest(context.Background(), "/media/card/CANON_R5")
+	if !manualSummary.OK() {
+		t.Fatalf("expected manual TriggerIngest to proceed unconditionally, got %+v", manualSummary)
 	}
 }

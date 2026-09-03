@@ -1210,6 +1210,7 @@ type fakeSettings struct{}
 func (fakeSettings) Snapshot() SettingsView                     { return SettingsView{} }
 func (fakeSettings) SetBool(_ string, _ bool) error             { return nil }
 func (fakeSettings) SetInt(_ string, _ int) error               { return nil }
+func (fakeSettings) SetStringSlice(_ string, _ []string) error  { return nil }
 func (fakeSettings) PromptAndSet(_ SettingsField) (bool, error) { return false, nil }
 func (fakeSettings) PromptAndSetIntegrationPath(_ IntegrationID) (bool, error) {
 	return false, nil
@@ -1287,6 +1288,205 @@ func TestReconfigureDetectorWithRequireDCIM(t *testing.T) {
 
 	if atomic.LoadInt32(&hit) == 0 {
 		t.Error("expected camera card with DCIM to trigger ingest when requireDCIM=true")
+	}
+
+	r.StopDetector()
+}
+
+type fakeIngestGate struct {
+	calls   []string
+	proceed bool
+	err     error
+}
+
+func (f *fakeIngestGate) Confirm(_ context.Context, volumePath, volumeName string) (bool, error) {
+	f.calls = append(f.calls, volumePath)
+	return f.proceed, f.err
+}
+
+func TestTriggerIngestWithGate(t *testing.T) {
+	fi := &fakeIngester{
+		result: ingest.CardResult{
+			Files: []ingest.FileResult{
+				{SourcePath: "IMG_0001.JPG"},
+			},
+		},
+	}
+	r := NewRunner(fi, nil, "")
+
+	// 1. Nil gate -> proceeds unconditionally
+	summary := r.TriggerDetectedIngest(context.Background(), "/media/card1")
+	if !summary.OK() || summary.Submitted != 1 {
+		t.Fatalf("expected submitted=1, got summary=%+v", summary)
+	}
+
+	// 2. Gate returning error (transient failure, e.g. render failed)
+	gate := &fakeIngestGate{proceed: false, err: errors.New("zenity failed")}
+	r.SetIngestGate(gate)
+
+	summary = r.TriggerDetectedIngest(context.Background(), "/media/card2")
+	if summary.Err == nil {
+		t.Fatal("expected summary.Err to be non-nil on gate error")
+	}
+	if summary.Submitted != 0 {
+		t.Fatalf("expected 0 submitted on error, got %+v", summary)
+	}
+	if r.IsSkipped("/media/card2") {
+		t.Fatal("expected /media/card2 NOT to be in skipped set on error")
+	}
+
+	// Manual TriggerIngest bypasses gate and proceeds unconditionally
+	manualSummary := r.TriggerIngest(context.Background(), "/media/card2")
+	if !manualSummary.OK() || manualSummary.Submitted != 1 {
+		t.Fatalf("expected manual TriggerIngest to proceed unconditionally, got %+v", manualSummary)
+	}
+	if len(gate.calls) != 1 {
+		t.Fatalf("expected manual TriggerIngest NOT to call gate, calls=%v", gate.calls)
+	}
+
+	// Next detection call on same path triggers gate again because it was not added to skipped set
+	gate.err = nil
+	gate.proceed = false
+	gate.calls = nil
+
+	// 3. Gate returning false (explicit "Skip this time")
+	summary = r.TriggerDetectedIngest(context.Background(), "/media/card2")
+	if summary.Err != nil {
+		t.Fatalf("unexpected summary.Err: %v", summary.Err)
+	}
+	if summary.Submitted != 0 {
+		t.Fatalf("expected ingest skipped, got %+v", summary)
+	}
+	if len(gate.calls) != 1 || gate.calls[0] != "/media/card2" {
+		t.Fatalf("expected gate called for /media/card2, got %v", gate.calls)
+	}
+	if !r.IsSkipped("/media/card2") {
+		t.Fatal("expected /media/card2 in skipped set")
+	}
+
+	// 4. Second detection call on the same path suppresses dialog (session-scoped skip)
+	summary = r.TriggerDetectedIngest(context.Background(), "/media/card2")
+	if summary.Submitted != 0 {
+		t.Fatalf("expected ingest skipped, got %+v", summary)
+	}
+	if len(gate.calls) != 1 {
+		t.Fatalf("expected gate NOT called again for skipped path, got calls=%v", gate.calls)
+	}
+
+	// Manual TriggerIngest still proceeds even when path is in skipped set
+	manualSummary = r.TriggerIngest(context.Background(), "/media/card2")
+	if !manualSummary.OK() || manualSummary.Submitted != 1 {
+		t.Fatalf("expected manual TriggerIngest to proceed even when path is in skipped set, got %+v", manualSummary)
+	}
+
+	// 5. ForgetSkipped clears skip set
+	r.ForgetSkipped("/media/card2")
+	if r.IsSkipped("/media/card2") {
+		t.Fatal("expected /media/card2 removed from skipped set")
+	}
+
+	// 6. Next detection call triggers gate again
+	gate.proceed = true
+	summary = r.TriggerDetectedIngest(context.Background(), "/media/card2")
+	if !summary.OK() || summary.Submitted != 1 {
+		t.Fatalf("expected submitted=1 after un-skipping, got summary=%+v", summary)
+	}
+	if len(gate.calls) != 2 {
+		t.Fatalf("expected gate called again after un-skipping, got calls=%v", gate.calls)
+	}
+}
+
+func TestTriggerIngestNotification(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+
+	var notifications []struct{ title, message string }
+	r.SetNotifier(func(title, message string) {
+		notifications = append(notifications, struct{ title, message string }{title, message})
+	})
+
+	// Plural: 8 photos
+	fi.result = ingest.CardResult{
+		Files: make([]ingest.FileResult, 8),
+	}
+	r.TriggerIngest(context.Background(), "/Volumes/CANON R5")
+	if len(notifications) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(notifications))
+	}
+	if notifications[0].message != "8 photos imported from CANON R5" {
+		t.Errorf("got msg %q, want %q", notifications[0].message, "8 photos imported from CANON R5")
+	}
+
+	// Singular: 1 photo
+	notifications = nil
+	fi.result = ingest.CardResult{
+		Files: make([]ingest.FileResult, 1),
+	}
+	r.TriggerIngest(context.Background(), "/Volumes/CANON R5")
+	if len(notifications) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(notifications))
+	}
+	if notifications[0].message != "1 photo imported from CANON R5" {
+		t.Errorf("got msg %q, want %q", notifications[0].message, "1 photo imported from CANON R5")
+	}
+
+	// Error: no notification
+	notifications = nil
+	fi.err = errors.New("read failed")
+	r.TriggerIngest(context.Background(), "/Volumes/CANON R5")
+	if len(notifications) != 0 {
+		t.Errorf("expected no notification on error, got %v", notifications)
+	}
+}
+
+func TestDetectorWatchForgetsSkippedOnRemoval(t *testing.T) {
+	fi := &fakeIngester{
+		result: ingest.CardResult{
+			Files: []ingest.FileResult{{SourcePath: "IMG_0001.JPG"}},
+		},
+	}
+	dir := t.TempDir()
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+
+	gate := &fakeIngestGate{proceed: false}
+	r.SetIngestGate(gate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{dir})
+
+	cardDir := filepath.Join(dir, "CARD1")
+	if err := os.Mkdir(cardDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for card to be detected and skipped
+	for i := 0; i < 50; i++ {
+		if r.IsSkipped(cardDir) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !r.IsSkipped(cardDir) {
+		t.Fatal("expected cardDir in skipped set")
+	}
+
+	// Remove volume directory
+	if err := os.Remove(cardDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for detector to observe removal and call ForgetSkipped
+	for i := 0; i < 50; i++ {
+		if !r.IsSkipped(cardDir) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if r.IsSkipped(cardDir) {
+		t.Fatal("expected cardDir removed from skipped set after unmount")
 	}
 
 	r.StopDetector()

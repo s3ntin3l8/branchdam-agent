@@ -175,6 +175,16 @@ func (s *configSettings) SetInt(key string, v int) error {
 	return s.reload()
 }
 
+func (s *configSettings) SetStringSlice(key string, v []string) error {
+	if err := s.validateStringSliceChange(key, v); err != nil {
+		return err
+	}
+	if err := config.Patch(s.path, map[string]any{key: v}); err != nil {
+		return fmt.Errorf("save %s: %w", key, err)
+	}
+	return s.reload()
+}
+
 // validateBoolChange/validateIntChange/validateStringChange each build a
 // copy of the current config with one field hypothetically changed and
 // run Validate() against it -- entirely in memory, before config.Patch
@@ -272,6 +282,23 @@ func (s *configSettings) validateStringChange(key, v string) error {
 		if !applyIntegrationStringChange(&cfg, key, v) {
 			return fmt.Errorf("settings: %q is not a settable string key", key)
 		}
+	}
+	return firstValidateProblem(cfg)
+}
+
+func (s *configSettings) validateStringSliceChange(key string, v []string) error {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	switch key {
+	case "ingest.autoImportPaths":
+		cfg.Ingest.AutoImportPaths = append([]string(nil), v...)
+	case "ingest.cardRoots":
+		cfg.Ingest.CardRoots = append([]string(nil), v...)
+	case "ingest.allowedExtensions":
+		cfg.Ingest.AllowedExtensions = append([]string(nil), v...)
+	default:
+		return fmt.Errorf("settings: %q is not a settable string slice key", key)
 	}
 	return firstValidateProblem(cfg)
 }

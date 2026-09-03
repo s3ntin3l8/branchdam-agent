@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -27,6 +28,12 @@ import (
 // issue #3; a Linux workstation still has the fully-tested headless
 // `ingest`/`ingest --watch` path, just no tray icon.
 var ErrUnsupported = errors.New("tray: unsupported on this platform (windows and darwin only); use `branchdam-agent ingest` instead")
+
+// IngestGate decides whether to proceed with ingesting a detected card volume (issue #79).
+// Confirm returns proceed=true to proceed with ingest, or proceed=false/error to skip.
+type IngestGate interface {
+	Confirm(ctx context.Context, volumePath, volumeName string) (proceed bool, err error)
+}
 
 // Ingester is the subset of *ingest.Engine's surface Runner needs, so tests
 // can substitute a fake without touching a real card or a real branchDAM
@@ -268,6 +275,15 @@ type Runner struct {
 	hookInFlight   map[HookID]bool
 	hookState      map[HookID]*HookState
 
+	// ingestGate gates card ingest on detection (issue #79). Nil means
+	// always proceed (used by tests and headless CLI).
+	ingestGate IngestGate
+	// skipped holds the in-memory session-scoped ignore set of volumes
+	// the operator dismissed with "Skip this time" (issue #79).
+	skipped map[string]bool
+	// notifier emits user-facing OS desktop notifications (issue #79).
+	notifier func(title, message string)
+
 	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
 	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
 	detectorMu          sync.Mutex
@@ -289,6 +305,7 @@ func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner
 		watchDirs:        append([]string(nil), watchDirs...),
 		scratchDir:       scratchDir,
 		detectorInterval: ingest.DefaultPollInterval,
+		skipped:          map[string]bool{},
 		syncInFlight:     map[IntegrationID]bool{},
 		lastSync:         map[IntegrationID]*SyncSummary{},
 		hookInFlight:     map[HookID]bool{},
@@ -308,14 +325,50 @@ func (r *Runner) WatchDirs() []string {
 
 // TriggerIngest runs one IngestCard pass over cardPath through the same
 // Engine the headless `ingest` subcommand uses, records the outcome, and
-// returns it. Safe to call from a menu-click handler or from the
-// card-detection watch loop -- both paths in run_supported.go go through
-// this single method, and it now also serializes them: a call blocks
-// until any other in-flight ingest (from either path) has finished, via
-// gate.
+// returns it. Safe to call from a menu-click handler -- blocks until any
+// other in-flight ingest (from either path) has finished, via gate.
+// Manual triggers bypass the confirmation dialog and session skip set.
 func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSummary {
+	return r.triggerIngest(ctx, cardPath, false)
+}
+
+// TriggerDetectedIngest runs one IngestCard pass for a newly detected card
+// path. If an IngestGate is configured, it prompts the operator for
+// confirmation (or checks the allow-list) before proceeding. Explicitly
+// skipped volumes are added to the session skip set and ignored until removed.
+func (r *Runner) TriggerDetectedIngest(ctx context.Context, cardPath string) IngestSummary {
+	return r.triggerIngest(ctx, cardPath, true)
+}
+
+func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection bool) IngestSummary {
 	r.gate.Lock()
 	defer r.gate.Unlock()
+
+	if isDetection {
+		r.mu.Lock()
+		if r.skipped != nil && r.skipped[cardPath] {
+			r.mu.Unlock()
+			return IngestSummary{CardPath: cardPath}
+		}
+		gate := r.ingestGate
+		r.mu.Unlock()
+
+		if gate != nil {
+			proceed, err := gate.Confirm(ctx, cardPath, filepath.Base(cardPath))
+			if err != nil {
+				return IngestSummary{CardPath: cardPath, Err: err}
+			}
+			if !proceed {
+				r.mu.Lock()
+				if r.skipped == nil {
+					r.skipped = make(map[string]bool)
+				}
+				r.skipped[cardPath] = true
+				r.mu.Unlock()
+				return IngestSummary{CardPath: cardPath}
+			}
+		}
+	}
 
 	r.setBusy(true, cardPath)
 	defer r.setBusy(false, "")
@@ -345,7 +398,19 @@ func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSumma
 
 	r.mu.Lock()
 	r.last = &summary
+	notifier := r.notifier
 	r.mu.Unlock()
+
+	if notifier != nil && summary.OK() && summary.Submitted > 0 {
+		volName := filepath.Base(cardPath)
+		var msg string
+		if summary.Submitted == 1 {
+			msg = fmt.Sprintf("1 photo imported from %s", volName)
+		} else {
+			msg = fmt.Sprintf("%d photos imported from %s", summary.Submitted, volName)
+		}
+		notifier("branchDAM Agent", msg)
+	}
 
 	return summary
 }
@@ -655,6 +720,44 @@ func (r *Runner) RevealHook(id HookID) error {
 	return installer.Reveal()
 }
 
+// SetIngestGate wires the gate used to confirm card imports before proceeding (issue #79).
+// A nil gate (the default) means always proceed -- preserving existing test and headless
+// behavior.
+func (r *Runner) SetIngestGate(g IngestGate) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ingestGate = g
+}
+
+// IngestGate returns the registered IngestGate, or nil if none was set.
+func (r *Runner) IngestGate() IngestGate {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ingestGate
+}
+
+// SetNotifier registers a callback for emitting user-facing OS desktop notifications (issue #79).
+func (r *Runner) SetNotifier(fn func(title, message string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notifier = fn
+}
+
+// ForgetSkipped clears a volume path from the session-scoped skip set
+// when the volume is unmounted / removed (issue #79).
+func (r *Runner) ForgetSkipped(volumePath string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.skipped, volumePath)
+}
+
+// IsSkipped reports whether volumePath is in the session-scoped skip set.
+func (r *Runner) IsSkipped(volumePath string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.skipped[volumePath]
+}
+
 // SetOnCardIngested registers a callback invoked when a card is detected
 // and ingested by the Detector.Watch goroutine (run_supported.go uses this
 // to trigger an immediate menu refresh).
@@ -759,8 +862,11 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 	go func() {
 		defer close(done)
 		err := detector.Watch(dctx, func(diff ingest.Diff) {
+			for _, path := range diff.Removed {
+				r.ForgetSkipped(path)
+			}
 			for _, path := range diff.Inserted {
-				r.TriggerIngest(dctx, path)
+				r.TriggerDetectedIngest(dctx, path)
 				r.mu.Lock()
 				cb := r.onCardIngested
 				r.mu.Unlock()
