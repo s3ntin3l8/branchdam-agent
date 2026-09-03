@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
@@ -148,19 +149,22 @@ func (u UpdateStatus) Note() string {
 // Configured-vs-Err distinction that preserves the "never fabricate a
 // number" invariant the stub used to hold as a literal string.
 type Status struct {
-	WatchDirs   []string
-	ScratchNote string
-	QueueStatus QueueStatus
-	LastIngest  *IngestSummary
-	SelfUpdate  UpdateStatus
+	WatchDirs   []string       `json:"watchDirs"`
+	ScratchNote string         `json:"scratchNote"`
+	QueueStatus QueueStatus    `json:"queueStatus"`
+	LastIngest  *IngestSummary `json:"lastIngest,omitempty"`
+	SelfUpdate  UpdateStatus   `json:"selfUpdate"`
 	// Busy and BusyCard reflect Runner.Busy() -- shown on the status page
 	// and used by the tray menu to disable "Install and restart" while an
 	// ingest is running (see Runner.TryLockIdle for the actual gate this
 	// only mirrors for display).
-	Busy     bool
-	BusyCard string
+	Busy     bool   `json:"busy"`
+	BusyCard string `json:"busyCard,omitempty"`
 	// BusySince is when the current ingest started (zero when not busy).
-	BusySince time.Time
+	BusySince time.Time `json:"busySince,omitempty"`
+	// IngestProgress is the most recent progress sample from an in-flight
+	// ingest (DualWrite/WriteLocal/Verify), or nil when idle.
+	IngestProgress *ingest.ProgressEvent `json:"ingestProgress,omitempty"`
 	// HandshakeOK surfaces the most recent DrainSummary.HandshakeOK to the
 	// status page -- the operator's most basic "is the server reachable?"
 	// signal, which DrainSummary already computes but never exposed. False
@@ -168,30 +172,30 @@ type Status struct {
 	// this is the single source of truth for the "Server connection"
 	// section's reachable/unreachable label, so the template does not
 	// reach into QueueStatus.LastDrain directly.
-	HandshakeOK bool
+	HandshakeOK bool `json:"handshakeOk"`
 	// HasDrained is true once at least one drain pass has completed in
 	// this session -- the "have we ever heard from the server?" signal
 	// the Server connection section uses to distinguish "no drain run
 	// yet" from "last drain: handshake failed". Independent of
 	// HandshakeOK on purpose: a never-drained install is neither
 	// "reachable" nor "unreachable", it's "unknown".
-	HasDrained bool
+	HasDrained bool `json:"hasDrained"`
 	// InFlightDrain reports whether a drain pass is currently running.
-	InFlightDrain bool
+	InFlightDrain bool `json:"inFlightDrain"`
 	// InFlightPrune reports whether a prune pass is currently running.
-	InFlightPrune bool
+	InFlightPrune bool `json:"inFlightPrune"`
 	// Integrations is RUNTIME state only, ordered by the compile-time
 	// Integrations() registry so the status page and (a later PR's) menu
 	// render in the same order every time. Config state (enabled, dry
 	// run, configured paths) comes from Settings.Snapshot(), never from
 	// here -- Runner never reads config.
-	Integrations []IntegrationStatus
+	Integrations []IntegrationStatus `json:"integrations,omitempty"`
 	// Hooks is Integrations' counterpart for installable script hooks
 	// (DaVinci Resolve's render hook, issue #60) -- a SEPARATE list, not
 	// folded into Integrations, since a hook has no CatalogSyncConfig and
 	// isn't in Integrations()'s own registry (see HookID's own doc
 	// comment). Ordered by the compile-time Hooks() registry.
-	Hooks []HookStatus
+	Hooks []HookStatus `json:"hooks,omitempty"`
 }
 
 // Runner owns the state a tray-resident process needs: the ingest engine
@@ -230,6 +234,10 @@ type Runner struct {
 	busy       bool
 	busyCard   string
 	busySince  time.Time
+
+	// lastProgress records the most recent progress sample from an in-flight
+	// IngestCard call (DualWrite/WriteLocal/Verify). Cleared when idle.
+	lastProgress atomic.Pointer[ingest.ProgressEvent]
 
 	// queueReader/drainer/pruner are nil-able (issue #32): nil means "not
 	// configured" (no offline.queueDbPath, or prune.enabled is false),
@@ -300,7 +308,7 @@ type Runner struct {
 // the configured ingest.cardRoots) and scratchDir (ingest.localEditRoot)
 // in the status snapshot.
 func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner {
-	return &Runner{
+	r := &Runner{
 		ingester:         ingester,
 		watchDirs:        append([]string(nil), watchDirs...),
 		scratchDir:       scratchDir,
@@ -311,6 +319,8 @@ func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner
 		hookInFlight:     map[HookID]bool{},
 		hookState:        map[HookID]*HookState{},
 	}
+	r.wireProgress(ingester)
+	return r
 }
 
 // WatchDirs returns a defensive copy of the directories currently
@@ -370,12 +380,18 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		}
 	}
 
+	r.lastProgress.Store(nil)
 	r.setBusy(true, cardPath)
-	defer r.setBusy(false, "")
+	defer func() {
+		r.lastProgress.Store(nil)
+		r.setBusy(false, "")
+	}()
 
 	r.mu.Lock()
 	ingester := r.ingester
 	r.mu.Unlock()
+
+	r.wireProgress(ingester)
 
 	summary := IngestSummary{CardPath: cardPath, StartedAt: time.Now()}
 
@@ -422,6 +438,8 @@ func (r *Runner) setBusy(busy bool, cardPath string) {
 	r.busyCard = cardPath
 	if busy {
 		r.busySince = time.Now()
+	} else {
+		r.lastProgress.Store(nil)
 	}
 }
 
@@ -929,6 +947,7 @@ func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir s
 	r.mu.Lock()
 	oldRoots := append([]string(nil), r.watchDirs...)
 	r.ingester = ingester
+	r.wireProgress(ingester)
 	r.scratchDir = scratchDir
 	if !slices.Equal(oldRoots, watchDirs) {
 		rootsChanged = true
@@ -941,6 +960,23 @@ func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir s
 	if rootsChanged {
 		r.ReconfigureDetector(r.BaseContext(), newRoots)
 	}
+}
+
+// wireProgress connects the Runner's progress callback to the underlying
+// Engine if ingester is an *ingest.Engine.
+func (r *Runner) wireProgress(ingester Ingester) {
+	if eng, ok := ingester.(*ingest.Engine); ok && eng != nil {
+		eng.Progress = func(e ingest.ProgressEvent) {
+			ev := e
+			r.lastProgress.Store(&ev)
+		}
+	}
+}
+
+// SetProgress records an ingest progress event (used by tests and progress
+// observers).
+func (r *Runner) SetProgress(ev *ingest.ProgressEvent) {
+	r.lastProgress.Store(ev)
 }
 
 // statusQueueReadTimeout bounds Status()'s QueueReader.Counts call -- see
@@ -995,6 +1031,11 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	}
 	r.mu.Unlock()
 
+	var prog *ingest.ProgressEvent
+	if busy {
+		prog = r.lastProgress.Load()
+	}
+
 	scratchNote := "not configured"
 	if scratchDir != "" {
 		scratchNote = fmt.Sprintf("%s (usage tracking not yet implemented)", scratchDir)
@@ -1021,19 +1062,20 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	}
 
 	return Status{
-		WatchDirs:     watchDirs,
-		ScratchNote:   scratchNote,
-		QueueStatus:   qs,
-		LastIngest:    last,
-		SelfUpdate:    selfUpdate,
-		Busy:          busy,
-		BusyCard:      busyCard,
-		BusySince:     busySince,
-		HandshakeOK:   lastDrain != nil && lastDrain.HandshakeOK,
-		HasDrained:    lastDrain != nil,
-		InFlightDrain: inFlightDrain,
-		InFlightPrune: inFlightPrune,
-		Integrations:  integrations,
-		Hooks:         hooks,
+		WatchDirs:      watchDirs,
+		ScratchNote:    scratchNote,
+		QueueStatus:    qs,
+		LastIngest:     last,
+		SelfUpdate:     selfUpdate,
+		Busy:           busy,
+		BusyCard:       busyCard,
+		BusySince:      busySince,
+		IngestProgress: prog,
+		HandshakeOK:    lastDrain != nil && lastDrain.HandshakeOK,
+		HasDrained:     lastDrain != nil,
+		InFlightDrain:  inFlightDrain,
+		InFlightPrune:  inFlightPrune,
+		Integrations:   integrations,
+		Hooks:          hooks,
 	}
 }
