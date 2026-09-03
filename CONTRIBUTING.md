@@ -30,9 +30,8 @@ Because `required_conversation_resolution` is on, any inline comment Hermes (or 
 reviewer) attaches to a review thread blocks merge until that thread is replied to and resolved.
 This does *not* gate on the review's overall verdict (`APPROVED`/`CHANGES_REQUESTED`) -- a
 `CHANGES_REQUESTED` review whose findings live only in the summary body, with no inline comments,
-does not block. See the `chore/add-agents-md` PR description for why that's the
-deliberate trade-off (it keeps a Hermes outage from ever wedging a merge, since a human can
-resolve threads without the bot).
+does not block. That's a deliberate trade-off (see PR #89): it keeps a Hermes outage from ever
+wedging a merge, since a human can resolve threads without the bot.
 
 Auto-review only runs for PRs from this repo, not forks -- `hermes.yml`'s `auto-review` job is
 gated on `head.repo.full_name == github.repository`, since a `pull_request` event otherwise runs

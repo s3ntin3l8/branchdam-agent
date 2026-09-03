@@ -51,6 +51,7 @@ make build-darwin-app# Assembles macOS .app bundle via tools/mkbundle
 7. **Client-Side Edge Validation**: `ValidateEdgeAttached` strictly enforces confidence `[0.50, 1.00]`, allowed relationship types, and rejects agent-supplied `reviewState` before POSTing.
 8. **Prune Safety Checks**: `prune` only operates on `queue.db` items confirmed verified by `POST /api/v1/agent/node-status`. Re-verifies local containment and disk mtime/size before deletion.
 9. **Tray Gate Serialization**: `Runner.TriggerIngest` serializes concurrent card insertions and manual clicks behind `gate`. Reconfiguration rebuilds components via `Runner.Reconfigure`.
+10. **`internal/naming.Stem` Is a Locked Port**: byte-for-byte port of branchDAM's own `naming.Stem` (conformance verified against that repo's own golden test table). Its role-suffix pattern must never gain Luminar-specific suffixes — `internal/luminar/derive.go`'s own local `stem` helper exists so `PairDerivatives` doesn't need to touch it. See `docs/luminar-catalog.md`.
 
 ## Review thread resolution
 
