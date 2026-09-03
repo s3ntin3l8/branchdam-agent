@@ -2065,3 +2065,158 @@ func TestPauseDoesNotInterruptInProgressIngest(t *testing.T) {
 		t.Error("expected Status().Paused to be true")
 	}
 }
+
+// TestStatusSurfacesLastHandshakeAt pins the F-13 follow-up: a drain
+// pass that stamps LastHandshakeAt must propagate that timestamp
+// through to Status().LastHandshakeAt so the status page can render
+// a freshness signal (issue #109 / PR #123 follow-up; the original PR
+// shipped HandshakeOK as a bool, which collapses "5 minutes ago" and
+// "3 weeks ago" into the same true).
+func TestStatusSurfacesLastHandshakeAt(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	r.TriggerDrain(context.Background())
+
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.Equal(when) {
+		t.Errorf("Status().LastHandshakeAt = %v, want %v", st.LastHandshakeAt, when)
+	}
+}
+
+// TestStatusLastHandshakeAtZeroWhenNoDrains pins the zero-value
+// sentinel: a never-drained install must surface
+// LastHandshakeAt == time.Time{} so the template's
+// {{ if not .Status.LastHandshakeAt.IsZero }} guard suppresses the
+// "last handshake" line.
+func TestStatusLastHandshakeAtZeroWhenNoDrains(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.IsZero() {
+		t.Errorf("Status().LastHandshakeAt = %v, want zero time.Time{}", st.LastHandshakeAt)
+	}
+}
+
+// TestStatusBusySinceResetsAfterIngest pins the B-17 follow-up:
+// setBusy(false, ...) must reset r.busySince to time.Time{} so
+// Status().BusySince does not return a stale timestamp from the
+// last completed ingest. Before this fix, the status page's
+// "Running… since HH:MM:SS" indicator kept showing the timestamp
+// of the last ingest long after the tray went idle.
+func TestStatusBusySinceResetsAfterIngest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, nil, "")
+
+	go r.TriggerIngest(context.Background(), "/media/a")
+	<-started
+
+	st := r.Status(UpdateStatus{})
+	if !st.Busy {
+		t.Fatalf("after ingest start: Busy=%v (should be true)", st.Busy)
+	}
+	if st.BusySince.IsZero() {
+		t.Error("after ingest start: BusySince should be non-zero")
+	}
+
+	close(release)
+
+	// Wait for the goroutine's post-IngestCard defer to run setBusy(false).
+	// Polling with a deadline is race-safe and avoids depending on
+	// blockingIngester's internal sync, which only signals start.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, since, busy := r.Busy(); !busy {
+			if !since.IsZero() {
+				t.Errorf("after ingest completion: BusySince = %v, want time.Time{} (zero)", since)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_, since, busy := r.Busy()
+	t.Errorf("timed out waiting for ingest to complete: busy=%v since=%v", busy, since)
+}
+
+// TestStatusPreservesLastHandshakeAtAcrossFailedPass is the regression
+// guard for the TriggerDrain carry-forward logic: when a drain pass
+// with a failed handshake follows one that succeeded, the previous
+// successful LastHandshakeAt must be preserved on the Status surface
+// (issue #109 / audit F-13 follow-up; the "5s blip must not erase
+// 'successful 4h ago'" invariant that the carry-forward logic
+// exists to defend). The test pins two properties:
+//
+//  1. A single failure after a success preserves the prior stamp.
+//  2. CONSECUTIVE failures after a success also preserve the prior
+//     stamp (Hermes review on PR #148: keying the carry-forward off
+//     r.lastDrain.HandshakeOK only survives ONE failure, because
+//     after the carry-forward the prior summary's HandshakeOK is
+//     false, so a second failure would drop the stamp -- a 10s+
+//     outage at a 5s drain cadence would otherwise wipe the
+//     freshness signal the field exists to defend).
+//  3. An initial failure (no prior successful stamp) stays at the
+//     zero sentinel so the template's "never completed a successful
+//     handshake" line stays correct.
+func TestStatusPreservesLastHandshakeAtAcrossFailedPass(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	t.Run("single_failure_after_success_preserves_stamp", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+
+		fdSuccess := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+		r.SetQueueDeps(nil, fdSuccess, nil)
+		r.TriggerDrain(context.Background())
+
+		st := r.Status(UpdateStatus{})
+		if !st.LastHandshakeAt.Equal(when) {
+			t.Fatalf("after successful pass: LastHandshakeAt = %v, want %v", st.LastHandshakeAt, when)
+		}
+
+		fdFail := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+		r.SetQueueDeps(nil, fdFail, nil)
+		r.TriggerDrain(context.Background())
+
+		st = r.Status(UpdateStatus{})
+		if !st.LastHandshakeAt.Equal(when) {
+			t.Errorf("after single failed pass: LastHandshakeAt = %v, want %v (carry-forward of prior success)",
+				st.LastHandshakeAt, when)
+		}
+	})
+
+	t.Run("consecutive_failures_after_success_preserve_stamp", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+
+		fdSuccess := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+		r.SetQueueDeps(nil, fdSuccess, nil)
+		r.TriggerDrain(context.Background())
+
+		fdFail := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+		r.SetQueueDeps(nil, fdFail, nil)
+		r.TriggerDrain(context.Background())
+		r.TriggerDrain(context.Background())
+		r.TriggerDrain(context.Background())
+
+		st := r.Status(UpdateStatus{})
+		if !st.LastHandshakeAt.Equal(when) {
+			t.Errorf("after three consecutive failed passes: LastHandshakeAt = %v, want %v (carry-forward must chain across multiple failures)",
+				st.LastHandshakeAt, when)
+		}
+	})
+
+	t.Run("initial_failure_stays_at_zero", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+
+		fdFail := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+		r.SetQueueDeps(nil, fdFail, nil)
+		r.TriggerDrain(context.Background())
+
+		st := r.Status(UpdateStatus{})
+		if !st.LastHandshakeAt.IsZero() {
+			t.Errorf("after initial failed pass with no prior success: LastHandshakeAt = %v, want time.Time{} (never completed a successful handshake)",
+				st.LastHandshakeAt)
+		}
+	})
+}

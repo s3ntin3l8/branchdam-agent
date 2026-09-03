@@ -680,16 +680,23 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 	}
 
 	r.mu.Lock()
-	// Preserve the prior successful LastHandshakeAt across a failed
-	// drain pass: the Drainer leaves summary.LastHandshakeAt zero when
-	// HandshakeOK is false, but overwriting r.lastDrain with that zero
-	// would erase "successful 4h ago" the moment a single 5s tick's
-	// handshake blip happens, which is exactly the freshness signal the
-	// status page's "last handshake" line is meant to preserve. Only
-	// carry forward when the previous summary was itself a successful
-	// one, so an initial failure stays at zero ("never completed a
-	// successful handshake") per DrainSummary.LastHandshakeAt's doc.
-	if summary.LastHandshakeAt.IsZero() && r.lastDrain != nil && r.lastDrain.HandshakeOK {
+	// Preserve the prior successful LastHandshakeAt across failed
+	// drain passes: the Drainer leaves summary.LastHandshakeAt zero
+	// when HandshakeOK is false, but overwriting r.lastDrain with
+	// that zero would erase "successful 4h ago" the moment a 5s
+	// tick's handshake blip happens, which is exactly the freshness
+	// signal the status page's "last handshake" line is meant to
+	// preserve. Key off the preserved stamp's non-zero state, not
+	// the prior pass's HandshakeOK: at a 5s drain cadence any outage
+	// >~10s would otherwise wipe the signal after a single recovery
+	// blip already preserved it once (Hermes review on PR #148:
+	// keying on r.lastDrain.HandshakeOK only survives ONE
+	// consecutive failure, because after the carry-forward the prior
+	// summary's HandshakeOK is false, so a second failure drops the
+	// stamp). Initial failures (no prior successful stamp) stay at
+	// zero -- the "never completed a successful handshake" sentinel
+	// per DrainSummary.LastHandshakeAt's doc.
+	if summary.LastHandshakeAt.IsZero() && r.lastDrain != nil && !r.lastDrain.LastHandshakeAt.IsZero() {
 		summary.LastHandshakeAt = r.lastDrain.LastHandshakeAt
 	}
 	r.lastDrain = &summary
