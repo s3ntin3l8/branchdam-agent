@@ -64,6 +64,7 @@
     {{else}}
     <p><span class="fail">last drain: handshake failed</span></p>
     {{end}}
+    {{if not .Status.LastHandshakeAt.IsZero}}<p class="stub">last handshake: {{since .Status.LastHandshakeAt}} ago</p>{{end}}
   </section>
 
   <section>
