@@ -139,7 +139,7 @@ func TestTriggerIngestOfflineFallbackUnconfiguredShowsError(t *testing.T) {
 	if summary.Err == nil {
 		t.Fatal("expected summary.Err when NAS unreachable and queue not configured")
 	}
-	wantMsg := "NAS unreachable. Set offline.queueDbPath to enable field ingest."
+	wantMsg := "NAS unreachable. Set offline.queueDbPath to enable field ingest"
 	if summary.Err.Error() != wantMsg {
 		t.Errorf("got err %q, want %q", summary.Err.Error(), wantMsg)
 	}

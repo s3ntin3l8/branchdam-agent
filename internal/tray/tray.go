@@ -536,7 +536,7 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 				}
 			}
 		}
-	}
+ 	}
 
 	r.mu.Lock()
 	r.last = &summary

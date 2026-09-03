@@ -641,7 +641,7 @@ func probeArchive(ctx context.Context, archiveRoot, baseURL string, uploadStream
 		if err != nil {
 			return false
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return resp.StatusCode == http.StatusOK
 	}
 
