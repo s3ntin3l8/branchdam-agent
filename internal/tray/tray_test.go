@@ -1492,6 +1492,170 @@ func TestDetectorWatchForgetsSkippedOnRemoval(t *testing.T) {
 	r.StopDetector()
 }
 
+func TestRunnerPauseDefaultsToFalse(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	if r.Paused() {
+		t.Error("expected Paused() to default to false")
+	}
+	st := r.Status(UpdateStatus{})
+	if st.Paused {
+		t.Error("expected Status().Paused to default to false")
+	}
+}
+
+func TestRunnerSetPausedAndCallback(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	var gotState bool
+	var called int
+	r.SetOnPauseChange(func(paused bool) {
+		gotState = paused
+		called++
+	})
+
+	r.SetPaused(true)
+	if !r.Paused() {
+		t.Error("expected Paused() to be true after SetPaused(true)")
+	}
+	if called != 1 || !gotState {
+		t.Errorf("callback called=%d, gotState=%v, want 1, true", called, gotState)
+	}
+
+	r.SetPaused(false)
+	if r.Paused() {
+		t.Error("expected Paused() to be false after SetPaused(false)")
+	}
+	if called != 2 || gotState {
+		t.Errorf("callback called=%d, gotState=%v, want 2, false", called, gotState)
+	}
+}
+
+func TestTriggerIngestSkipsWhenPaused(t *testing.T) {
+	fi := &fakeIngester{result: ingest.CardResult{Files: []ingest.FileResult{{SourcePath: "a.jpg"}}}}
+	r := NewRunner(fi, nil, "")
+	r.SetPaused(true)
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+	if summary.CardPath != "/media/card" {
+		t.Errorf("summary.CardPath = %q, want /media/card", summary.CardPath)
+	}
+	if len(fi.calls) != 0 {
+		t.Errorf("expected 0 IngestCard calls when paused, got %d", len(fi.calls))
+	}
+	if summary.Submitted != 0 || summary.Failed != 0 {
+		t.Errorf("got %+v, expected 0 submitted/failed", summary)
+	}
+
+	st := r.Status(UpdateStatus{})
+	if st.LastIngest != nil {
+		t.Errorf("expected LastIngest to be nil after skipped TriggerIngest, got %+v", st.LastIngest)
+	}
+}
+
+func TestTriggerDrainSkipsWhenPaused(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 2}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	r.SetPaused(true)
+	summary, ran := r.TriggerDrain(context.Background())
+	if ran {
+		t.Error("expected TriggerDrain to return ran=false when paused")
+	}
+	if summary != (DrainSummary{}) {
+		t.Errorf("expected empty DrainSummary when paused, got %+v", summary)
+	}
+	if fd.calls != 0 {
+		t.Errorf("expected 0 Drain calls when paused, got %d", fd.calls)
+	}
+
+	// When resumed, TriggerDrain works normally
+	r.SetPaused(false)
+	summary, ran = r.TriggerDrain(context.Background())
+	if !ran || summary.NodeCreatedSent != 2 {
+		t.Errorf("expected TriggerDrain to run after resume, got ran=%v, summary=%+v", ran, summary)
+	}
+	if fd.calls != 1 {
+		t.Errorf("expected 1 Drain call, got %d", fd.calls)
+	}
+}
+
+func TestTriggerPruneSkipsWhenPaused(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fp := &fakePruner{summary: PruneSummary{Pruned: 3}}
+	r.SetQueueDeps(nil, nil, fp)
+
+	r.SetPaused(true)
+	summary, ran := r.TriggerPrune(context.Background())
+	if ran {
+		t.Error("expected TriggerPrune to return ran=false when paused")
+	}
+	if summary != (PruneSummary{}) {
+		t.Errorf("expected empty PruneSummary when paused, got %+v", summary)
+	}
+	if fp.calls != 0 {
+		t.Errorf("expected 0 Prune calls when paused, got %d", fp.calls)
+	}
+
+	// When resumed, TriggerPrune works normally
+	r.SetPaused(false)
+	summary, ran = r.TriggerPrune(context.Background())
+	if !ran || summary.Pruned != 3 {
+		t.Errorf("expected TriggerPrune to run after resume, got ran=%v, summary=%+v", ran, summary)
+	}
+	if fp.calls != 1 {
+		t.Errorf("expected 1 Prune call, got %d", fp.calls)
+	}
+}
+
+func TestReconfigureDetectorDropsEventsWhenPaused(t *testing.T) {
+	fi := &fakeIngester{}
+	dir := t.TempDir()
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+	r.SetPaused(true)
+
+	var hit int32
+	r.SetOnCardIngested(func() {
+		atomic.AddInt32(&hit, 1)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{dir})
+
+	cardDir1 := filepath.Join(dir, "CARD1")
+	if err := os.Mkdir(cardDir1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if atomic.LoadInt32(&hit) > 0 || len(fi.calls) > 0 {
+		t.Errorf("expected no ingest while paused, got hit=%d, calls=%d", hit, len(fi.calls))
+	}
+
+	// Resume ingest
+	r.SetPaused(false)
+
+	cardDir2 := filepath.Join(dir, "CARD2")
+	if err := os.Mkdir(cardDir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 50; i++ {
+		if atomic.LoadInt32(&hit) > 0 && len(fi.calls) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if atomic.LoadInt32(&hit) == 0 || len(fi.calls) == 0 {
+		t.Errorf("expected ingest to resume after unpausing, got hit=%d, calls=%d", hit, len(fi.calls))
+	}
+
+	r.StopDetector()
+}
+
 func TestRunnerIngestProgressRecordedAndCleared(t *testing.T) {
 	fi := &fakeIngester{result: ingest.CardResult{Files: []ingest.FileResult{{SourcePath: "a.jpg"}}}}
 	r := NewRunner(fi, nil, "")
@@ -1617,5 +1781,41 @@ func TestFormatETA(t *testing.T) {
 		if got := formatETA(tc.d); got != tc.want {
 			t.Errorf("formatETA(%v) = %q, want %q", tc.d, got, tc.want)
 		}
+	}
+}
+
+func TestPauseDoesNotInterruptInProgressIngest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, nil, "")
+
+	done := make(chan IngestSummary, 1)
+	go func() {
+		done <- r.TriggerIngest(context.Background(), "/media/card")
+	}()
+	<-started
+
+	// Set paused while ingest is in-flight
+	r.SetPaused(true)
+
+	// Ingest should still be marked busy
+	if _, _, busy := r.Busy(); !busy {
+		t.Error("expected in-flight ingest to remain busy")
+	}
+
+	// Release the in-flight ingest
+	close(release)
+	summary := <-done
+
+	if summary.CardPath != "/media/card" {
+		t.Errorf("got summary.CardPath = %q, want /media/card", summary.CardPath)
+	}
+	st := r.Status(UpdateStatus{})
+	if st.LastIngest == nil {
+		t.Error("expected LastIngest to be recorded for the in-progress ingest")
+	}
+	if !st.Paused {
+		t.Error("expected Status().Paused to be true")
 	}
 }

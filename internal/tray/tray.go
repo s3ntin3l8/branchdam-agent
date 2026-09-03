@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -154,6 +155,8 @@ type Status struct {
 	QueueStatus QueueStatus    `json:"queueStatus"`
 	LastIngest  *IngestSummary `json:"lastIngest,omitempty"`
 	SelfUpdate  UpdateStatus   `json:"selfUpdate"`
+	// Paused reflects Runner.Paused() (issue #83) -- manual ingest pause.
+	Paused bool `json:"paused"`
 	// Busy and BusyCard reflect Runner.Busy() -- shown on the status page
 	// and used by the tray menu to disable "Install and restart" while an
 	// ingest is running (see Runner.TryLockIdle for the actual gate this
@@ -222,18 +225,23 @@ type Runner struct {
 	// blocked by (or block) an ingest or a self-update apply.
 	drainMu sync.Mutex
 
+	// paused tracks whether manual ingest pause is active (shoot-mode, issue #83).
+	// Session-only, never persisted.
+	paused atomic.Bool
+
 	// mu guards every field below, including ingester/watchDirs/
 	// scratchDir -- unlike before issue #31's settings menu, these are no
 	// longer set once at construction and left alone; Reconfigure can
 	// swap them at any time the tray is running.
-	mu         sync.Mutex
-	ingester   Ingester
-	watchDirs  []string
-	scratchDir string // LocalEditRoot -- described, not measured; see Status().
-	last       *IngestSummary
-	busy       bool
-	busyCard   string
-	busySince  time.Time
+	mu            sync.Mutex
+	ingester      Ingester
+	watchDirs     []string
+	scratchDir    string // LocalEditRoot -- described, not measured; see Status().
+	last          *IngestSummary
+	busy          bool
+	busyCard      string
+	busySince     time.Time
+	onPauseChange func(paused bool)
 
 	// lastProgress records the most recent progress sample from an in-flight
 	// IngestCard call (DualWrite/WriteLocal/Verify). Cleared when idle.
@@ -323,6 +331,29 @@ func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner
 	return r
 }
 
+// Paused reports whether manual ingest pause is active (shoot-mode, issue #83).
+func (r *Runner) Paused() bool {
+	return r.paused.Load()
+}
+
+// SetPaused updates the manual ingest pause state and invokes onPauseChange if registered.
+func (r *Runner) SetPaused(v bool) {
+	r.paused.Store(v)
+	r.mu.Lock()
+	cb := r.onPauseChange
+	r.mu.Unlock()
+	if cb != nil {
+		cb(v)
+	}
+}
+
+// SetOnPauseChange registers a callback invoked when the pause state changes.
+func (r *Runner) SetOnPauseChange(fn func(paused bool)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onPauseChange = fn
+}
+
 // WatchDirs returns a defensive copy of the directories currently
 // described as watched -- run_supported.go's menu rendering and its
 // "Ingest now" worker both read this rather than a raw field, since
@@ -335,9 +366,13 @@ func (r *Runner) WatchDirs() []string {
 
 // TriggerIngest runs one IngestCard pass over cardPath through the same
 // Engine the headless `ingest` subcommand uses, records the outcome, and
-// returns it. Safe to call from a menu-click handler -- blocks until any
-// other in-flight ingest (from either path) has finished, via gate.
-// Manual triggers bypass the confirmation dialog and session skip set.
+// returns it. Safe to call from a menu-click handler or from the
+// card-detection watch loop -- both paths in run_supported.go go through
+// this single method, and it now also serializes them: a call blocks
+// until any other in-flight ingest (from either path) has finished, via
+// gate. Manual triggers bypass the confirmation dialog and session skip set.
+// When paused (issue #83), triggerIngest returns early without acquiring gate
+// so both manual and detection-driven calls drop the volume.
 func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSummary {
 	return r.triggerIngest(ctx, cardPath, false)
 }
@@ -351,6 +386,11 @@ func (r *Runner) TriggerDetectedIngest(ctx context.Context, cardPath string) Ing
 }
 
 func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection bool) IngestSummary {
+	if r.paused.Load() {
+		log.Printf("tray: ingest paused, skipping %s", cardPath)
+		return IngestSummary{CardPath: cardPath}
+	}
+
 	r.gate.Lock()
 	defer r.gate.Unlock()
 
@@ -492,10 +532,14 @@ func (r *Runner) SetQueueDeps(reader QueueReader, drainer Drainer, pruner Pruner
 // next-attempt timestamps in queue.db are the real backoff), so skipping a
 // tick outright when a previous pass is still running -- rather than
 // queuing behind it -- is always safe and is what keeps concurrent passes
-// from ever piling up. ran=false covers both "not configured" and "already
-// running"; the caller (a timer tick or a menu click) treats both the same
-// way: nothing to show beyond what Status() already reports.
+// from ever piling up. ran=false covers both "not configured", "already
+// running", and "ingest paused"; the caller (a timer tick or a menu click)
+// treats all three the same way: nothing to show beyond what Status()
+// already reports.
 func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bool) {
+	if r.paused.Load() {
+		return DrainSummary{}, false
+	}
 	if !r.drainMu.TryLock() {
 		return DrainSummary{}, false
 	}
@@ -543,6 +587,9 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 // `prune -watch` running standalone never had to guard against. Skipping
 // a busy tick is safe at prune's own (much longer) cadence.
 func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bool) {
+	if r.paused.Load() {
+		return PruneSummary{}, false
+	}
 	release, ok := r.TryLockIdle()
 	if !ok {
 		return PruneSummary{}, false
@@ -883,6 +930,9 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 			for _, path := range diff.Removed {
 				r.ForgetSkipped(path)
 			}
+			if r.paused.Load() {
+				return
+			}
 			for _, path := range diff.Inserted {
 				r.TriggerDetectedIngest(dctx, path)
 				r.mu.Lock()
@@ -1067,6 +1117,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		QueueStatus:    qs,
 		LastIngest:     last,
 		SelfUpdate:     selfUpdate,
+		Paused:         r.paused.Load(),
 		Busy:           busy,
 		BusyCard:       busyCard,
 		BusySince:      busySince,

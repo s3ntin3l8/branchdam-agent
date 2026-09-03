@@ -195,6 +195,9 @@
 
   <section id="ingest-status">
     <h2>Ingest status</h2>
+    {{if .Status.Paused}}
+    <p class="stub">Ingest paused by user</p>
+    {{end}}
     {{if .Status.Busy}}
     <p>busy: ingesting <code>{{.Status.BusyCard}}</code> (since {{since .Status.BusySince}} ago)</p>
     {{if .Status.IngestProgress}}
@@ -205,7 +208,7 @@
     </div>
     {{end}}
     {{end}}
-    {{else}}
+    {{else if not .Status.Paused}}
     <p>idle</p>
     {{end}}
   </section>

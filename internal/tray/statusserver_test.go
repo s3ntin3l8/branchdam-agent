@@ -589,3 +589,19 @@ func TestHandleIndexAcceptJSON(t *testing.T) {
 		t.Errorf("got Content-Type %q, want application/json", ct)
 	}
 }
+
+func TestHandleIndexRendersPaused(t *testing.T) {
+	s := &StatusServer{StatusFunc: func() Status {
+		return Status{
+			Paused: true,
+		}
+	}}
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "Ingest paused by user") {
+		t.Errorf("response body missing 'Ingest paused by user' when Paused=true\n---\n%s", body)
+	}
+}
