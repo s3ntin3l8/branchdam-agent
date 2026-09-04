@@ -2725,3 +2725,132 @@ func TestCrossRestartLastHandshakeAtSurvivesViaRuntimeFile(t *testing.T) {
 		t.Error("expected HandshakeOK=false after cross-restart seed (current-session signal must come from a real drain, not a persisted stamp)")
 	}
 }
+
+func TestAutoEjectOnSuccessfulIngest(t *testing.T) {
+	fi := &fakeIngester{result: ingest.CardResult{Files: []ingest.FileResult{
+		{SourcePath: "/media/CANON R5/DCIM/100CANON/IMG_0001.JPG"},
+	}}}
+	r := NewRunner(fi, []string{"/media"}, "/scratch")
+	r.SetAutoEject(true)
+
+	var ejectedPath string
+	r.SetEjectFunc(func(mountPath string) error {
+		ejectedPath = mountPath
+		return nil
+	})
+
+	var notifTitle, notifMsg string
+	r.SetNotifier(func(title, message string) {
+		notifTitle = title
+		notifMsg = message
+	})
+
+	summary := r.TriggerIngest(context.Background(), "/media/CANON R5")
+	if !summary.OK() {
+		t.Fatalf("expected summary.OK()=true, got %+v", summary)
+	}
+
+	if ejectedPath != "/media/CANON R5" {
+		t.Errorf("expected ejectedPath = %q, got %q", "/media/CANON R5", ejectedPath)
+	}
+	if notifTitle != "branchDAM Agent" {
+		t.Errorf("expected notifTitle = %q, got %q", "branchDAM Agent", notifTitle)
+	}
+	if notifMsg != "CANON R5 ejected — safe to remove" {
+		t.Errorf("expected notifMsg = %q, got %q", "CANON R5 ejected — safe to remove", notifMsg)
+	}
+}
+
+func TestAutoEjectFailureNotification(t *testing.T) {
+	fi := &fakeIngester{result: ingest.CardResult{Files: []ingest.FileResult{
+		{SourcePath: "/media/SONY/DCIM/100MSDCF/DSC0001.ARW"},
+	}}}
+	r := NewRunner(fi, []string{"/media"}, "/scratch")
+	r.SetAutoEject(true)
+
+	r.SetEjectFunc(func(mountPath string) error {
+		return errors.New("device busy")
+	})
+
+	var notifTitle, notifMsg string
+	r.SetNotifier(func(title, message string) {
+		notifTitle = title
+		notifMsg = message
+	})
+
+	summary := r.TriggerIngest(context.Background(), "/media/SONY")
+	if !summary.OK() {
+		t.Fatalf("expected summary.OK()=true, got %+v", summary)
+	}
+
+	if notifTitle != "branchDAM Agent" {
+		t.Errorf("expected notifTitle = %q, got %q", "branchDAM Agent", notifTitle)
+	}
+	if notifMsg != "Eject failed — please eject manually" {
+		t.Errorf("expected notifMsg = %q, got %q", "Eject failed — please eject manually", notifMsg)
+	}
+}
+
+func TestAutoEjectSkippedOnIngestErrors(t *testing.T) {
+	fi := &fakeIngester{result: ingest.CardResult{Files: []ingest.FileResult{
+		{SourcePath: "/media/CARD/IMG_0001.JPG", Err: errors.New("hash mismatch")},
+	}}}
+	r := NewRunner(fi, []string{"/media"}, "/scratch")
+	r.SetAutoEject(true)
+
+	ejected := false
+	r.SetEjectFunc(func(mountPath string) error {
+		ejected = true
+		return nil
+	})
+
+	var notifMsg string
+	r.SetNotifier(func(title, message string) {
+		notifMsg = message
+	})
+
+	summary := r.TriggerIngest(context.Background(), "/media/CARD")
+	if summary.OK() {
+		t.Fatal("expected summary.OK()=false on ingest error")
+	}
+
+	if ejected {
+		t.Error("expected card NOT to be ejected when ingest has errors")
+	}
+	if notifMsg != "" {
+		t.Errorf("expected no notification on failed ingest, got %q", notifMsg)
+	}
+}
+
+func TestAutoEjectDisabledByDefault(t *testing.T) {
+	fi := &fakeIngester{result: ingest.CardResult{Files: []ingest.FileResult{
+		{SourcePath: "/media/CARD/IMG_0001.JPG"},
+	}}}
+	r := NewRunner(fi, []string{"/media"}, "/scratch")
+	if r.AutoEject() {
+		t.Error("expected AutoEject()=false by default")
+	}
+
+	ejected := false
+	r.SetEjectFunc(func(mountPath string) error {
+		ejected = true
+		return nil
+	})
+
+	var notifMsg string
+	r.SetNotifier(func(title, message string) {
+		notifMsg = message
+	})
+
+	summary := r.TriggerIngest(context.Background(), "/media/CARD")
+	if !summary.OK() {
+		t.Fatalf("expected summary.OK()=true, got %+v", summary)
+	}
+
+	if ejected {
+		t.Error("expected card NOT to be ejected when autoEject is false")
+	}
+	if notifMsg != "1 photo imported from CARD" {
+		t.Errorf("expected standard import notification, got %q", notifMsg)
+	}
+}

@@ -37,6 +37,7 @@ type settingsMenu struct {
 	requireUnbuffered    *systray.MenuItem
 	requireDCIM          *systray.MenuItem
 	pauseUploadOnMetered *systray.MenuItem
+	autoEject            *systray.MenuItem
 	serverURL            *systray.MenuItem
 	apiKey               *systray.MenuItem
 	cardRoots            *systray.MenuItem
@@ -70,6 +71,7 @@ func newSettingsMenu(settings Settings, actionCh chan<- menuAction) *settingsMen
 	sm.requireUnbuffered = parent.AddSubMenuItemCheckbox("Require unbuffered verify", "Fail ingest instead of silently falling back to a buffered re-read", sv.RequireUnbuffered)
 	sm.requireDCIM = parent.AddSubMenuItemCheckbox("Require DCIM folder", "Skip volumes that do not contain a DCIM folder", sv.RequireDCIM)
 	sm.pauseUploadOnMetered = parent.AddSubMenuItemCheckbox("Pause upload on metered connection", "Pause queue drain and upload streaming when on a metered or hotspot network", sv.PauseUploadOnMetered)
+	sm.autoEject = parent.AddSubMenuItemCheckbox("Auto-eject after ingest", "Safely unmount/eject the card volume after verified ingest", sv.AutoEject)
 
 	parent.AddSeparator()
 
@@ -132,6 +134,9 @@ func (sm *settingsMenu) dispatch() {
 		case <-sm.pauseUploadOnMetered.ClickedCh:
 			v := !sm.pauseUploadOnMetered.Checked()
 			sm.send(func() error { return sm.settings.SetBool("ingest.pauseUploadOnMetered", v) })
+		case <-sm.autoEject.ClickedCh:
+			v := !sm.autoEject.Checked()
+			sm.send(func() error { return sm.settings.SetBool("ingest.autoEject", v) })
 		case <-sm.serverURL.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldServerBaseURL); return err })
 		case <-sm.apiKey.ClickedCh:
@@ -169,6 +174,7 @@ func (sm *settingsMenu) sync(sv SettingsView) {
 	setChecked(sm.requireUnbuffered, sv.RequireUnbuffered)
 	setChecked(sm.requireDCIM, sv.RequireDCIM)
 	setChecked(sm.pauseUploadOnMetered, sv.PauseUploadOnMetered)
+	setChecked(sm.autoEject, sv.AutoEject)
 
 	sm.apiKey.SetTitle(apiKeyTitle(sv.ServerAPIKeySet))
 

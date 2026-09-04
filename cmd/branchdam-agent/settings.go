@@ -151,6 +151,7 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		RequireUnbuffered:          cfg.Ingest.RequireUnbuffered,
 		RequireDCIM:                cfg.Ingest.RequireDCIM,
 		PauseUploadOnMetered:       cfg.Ingest.PauseUploadOnMetered,
+		AutoEject:                  cfg.Ingest.AutoEject,
 		ServerBaseURL:              cfg.Server.BaseURL,
 		ServerAPIKeySet:            cfg.Server.APIKey != "",
 		ArchiveRoot:                cfg.Ingest.ArchiveRoot,
@@ -235,6 +236,8 @@ func (s *configSettings) validateBoolChange(key string, v bool) error {
 		cfg.Ingest.RequireDCIM = v
 	case "ingest.pauseUploadOnMetered":
 		cfg.Ingest.PauseUploadOnMetered = v
+	case "ingest.autoEject":
+		cfg.Ingest.AutoEject = v
 	default:
 		// config.Patch does no schema validation of its own -- these three
 		// switches (this one plus validateIntChange/validateStringChange
@@ -598,6 +601,7 @@ func (s *configSettings) reload() error {
 	s.runner.SetDetectorInterval(time.Duration(newCfg.Ingest.PollIntervalSecs) * time.Second)
 	s.runner.SetDetectorRequireDCIM(newCfg.Ingest.RequireDCIM)
 	s.runner.SetPauseUploadOnMetered(newCfg.Ingest.PauseUploadOnMetered)
+	s.runner.SetAutoEject(newCfg.Ingest.AutoEject)
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
 
 	// Rebuild every integration syncer against the freshly reloaded

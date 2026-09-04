@@ -48,6 +48,7 @@ type SettingsView struct {
 	RequireUnbuffered    bool
 	RequireDCIM          bool
 	PauseUploadOnMetered bool
+	AutoEject            bool
 
 	ServerBaseURL   string
 	ServerAPIKeySet bool
@@ -199,7 +200,7 @@ type Settings interface {
 	//
 	// Fields the issue (#110) lists as future graduates but that do
 	// not yet exist in the Config struct (no M5 sub-issue has landed):
-	// ingest.autoEject (#87), ingest.requireDCIM (#81),
+	// ingest.requireDCIM (#81),
 	// ingest.pauseUploadOnMetered (#84),
 	// ingest.autoImportPaths (#79), tray.confirmDestructive (E3 #S2-14).
 	// Each appears in docs/tray-settings-inventory.md's table as a

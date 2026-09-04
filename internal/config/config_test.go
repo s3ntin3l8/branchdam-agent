@@ -858,3 +858,39 @@ ingest:
 		t.Error("expected RequireDCIM to be true")
 	}
 }
+
+func TestLoadAutoEjectDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  baseUrl: http://x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Ingest.AutoEject {
+		t.Error("expected default AutoEject to be false")
+	}
+}
+
+func TestLoadAutoEjectOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+ingest:
+  autoEject: true
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Ingest.AutoEject {
+		t.Error("expected AutoEject to be true")
+	}
+}
