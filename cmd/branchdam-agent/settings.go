@@ -619,11 +619,14 @@ func (s *configSettings) reload() error {
 	// detect's result until the next tray restart, even though the
 	// installer's own view has changed. Also push the new scriptsDir
 	// into the installer so a subsequent TriggerHookInstall targets the
-	// new directory rather than the startup-captured one.
+	// new directory rather than the startup-captured one. Set first,
+	// then read candidateDirs() from the installer (single source of
+	// truth) -- avoids a parallel resolveHookCandidateDirs call here
+	// that could drift from the installer's own view if scriptsDir
+	// handling ever grows a normalization step.
 	if resolveInstaller != nil && newCfg.Integrations.Resolve.ScriptsDir != oldResolveScriptsDir {
-		newDirs := resolveHookCandidateDirs(newCfg.Integrations.Resolve.ScriptsDir)
 		resolveInstaller.SetScriptsDir(newCfg.Integrations.Resolve.ScriptsDir)
-		detected := resolvehook.Detect(newDirs, resolve.FileName, resolve.SourceSHA256)
+		detected := resolvehook.Detect(resolveInstaller.candidateDirs(), resolve.FileName, resolve.SourceSHA256)
 		s.runner.RefreshHookState(tray.HookResolve, tray.HookState{
 			At:        time.Now(),
 			Dir:       detected.Dir,

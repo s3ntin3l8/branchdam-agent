@@ -1084,6 +1084,15 @@ func TestConfigSettingsReloadRefreshesHookStateOnScriptsDirChange(t *testing.T) 
 	if got := resolveInstaller.scriptsDir; got != newDir {
 		t.Errorf("installer.scriptsDir = %q, want %q (reload() must update the installer on a settings change)", got, newDir)
 	}
+	// Post-reload: the installer's candidateDirs() must reflect /new as
+	// the single override entry -- pins the single-source-of-truth
+	// refactor (PR #158 re-review, cosmetic suggestion): reload() reads
+	// candidateDirs() off the installer after SetScriptsDir rather than
+	// computing it in parallel. A future change that adds a normalization
+	// step to scriptsDir handling must land in one place, not two.
+	if got := resolveInstaller.candidateDirs(); !slices.Equal(got, []string{newDir}) {
+		t.Errorf("installer.candidateDirs() = %v, want [%q] (the installer's getter is the single source of truth after SetScriptsDir)", got, newDir)
+	}
 
 	// Post-reload: Runner.hookState must reflect a fresh Detect against
 	// /new. /new has no install, so we expect Installed=false. Without
