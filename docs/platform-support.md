@@ -524,3 +524,69 @@ to say "verified."
 10. DaVinci Resolve hook menu: same as Windows item 10 -- additionally confirm "Reveal Scripts
     folder" opens the per-user path via `osascript`/Finder, including when the tray is launched by
     launchd rather than from Finder.
+
+### M5 additions (epic #77, #78–#88)
+
+The M5 work landed several new tray behaviors whose code paths are covered by
+unit tests but whose rendering / OS-integration paths have never been exercised
+on real hardware. Add these checks to the Windows and macOS lists above as
+appropriate:
+
+11. **Settings menu — M5 dialogs (#78, #79, #81):** with a config already in
+    place, open the tray's Settings submenu and trigger each of the new M5
+    items -- "Watch folders…" (multi-value directory picker for `cardRoots`),
+    "Allowed extensions…" (comma-separated text for the extension allow-list),
+    and the autoImportPaths list-editing dialog (reached via the card-detection
+    confirmation flow's "Always auto-import"). Confirm each dialog renders
+    correctly while systray's own message pump is already running (the
+    materially-different scenario from item 2's pre-`systray.Run` startup
+    dialog). Also: trigger a card detection with the dialog path, click
+    "Skip this time" -- confirm a re-insert re-shows the dialog; click
+    "Always auto-import" -- confirm the volume is now in the allow-list and
+    re-insert bypasses the dialog.
+12. **Settings menu — M5 native checkboxes (#81, #83, #84, #87):** with the
+    same config in place, toggle "Require DCIM folder" (insert a USB stick
+    with no DCIM folder -- confirm not detected), "Auto-eject after ingest"
+    (insert a card -- confirm a successful ingest unmounts/ejects the volume
+    and surfaces an OS notification; induce an ingest error -- confirm the
+    card is NOT ejected on partial ingest), "Pause upload on metered
+    connection" (toggle on, then on a real hotspot/iPhone-tethered network
+    confirm queue drain is skipped and the local edit copy still proceeds),
+    and "Pause ingest" (toggle on, insert a card -- confirm no ingest starts
+    AND no dialog appears; toggle off, confirm a re-insert triggers the
+    dialog again).
+13. **Live ingest progress in tooltip + status page (#85):** insert a card,
+    open the tray menu -- confirm the tooltip updates with the per-file
+    progress line within one tick (path, bytes done / total, phase, elapsed
+    time) and the status page renders the same data under the busy-card
+    header. Confirm the tooltip clears (reverts to the default "branchDAM
+    agent" string) within one tick of ingest completion.
+14. **Pre-flight BLAKE3 dedup (#88):** ingest a card. Then re-insert the same
+    card. Confirm the second ingest reports every file as
+    `duplicate: already in library as node X` with zero bytes written to
+    `archiveRoot`. Then disconnect from the server (simulate offline: pull
+    the network cable / disable Wi-Fi), re-insert the card -- confirm the
+    pre-flight times out within 5s (`PreflightTimeoutSecs`), the ingest
+    proceeds normally, and the server-side dedup fires on the next
+    `PostNodeCreated` once connectivity is restored.
+15. **Safe eject after verified ingest (#87):** with `autoEject: true` set,
+    insert a camera card -- confirm the volume unmounts/ejects after the
+    verified ingest completes and an OS notification appears. On Windows
+    specifically, confirm the tray surfaces `FSCTL_LOCK_VOLUME` +
+    `CM_Request_Device_Eject` cleanly (no "device in use" dialog from the
+    OS -- the card must have been closed by `Verify`'s unbuffered re-open
+    before the eject call). On macOS, confirm `diskutil unmountDisk` reports
+    `Volume X on diskY unmounted` and the card disappears from Finder. On
+    Linux, confirm the udev eject path runs (visible in
+    `%XDG_STATE_HOME%/branchdam-agent/agent.log`) and the card's mount point
+    is gone from `mount`.
+
+All M5 items above are also pinned by tests that run on Linux CI --
+`internal/ingest/offline_test.go::TestIngestFileOfflineDedupTimeout` for
+#88's offline timeout fall-open, `internal/tray/tray_test.go::TestAutoEject*`
+for #87, `internal/tray/run_supported_test.go`-shaped (or, on Linux, the
+`run_unsupported_test.go` counterpart) coverage for #83 / #84's gate logic,
+`internal/ingest/progress_test.go::Test*Progress` for #85, and the unit
+tests called out in AGENTS.md invariant #17 for the rest. What this
+checklist adds is the real-OS-integration half that no test on Linux CI
+can substitute for.
