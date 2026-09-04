@@ -16,7 +16,7 @@ available to the repo owner.
 
 `required_conversation_resolution` is also on: every review thread (Hermes's or a human's) must
 be replied to and resolved before a PR is mergeable, even with `enforce_admins: false`. See
-[`CLAUDE.md`](CLAUDE.md)'s "Addressing review feedback" guideline for the exact commands (thread
+[`AGENTS.md`](AGENTS.md)'s "Review thread resolution" guideline for the exact commands (thread
 resolution is a GraphQL-only concept, not a `gh pr` verb).
 
 ## Automated review
@@ -30,9 +30,8 @@ Because `required_conversation_resolution` is on, any inline comment Hermes (or 
 reviewer) attaches to a review thread blocks merge until that thread is replied to and resolved.
 This does *not* gate on the review's overall verdict (`APPROVED`/`CHANGES_REQUESTED`) -- a
 `CHANGES_REQUESTED` review whose findings live only in the summary body, with no inline comments,
-does not block. See [`CLAUDE.md`](CLAUDE.md)'s branch-protection invariant for why that's the
-deliberate trade-off (it keeps a Hermes outage from ever wedging a merge, since a human can
-resolve threads without the bot).
+does not block. That's a deliberate trade-off (see PR #89): it keeps a Hermes outage from ever
+wedging a merge, since a human can resolve threads without the bot.
 
 Auto-review only runs for PRs from this repo, not forks -- `hermes.yml`'s `auto-review` job is
 gated on `head.repo.full_name == github.repository`, since a `pull_request` event otherwise runs

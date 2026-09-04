@@ -871,7 +871,6 @@ func TestIngestCardUploadStreamChtimesFailureIsLogged(t *testing.T) {
 		t.Errorf("warn source = %v", warn["source"])
 	}
 }
-
 type fakeCheckContentClient struct {
 	fakeClient
 	checkCalls []struct{ FastHash, FullHash string }
@@ -1281,4 +1280,171 @@ func TestIngestFileDedupPreFlight(t *testing.T) {
 			t.Errorf("expected 0 CheckContent calls for AlreadyIngested file, got %d", len(client.checkCalls))
 		}
 	})
+}
+
+// TestIngestCardCameraModelTraversalE2E is the end-to-end assertion that
+// closes the last open AC item from issue #99 / PR #128: a crafted
+// camera_model of "../../evil" must not let RenderPath's output escape
+// the archiveRoot when joined under it. TestRenderPathStripsTraversalSequence
+// proves the RenderPath boundary in isolation; this test proves the same
+// invariant holds after filepath.Join, which is the half the ingest
+// pipeline actually exercises (every DualWrite destination is
+// `filepath.Join(archiveRoot, relPath)`). The blast radius is identical:
+// a traversal that survives Join would land a file above archiveRoot.
+//
+// Direct RenderPath invocation (not a full card driver) is sufficient
+// because the join operation IS the security boundary -- there is no
+// downstream check on the joined path -- and the existing test's
+// table-driven cases already cover the path-rendering side.
+func TestIngestCardCameraModelTraversalE2E(t *testing.T) {
+	archiveRoot := t.TempDir()
+
+	cases := []struct {
+		name        string
+		cameraModel string
+	}{
+		{"traversal_segments", "../../etc"},
+		{"evil_literal", "../../evil"},
+		{"bare_dot_segments", "./././"},
+		{"mixed_traversal_and_literal", ".././../evil"},
+	}
+
+	tpl := "{camera_model}/{original_name}"
+	now := time.Now()
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vars := TemplateVars{
+				CapturedAt:   now,
+				CameraModel:  tc.cameraModel,
+				OriginalName: "f.jpg",
+			}
+			rel := RenderPath(tpl, vars)
+			joined := filepath.Join(archiveRoot, rel)
+
+			// Blast-radius assertion: filepath.Rel must produce a
+			// path that starts with ".." if the traversal survived
+			// Join -- that, and only that, is the security
+			// boundary. A relative rel would land the file above
+			// archiveRoot. (filepath.IsAbs(joined) is always true
+			// because t.TempDir() is absolute, so the test does
+			// not assert on it; the Rel check above subsumes the
+			// "joined is under archiveRoot" property.)
+			relFromRoot, err := filepath.Rel(archiveRoot, joined)
+			if err != nil {
+				t.Fatalf("filepath.Rel(%q, %q): %v", archiveRoot, joined, err)
+			}
+			if relFromRoot == ".." || strings.HasPrefix(relFromRoot, ".."+string(filepath.Separator)) {
+				t.Errorf("RenderPath(%q, %+v) = %q; joined = %q escapes archiveRoot (rel = %q)",
+					tpl, vars, rel, joined, relFromRoot)
+			}
+
+			// Sanity check: the literal ".." must not appear in the
+			// joined path, mirroring TestRenderPathStripsTraversalSequence.
+			if strings.Contains(joined, "..") {
+				t.Errorf("joined path %q still contains %q", joined, "..")
+			}
+		})
+	}
+}
+
+func TestIngestCardUploadStreamPauseOnMetered(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "IMG_0099.jpg"), []byte("metered-photo-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	localRoot := filepath.Join(dir, "local")
+
+	// Case 1: pauseUploadOnMetered: true AND isMetered returns true
+	// -> upload deferred, local copy proceeds, no Upload HTTP call
+	uploader := &fakeUploaderClient{}
+	e := NewEngine(uploader, "test-agent", config.IngestConfig{
+		LocalEditRoot:        localRoot,
+		UploadStream:         true,
+		PauseUploadOnMetered: true,
+	}, nil)
+	e.IsMetered = func() (bool, error) { return true, nil }
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	if len(res.Files) != 1 {
+		t.Fatalf("got %d files, want 1", len(res.Files))
+	}
+	fr := res.Files[0]
+	if fr.Err != nil {
+		t.Fatalf("unexpected error: %v", fr.Err)
+	}
+	if !fr.Skipped {
+		t.Errorf("expected fr.Skipped=true, got false")
+	}
+	if fr.SkipReason != "upload skipped on metered connection -- re-insert card to retry" {
+		t.Errorf("expected skipReason 'upload skipped on metered connection -- re-insert card to retry', got %q", fr.SkipReason)
+	}
+	if len(uploader.uploadCalls) != 0 {
+		t.Errorf("expected 0 upload calls on metered network, got %d", len(uploader.uploadCalls))
+	}
+	if fr.LocalPath == "" {
+		t.Errorf("expected local path to be populated, got empty")
+	}
+	if !fr.LocalVerify.Verified {
+		t.Errorf("expected local copy to be verified, got verified=%v", fr.LocalVerify.Verified)
+	}
+	if _, err := os.Stat(fr.LocalPath); err != nil {
+		t.Errorf("expected local file to exist at %s: %v", fr.LocalPath, err)
+	}
+
+	// Case 2: pauseUploadOnMetered: true AND isMetered returns false (unmetered connection)
+	// -> upload proceeds normally
+	uploader2 := &fakeUploaderClient{}
+	e2 := NewEngine(uploader2, "test-agent", config.IngestConfig{
+		LocalEditRoot:        filepath.Join(dir, "local2"),
+		UploadStream:         true,
+		PauseUploadOnMetered: true,
+	}, nil)
+	e2.IsMetered = func() (bool, error) { return false, nil }
+
+	res2, err := e2.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	if len(res2.Files) != 1 || res2.Files[0].Err != nil {
+		t.Fatalf("unexpected result: %+v", res2.Files)
+	}
+	if res2.Files[0].Skipped {
+		t.Errorf("expected fr.Skipped=false on unmetered network, got true")
+	}
+	if len(uploader2.uploadCalls) != 1 {
+		t.Errorf("expected 1 upload call on unmetered network, got %d", len(uploader2.uploadCalls))
+	}
+
+	// Case 3: pauseUploadOnMetered: false (default) AND isMetered returns true
+	// -> no behavior change, upload proceeds
+	uploader3 := &fakeUploaderClient{}
+	e3 := NewEngine(uploader3, "test-agent", config.IngestConfig{
+		LocalEditRoot:        filepath.Join(dir, "local3"),
+		UploadStream:         true,
+		PauseUploadOnMetered: false,
+	}, nil)
+	e3.IsMetered = func() (bool, error) { return true, nil }
+
+	res3, err := e3.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	if len(res3.Files) != 1 || res3.Files[0].Err != nil {
+		t.Fatalf("unexpected result: %+v", res3.Files)
+	}
+	if res3.Files[0].Skipped {
+		t.Errorf("expected fr.Skipped=false when PauseUploadOnMetered is false, got true")
+	}
+	if len(uploader3.uploadCalls) != 1 {
+		t.Errorf("expected 1 upload call when PauseUploadOnMetered is false, got %d", len(uploader3.uploadCalls))
+	}
 }

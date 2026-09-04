@@ -47,8 +47,13 @@ type queueDrainer struct {
 
 func (d *queueDrainer) Drain(ctx context.Context) (tray.DrainSummary, error) {
 	stats, err := ingest.Drain(ctx, d.client, d.store, d.agentID, nil)
+	var lastHandshakeAt time.Time
+	if stats.HandshakeOK {
+		lastHandshakeAt = time.Now()
+	}
 	return tray.DrainSummary{
 		HandshakeOK:       stats.HandshakeOK,
+		LastHandshakeAt:   lastHandshakeAt,
 		NodeCreatedSent:   stats.NodeCreatedSent,
 		ArchiveCopiesDone: stats.ArchiveCopiesDone,
 		RebasesDone:       stats.RebasesDone,

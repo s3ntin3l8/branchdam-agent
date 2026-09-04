@@ -1,6 +1,6 @@
 // Package tray is the tray-resident shell around internal/ingest.Engine
 // (issue #3, M1's tray half). Per the plan doc's "UI stack (M1)" section
-// and this repo's CLAUDE.md ingest-core comment, the ingest core has no UI
+// and this repo's AGENTS.md ingest-core comment, the ingest core has no UI
 // imports on purpose -- this package is a thin driver over it, not a
 // reimplementation. Everything in this file is platform-independent (no
 // fyne.io/systray import): the actual tray icon/menu wiring lives in
@@ -15,12 +15,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
+	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
 )
 
 // ErrUnsupported is returned by Run on any platform other than
@@ -41,6 +44,7 @@ type IngestGate interface {
 // interface and cmd/branchdam-agent/preflight.go's helloCaller.
 type Ingester interface {
 	IngestCard(ctx context.Context, cardRoot string) (ingest.CardResult, error)
+	IngestCardOffline(ctx context.Context, cardRoot string) (ingest.OfflineCardResult, error)
 }
 
 // IngestSummary is a condensed, human-readable view of the most recent
@@ -53,6 +57,7 @@ type IngestSummary struct {
 	Skipped   int
 	Failed    int
 	Err       error
+	Offline   bool
 }
 
 // OK reports whether every file that should have been submitted succeeded
@@ -148,19 +153,28 @@ func (u UpdateStatus) Note() string {
 // Configured-vs-Err distinction that preserves the "never fabricate a
 // number" invariant the stub used to hold as a literal string.
 type Status struct {
-	WatchDirs   []string
-	ScratchNote string
-	QueueStatus QueueStatus
-	LastIngest  *IngestSummary
-	SelfUpdate  UpdateStatus
+	WatchDirs   []string       `json:"watchDirs"`
+	ScratchNote string         `json:"scratchNote"`
+	QueueStatus QueueStatus    `json:"queueStatus"`
+	LastIngest  *IngestSummary `json:"lastIngest,omitempty"`
+	SelfUpdate  UpdateStatus   `json:"selfUpdate"`
+	// Paused reflects Runner.Paused() (issue #83) -- manual ingest pause.
+	Paused bool `json:"paused"`
 	// Busy and BusyCard reflect Runner.Busy() -- shown on the status page
 	// and used by the tray menu to disable "Install and restart" while an
 	// ingest is running (see Runner.TryLockIdle for the actual gate this
 	// only mirrors for display).
-	Busy     bool
-	BusyCard string
-	// BusySince is when the current ingest started (zero when not busy).
-	BusySince time.Time
+	Busy     bool   `json:"busy"`
+	BusyCard string `json:"busyCard,omitempty"`
+	// BusySince is when the current ingest started (zero when not
+	// busy; reset to the zero value at ingest completion, not left
+	// stale at the last start time, so the status page's "Running…
+	// since HH:MM:SS" line cleanly hides the indicator when the
+	// tray is idle -- issue #109 / audit B-17 follow-up).
+	BusySince time.Time `json:"busySince,omitempty"`
+	// IngestProgress is the most recent progress sample from an in-flight
+	// ingest (DualWrite/WriteLocal/Verify), or nil when idle.
+	IngestProgress *ingest.ProgressEvent `json:"ingestProgress,omitempty"`
 	// HandshakeOK surfaces the most recent DrainSummary.HandshakeOK to the
 	// status page -- the operator's most basic "is the server reachable?"
 	// signal, which DrainSummary already computes but never exposed. False
@@ -168,30 +182,35 @@ type Status struct {
 	// this is the single source of truth for the "Server connection"
 	// section's reachable/unreachable label, so the template does not
 	// reach into QueueStatus.LastDrain directly.
-	HandshakeOK bool
+	HandshakeOK bool `json:"handshakeOk"`
+	// LastHandshakeAt is the timestamp of the most recent successful
+	// drain pass. Zero means "never drained" -- the status page
+	// template suppresses the line in that case. Mirrors
+	// DrainSummary.LastHandshakeAt (issue #109 follow-up).
+	LastHandshakeAt time.Time `json:"lastHandshakeAt,omitempty"`
 	// HasDrained is true once at least one drain pass has completed in
 	// this session -- the "have we ever heard from the server?" signal
 	// the Server connection section uses to distinguish "no drain run
 	// yet" from "last drain: handshake failed". Independent of
 	// HandshakeOK on purpose: a never-drained install is neither
 	// "reachable" nor "unreachable", it's "unknown".
-	HasDrained bool
+	HasDrained bool `json:"hasDrained"`
 	// InFlightDrain reports whether a drain pass is currently running.
-	InFlightDrain bool
+	InFlightDrain bool `json:"inFlightDrain"`
 	// InFlightPrune reports whether a prune pass is currently running.
-	InFlightPrune bool
+	InFlightPrune bool `json:"inFlightPrune"`
 	// Integrations is RUNTIME state only, ordered by the compile-time
 	// Integrations() registry so the status page and (a later PR's) menu
 	// render in the same order every time. Config state (enabled, dry
 	// run, configured paths) comes from Settings.Snapshot(), never from
 	// here -- Runner never reads config.
-	Integrations []IntegrationStatus
+	Integrations []IntegrationStatus `json:"integrations,omitempty"`
 	// Hooks is Integrations' counterpart for installable script hooks
 	// (DaVinci Resolve's render hook, issue #60) -- a SEPARATE list, not
 	// folded into Integrations, since a hook has no CatalogSyncConfig and
 	// isn't in Integrations()'s own registry (see HookID's own doc
 	// comment). Ordered by the compile-time Hooks() registry.
-	Hooks []HookStatus
+	Hooks []HookStatus `json:"hooks,omitempty"`
 }
 
 // Runner owns the state a tray-resident process needs: the ingest engine
@@ -218,18 +237,27 @@ type Runner struct {
 	// blocked by (or block) an ingest or a self-update apply.
 	drainMu sync.Mutex
 
+	// paused tracks whether manual ingest pause is active (shoot-mode, issue #83).
+	// Session-only, never persisted.
+	paused atomic.Bool
+
 	// mu guards every field below, including ingester/watchDirs/
 	// scratchDir -- unlike before issue #31's settings menu, these are no
 	// longer set once at construction and left alone; Reconfigure can
 	// swap them at any time the tray is running.
-	mu         sync.Mutex
-	ingester   Ingester
-	watchDirs  []string
-	scratchDir string // LocalEditRoot -- described, not measured; see Status().
-	last       *IngestSummary
-	busy       bool
-	busyCard   string
-	busySince  time.Time
+	mu            sync.Mutex
+	ingester      Ingester
+	watchDirs     []string
+	scratchDir    string // LocalEditRoot -- described, not measured; see Status().
+	last          *IngestSummary
+	busy          bool
+	busyCard      string
+	busySince     time.Time
+	onPauseChange func(paused bool)
+
+	// lastProgress records the most recent progress sample from an in-flight
+	// IngestCard call (DualWrite/WriteLocal/Verify). Cleared when idle.
+	lastProgress atomic.Pointer[ingest.ProgressEvent]
 
 	// queueReader/drainer/pruner are nil-able (issue #32): nil means "not
 	// configured" (no offline.queueDbPath, or prune.enabled is false),
@@ -246,6 +274,32 @@ type Runner struct {
 	lastPrune     *PruneSummary
 	inFlightDrain bool
 	inFlightPrune bool
+
+	// onSuccessfulHandshake is invoked after every TriggerDrain pass
+	// whose HandshakeOK is true, with the just-stamped
+	// summary.LastHandshakeAt as its argument. Wired by runTrayCmd to
+	// internal/runtime.Save so the freshness signal the status page
+	// renders as "last handshake: <since> ago" survives a tray
+	// restart (issue #149 / audit F-13 cross-session half). The
+	// callback is allowed to return an error -- failing to write
+	// runtime.json (disk full, permission revocation) must not block
+	// the drain pass, and a panicking callback is caught and
+	// recovered by the TriggerDrain hook site. Both the field and the
+	// setter/seed follow the same one-time-wired-after-construction
+	// shape as SetQueueDeps and SetErrorNotifier: the drain timer
+	// calls into this hook from a goroutine the tray owns, so a
+	// mid-flight swap is rare but not undefined, and the setter takes
+	// r.mu to be consistent with the rest of the Runner's setters.
+	//
+	// Stored in an atomic.Pointer so the TriggerDrain hook site can
+	// read it without holding r.mu (the save may be slow on a
+	// network share; holding r.mu across a slow Save would block
+	// the next drain pass's r.lastDrain write and the carry-forward
+	// key off r.lastDrain, breaking Key Invariant 9's
+	// serialization contract). An atomic read is a free snapshot
+	// of the current callback, with no torn-write window during a
+	// SetOnSuccessfulHandshake swap.
+	onSuccessfulHandshake atomic.Pointer[func(time.Time) error]
 
 	// syncers is nil-able per ID (issue #57), same contract as drainer/
 	// pruner above: an absent entry is "not configured" -- disabled, or
@@ -283,24 +337,35 @@ type Runner struct {
 	skipped map[string]bool
 	// notifier emits user-facing OS desktop notifications (issue #79).
 	notifier func(title, message string)
+	// archiveRoot is the configured ingest.archiveRoot destination path,
+	// probed before an online ingest pass.
+	archiveRoot string
+	// archiveProber is the probe function called by TriggerIngest to verify
+	// reachability before attempting an online dual-write ingest pass.
+	archiveProber func(ctx context.Context, archiveRoot string) bool
+	// notifyError is called when an ingest fails (e.g. NAS unreachable with
+	// no offline queue configured).
+	notifyError func(title, message string)
 
 	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
 	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
-	detectorMu          sync.Mutex
-	detectorCancel      context.CancelFunc
-	detectorDone        chan struct{}
-	detectorBaseCtx     context.Context
-	detectorInterval    time.Duration
-	detectorRequireDCIM bool
-	onCardIngested      func()
-	detectorErrHandler  func(err error)
+	detectorMu           sync.Mutex
+	detectorCancel       context.CancelFunc
+	detectorDone         chan struct{}
+	detectorBaseCtx      context.Context
+	detectorInterval     time.Duration
+	detectorRequireDCIM  bool
+	onCardIngested       func()
+	detectorErrHandler   func(err error)
+	pauseUploadOnMetered bool
+	isMeteredFn          func() (bool, error)
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
 // the configured ingest.cardRoots) and scratchDir (ingest.localEditRoot)
 // in the status snapshot.
 func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner {
-	return &Runner{
+	r := &Runner{
 		ingester:         ingester,
 		watchDirs:        append([]string(nil), watchDirs...),
 		scratchDir:       scratchDir,
@@ -311,6 +376,55 @@ func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner
 		hookInFlight:     map[HookID]bool{},
 		hookState:        map[HookID]*HookState{},
 	}
+	r.wireProgress(ingester)
+	return r
+}
+
+// Paused reports whether manual ingest pause is active (shoot-mode, issue #83).
+func (r *Runner) Paused() bool {
+	return r.paused.Load()
+}
+
+// SetPaused updates the manual ingest pause state and invokes onPauseChange if registered.
+func (r *Runner) SetPaused(v bool) {
+	r.paused.Store(v)
+	r.mu.Lock()
+	cb := r.onPauseChange
+	r.mu.Unlock()
+	if cb != nil {
+		cb(v)
+	}
+}
+
+// SetOnPauseChange registers a callback invoked when the pause state changes.
+func (r *Runner) SetOnPauseChange(fn func(paused bool)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onPauseChange = fn
+}
+
+// SetArchiveRoot updates the archive destination directory (ingest.archiveRoot)
+// probed before an online ingest.
+func (r *Runner) SetArchiveRoot(root string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.archiveRoot = root
+}
+
+// SetArchiveProber sets a custom reachability prober called before IngestCard.
+// If nil, no probe is performed and IngestCard is called directly.
+func (r *Runner) SetArchiveProber(prober func(ctx context.Context, archiveRoot string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.archiveProber = prober
+}
+
+// SetErrorNotifier sets a callback invoked when an ingest cannot proceed
+// (e.g. archive unreachable and no offline queue configured).
+func (r *Runner) SetErrorNotifier(fn func(title, message string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notifyError = fn
 }
 
 // WatchDirs returns a defensive copy of the directories currently
@@ -325,9 +439,19 @@ func (r *Runner) WatchDirs() []string {
 
 // TriggerIngest runs one IngestCard pass over cardPath through the same
 // Engine the headless `ingest` subcommand uses, records the outcome, and
-// returns it. Safe to call from a menu-click handler -- blocks until any
-// other in-flight ingest (from either path) has finished, via gate.
-// Manual triggers bypass the confirmation dialog and session skip set.
+// returns it. Safe to call from a menu-click handler or from the
+// card-detection watch loop -- both paths in run_supported.go go through
+// this single method, and it now also serializes them: a call blocks
+// until any other in-flight ingest (from either path) has finished, via
+// gate. Manual triggers bypass the confirmation dialog and session skip set.
+// When paused (issue #83), triggerIngest returns early without acquiring gate
+// so both manual and detection-driven calls drop the volume.
+//
+// If the archive destination is probed and found unreachable:
+//   - If offline queueing is configured (queueReader != nil), it transparently
+//     falls back to IngestCardOffline.
+//   - If offline queueing is not configured, it records an error and invokes
+//     the registered error notification handler.
 func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSummary {
 	return r.triggerIngest(ctx, cardPath, false)
 }
@@ -341,9 +465,10 @@ func (r *Runner) TriggerDetectedIngest(ctx context.Context, cardPath string) Ing
 }
 
 func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection bool) IngestSummary {
-	r.gate.Lock()
-	defer r.gate.Unlock()
-
+	if r.paused.Load() {
+		slog.Info("tray: ingest paused, skipping", "path", cardPath)
+		return IngestSummary{CardPath: cardPath}
+	}
 	if isDetection {
 		r.mu.Lock()
 		if r.skipped != nil && r.skipped[cardPath] {
@@ -370,28 +495,82 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		}
 	}
 
+	r.mu.Lock()
+	prober := r.archiveProber
+	archiveRoot := r.archiveRoot
+	hasQueue := r.queueReader != nil
+	notifyErr := r.notifyError
+	r.mu.Unlock()
+
+	summary := IngestSummary{CardPath: cardPath}
+	reachable := prober == nil || prober(ctx, archiveRoot)
+	if !reachable && !hasQueue {
+		summary.StartedAt = time.Now()
+		summary.Elapsed = 0
+		msg := "NAS unreachable. Set offline.queueDbPath to enable field ingest"
+		summary.Err = errors.New(msg)
+		if notifyErr != nil {
+			notifyErr("branchDAM Ingest", msg)
+		}
+		r.gate.Lock()
+		r.mu.Lock()
+		r.last = &summary
+		r.mu.Unlock()
+		r.gate.Unlock()
+		return summary
+	}
+	if !reachable {
+		summary.Offline = true
+	}
+
+	r.gate.Lock()
+	defer r.gate.Unlock()
+	summary.StartedAt = time.Now()
+
+	r.lastProgress.Store(nil)
 	r.setBusy(true, cardPath)
-	defer r.setBusy(false, "")
+	defer func() {
+		r.lastProgress.Store(nil)
+		r.setBusy(false, "")
+	}()
 
 	r.mu.Lock()
 	ingester := r.ingester
 	r.mu.Unlock()
+	r.wireProgress(ingester)
 
-	summary := IngestSummary{CardPath: cardPath, StartedAt: time.Now()}
-
-	result, err := ingester.IngestCard(ctx, cardPath)
-	summary.Elapsed = time.Since(summary.StartedAt)
-	if err != nil {
-		summary.Err = err
+	if reachable {
+		result, err := ingester.IngestCard(ctx, cardPath)
+		summary.Elapsed = time.Since(summary.StartedAt)
+		if err != nil {
+			summary.Err = err
+		} else {
+			for _, f := range result.Files {
+				switch {
+				case f.Err != nil:
+					summary.Failed++
+				case f.Skipped:
+					summary.Skipped++
+				default:
+					summary.Submitted++
+				}
+			}
+		}
 	} else {
-		for _, f := range result.Files {
-			switch {
-			case f.Err != nil:
-				summary.Failed++
-			case f.Skipped:
-				summary.Skipped++
-			default:
-				summary.Submitted++
+		result, err := ingester.IngestCardOffline(ctx, cardPath)
+		summary.Elapsed = time.Since(summary.StartedAt)
+		if err != nil {
+			summary.Err = err
+		} else {
+			for _, f := range result.Files {
+				switch {
+				case f.Err != nil:
+					summary.Failed++
+				case f.Skipped:
+					summary.Skipped++
+				default:
+					summary.Submitted++
+				}
 			}
 		}
 	}
@@ -403,11 +582,15 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 
 	if notifier != nil && summary.OK() && summary.Submitted > 0 {
 		volName := filepath.Base(cardPath)
+		action := "imported"
+		if summary.Offline {
+			action = "queued offline"
+		}
 		var msg string
 		if summary.Submitted == 1 {
-			msg = fmt.Sprintf("1 photo imported from %s", volName)
+			msg = fmt.Sprintf("1 photo %s from %s", action, volName)
 		} else {
-			msg = fmt.Sprintf("%d photos imported from %s", summary.Submitted, volName)
+			msg = fmt.Sprintf("%d photos %s from %s", summary.Submitted, action, volName)
 		}
 		notifier("branchDAM Agent", msg)
 	}
@@ -422,6 +605,17 @@ func (r *Runner) setBusy(busy bool, cardPath string) {
 	r.busyCard = cardPath
 	if busy {
 		r.busySince = time.Now()
+	} else {
+		r.lastProgress.Store(nil)
+		// Reset busySince to the zero value when the ingest finishes so
+		// Status().BusySince returns a "never" sentinel rather than a
+		// stale timestamp from the last completed ingest. The zero
+		// time.Time is the same "never" pattern the template uses for
+		// LastHandshakeAt below; the status page's "Running… since
+		// HH:MM:SS" line keys off busy && !busySince.IsZero() so the
+		// reset cleanly hides the indicator when the tray is idle
+		// (issue #109 / audit B-17 follow-up).
+		r.busySince = time.Time{}
 	}
 }
 
@@ -463,6 +657,111 @@ func (r *Runner) SetQueueDeps(reader QueueReader, drainer Drainer, pruner Pruner
 	r.pruner = pruner
 }
 
+// SeedLastHandshakeAt pre-populates the in-memory carry-forward
+// state with a prior successful handshake, so a tray that loaded a
+// persisted runtime.json at startup can render the status page's
+// "last handshake: <since> ago" line before the first in-session
+// drain pass runs (issue #149 / audit F-13 cross-session half).
+//
+// A zero time.Time is treated as the "never" sentinel and is a
+// no-op: a fresh install that loaded an empty runtime state file
+// (or no file at all) must not pre-populate lastDrain with the
+// zero time, which the template's
+// {{ if not .Status.LastHandshakeAt.IsZero }} guard already
+// suppresses but the test pins as a stronger invariant.
+//
+// If a real drain pass has already completed in this session
+// (r.lastDrain != nil), the seed is silently ignored: a fresh
+// in-memory signal from the running tray is always more accurate
+// than whatever the runtime.json file held, and overwriting it
+// with a stale persisted stamp would briefly regress the status
+// page to an older "successful Nh ago" line during the few
+// milliseconds between NewRunner returning and Seed being called.
+//
+// The guard is "r.lastDrain == nil || r.lastDrain.LastHandshakeAt
+// is zero" -- not just "r.lastDrain == nil" -- because the drain
+// timer can fire between NewRunner returning and Seed being called
+// (a 5s drain cadence on an offline server would, with high
+// probability, hit this race on a fresh install: NewRunner, then
+// SetQueueDeps + go startPeriodic, then the wiring code that calls
+// Seed). A failed first-drain pass leaves r.lastDrain non-nil with
+// a zero LastHandshakeAt, and keying the guard on the carry-forward
+// invariant (Key Invariant 11: "r.lastDrain != nil &&
+// !r.lastDrain.LastHandshakeAt.IsZero()") means the seed wins
+// whenever the in-memory state does not already have a successful
+// stamp. Otherwise a 5s blip on the first post-restart drain pass
+// would silently drop the cross-restart signal this whole PR exists
+// to defend.
+//
+// The seeded DrainSummary has HandshakeOK set to false, not true:
+// the seeded stamp is from a *prior session's* successful
+// handshake, and Status().HandshakeOK is the *current session's*
+// "last drain: handshake OK" signal. A pre-seed HandshakeOK=true
+// would briefly lie about the current session during the 0-5s
+// window before the drain timer's first tick. The first in-session
+// drain pass (successful or not) is what flips HandshakeOK to its
+// honest current-session value; the seed only contributes the
+// cross-session freshness stamp.
+func (r *Runner) SeedLastHandshakeAt(t time.Time) {
+	if t.IsZero() {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lastDrain != nil && !r.lastDrain.LastHandshakeAt.IsZero() {
+		return
+	}
+	r.lastDrain = &DrainSummary{
+		At:              t,
+		HandshakeOK:     false,
+		LastHandshakeAt: t,
+	}
+}
+
+// SetOnSuccessfulHandshake registers a callback invoked after every
+// TriggerDrain pass whose HandshakeOK is true, with the
+// just-stamped summary.LastHandshakeAt as its argument. The
+// callback may return an error; the error is logged at WARN level
+// but does NOT propagate to the drain pass's return value -- a
+// failing runtime state save (disk full, permission revocation)
+// must never block a drain pass, since the freshness signal the
+// state file preserves is non-critical and the in-memory
+// carry-forward is the primary correctness layer (issue #149 AC:
+// "failing os.WriteFile to the runtime state file should not block
+// the drain pass"). A panicking callback is also recovered, for
+// the same reason.
+//
+// Wired by runTrayCmd to internal/runtime.Save; nil disables
+// the persistence side of issue #149 (the in-memory carry-forward
+// in PR #148 stays in effect regardless, so this is never a
+// correctness regression -- only a loss of cross-restart
+// persistence).
+func (r *Runner) SetOnSuccessfulHandshake(cb func(t time.Time) error) {
+	r.onSuccessfulHandshake.Store(&cb)
+}
+
+// SetPauseUploadOnMetered sets whether queue drain and streaming upload
+// operations should be deferred when connected to a metered network.
+func (r *Runner) SetPauseUploadOnMetered(v bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pauseUploadOnMetered = v
+}
+
+// PauseUploadOnMetered reports whether pause-on-metered is currently enabled.
+func (r *Runner) PauseUploadOnMetered() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.pauseUploadOnMetered
+}
+
+// SetIsMeteredFunc overrides the network meteredness probe function (useful for tests).
+func (r *Runner) SetIsMeteredFunc(fn func() (bool, error)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.isMeteredFn = fn
+}
+
 // TriggerDrain runs one internal/ingest.Drain pass via the configured
 // Drainer, if one is wired and no other drain pass is currently running.
 // drainMu is a DEDICATED mutex, deliberately never Runner.gate: gate is
@@ -474,10 +773,14 @@ func (r *Runner) SetQueueDeps(reader QueueReader, drainer Drainer, pruner Pruner
 // next-attempt timestamps in queue.db are the real backoff), so skipping a
 // tick outright when a previous pass is still running -- rather than
 // queuing behind it -- is always safe and is what keeps concurrent passes
-// from ever piling up. ran=false covers both "not configured" and "already
-// running"; the caller (a timer tick or a menu click) treats both the same
-// way: nothing to show beyond what Status() already reports.
+// from ever piling up. ran=false covers both "not configured", "already
+// running", and "ingest paused"; the caller (a timer tick or a menu click)
+// treats all three the same way: nothing to show beyond what Status()
+// already reports.
 func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bool) {
+	if r.paused.Load() {
+		return DrainSummary{}, false
+	}
 	if !r.drainMu.TryLock() {
 		return DrainSummary{}, false
 	}
@@ -485,10 +788,25 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 
 	r.mu.Lock()
 	drainer := r.drainer
+	pauseMetered := r.pauseUploadOnMetered
+	isMetered := r.isMeteredFn
+	if isMetered == nil {
+		isMetered = netgate.IsMetered
+	}
 	r.mu.Unlock()
 
 	if drainer == nil {
 		return DrainSummary{}, false
+	}
+
+	if pauseMetered {
+		if metered, mErr := isMetered(); metered || mErr != nil {
+			if mErr != nil {
+				slog.Debug("metered probe failed, treating as metered (fail-closed)", "err", mErr)
+			}
+			slog.Info("upload skipped on metered connection")
+			return DrainSummary{}, false
+		}
 	}
 
 	// Set inFlightDrain AFTER the nil-drainer guard. A periodic timer
@@ -511,8 +829,62 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 	}
 
 	r.mu.Lock()
+	// Preserve the prior successful LastHandshakeAt across failed
+	// drain passes: the Drainer leaves summary.LastHandshakeAt zero
+	// when HandshakeOK is false, but overwriting r.lastDrain with
+	// that zero would erase "successful 4h ago" the moment a 5s
+	// tick's handshake blip happens, which is exactly the freshness
+	// signal the status page's "last handshake" line is meant to
+	// preserve. Key off the preserved stamp's non-zero state, not
+	// the prior pass's HandshakeOK: at a 5s drain cadence any outage
+	// >~10s would otherwise wipe the signal after a single recovery
+	// blip already preserved it once (Hermes review on PR #148:
+	// keying on r.lastDrain.HandshakeOK only survives ONE
+	// consecutive failure, because after the carry-forward the prior
+	// summary's HandshakeOK is false, so a second failure drops the
+	// stamp). Initial failures (no prior successful stamp) stay at
+	// zero -- the "never completed a successful handshake" sentinel
+	// per DrainSummary.LastHandshakeAt's doc.
+	if summary.LastHandshakeAt.IsZero() && r.lastDrain != nil && !r.lastDrain.LastHandshakeAt.IsZero() {
+		summary.LastHandshakeAt = r.lastDrain.LastHandshakeAt
+	}
 	r.lastDrain = &summary
 	r.mu.Unlock()
+
+	// Cross-session persistence hook (issue #149): on every
+	// successful drain pass, ask the registered callback to write
+	// the just-stamped LastHandshakeAt to the runtime state file.
+	// The callback is allowed to fail (logged via slog from the
+	// call site) and panic (recovered here): a misbehaving save
+	// must not corrupt the drain pass's own return value, which
+	// is the trigger timer's only signal that the pass completed.
+	// We deliberately do this AFTER r.mu.Unlock() so a slow save
+	// (e.g. a slow SMB share holding runtime.json) does not block
+	// the next drain pass from acquiring the mutex.
+	//
+	// The callback is read via an atomic.Pointer (not
+	// r.onSuccessfulHandshake under r.mu) so a future
+	// SetOnSuccessfulHandshake swap from a settings-reload hook
+	// does not race the read here: at worst, a swap that lands
+	// between the Load and the call uses the *old* callback for
+	// this one drain pass and the *new* one from the next pass
+	// onward -- the freshness signal lands at one of the two
+	// configured destinations, never lost, which is the only
+	// invariant the persistence hook actually owns.
+	cbPtr := r.onSuccessfulHandshake.Load()
+	if summary.HandshakeOK && cbPtr != nil {
+		cb := *cbPtr
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					slog.Error("onSuccessfulHandshake callback panicked; runtime state will not be persisted this pass", "panic", rec)
+				}
+			}()
+			if err := cb(summary.LastHandshakeAt); err != nil {
+				slog.Warn("runtime state save failed; the last-handshake signal will not survive the next restart", "err", err)
+			}
+		}()
+	}
 
 	return summary, true
 }
@@ -525,6 +897,9 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 // `prune -watch` running standalone never had to guard against. Skipping
 // a busy tick is safe at prune's own (much longer) cadence.
 func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bool) {
+	if r.paused.Load() {
+		return PruneSummary{}, false
+	}
 	release, ok := r.TryLockIdle()
 	if !ok {
 		return PruneSummary{}, false
@@ -865,6 +1240,9 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 			for _, path := range diff.Removed {
 				r.ForgetSkipped(path)
 			}
+			if r.paused.Load() {
+				return
+			}
 			for _, path := range diff.Inserted {
 				r.TriggerDetectedIngest(dctx, path)
 				r.mu.Lock()
@@ -929,6 +1307,7 @@ func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir s
 	r.mu.Lock()
 	oldRoots := append([]string(nil), r.watchDirs...)
 	r.ingester = ingester
+	r.wireProgress(ingester)
 	r.scratchDir = scratchDir
 	if !slices.Equal(oldRoots, watchDirs) {
 		rootsChanged = true
@@ -941,6 +1320,23 @@ func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir s
 	if rootsChanged {
 		r.ReconfigureDetector(r.BaseContext(), newRoots)
 	}
+}
+
+// wireProgress connects the Runner's progress callback to the underlying
+// Engine if ingester is an *ingest.Engine.
+func (r *Runner) wireProgress(ingester Ingester) {
+	if eng, ok := ingester.(*ingest.Engine); ok && eng != nil {
+		eng.Progress = func(e ingest.ProgressEvent) {
+			ev := e
+			r.lastProgress.Store(&ev)
+		}
+	}
+}
+
+// SetProgress records an ingest progress event (used by tests and progress
+// observers).
+func (r *Runner) SetProgress(ev *ingest.ProgressEvent) {
+	r.lastProgress.Store(ev)
 }
 
 // statusQueueReadTimeout bounds Status()'s QueueReader.Counts call -- see
@@ -995,6 +1391,11 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	}
 	r.mu.Unlock()
 
+	var prog *ingest.ProgressEvent
+	if busy {
+		prog = r.lastProgress.Load()
+	}
+
 	scratchNote := "not configured"
 	if scratchDir != "" {
 		scratchNote = fmt.Sprintf("%s (usage tracking not yet implemented)", scratchDir)
@@ -1020,20 +1421,28 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		}
 	}
 
+	var lastHandshakeAt time.Time
+	if lastDrain != nil {
+		lastHandshakeAt = lastDrain.LastHandshakeAt
+	}
+
 	return Status{
-		WatchDirs:     watchDirs,
-		ScratchNote:   scratchNote,
-		QueueStatus:   qs,
-		LastIngest:    last,
-		SelfUpdate:    selfUpdate,
-		Busy:          busy,
-		BusyCard:      busyCard,
-		BusySince:     busySince,
-		HandshakeOK:   lastDrain != nil && lastDrain.HandshakeOK,
-		HasDrained:    lastDrain != nil,
-		InFlightDrain: inFlightDrain,
-		InFlightPrune: inFlightPrune,
-		Integrations:  integrations,
-		Hooks:         hooks,
+		WatchDirs:       watchDirs,
+		ScratchNote:     scratchNote,
+		QueueStatus:     qs,
+		LastIngest:      last,
+		SelfUpdate:      selfUpdate,
+		Paused:          r.paused.Load(),
+		Busy:            busy,
+		BusyCard:        busyCard,
+		BusySince:       busySince,
+		IngestProgress:  prog,
+		HandshakeOK:     lastDrain != nil && lastDrain.HandshakeOK,
+		LastHandshakeAt: lastHandshakeAt,
+		HasDrained:      lastDrain != nil,
+		InFlightDrain:   inFlightDrain,
+		InFlightPrune:   inFlightPrune,
+		Integrations:    integrations,
+		Hooks:           hooks,
 	}
 }

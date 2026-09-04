@@ -3,6 +3,7 @@ package tray
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -45,9 +46,9 @@ var statusPageTmpl = template.Must(template.New("index.html").Funcs(template.Fun
 // comment -- so the Integrations section joins the two by ID via the
 // integrationView template func above.
 type statusPageView struct {
-	Version  string
-	Status   Status
-	Settings SettingsView
+	Version  string       `json:"version"`
+	Status   Status       `json:"status"`
+	Settings SettingsView `json:"settings,omitempty"`
 }
 
 // StatusServer is the embedded localhost status page: spec §7.2's three
@@ -114,6 +115,8 @@ func (s *StatusServer) Listen() (net.Listener, error) {
 func (s *StatusServer) Serve(ctx context.Context, ln net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/status", s.handleStatusJSON)
+	mux.HandleFunc("/status.json", s.handleStatusJSON)
 
 	s.srv = &http.Server{
 		Handler:           mux,
@@ -157,6 +160,10 @@ func (s *StatusServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		s.handleStatusJSON(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	view := statusPageView{Version: s.Version, Status: s.StatusFunc()}
 	if s.SettingsFunc != nil {
@@ -168,6 +175,17 @@ func (s *StatusServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		// flushed) -- log and move on, matching net/http's own
 		// recommendation for this exact situation.
 		log.Printf("tray: status page template error: %v", err)
+	}
+}
+
+func (s *StatusServer) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	view := statusPageView{Version: s.Version, Status: s.StatusFunc()}
+	if s.SettingsFunc != nil {
+		view.Settings = s.SettingsFunc()
+	}
+	if err := json.NewEncoder(w).Encode(view); err != nil {
+		log.Printf("tray: status json error: %v", err)
 	}
 }
 

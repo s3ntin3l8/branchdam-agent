@@ -26,6 +26,10 @@ func (noopIngester) IngestCard(_ context.Context, _ string) (ingest.CardResult, 
 	return ingest.CardResult{}, nil
 }
 
+func (noopIngester) IngestCardOffline(_ context.Context, _ string) (ingest.OfflineCardResult, error) {
+	return ingest.OfflineCardResult{}, nil
+}
+
 func settingsTestFixture(t *testing.T) (path string, cfg config.Config, runner *tray.Runner) {
 	t.Helper()
 	dir := t.TempDir()
@@ -109,6 +113,34 @@ func TestConfigSettingsSetBoolPersistsAndReloads(t *testing.T) {
 	}
 	if !reloaded.Ingest.RequireUnbuffered {
 		t.Error("expected the change to be persisted to disk")
+	}
+}
+
+func TestConfigSettingsSetBoolPauseUploadOnMeteredPersistsAndReloads(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if s.Snapshot().PauseUploadOnMetered {
+		t.Error("expected default PauseUploadOnMetered=false")
+	}
+
+	if err := s.SetBool("ingest.pauseUploadOnMetered", true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+
+	if !s.Snapshot().PauseUploadOnMetered {
+		t.Error("expected Snapshot to reflect PauseUploadOnMetered=true immediately")
+	}
+	if !runner.PauseUploadOnMetered() {
+		t.Error("expected runner to be updated with PauseUploadOnMetered=true")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Ingest.PauseUploadOnMetered {
+		t.Error("expected PauseUploadOnMetered=true to be persisted to disk")
 	}
 }
 
@@ -421,6 +453,17 @@ func TestConfigSettingsReloadDetectsRestartRequiredStatusAddr(t *testing.T) {
 	}
 }
 
+func TestConfigSettingsReloadRejectsMissingOfflineTier0ContainerRoot(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	editConfigFile(t, path, "tray:\n", "offline:\n  queueDbPath: \""+filepath.Join(t.TempDir(), "queue.db")+"\"\n  tier0ContainerRoot: /storage\ntray:\n")
+	editConfigFile(t, path, "  tier0ContainerRoot: /storage", "  tier0ContainerRoot: ")
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.Reload(); err == nil {
+		t.Fatal("expected Reload to reject an offline queue with an empty tier0ContainerRoot")
+	}
+}
+
 func TestConfigSettingsReloadCardRootsDoesNotRequireRestart(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner, nil)
@@ -687,12 +730,19 @@ func TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange(t *testing
 	if _, err := s.PromptAndSet(tray.FieldServerBaseURL); err != nil {
 		t.Fatalf("PromptAndSet: %v", err)
 	}
+	// reload() itself performs a handshake against the new server to sync NamingTemplate (issue #86)
+	if got := atomic.LoadInt32(&hitNew); got != 1 {
+		t.Fatalf("expected 1 handshake to new server during reload, got %d", got)
+	}
 
 	if _, ran := runner.TriggerDrain(context.Background()); !ran {
 		t.Fatal("expected the post-reload TriggerDrain to run")
 	}
-	if atomic.LoadInt32(&hitNew) != 1 {
-		t.Errorf("expected the rebuilt drainer to hit the new server after a server.baseUrl change, hitNew=%d -- stale-client regression", hitNew)
+	if atomic.LoadInt32(&hitNew) != 2 {
+		t.Errorf("expected the rebuilt drainer to hit the new server after a server.baseUrl change, hitNew=%d -- stale-client regression", atomic.LoadInt32(&hitNew))
+	}
+	if atomic.LoadInt32(&hitOld) != 1 {
+		t.Errorf("expected old server not to be hit again, hitOld=%d", atomic.LoadInt32(&hitOld))
 	}
 }
 
@@ -793,5 +843,147 @@ func TestConfigSettingsSetStringSliceAutoImportPaths(t *testing.T) {
 	// Invalid key should error
 	if err := s.SetStringSlice("invalid.key", paths); err == nil {
 		t.Error("expected error for invalid key")
+	}
+}
+
+func TestConfigSettingsReloadSyncsNamingTemplateFromServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"ok": true,
+			"serverVersion": "0.12.0",
+			"serverTimeUnix": 1756470000,
+			"namingTemplate": "{yyyy}/{camera_model}/{original_name}"
+		}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"" + srv.URL + "\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
+		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"  pathTemplate: \"{original_name}\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	// Before reload, Snapshot reflects the initial config
+	if s.Snapshot().NamingTemplate != "{original_name}" {
+		t.Fatalf("initial NamingTemplate = %q, want {original_name}", s.Snapshot().NamingTemplate)
+	}
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	// After reload, Snapshot reflects the server-synced template in memory
+	want := "{yyyy}/{camera_model}/{original_name}"
+	if got := s.Snapshot().NamingTemplate; got != want {
+		t.Errorf("Snapshot NamingTemplate = %q, want %q", got, want)
+	}
+
+	// On disk, the config file is not modified
+	onDisk, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.Ingest.PathTemplate != "{original_name}" {
+		t.Errorf("onDisk PathTemplate = %q, want {original_name}", onDisk.Ingest.PathTemplate)
+	}
+}
+
+func TestConfigSettingsReloadHandshakeUnreachablePreservesConfigTemplate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"http://127.0.0.1:1\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
+		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"  pathTemplate: \"{original_name}\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload should not fail when server is unreachable, got: %v", err)
+	}
+
+	if got := s.Snapshot().NamingTemplate; got != "{original_name}" {
+		t.Errorf("Snapshot NamingTemplate = %q, want {original_name}", got)
+	}
+}
+
+func TestConfigSettingsPromptAndSetReSyncsNamingTemplate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"ok": true,
+			"serverVersion": "0.12.0",
+			"serverTimeUnix": 1756470000,
+			"namingTemplate": "{yyyy}/{mm}/{original_name}"
+		}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"" + srv.URL + "\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
+		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"  pathTemplate: \"{original_name}\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
+		return filepath.Join(dir, "new-archive"), dialogExitOK, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+
+	ok, err := s.PromptAndSet(tray.FieldArchiveRoot)
+	if err != nil {
+		t.Fatalf("PromptAndSet: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+
+	snap := s.Snapshot()
+	if snap.ArchiveRoot != filepath.Join(dir, "new-archive") {
+		t.Errorf("ArchiveRoot = %q, want %q", snap.ArchiveRoot, filepath.Join(dir, "new-archive"))
+	}
+	if snap.NamingTemplate != "{yyyy}/{mm}/{original_name}" {
+		t.Errorf("NamingTemplate = %q, want {yyyy}/{mm}/{original_name}", snap.NamingTemplate)
 	}
 }

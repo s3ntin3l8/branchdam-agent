@@ -82,3 +82,49 @@ func TestBuildTrayIconMatchesExpectedGeometry(t *testing.T) {
 		t.Errorf("decoded image bounds = %v, want %dx%d", b, trayIconSize, trayIconSize)
 	}
 }
+
+func TestBuildPausedTrayIconIsAValidICOContainer(t *testing.T) {
+	b := buildPausedTrayIcon()
+	if len(b) < 6+16 {
+		t.Fatalf("icon too short: %d bytes", len(b))
+	}
+	if b[0] != 0 || b[1] != 0 || b[2] != 1 || b[3] != 0 || b[4] != 1 || b[5] != 0 {
+		t.Errorf("invalid ICONDIR header: %v", b[0:6])
+	}
+	if b[6] != byte(trayIconSize) || b[7] != byte(trayIconSize) {
+		t.Errorf("width/height = %d,%d, want %d,%d", b[6], b[7], trayIconSize, trayIconSize)
+	}
+	pngMagic := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	got := b[22 : 22+len(pngMagic)]
+	for i, want := range pngMagic {
+		if got[i] != want {
+			t.Fatalf("PNG magic mismatch at byte %d: got %x, want %x", i, got, pngMagic)
+		}
+	}
+}
+
+func TestBuildPausedTrayIconMatchesExpectedGeometry(t *testing.T) {
+	b := buildPausedTrayIcon()
+	img, err := png.Decode(bytes.NewReader(b[22:]))
+	if err != nil {
+		t.Fatalf("png.Decode: %v", err)
+	}
+
+	opaque := func(t *testing.T, name string, x, y int) {
+		t.Helper()
+		_, _, _, a := img.At(x, y).RGBA()
+		if a == 0 {
+			t.Errorf("%s at (%d,%d): alpha = 0, want opaque", name, x, y)
+		}
+	}
+
+	// Stem: should still be present in paused icon
+	opaque(t, "stem", 5, 16)
+	// Bowl ring
+	opaque(t, "bowl ring", 14, 13)
+	// Pause badge area: centered at (25, 7)
+	opaque(t, "pause badge", 25, 7)
+	// Pause bar
+	opaque(t, "pause bar 1", 23, 7)
+	opaque(t, "pause bar 2", 26, 7)
+}

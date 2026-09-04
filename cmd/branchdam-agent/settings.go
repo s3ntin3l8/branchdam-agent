@@ -126,6 +126,7 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		SelfUpdateCheckIntervalHrs: cfg.SelfUpdate.CheckIntervalHours,
 		RequireUnbuffered:          cfg.Ingest.RequireUnbuffered,
 		RequireDCIM:                cfg.Ingest.RequireDCIM,
+		PauseUploadOnMetered:       cfg.Ingest.PauseUploadOnMetered,
 		ServerBaseURL:              cfg.Server.BaseURL,
 		ServerAPIKeySet:            cfg.Server.APIKey != "",
 		ArchiveRoot:                cfg.Ingest.ArchiveRoot,
@@ -208,6 +209,8 @@ func (s *configSettings) validateBoolChange(key string, v bool) error {
 		cfg.Ingest.RequireUnbuffered = v
 	case "ingest.requireDCIM":
 		cfg.Ingest.RequireDCIM = v
+	case "ingest.pauseUploadOnMetered":
+		cfg.Ingest.PauseUploadOnMetered = v
 	default:
 		// config.Patch does no schema validation of its own -- these three
 		// switches (this one plus validateIntChange/validateStringChange
@@ -533,8 +536,22 @@ func (s *configSettings) reload() error {
 	if problem := firstBlockingProblem(newCfg); problem != nil {
 		return fmt.Errorf("config problem: %s", problem)
 	}
+	if newCfg.Offline.QueueDBPath != "" && newCfg.Offline.Tier0ContainerRoot == "" {
+		return fmt.Errorf("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")
+	}
 
 	client := branchdam.New(newCfg.Server.BaseURL, newCfg.Server.APIKey)
+
+	// Synchronize naming template from server handshake if available (issue #86).
+	// Handshake failure must not block settings reload -- continue with config-file template.
+	hsCtx, hsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: newCfg.AgentID}); err != nil {
+		slog.Warn("could not sync naming template from server handshake on reload; using config value", "err", err)
+	} else if hs.NamingTemplate != "" {
+		newCfg.Ingest.PathTemplate = hs.NamingTemplate
+	}
+	hsCancel()
+
 	engine := ingest.NewEngine(client, newCfg.AgentID, newCfg.Ingest, newCfg.PathMappings)
 
 	s.mu.Lock()
@@ -543,8 +560,18 @@ func (s *configSettings) reload() error {
 	queueStore := s.queueStore
 	s.mu.Unlock()
 
+	if queueStore != nil {
+		engine.Queue = queueStore
+		engine.Tier0ContainerRoot = newCfg.Offline.Tier0ContainerRoot
+	}
+
+	s.runner.SetArchiveRoot(newCfg.Ingest.ArchiveRoot)
+	s.runner.SetArchiveProber(func(pctx context.Context, root string) bool {
+		return probeArchive(pctx, root, client, newCfg.Ingest.UploadStream)
+	})
 	s.runner.SetDetectorInterval(time.Duration(newCfg.Ingest.PollIntervalSecs) * time.Second)
 	s.runner.SetDetectorRequireDCIM(newCfg.Ingest.RequireDCIM)
+	s.runner.SetPauseUploadOnMetered(newCfg.Ingest.PauseUploadOnMetered)
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
 
 	// Rebuild every integration syncer against the freshly reloaded

@@ -18,14 +18,22 @@ import (
 // pattern internal/ingest.Engine's own nodeCreator interface and
 // cmd/branchdam-agent/preflight.go's helloCaller use.
 type fakeIngester struct {
-	result ingest.CardResult
-	err    error
-	calls  []string
+	result        ingest.CardResult
+	offlineResult ingest.OfflineCardResult
+	err           error
+	offlineErr    error
+	calls         []string
+	offlineCalls  []string
 }
 
 func (f *fakeIngester) IngestCard(_ context.Context, cardRoot string) (ingest.CardResult, error) {
 	f.calls = append(f.calls, cardRoot)
 	return f.result, f.err
+}
+
+func (f *fakeIngester) IngestCardOffline(_ context.Context, cardRoot string) (ingest.OfflineCardResult, error) {
+	f.offlineCalls = append(f.offlineCalls, cardRoot)
+	return f.offlineResult, f.offlineErr
 }
 
 func TestTriggerIngestCountsOutcomes(t *testing.T) {
@@ -64,6 +72,169 @@ func TestTriggerIngestEngineError(t *testing.T) {
 	}
 	if summary.OK() {
 		t.Error("expected OK()=false on engine error")
+	}
+}
+
+func TestTriggerIngestOfflineFallbackWhenArchiveUnreachable(t *testing.T) {
+	fi := &fakeIngester{
+		offlineResult: ingest.OfflineCardResult{
+			Files: []ingest.OfflineFileResult{
+				{SourcePath: "a.jpg", LocalPath: "/scratch/a.jpg"},
+				{SourcePath: "b.xmp", Skipped: true},
+			},
+		},
+	}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(ctx context.Context, archiveRoot string) bool {
+		return false // simulate NAS unreachable
+	})
+	qr := &fakeQueueReader{counts: QueueCounts{AwaitingUpload: 2}}
+	r.SetQueueDeps(qr, nil, nil)
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if !summary.Offline {
+		t.Error("expected summary.Offline=true when falling back to offline ingest")
+	}
+	if summary.Submitted != 1 || summary.Skipped != 1 || summary.Failed != 0 {
+		t.Fatalf("got summary %+v, want 1 submitted, 1 skipped, 0 failed", summary)
+	}
+	if !summary.OK() {
+		t.Error("expected summary.OK()=true when offline files queued cleanly")
+	}
+	if len(fi.calls) != 0 {
+		t.Errorf("expected IngestCard NOT called, got %v", fi.calls)
+	}
+	if len(fi.offlineCalls) != 1 || fi.offlineCalls[0] != "/media/card" {
+		t.Errorf("expected IngestCardOffline called once with /media/card, got %v", fi.offlineCalls)
+	}
+
+	st := r.Status(UpdateStatus{})
+	if st.LastIngest == nil || !st.LastIngest.Offline {
+		t.Error("expected st.LastIngest.Offline=true")
+	}
+	if st.QueueStatus.Counts.Pending() != 2 {
+		t.Errorf("expected QueueStatus.Pending=2, got %d", st.QueueStatus.Counts.Pending())
+	}
+}
+
+func TestTriggerIngestOfflineFallbackUnconfiguredShowsError(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(ctx context.Context, archiveRoot string) bool {
+		return false // simulate NAS unreachable
+	})
+	// Queue is NOT configured (SetQueueDeps not called)
+
+	var notifiedTitle, notifiedMsg string
+	r.SetErrorNotifier(func(title, message string) {
+		notifiedTitle = title
+		notifiedMsg = message
+	})
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if summary.Err == nil {
+		t.Fatal("expected summary.Err when NAS unreachable and queue not configured")
+	}
+	wantMsg := "NAS unreachable. Set offline.queueDbPath to enable field ingest"
+	if summary.Err.Error() != wantMsg {
+		t.Errorf("got err %q, want %q", summary.Err.Error(), wantMsg)
+	}
+	if len(fi.calls) != 0 || len(fi.offlineCalls) != 0 {
+		t.Errorf("expected neither IngestCard nor IngestCardOffline to be called")
+	}
+	if notifiedTitle != "branchDAM Ingest" {
+		t.Errorf("expected notifyError title %q, got %q", "branchDAM Ingest", notifiedTitle)
+	}
+	if notifiedMsg != wantMsg {
+		t.Errorf("expected notifyError called with message %q, got %q (title %q)", wantMsg, notifiedMsg, notifiedTitle)
+	}
+}
+
+func TestTriggerIngestProberTrueRunsOnline(t *testing.T) {
+	fi := &fakeIngester{
+		result: ingest.CardResult{
+			Files: []ingest.FileResult{
+				{SourcePath: "a.jpg"},
+			},
+		},
+	}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(ctx context.Context, archiveRoot string) bool {
+		return true // simulate NAS reachable
+	})
+	qr := &fakeQueueReader{counts: QueueCounts{AwaitingUpload: 1}}
+	r.SetQueueDeps(qr, nil, nil)
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if summary.Offline {
+		t.Error("expected summary.Offline=false when prober returns true")
+	}
+	if len(fi.calls) != 1 || fi.calls[0] != "/media/card" {
+		t.Errorf("expected IngestCard called once, got %v", fi.calls)
+	}
+	if len(fi.offlineCalls) != 0 {
+		t.Errorf("expected IngestCardOffline NOT called, got %v", fi.offlineCalls)
+	}
+
+	st := r.Status(UpdateStatus{})
+	if st.LastIngest == nil || st.LastIngest.Offline {
+		t.Error("expected st.LastIngest.Offline=false")
+	}
+}
+
+func TestTriggerIngestProberTrueButIngestFails(t *testing.T) {
+	wantErr := errors.New("copy failed")
+	fi := &fakeIngester{err: wantErr}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(ctx context.Context, archiveRoot string) bool {
+		return true
+	})
+	r.SetQueueDeps(&fakeQueueReader{}, nil, nil)
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if !errors.Is(summary.Err, wantErr) {
+		t.Fatalf("summary.Err = %v, want %v", summary.Err, wantErr)
+	}
+	if summary.Offline {
+		t.Error("expected prober=true to keep the ingest online even when IngestCard fails")
+	}
+	if len(fi.calls) != 1 {
+		t.Errorf("expected one online ingest call, got %d", len(fi.calls))
+	}
+	if len(fi.offlineCalls) != 0 {
+		t.Errorf("expected no offline fallback after a reachable probe, got %d calls", len(fi.offlineCalls))
+	}
+}
+
+func TestTriggerIngestOfflineFallbackUsesOfflineNotification(t *testing.T) {
+	fi := &fakeIngester{
+		offlineResult: ingest.OfflineCardResult{
+			Files: []ingest.OfflineFileResult{{SourcePath: "a.jpg", LocalPath: "/scratch/a.jpg"}},
+		},
+	}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveProber(func(context.Context, string) bool { return false })
+	r.SetQueueDeps(&fakeQueueReader{}, nil, nil)
+	var notification string
+	r.SetNotifier(func(_, message string) {
+		notification = message
+	})
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+
+	if !summary.Offline {
+		t.Fatal("expected offline summary")
+	}
+	if notification != "1 photo queued offline from card" {
+		t.Fatalf("notification = %q, want offline wording", notification)
 	}
 }
 
@@ -846,6 +1017,53 @@ func TestStatusInFlightPruneFalseWhenIdle(t *testing.T) {
 	}
 }
 
+func TestTriggerIngestProbeDoesNotHoldGate(t *testing.T) {
+	started := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetArchiveProber(func(context.Context, string) bool {
+		close(started)
+		<-releaseProbe
+		return true
+	})
+
+	done := make(chan IngestSummary, 1)
+	go func() {
+		done <- r.TriggerIngest(context.Background(), "/media/card")
+	}()
+	<-started
+
+	releaseGate, ok := r.TryLockIdle()
+	if !ok {
+		close(releaseProbe)
+		<-done
+		t.Fatal("reachability probe held Runner.gate")
+	}
+	releaseGate()
+	close(releaseProbe)
+	<-done
+}
+
+func TestTriggerIngestStartsClockAfterGate(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	releaseGate, ok := r.TryLockIdle()
+	if !ok {
+		t.Fatal("expected to acquire idle gate")
+	}
+
+	done := make(chan IngestSummary, 1)
+	go func() {
+		done <- r.TriggerIngest(context.Background(), "/media/card")
+	}()
+	time.Sleep(100 * time.Millisecond)
+	releaseGate()
+
+	summary := <-done
+	if summary.Elapsed >= 50*time.Millisecond {
+		t.Fatalf("ingest elapsed time %s includes gate-wait time", summary.Elapsed)
+	}
+}
+
 func TestTriggerIngestSerializesConcurrentCalls(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -1233,6 +1451,10 @@ func (b *blockingIngester) IngestCard(_ context.Context, _ string) (ingest.CardR
 	return ingest.CardResult{}, nil
 }
 
+func (b *blockingIngester) IngestCardOffline(_ context.Context, _ string) (ingest.OfflineCardResult, error) {
+	return ingest.OfflineCardResult{}, nil
+}
+
 func TestSetDetectorRequireDCIM(t *testing.T) {
 	fi := &fakeIngester{}
 	r := NewRunner(fi, nil, "")
@@ -1490,4 +1712,877 @@ func TestDetectorWatchForgetsSkippedOnRemoval(t *testing.T) {
 	}
 
 	r.StopDetector()
+}
+
+func TestRunnerPauseDefaultsToFalse(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	if r.Paused() {
+		t.Error("expected Paused() to default to false")
+	}
+	st := r.Status(UpdateStatus{})
+	if st.Paused {
+		t.Error("expected Status().Paused to default to false")
+	}
+}
+
+func TestRunnerSetPausedAndCallback(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	var gotState bool
+	var called int
+	r.SetOnPauseChange(func(paused bool) {
+		gotState = paused
+		called++
+	})
+
+	r.SetPaused(true)
+	if !r.Paused() {
+		t.Error("expected Paused() to be true after SetPaused(true)")
+	}
+	if called != 1 || !gotState {
+		t.Errorf("callback called=%d, gotState=%v, want 1, true", called, gotState)
+	}
+
+	r.SetPaused(false)
+	if r.Paused() {
+		t.Error("expected Paused() to be false after SetPaused(false)")
+	}
+	if called != 2 || gotState {
+		t.Errorf("callback called=%d, gotState=%v, want 2, false", called, gotState)
+	}
+}
+
+func TestTriggerIngestSkipsWhenPaused(t *testing.T) {
+	fi := &fakeIngester{result: ingest.CardResult{Files: []ingest.FileResult{{SourcePath: "a.jpg"}}}}
+	r := NewRunner(fi, nil, "")
+	r.SetPaused(true)
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+	if summary.CardPath != "/media/card" {
+		t.Errorf("summary.CardPath = %q, want /media/card", summary.CardPath)
+	}
+	if len(fi.calls) != 0 {
+		t.Errorf("expected 0 IngestCard calls when paused, got %d", len(fi.calls))
+	}
+	if summary.Submitted != 0 || summary.Failed != 0 {
+		t.Errorf("got %+v, expected 0 submitted/failed", summary)
+	}
+
+	st := r.Status(UpdateStatus{})
+	if st.LastIngest != nil {
+		t.Errorf("expected LastIngest to be nil after skipped TriggerIngest, got %+v", st.LastIngest)
+	}
+}
+
+func TestTriggerDrainSkipsWhenPaused(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 2}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	r.SetPaused(true)
+	summary, ran := r.TriggerDrain(context.Background())
+	if ran {
+		t.Error("expected TriggerDrain to return ran=false when paused")
+	}
+	if summary != (DrainSummary{}) {
+		t.Errorf("expected empty DrainSummary when paused, got %+v", summary)
+	}
+	if fd.calls != 0 {
+		t.Errorf("expected 0 Drain calls when paused, got %d", fd.calls)
+	}
+
+	// When resumed, TriggerDrain works normally
+	r.SetPaused(false)
+	summary, ran = r.TriggerDrain(context.Background())
+	if !ran || summary.NodeCreatedSent != 2 {
+		t.Errorf("expected TriggerDrain to run after resume, got ran=%v, summary=%+v", ran, summary)
+	}
+	if fd.calls != 1 {
+		t.Errorf("expected 1 Drain call, got %d", fd.calls)
+	}
+}
+
+func TestTriggerDrainPauseOnMetered(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 2}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	// Case 1: PauseUploadOnMetered=true and isMetered=true -> drain skipped
+	r.SetPauseUploadOnMetered(true)
+	r.SetIsMeteredFunc(func() (bool, error) { return true, nil })
+
+	summary, ran := r.TriggerDrain(context.Background())
+	if ran {
+		t.Error("expected TriggerDrain to return ran=false on metered network when PauseUploadOnMetered is true")
+	}
+	if summary.NodeCreatedSent != 0 {
+		t.Errorf("expected zero summary, got %+v", summary)
+	}
+	if fd.calls != 0 {
+		t.Errorf("expected 0 Drain calls, got %d", fd.calls)
+	}
+
+	// Case 2: PauseUploadOnMetered=true and isMetered=false (unmetered) -> drain proceeds
+	r.SetIsMeteredFunc(func() (bool, error) { return false, nil })
+	summary, ran = r.TriggerDrain(context.Background())
+	if !ran {
+		t.Error("expected TriggerDrain to return ran=true on unmetered network")
+	}
+	if summary.NodeCreatedSent != 2 {
+		t.Errorf("expected NodeCreatedSent=2, got %+v", summary)
+	}
+	if fd.calls != 1 {
+		t.Errorf("expected 1 Drain call, got %d", fd.calls)
+	}
+}
+
+func TestTriggerPruneSkipsWhenPaused(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fp := &fakePruner{summary: PruneSummary{Pruned: 3}}
+	r.SetQueueDeps(nil, nil, fp)
+
+	r.SetPaused(true)
+	summary, ran := r.TriggerPrune(context.Background())
+	if ran {
+		t.Error("expected TriggerPrune to return ran=false when paused")
+	}
+	if summary != (PruneSummary{}) {
+		t.Errorf("expected empty PruneSummary when paused, got %+v", summary)
+	}
+	if fp.calls != 0 {
+		t.Errorf("expected 0 Prune calls when paused, got %d", fp.calls)
+	}
+
+	// When resumed, TriggerPrune works normally
+	r.SetPaused(false)
+	summary, ran = r.TriggerPrune(context.Background())
+	if !ran || summary.Pruned != 3 {
+		t.Errorf("expected TriggerPrune to run after resume, got ran=%v, summary=%+v", ran, summary)
+	}
+	if fp.calls != 1 {
+		t.Errorf("expected 1 Prune call, got %d", fp.calls)
+	}
+}
+
+func TestReconfigureDetectorDropsEventsWhenPaused(t *testing.T) {
+	fi := &fakeIngester{}
+	dir := t.TempDir()
+	r := NewRunner(fi, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+	r.SetPaused(true)
+
+	var hit int32
+	r.SetOnCardIngested(func() {
+		atomic.AddInt32(&hit, 1)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.ReconfigureDetector(ctx, []string{dir})
+
+	cardDir1 := filepath.Join(dir, "CARD1")
+	if err := os.Mkdir(cardDir1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if atomic.LoadInt32(&hit) > 0 || len(fi.calls) > 0 {
+		t.Errorf("expected no ingest while paused, got hit=%d, calls=%d", hit, len(fi.calls))
+	}
+
+	// Resume ingest
+	r.SetPaused(false)
+
+	cardDir2 := filepath.Join(dir, "CARD2")
+	if err := os.Mkdir(cardDir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 50; i++ {
+		if atomic.LoadInt32(&hit) > 0 && len(fi.calls) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if atomic.LoadInt32(&hit) == 0 || len(fi.calls) == 0 {
+		t.Errorf("expected ingest to resume after unpausing, got hit=%d, calls=%d", hit, len(fi.calls))
+	}
+
+	r.StopDetector()
+}
+
+func TestTriggerDrainPauseOnMeteredCase3(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 2}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	// Case 3: PauseUploadOnMetered=false and isMetered=true -> no behavior change, drain proceeds
+	r.SetPauseUploadOnMetered(false)
+	r.SetIsMeteredFunc(func() (bool, error) { return true, nil })
+	_, ran := r.TriggerDrain(context.Background())
+	if !ran {
+		t.Error("expected TriggerDrain to return ran=true when PauseUploadOnMetered is false")
+	}
+	if fd.calls != 1 {
+		t.Errorf("expected 1 Drain call, got %d", fd.calls)
+	}
+}
+
+func TestRunnerIngestProgressRecordedAndCleared(t *testing.T) {
+	fi := &fakeIngester{result: ingest.CardResult{Files: []ingest.FileResult{{SourcePath: "a.jpg"}}}}
+	r := NewRunner(fi, nil, "")
+
+	st := r.Status(UpdateStatus{})
+	if st.IngestProgress != nil {
+		t.Errorf("expected IngestProgress=nil when idle, got %+v", st.IngestProgress)
+	}
+
+	// Set progress and check busy status
+	r.setBusy(true, "/media/CANON R5")
+	ev := ingest.ProgressEvent{
+		Path:       "/local/DSC_0042.ARW",
+		Phase:      ingest.ProgressPhaseCopying,
+		BytesDone:  2469606195,
+		TotalBytes: 8697308774,
+	}
+	r.SetProgress(&ev)
+
+	st = r.Status(UpdateStatus{})
+	if st.IngestProgress == nil {
+		t.Fatal("expected IngestProgress non-nil while busy with progress set")
+	}
+	if st.IngestProgress.Path != "/local/DSC_0042.ARW" || st.IngestProgress.BytesDone != 2469606195 {
+		t.Errorf("unexpected IngestProgress: %+v", st.IngestProgress)
+	}
+
+	// Clearing busy clears progress
+	r.setBusy(false, "")
+	st = r.Status(UpdateStatus{})
+	if st.IngestProgress != nil {
+		t.Errorf("expected IngestProgress cleared after setBusy(false), got %+v", st.IngestProgress)
+	}
+}
+
+func TestFormatTooltipIdle(t *testing.T) {
+	st := Status{Busy: false}
+	if got := FormatTooltip(st); got != "branchDAM agent" {
+		t.Errorf("FormatTooltip(idle) = %q, want %q", got, "branchDAM agent")
+	}
+}
+
+func TestFormatTooltipBusyWithoutProgress(t *testing.T) {
+	st := Status{Busy: true, BusyCard: "/Volumes/CANON R5"}
+	if got := FormatTooltip(st); got != "Ingesting CANON R5..." {
+		t.Errorf("FormatTooltip(busy, no progress) = %q, want %q", got, "Ingesting CANON R5...")
+	}
+}
+
+func TestFormatTooltipBusyWithProgress(t *testing.T) {
+	busySince := time.Now().Add(-5 * time.Second) // 2.3 GB in 5s ~ 460 MB/s
+	ev := ingest.ProgressEvent{
+		Path:       "/local/DSC_0042.ARW",
+		Phase:      ingest.ProgressPhaseCopying,
+		BytesDone:  2469606195, // 2.3 GB
+		TotalBytes: 8697308774, // 8.1 GB
+	}
+	st := Status{
+		Busy:           true,
+		BusyCard:       "/Volumes/CANON R5",
+		BusySince:      busySince,
+		IngestProgress: &ev,
+	}
+
+	got := FormatTooltip(st)
+	// Must contain card, filename, bytes, pct, and speed
+	if !strings.HasPrefix(got, "Ingesting CANON R5: DSC_0042.ARW — 2.3 GB / 8.1 GB (28%") {
+		t.Errorf("FormatTooltip got %q, want it to start with %q", got, "Ingesting CANON R5: DSC_0042.ARW — 2.3 GB / 8.1 GB (28%")
+	}
+	if !strings.Contains(got, "MB/s") {
+		t.Errorf("FormatTooltip got %q, want it to contain speed MB/s", got)
+	}
+}
+
+func TestFormatTooltipBusyWithProgressAndOfflineQueue(t *testing.T) {
+	busySince := time.Now().Add(-5 * time.Second)
+	ev := ingest.ProgressEvent{
+		Path:       "/local/DSC_0042.ARW",
+		Phase:      ingest.ProgressPhaseCopying,
+		BytesDone:  2469606195,
+		TotalBytes: 8697308774,
+	}
+	st := Status{
+		Busy:           true,
+		BusyCard:       "/Volumes/CANON R5",
+		BusySince:      busySince,
+		IngestProgress: &ev,
+		QueueStatus: QueueStatus{
+			Configured: true,
+			Counts:     QueueCounts{AwaitingUpload: 1},
+		},
+	}
+
+	if got := FormatTooltip(st); !strings.Contains(got, "(1 file queued offline)") {
+		t.Errorf("FormatTooltip = %q, want queued-offline suffix", got)
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	cases := []struct {
+		bytes int64
+		want  string
+	}{
+		{0, "0 B"},
+		{500, "500 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1024 * 1024, "1.0 MB"},
+		{450 * 1024 * 1024, "450.0 MB"},
+		{2469606195, "2.3 GB"},
+		{8697308774, "8.1 GB"},
+	}
+	for _, tc := range cases {
+		if got := formatBytes(tc.bytes); got != tc.want {
+			t.Errorf("formatBytes(%d) = %q, want %q", tc.bytes, got, tc.want)
+		}
+	}
+}
+
+func TestFormatSpeed(t *testing.T) {
+	cases := []struct {
+		rate float64
+		want string
+	}{
+		{500, "500 B/s"},
+		{1500, "1 KB/s"},
+		{450 * 1024 * 1024, "450 MB/s"},
+		{2.5 * 1024 * 1024 * 1024, "2.5 GB/s"},
+	}
+	for _, tc := range cases {
+		if got := formatSpeed(tc.rate); got != tc.want {
+			t.Errorf("formatSpeed(%v) = %q, want %q", tc.rate, got, tc.want)
+		}
+	}
+}
+
+func TestFormatETA(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{30 * time.Second, "~30s"},
+		{14 * time.Minute, "~14 min"},
+		{2 * time.Hour, "~2 hr"},
+	}
+	for _, tc := range cases {
+		if got := formatETA(tc.d); got != tc.want {
+			t.Errorf("formatETA(%v) = %q, want %q", tc.d, got, tc.want)
+		}
+	}
+}
+
+func TestPauseDoesNotInterruptInProgressIngest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, nil, "")
+
+	done := make(chan IngestSummary, 1)
+	go func() {
+		done <- r.TriggerIngest(context.Background(), "/media/card")
+	}()
+	<-started
+
+	// Set paused while ingest is in-flight
+	r.SetPaused(true)
+
+	// Ingest should still be marked busy
+	if _, _, busy := r.Busy(); !busy {
+		t.Error("expected in-flight ingest to remain busy")
+	}
+
+	// Release the in-flight ingest
+	close(release)
+	summary := <-done
+
+	if summary.CardPath != "/media/card" {
+		t.Errorf("got summary.CardPath = %q, want /media/card", summary.CardPath)
+	}
+	st := r.Status(UpdateStatus{})
+	if st.LastIngest == nil {
+		t.Error("expected LastIngest to be recorded for the in-progress ingest")
+	}
+	if !st.Paused {
+		t.Error("expected Status().Paused to be true")
+	}
+}
+
+// TestStatusSurfacesLastHandshakeAt pins the F-13 follow-up: a drain
+// pass that stamps LastHandshakeAt must propagate that timestamp
+// through to Status().LastHandshakeAt so the status page can render
+// a freshness signal (issue #109 / PR #123 follow-up; the original PR
+// shipped HandshakeOK as a bool, which collapses "5 minutes ago" and
+// "3 weeks ago" into the same true).
+func TestStatusSurfacesLastHandshakeAt(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+	r.SetQueueDeps(nil, fd, nil)
+
+	r.TriggerDrain(context.Background())
+
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.Equal(when) {
+		t.Errorf("Status().LastHandshakeAt = %v, want %v", st.LastHandshakeAt, when)
+	}
+}
+
+// TestStatusLastHandshakeAtZeroWhenNoDrains pins the zero-value
+// sentinel: a never-drained install must surface
+// LastHandshakeAt == time.Time{} so the template's
+// {{ if not .Status.LastHandshakeAt.IsZero }} guard suppresses the
+// "last handshake" line.
+func TestStatusLastHandshakeAtZeroWhenNoDrains(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.IsZero() {
+		t.Errorf("Status().LastHandshakeAt = %v, want zero time.Time{}", st.LastHandshakeAt)
+	}
+}
+
+// TestStatusBusySinceResetsAfterIngest pins the B-17 follow-up:
+// setBusy(false, ...) must reset r.busySince to time.Time{} so
+// Status().BusySince does not return a stale timestamp from the
+// last completed ingest. Before this fix, the status page's
+// "Running… since HH:MM:SS" indicator kept showing the timestamp
+// of the last ingest long after the tray went idle.
+func TestStatusBusySinceResetsAfterIngest(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, nil, "")
+
+	go r.TriggerIngest(context.Background(), "/media/a")
+	<-started
+
+	st := r.Status(UpdateStatus{})
+	if !st.Busy {
+		t.Fatalf("after ingest start: Busy=%v (should be true)", st.Busy)
+	}
+	if st.BusySince.IsZero() {
+		t.Error("after ingest start: BusySince should be non-zero")
+	}
+
+	close(release)
+
+	// Wait for the goroutine's post-IngestCard defer to run setBusy(false).
+	// Polling with a deadline is race-safe and avoids depending on
+	// blockingIngester's internal sync, which only signals start.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, since, busy := r.Busy(); !busy {
+			if !since.IsZero() {
+				t.Errorf("after ingest completion: BusySince = %v, want time.Time{} (zero)", since)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_, since, busy := r.Busy()
+	t.Errorf("timed out waiting for ingest to complete: busy=%v since=%v", busy, since)
+}
+
+// TestStatusPreservesLastHandshakeAtAcrossFailedPass is the regression
+// guard for the TriggerDrain carry-forward logic: when a drain pass
+// with a failed handshake follows one that succeeded, the previous
+// successful LastHandshakeAt must be preserved on the Status surface
+// (issue #109 / audit F-13 follow-up; the "5s blip must not erase
+// 'successful 4h ago'" invariant that the carry-forward logic
+// exists to defend). The test pins two properties:
+//
+//  1. A single failure after a success preserves the prior stamp.
+//  2. CONSECUTIVE failures after a success also preserve the prior
+//     stamp (Hermes review on PR #148: keying the carry-forward off
+//     r.lastDrain.HandshakeOK only survives ONE failure, because
+//     after the carry-forward the prior summary's HandshakeOK is
+//     false, so a second failure would drop the stamp -- a 10s+
+//     outage at a 5s drain cadence would otherwise wipe the
+//     freshness signal the field exists to defend).
+//  3. An initial failure (no prior successful stamp) stays at the
+//     zero sentinel so the template's "never completed a successful
+//     handshake" line stays correct.
+func TestStatusPreservesLastHandshakeAtAcrossFailedPass(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	t.Run("single_failure_after_success_preserves_stamp", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+
+		fdSuccess := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+		r.SetQueueDeps(nil, fdSuccess, nil)
+		r.TriggerDrain(context.Background())
+
+		st := r.Status(UpdateStatus{})
+		if !st.LastHandshakeAt.Equal(when) {
+			t.Fatalf("after successful pass: LastHandshakeAt = %v, want %v", st.LastHandshakeAt, when)
+		}
+
+		fdFail := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+		r.SetQueueDeps(nil, fdFail, nil)
+		r.TriggerDrain(context.Background())
+
+		st = r.Status(UpdateStatus{})
+		if !st.LastHandshakeAt.Equal(when) {
+			t.Errorf("after single failed pass: LastHandshakeAt = %v, want %v (carry-forward of prior success)",
+				st.LastHandshakeAt, when)
+		}
+	})
+
+	t.Run("consecutive_failures_after_success_preserve_stamp", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+
+		fdSuccess := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+		r.SetQueueDeps(nil, fdSuccess, nil)
+		r.TriggerDrain(context.Background())
+
+		fdFail := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+		r.SetQueueDeps(nil, fdFail, nil)
+		r.TriggerDrain(context.Background())
+		r.TriggerDrain(context.Background())
+		r.TriggerDrain(context.Background())
+
+		st := r.Status(UpdateStatus{})
+		if !st.LastHandshakeAt.Equal(when) {
+			t.Errorf("after three consecutive failed passes: LastHandshakeAt = %v, want %v (carry-forward must chain across multiple failures)",
+				st.LastHandshakeAt, when)
+		}
+	})
+
+	t.Run("initial_failure_stays_at_zero", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+
+		fdFail := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+		r.SetQueueDeps(nil, fdFail, nil)
+		r.TriggerDrain(context.Background())
+
+		st := r.Status(UpdateStatus{})
+		if !st.LastHandshakeAt.IsZero() {
+			t.Errorf("after initial failed pass with no prior success: LastHandshakeAt = %v, want time.Time{} (never completed a successful handshake)",
+				st.LastHandshakeAt)
+		}
+	})
+}
+
+// TestRunnerSeedLastHandshakeAtReflectsInStatus pins the cross-restart
+// signal: a SeedLastHandshakeAt call on a fresh Runner must surface
+// through to Status().LastHandshakeAt so a tray that loaded a
+// persisted runtime.json at startup can render "last handshake: <since>
+// ago" before the first in-session drain pass runs. This is the
+// Status() half of issue #149's AC: the Load happens in runTrayCmd,
+// this test pins the half that the tray internal itself owns.
+func TestRunnerSeedLastHandshakeAtReflectsInStatus(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	r.SeedLastHandshakeAt(when)
+
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.Equal(when) {
+		t.Errorf("Status().LastHandshakeAt = %v, want %v", st.LastHandshakeAt, when)
+	}
+	// Seed must also set HasDrained: the "have we ever heard from the
+	// server?" signal the status page renders alongside the freshness
+	// line should reflect a successful prior handshake, not "no drain
+	// run yet."
+	if !st.HasDrained {
+		t.Error("expected Status().HasDrained=true after SeedLastHandshakeAt")
+	}
+	// Seed must NOT set HandshakeOK: that signal is the
+	// current-session "last drain: handshake OK" line, and
+	// no drain has run *in this session* yet. The status
+	// page renders the prior-session stamp via
+	// LastHandshakeAt separately from HandshakeOK. A
+	// HandshakeOK=true from a seed would briefly say
+	// "handshake OK" when the very first post-restart
+	// drain hasn't completed -- misleading during the
+	// 0-5s window before the drain timer's first tick.
+	if st.HandshakeOK {
+		t.Error("expected Status().HandshakeOK=false after SeedLastHandshakeAt (the current-session handshake-OK signal must come from a real drain, not a persisted seed)")
+	}
+}
+
+// TestRunnerSeedLastHandshakeAtDoesNotConflateSeedWithDrained stamps
+// the load-bearing case behind TestRunnerSeedLastHandshakeAtReflectsInStatus's
+// HandshakeOK=false assertion: after a seed, a subsequent
+// *successful* drain must reset HandshakeOK to true (a real
+// in-session successful handshake now exists), and a subsequent
+// *failed* drain must keep HandshakeOK false (a real failed
+// handshake is the honest current-session signal). The test pins
+// both transitions, since each is a separate code path on the
+// happy/failed drain branches of TriggerDrain.
+func TestRunnerSeedLastHandshakeAtDoesNotConflateSeedWithDrained(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	t.Run("failed_drain_after_seed_keeps_handshake_ok_false", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+		r.SeedLastHandshakeAt(when)
+		fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+		r.SetQueueDeps(nil, fd, nil)
+		r.TriggerDrain(context.Background())
+
+		st := r.Status(UpdateStatus{})
+		if st.HandshakeOK {
+			t.Error("after failed drain following a seed: HandshakeOK=true, want false (the failed drain's HandshakeOK is the current-session truth)")
+		}
+		if !st.LastHandshakeAt.Equal(when) {
+			t.Errorf("after failed drain following a seed: LastHandshakeAt = %v, want %v (carry-forward preserves the seeded stamp)", st.LastHandshakeAt, when)
+		}
+	})
+
+	t.Run("successful_drain_after_seed_sets_handshake_ok_true", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+		r.SeedLastHandshakeAt(when)
+		fresh := time.Date(2026, 9, 3, 13, 0, 0, 0, time.UTC)
+		fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: fresh}}
+		r.SetQueueDeps(nil, fd, nil)
+		r.TriggerDrain(context.Background())
+
+		st := r.Status(UpdateStatus{})
+		if !st.HandshakeOK {
+			t.Error("after successful drain following a seed: HandshakeOK=false, want true (the real drain's HandshakeOK supersedes the seeded false)")
+		}
+		if !st.LastHandshakeAt.Equal(fresh) {
+			t.Errorf("after successful drain following a seed: LastHandshakeAt = %v, want %v (the real drain's stamp supersedes the seed)", st.LastHandshakeAt, fresh)
+		}
+	})
+}
+
+// TestRunnerSeedLastHandshakeAtIgnoredWhenAlreadyDrained pins the
+// "fresh signal beats persisted" invariant: if a real drain pass ran
+// before the tray finished loading the runtime.json (e.g. the drain
+// timer fired between NewRunner and SeedLastHandshakeAt), the real
+// pass's stamp must win. Without this guard, a slower-loaded persisted
+// stamp could overwrite a fresher in-memory one and the status page
+// would briefly regress to an older "successful Nh ago" line.
+func TestRunnerSeedLastHandshakeAtIgnoredWhenAlreadyDrained(t *testing.T) {
+	fresh := time.Date(2026, 9, 3, 13, 0, 0, 0, time.UTC)
+	persisted := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: fresh}}
+	r.SetQueueDeps(nil, fd, nil)
+	r.TriggerDrain(context.Background())
+
+	r.SeedLastHandshakeAt(persisted)
+
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.Equal(fresh) {
+		t.Errorf("Status().LastHandshakeAt = %v, want %v (real drain must beat persisted seed)", st.LastHandshakeAt, fresh)
+	}
+}
+
+// TestRunnerSeedLastHandshakeAtWinsOverFailedDrain pins the guard
+// fix for the reviewer's Critical #1: the seed must win when the
+// in-memory state has a drain pass that *failed* (lastDrain non-nil
+// with a zero LastHandshakeAt). A 5s drain cadence on an offline
+// server has a high probability of hitting this race on a fresh
+// install: NewRunner, then SetQueueDeps + go startPeriodic, then
+// the wiring code that calls Seed. Without this guard, the seed
+// is silently dropped when a single 5s blip precedes the load, and
+// the cross-restart signal this whole PR exists to defend is lost
+// for the entire session.
+//
+// The guard is the same expression as the in-memory carry-forward
+// (Key Invariant 11: "r.lastDrain != nil &&
+// !r.lastDrain.LastHandshakeAt.IsZero()"), so the seed wins
+// whenever the in-memory state does not already have a successful
+// stamp -- the same condition that the carry-forward would
+// preserve a fresh pass's stamp into.
+func TestRunnerSeedLastHandshakeAtWinsOverFailedDrain(t *testing.T) {
+	persisted := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	r := NewRunner(&fakeIngester{}, nil, "")
+	// Failed drain pass: leaves r.lastDrain non-nil with
+	// LastHandshakeAt zero.
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+	r.SetQueueDeps(nil, fd, nil)
+	r.TriggerDrain(context.Background())
+
+	r.SeedLastHandshakeAt(persisted)
+
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.Equal(persisted) {
+		t.Errorf("after failed drain then seed: LastHandshakeAt = %v, want %v (seed must win when the in-memory state has no successful stamp yet)", st.LastHandshakeAt, persisted)
+	}
+}
+
+// TestRunnerSeedLastHandshakeAtIgnoresZeroValue pins the "never
+// completed a successful handshake" sentinel: a zero time.Time passed
+// to SeedLastHandshakeAt must not pre-populate lastDrain, so a never-
+// connected install never accidentally surfaces a spurious "successful
+// 0001-01-01" line via the status page's
+// {{ if not .Status.LastHandshakeAt.IsZero }} template guard.
+func TestRunnerSeedLastHandshakeAtIgnoresZeroValue(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	r.SeedLastHandshakeAt(time.Time{})
+
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.IsZero() {
+		t.Errorf("Status().LastHandshakeAt = %v, want zero time.Time{} (zero seed must be a no-op)", st.LastHandshakeAt)
+	}
+	if st.HasDrained {
+		t.Error("expected Status().HasDrained=false after zero-value SeedLastHandshakeAt")
+	}
+}
+
+// TestTriggerDrainSuccessfulPassInvokesOnSuccessfulHandshake pins the
+// happy path for issue #149's "write-back on every successful
+// handshake" contract: when HandshakeOK is true, the Runner's
+// registered callback fires with summary.LastHandshakeAt, which
+// runTrayCmd wires to runtime.Save.
+func TestTriggerDrainSuccessfulPassInvokesOnSuccessfulHandshake(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	var got time.Time
+	var calls int
+	r.SetOnSuccessfulHandshake(func(t time.Time) error {
+		got = t
+		calls++
+		return nil
+	})
+
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+	r.SetQueueDeps(nil, fd, nil)
+	r.TriggerDrain(context.Background())
+
+	if calls != 1 {
+		t.Fatalf("onSuccessfulHandshake calls = %d, want 1", calls)
+	}
+	if !got.Equal(when) {
+		t.Errorf("callback t = %v, want %v", got, when)
+	}
+}
+
+// TestTriggerDrainFailedPassDoesNotInvokeOnSuccessfulHandshake pins
+// the "successful only" cadence: a failed handshake must NOT write
+// runtime.json. Writing on failure would defeat the in-memory
+// carry-forward (PR #148) by re-stamping a stale zero back to disk.
+// A failed pass leaves the prior successful stamp in memory AND on
+// disk unchanged.
+func TestTriggerDrainFailedPassDoesNotInvokeOnSuccessfulHandshake(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	var calls int
+	r.SetOnSuccessfulHandshake(func(time.Time) error { calls++; return nil })
+
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+	r.SetQueueDeps(nil, fd, nil)
+	r.TriggerDrain(context.Background())
+
+	if calls != 0 {
+		t.Errorf("onSuccessfulHandshake calls = %d, want 0 (failed pass must not write runtime state)", calls)
+	}
+}
+
+// TestTriggerDrainWriteFailureDoesNotBreakDrain pins the "failing
+// WriteFile must not block the drain" contract from issue #149's
+// acceptance criteria. The callback is allowed to return an error
+// (e.g. disk full, permission revocation) but the drain pass itself
+// must still complete and surface HandshakeOK=true.
+func TestTriggerDrainWriteFailureDoesNotBreakDrain(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	r.SetOnSuccessfulHandshake(func(time.Time) error {
+		return errors.New("disk full")
+	})
+
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+	r.SetQueueDeps(nil, fd, nil)
+	summary, ran := r.TriggerDrain(context.Background())
+
+	if !ran {
+		t.Fatal("expected TriggerDrain to return ran=true")
+	}
+	if !summary.HandshakeOK {
+		t.Error("expected HandshakeOK=true even when the save callback returns an error")
+	}
+	if !summary.LastHandshakeAt.Equal(when) {
+		t.Errorf("summary.LastHandshakeAt = %v, want %v", summary.LastHandshakeAt, when)
+	}
+}
+
+// TestTriggerDrainCallbackPanicDoesNotBreakDrain is the panic-half
+// counterpart of TestTriggerDrainWriteFailureDoesNotBreakDrain: a
+// misbehaving callback that panics must not corrupt the drain
+// pass's state. The recover is in production code, the test pins
+// it from the outside.
+func TestTriggerDrainCallbackPanicDoesNotBreakDrain(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	r.SetOnSuccessfulHandshake(func(time.Time) error {
+		panic("test-induced panic in save callback")
+	})
+
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+	r.SetQueueDeps(nil, fd, nil)
+	summary, ran := r.TriggerDrain(context.Background())
+
+	if !ran {
+		t.Fatal("expected TriggerDrain to return ran=true even after a panicking callback")
+	}
+	if !summary.HandshakeOK {
+		t.Error("expected HandshakeOK=true after a panicking callback (drain must not be corrupted)")
+	}
+}
+
+// TestCrossRestartLastHandshakeAtSurvivesViaRuntimeFile is the
+// end-to-end test the issue specifically calls for: write a runtime
+// state file (simulating a prior tray session's last successful
+// drain), construct a fresh Runner, seed from the file, and assert
+// Status().LastHandshakeAt reflects the persisted timestamp before
+// any drain pass has run. This is the "Add a test that exercises the
+// cross-restart path" AC.
+func TestCrossRestartLastHandshakeAtSurvivesViaRuntimeFile(t *testing.T) {
+	// Prior session's last successful handshake -- 4 hours before
+	// "now" to make the human-readable freshness check obvious.
+	prior := time.Now().Add(-4 * time.Hour).UTC().Truncate(time.Second)
+
+	dir := t.TempDir()
+	rtPath := filepath.Join(dir, "runtime.json")
+	if err := osWriteJSON(rtPath, prior); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh session: new Runner, load the runtime state from disk.
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	// This is the wiring runTrayCmd does between NewRunner and the
+	// drain timer start; the test is pinning exactly that sequence.
+	loaded, err := loadRuntimeStateForTest(rtPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SeedLastHandshakeAt(loaded)
+
+	// No drain has run yet (the timer hasn't fired, the callback
+	// hasn't been invoked). The persisted stamp must already be
+	// visible on the status page, but HandshakeOK must remain
+	// false: that signal is the current-session "last drain:
+	// handshake OK" line, and a pre-restart successful handshake
+	// is not the same as a post-restart one. See
+	// TestRunnerSeedLastHandshakeAtReflectsInStatus for the
+	// load-bearing assertion and the longer rationale.
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.Equal(prior) {
+		t.Errorf("after cross-restart seed: Status().LastHandshakeAt = %v, want %v (persisted)", st.LastHandshakeAt, prior)
+	}
+	if !st.HasDrained {
+		t.Error("expected HasDrained=true after cross-restart seed")
+	}
+	if st.HandshakeOK {
+		t.Error("expected HandshakeOK=false after cross-restart seed (current-session signal must come from a real drain, not a persisted stamp)")
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+
 	"os"
 	"os/exec"
 	"os/signal"
@@ -26,6 +27,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 	"github.com/s3ntin3l8/branchdam-agent/internal/resolvehook"
+	runtimeState "github.com/s3ntin3l8/branchdam-agent/internal/runtime"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
@@ -246,6 +248,32 @@ func formatByteSize(bytes uint64) string {
 	return fmt.Sprintf("%.1f %s", val, unitStr)
 }
 
+// trayPickDirectory builds the directory picker callback for the tray's
+// "Import from folder…" action (issue #80). It re-execs `dialog -kind directory
+// -title <title>` via run, returning the selected path on success, or an error
+// if the operator dismissed the dialog (dialogExitCanceled) or if it failed to render.
+func trayPickDirectory(run dialogRunner) func(ctx context.Context, title string) (string, error) {
+	return func(ctx context.Context, title string) (string, error) {
+		out, exitCode, err := run(ctx, "-kind", "directory", "-title", title)
+		if err != nil {
+			return "", err
+		}
+		if exitCode != dialogExitOK {
+			return "", errors.New("directory picker dismissed or failed")
+		}
+		return strings.TrimSpace(out), nil
+	}
+}
+
+// trayNotifyOS builds the OS notification callback the tray uses to show
+// toast/bubble notifications (e.g. "Already ingesting this path"). It re-execs
+// `dialog -kind notify -title <title> -message <message>` via run.
+func trayNotifyOS(run dialogRunner) func(ctx context.Context, title, message string) {
+	return func(ctx context.Context, title, message string) {
+		_, _, _ = run(ctx, "-kind", "notify", "-title", title, "-message", message)
+	}
+}
+
 // runTrayCmd implements `branchdam-agent tray -config <path>`: the
 // tray-resident shell around internal/ingest.Engine (issue #3). It drives
 // the exact same Engine.IngestCard code path runIngestCmd (ingest.go) does
@@ -335,6 +363,9 @@ func runTrayCmd(args []string) int {
 	if cfg.Ingest.ArchiveRoot == "" || cfg.Ingest.LocalEditRoot == "" {
 		return fail("ingest.archiveRoot and ingest.localEditRoot must both be set in config")
 	}
+	if cfg.Offline.QueueDBPath != "" && cfg.Offline.Tier0ContainerRoot == "" {
+		return fail("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")
+	}
 	// preflight only WARNs on an empty pathMappings (an operator running
 	// it hasn't necessarily configured ingest yet); the tray is about to
 	// actually ingest, where a missing mapping fails downstream with a
@@ -352,8 +383,35 @@ func runTrayCmd(args []string) int {
 	defer stop()
 
 	client := branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
+
+	// Synchronize naming template from server handshake if available (issue #86).
+	// Handshake failure must not block tray startup -- continue with config-file template.
+	hsCtx, hsCancel := context.WithTimeout(ctx, 5*time.Second)
+	if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: cfg.AgentID}); err != nil {
+		slog.Warn("could not sync naming template from server handshake; using config value", "err", err)
+	} else if hs.NamingTemplate != "" {
+		cfg.Ingest.PathTemplate = hs.NamingTemplate
+	}
+	hsCancel()
+
 	engine := ingest.NewEngine(client, cfg.AgentID, cfg.Ingest, cfg.PathMappings)
 	runner := tray.NewRunner(engine, cfg.Ingest.CardRoots, cfg.Ingest.LocalEditRoot)
+	runner.SetArchiveRoot(cfg.Ingest.ArchiveRoot)
+	runner.SetArchiveProber(func(pctx context.Context, root string) bool {
+		return probeArchive(pctx, root, client, cfg.Ingest.UploadStream)
+	})
+	runner.SetErrorNotifier(func(title, message string) {
+		go func() {
+			if dialog != nil {
+				_, _, _ = dialog(context.Background(), "-kind", "error", "-title", title, "-message", message)
+			}
+		}()
+	})
+
+	// Runtime state persistence (issue #149): see
+	// wireRuntimeStatePersistence below for the full contract.
+	wireRuntimeStatePersistence(runner)
+
 	settings := newConfigSettings(resolvedPath, cfg, runner, dialog)
 
 	// Integration syncers (issue #57): started unconditionally, unlike the
@@ -407,6 +465,8 @@ func runTrayCmd(args []string) int {
 			queueStore = nil
 		} else {
 			defer func() { _ = queueStore.Close() }()
+			engine.Queue = queueStore
+			engine.Tier0ContainerRoot = cfg.Offline.Tier0ContainerRoot
 			settings.SetQueueStore(queueStore)
 
 			var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: cfg.AgentID}
@@ -444,6 +504,7 @@ func runTrayCmd(args []string) int {
 			_, _, _ = dialog(context.Background(), "-kind", "notify", "-title", title, "-message", message)
 		}()
 	})
+	runner.SetPauseUploadOnMetered(cfg.Ingest.PauseUploadOnMetered)
 
 	if cfg.Tray.StartOnLogin {
 		if err := enableStartOnLogin(resolvedPath); err != nil {
@@ -504,7 +565,7 @@ func runTrayCmd(args []string) int {
 	// anything but a clean OK" behavior, so the disabled-dialog case
 	// can't accidentally turn into a silent proceed.
 	confirmDestructive := cfg.Tray.ConfirmDestructive
-	outcome, trayErr = tray.Run(ctx, runner, statusSrv.StatusURL(), updater, settings, trayConfirm(dialog), confirmDestructive)
+	outcome, trayErr = tray.Run(ctx, runner, statusSrv.StatusURL(), updater, settings, trayConfirm(dialog), confirmDestructive, trayPickDirectory(dialog), trayNotifyOS(dialog))
 	stop() // make sure the status server's ctx.Done() fires even if tray.Run returned on its own (e.g. Quit clicked)
 	wg.Wait()
 
@@ -569,4 +630,132 @@ func enableStartOnLogin(configPath string) error {
 		return fmt.Errorf("resolve config path %q: %w", configPath, err)
 	}
 	return autostart.Enable(execPath, []string{"tray", "-config", absConfigPath})
+}
+
+// wireRuntimeStatePersistence implements issue #149's "seed
+// from disk at startup + save on every successful handshake"
+// contract at the cmd wiring layer. Kept here, not inside
+// internal/tray, for the same reason SetQueueDeps accepts
+// narrow Drainer/Pruner interfaces from cmd/branchdam-agent
+// rather than importing *queue.Store directly: the tray
+// internal is interface-only, no direct I/O, unit-testable
+// with fakes; the cmd layer is the one place where the
+// concrete runtime state file path is known.
+//
+// The four branches correspond to the four runtime state
+// conditions on disk:
+//
+//  1. Path() errored (e.g. LOCALAPPDATA unset on Windows,
+//     os.UserHomeDir failed on a daemon). The cross-restart
+//     signal is unavailable for this session; we warn and
+//     skip both seeding and the save callback so no stale
+//     state can be written somewhere we can't predict.
+//  2. Load() errored but the file *exists* (Load returns
+//     (zero, nil) for missing/empty/corrupt, so a non-nil
+//     err means a real I/O failure -- usually a permission
+//     revocation on a file the agent used to own). The
+//     user had a cross-restart signal and has now lost it.
+//     We log at ERROR (this is the loudest non-fatal
+//     severity slog offers, reserved for "operator
+//     attention required") and skip the save callback so a
+//     successful drain doesn't silently overwrite the
+//     unreadable file with a fresh stamp -- which would
+//     hide the underlying permission problem from the
+//     next session's Load.
+//  3. Load() returned a non-zero LastHandshakeAt. The
+//     happy path: prior session ended with a successful
+//     handshake, this session should render it.
+//  4. Load() returned a zero LastHandshakeAt (missing,
+//     empty, or corrupt file). The "never" sentinel; we
+//     wire the save callback so this session establishes
+//     the first cross-restart signal.
+//
+// The runtime state file path, the Load function, and the
+// Save function are injected as fields on the
+// runtimeStateOps struct so a unit test can exercise all
+// four branches (the production wiring passes the real
+// runtime package functions; tests pass fakes that return
+// the condition under test). This is the same
+// dependency-injection shape tray.NewRunner uses for
+// Ingester/Drainer/Pruner -- the production code path
+// stays a one-liner that calls wireRuntimeStateWithOps
+// with the real ops, and the test code can call the same
+// function with synthetic ops.
+func wireRuntimeStatePersistence(runner *tray.Runner) {
+	wireRuntimeStateWithOps(runner, runtimeStateOps{
+		Path: runtimeState.Path,
+		Load: runtimeState.Load,
+		Save: runtimeState.Save,
+	})
+}
+
+// runtimeStateOps is the testable surface of
+// wireRuntimeStatePersistence. The function fields are
+// directly the runtime package's exported functions in
+// production, and stand-ins in tests -- the indirection is
+// the only way to exercise the four branches of the switch
+// (Path() can only return one specific kind of error per
+// platform; Load() can be made to return synthetic errors
+// for tests; Save() likewise).
+type runtimeStateOps struct {
+	Path func() (string, error)
+	Load func(path string) (runtimeState.State, error)
+	Save func(path string, st runtimeState.State) error
+}
+
+func wireRuntimeStateWithOps(runner *tray.Runner, ops runtimeStateOps) {
+	runtimePath, pathErr := ops.Path()
+	if pathErr != nil {
+		slog.Warn("could not resolve runtime state path; cross-restart LastHandshakeAt will not survive this session", "err", pathErr)
+		return
+	}
+	rt, loadErr := ops.Load(runtimePath)
+	switch {
+	case loadErr != nil:
+		slog.Error("runtime state load FAILED; cross-restart LastHandshakeAt is unavailable this session and the next save will be skipped to avoid overwriting an unreadable file with a fresh one (investigate filesystem permissions on the runtime state file)", "path", runtimePath, "err", loadErr)
+	case !rt.LastHandshakeAt.IsZero():
+		runner.SeedLastHandshakeAt(rt.LastHandshakeAt)
+		slog.Info("seeded LastHandshakeAt from runtime state", "path", runtimePath, "at", rt.LastHandshakeAt)
+		runner.SetOnSuccessfulHandshake(func(t time.Time) error {
+			return ops.Save(runtimePath, runtimeState.State{LastHandshakeAt: t})
+		})
+	default:
+		runner.SetOnSuccessfulHandshake(func(t time.Time) error {
+			return ops.Save(runtimePath, runtimeState.State{LastHandshakeAt: t})
+		})
+	}
+}
+
+// probeArchive tests whether the archive destination is reachable before an
+// online ingest pass is attempted. If uploadStream is true, it verifies the
+// authenticated branchDAM hello endpoint within a 2-second timeout; otherwise,
+// it verifies that archiveRoot can be stat'd within 2 seconds.
+func probeArchive(ctx context.Context, archiveRoot string, client *branchdam.Client, uploadStream bool) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	if uploadStream {
+		if client == nil {
+			return false
+		}
+		_, err := client.Hello(probeCtx)
+		return err == nil
+	}
+
+	if archiveRoot == "" {
+		return false
+	}
+
+	statCh := make(chan error, 1)
+	go func() {
+		_, err := os.Stat(archiveRoot)
+		statCh <- err
+	}()
+
+	select {
+	case <-probeCtx.Done():
+		return false
+	case err := <-statCh:
+		return err == nil
+	}
 }
