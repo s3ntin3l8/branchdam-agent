@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -689,30 +690,40 @@ type timeoutCheckClient struct {
 }
 
 func (timeoutCheckClient) CheckContent(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+	if fastHash == "" && fullHash == "" {
+		// Run-level reachability probe succeeds so per-file check is reached
+		return branchdam.ContentCheckResult{Found: false}, nil
+	}
 	<-ctx.Done()
 	return branchdam.ContentCheckResult{}, ctx.Err()
 }
 
 type duplicateCheckClient struct {
 	fakeClient
-	nodeUUID string
-	filePath string
+	nodeUUID       string
+	filePath       string
+	lifecycleState string
 }
 
 func (d duplicateCheckClient) CheckContent(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
 	if fullHash == "" {
 		return branchdam.ContentCheckResult{Found: true}, nil
 	}
+	state := d.lifecycleState
+	if state == "" {
+		state = "ACTIVE"
+	}
 	return branchdam.ContentCheckResult{
 		Found:          true,
 		NodeUUID:       d.nodeUUID,
 		FilePath:       d.filePath,
-		LifecycleState: "ACTIVE",
+		LifecycleState: state,
 	}, nil
 }
 
 func TestIngestFileOfflineDedupTimeout(t *testing.T) {
-	t.Run("dedup pre-flight times out and falls open to normal offline ingest", func(t *testing.T) {
+	t.Run("per-file dedup pre-flight times out and falls open to normal offline ingest", func(t *testing.T) {
+		buf := captureSlog(t)
 		dir := t.TempDir()
 		cardRoot := filepath.Join(dir, "card")
 		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
@@ -727,7 +738,7 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 		archiveRoot := filepath.Join(dir, "archive")
 		localRoot := filepath.Join(dir, "local")
 		e := newOfflineTestEngine(t, client, archiveRoot, localRoot, "/storage/staging/agent-1", store)
-		// Use a short timeout (e.g. 50ms) to ensure the test is fast while asserting timeout handling
+		// Set PreflightTimeoutSecs = 1 to test the per-request HTTP deadline
 		e.Ingest.PreflightTimeoutSecs = 1
 
 		start := time.Now()
@@ -758,6 +769,12 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 		}
 		if elapsed > 10*time.Second {
 			t.Errorf("offline ingest took too long (%v), timeout should have bounded it", elapsed)
+		}
+
+		// Verify that the per-file timeout warning was logged
+		logStr := buf.String()
+		if !strings.Contains(logStr, "offline content check pre-flight failed (fail-open)") {
+			t.Errorf("expected per-file timeout warning in logs, got:\n%s", logStr)
 		}
 	})
 
@@ -807,6 +824,85 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 		// Ensure local file was never written
 		if _, err := os.Stat(fr.LocalPath); !os.IsNotExist(err) {
 			t.Errorf("local file should not exist, err=%v", err)
+		}
+	})
+
+	t.Run("duplicate with non-live lifecycle state proceeds with local write", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "IMG_ARCHIVED.jpg"), []byte("offline-archived-content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		store := openStoreT(t)
+		client := &duplicateCheckClient{
+			nodeUUID:       "0190f1a2-offline-archived-uuid",
+			filePath:       "/storage/archive/2026/IMG_ARCHIVED.jpg",
+			lifecycleState: "ARCHIVED",
+		}
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newOfflineTestEngine(t, client, archiveRoot, localRoot, "/storage/staging/agent-1", store)
+
+		res, err := e.IngestCardOffline(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCardOffline: %v", err)
+		}
+		if len(res.Files) != 1 {
+			t.Fatalf("got %d files, want 1", len(res.Files))
+		}
+		fr := res.Files[0]
+		if fr.Skipped {
+			t.Errorf("expected non-live (ARCHIVED) duplicate to NOT be skipped")
+		}
+		if !fr.Queued {
+			t.Errorf("expected file to be Queued=true")
+		}
+	})
+
+	t.Run("HTTPError per-file error does not latch serverUnreachable", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "IMG_1.jpg"), []byte("file1"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "IMG_2.jpg"), []byte("file2"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		store := openStoreT(t)
+		callCount := 0
+		client := &fakeCheckContentClient{
+			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+				if fastHash == "" && fullHash == "" {
+					// Probe succeeds
+					return branchdam.ContentCheckResult{}, nil
+				}
+				callCount++
+				// Return 500 HTTPError (server reachable, per-request error)
+				return branchdam.ContentCheckResult{}, &branchdam.HTTPError{StatusCode: http.StatusInternalServerError, Body: "internal error"}
+			},
+		}
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newOfflineTestEngine(t, client, archiveRoot, localRoot, "/storage/staging/agent-1", store)
+
+		res, err := e.IngestCardOffline(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCardOffline: %v", err)
+		}
+		if len(res.Files) != 2 {
+			t.Fatalf("got %d files, want 2", len(res.Files))
+		}
+		// Since HTTPError (500) is per-request and does not latch, both files should attempt preflight check
+		if callCount != 2 {
+			t.Errorf("expected 2 preflight attempts (not latched on 500), got %d", callCount)
 		}
 	})
 }

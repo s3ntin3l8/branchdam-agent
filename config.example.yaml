@@ -56,8 +56,7 @@ ingest:
   # Per-file timeout for content dedup pre-flight checks against the server
   # (GET /api/v1/agent/check-content). Defaults to 5 seconds when <= 0 (2s in
   # offline mode). Set to -1 to disable pre-flight entirely.
-  preflightTimeoutSecs: 5
-
+  # preflightTimeoutSecs: 5
 
 # M2's offline queue (branchdam-agent ingest --offline / queue-drain) -- see
 # docs/offline-queue.md for the full state machine this backs. Both keys are

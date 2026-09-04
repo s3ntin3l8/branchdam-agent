@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
+	"github.com/s3ntin3l8/branchdam-agent/internal/hashing"
 )
 
 type fakeClient struct {
@@ -950,11 +952,119 @@ func TestIngestFileDedupPreFlight(t *testing.T) {
 		if len(client.checkCalls) != 2 {
 			t.Fatalf("expected 2 CheckContent calls (fast then full), got %d", len(client.checkCalls))
 		}
+		srcPath := filepath.Join(cardRoot, "DSC0001.JPG")
+		wantFullHash := blake3Hex(t, srcPath)
+		f, err := os.Open(srcPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantFastHash, err := hashing.FastHash(f, fi.Size())
+		_ = f.Close()
+		if err != nil {
+			t.Fatalf("FastHash: %v", err)
+		}
+		if client.checkCalls[0].FastHash != wantFastHash {
+			t.Errorf("first check fastHash = %q, want %q", client.checkCalls[0].FastHash, wantFastHash)
+		}
 		if client.checkCalls[0].FullHash != "" {
 			t.Errorf("first check should have empty fullHash, got %q", client.checkCalls[0].FullHash)
 		}
-		if client.checkCalls[1].FullHash == "" {
-			t.Errorf("second check should have non-empty fullHash")
+		if client.checkCalls[1].FastHash != wantFastHash {
+			t.Errorf("second check fastHash = %q, want %q", client.checkCalls[1].FastHash, wantFastHash)
+		}
+		if client.checkCalls[1].FullHash != wantFullHash {
+			t.Errorf("second check fullHash = %q, want %q", client.checkCalls[1].FullHash, wantFullHash)
+		}
+	})
+
+	t.Run("duplicate found but lifecycle state non-live proceeds with DualWrite", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0004.JPG"), []byte("archived-node-content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		client := &fakeCheckContentClient{
+			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+				return branchdam.ContentCheckResult{
+					Found:          true,
+					NodeUUID:       "0190f1a2-archived-node",
+					FilePath:       "/storage/archive/archived.jpg",
+					LifecycleState: "ARCHIVED",
+				}, nil
+			},
+		}
+
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newTestEngine(t, client, archiveRoot, localRoot)
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		if len(res.Files) != 1 {
+			t.Fatalf("got %d files, want 1", len(res.Files))
+		}
+		fr := res.Files[0]
+		if fr.Skipped {
+			t.Errorf("expected non-live (ARCHIVED) duplicate to NOT be skipped, got Skipped=true")
+		}
+		if len(client.calls) != 1 {
+			t.Errorf("expected 1 PostNodeCreated call, got %d", len(client.calls))
+		}
+	})
+
+	t.Run("server 404 on preflight latches and skips preflight for remaining files", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0001.JPG"), []byte("file1"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0002.JPG"), []byte("file2"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0003.JPG"), []byte("file3"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		client := &fakeCheckContentClient{
+			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+				return branchdam.ContentCheckResult{}, &branchdam.HTTPError{StatusCode: http.StatusNotFound, Body: "404 page not found"}
+			},
+		}
+
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newTestEngine(t, client, archiveRoot, localRoot)
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		if len(res.Files) != 3 {
+			t.Fatalf("got %d files, want 3", len(res.Files))
+		}
+		for _, fr := range res.Files {
+			if fr.Skipped {
+				t.Errorf("file %s was skipped", fr.SourcePath)
+			}
+		}
+		if len(client.checkCalls) != 1 {
+			t.Errorf("expected exactly 1 check call before latching, got %d", len(client.checkCalls))
+		}
+		if len(client.calls) != 3 {
+			t.Errorf("expected 3 PostNodeCreated calls, got %d", len(client.calls))
 		}
 	})
 

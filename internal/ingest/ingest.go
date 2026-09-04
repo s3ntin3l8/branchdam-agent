@@ -2,11 +2,14 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -159,6 +162,13 @@ type CardResult struct {
 	Files []FileResult
 }
 
+// isLiveLifecycleState returns true if lifecycleState represents an active, live node.
+// An empty string (default/unspecified) or "ACTIVE" is considered live. Non-live states
+// (e.g. "ARCHIVED", "TRASHED", "DELETED") do not prevent ingest so content is not lost.
+func isLiveLifecycleState(state string) bool {
+	return state == "" || strings.EqualFold(state, "ACTIVE")
+}
+
 // IngestCard walks cardRoot (a mounted card's root directory, or the
 // fixture directory a test points --card at) and ingests every regular
 // file found under it. Returns per-file results even when some files
@@ -201,6 +211,7 @@ type CardResult struct {
 // followed by a re-run is a known-good recovery.
 func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, error) {
 	stemSuffix := make(map[string]string)
+	var serverUnreachable bool
 	var result CardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -225,7 +236,7 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 			})
 			return nil
 		}
-		result.Files = append(result.Files, e.ingestFile(ctx, path, stemSuffix))
+		result.Files = append(result.Files, e.ingestFile(ctx, path, stemSuffix, &serverUnreachable))
 		return nil
 	})
 	if err != nil {
@@ -237,7 +248,7 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 // ingestFile runs the full pipeline for one source file: metadata
 // extraction (needed up front to fill the naming template), dual-copy
 // write, verify, DJI .srt GPS, and (for non-sidecar files) submission.
-func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string) FileResult {
+func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string, serverUnreachable *bool) FileResult {
 	if e.Ingest.UploadStream {
 		return e.ingestFileUpload(ctx, srcPath)
 	}
@@ -307,9 +318,9 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	// When enabled, queries GET /api/v1/agent/check-content first with fastHash
 	// (xxHash64 sampled), and on a hit confirms with fullHash (BLAKE3-256) to
 	// skip writing duplicate bytes to archiveRoot / localEditRoot.
-	if e.Ingest.PreflightTimeoutSecs >= 0 && e.Client != nil && !fr.IsSidecar {
+	if (serverUnreachable == nil || !*serverUnreachable) && e.Ingest.PreflightTimeoutSecs >= 0 && e.Client != nil && !fr.IsSidecar {
 		if checker, ok := e.Client.(contentChecker); ok {
-			timeout := 5 * time.Second
+			timeout := time.Duration(config.DefaultPreflightTimeoutSecs) * time.Second
 			if e.Ingest.PreflightTimeoutSecs > 0 {
 				timeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
 			}
@@ -323,6 +334,12 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 				pCancel()
 				if err != nil {
 					slog.Warn("ingest: content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
+					if serverUnreachable != nil {
+						var he *branchdam.HTTPError
+						if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented) {
+							*serverUnreachable = true
+						}
+					}
 				} else if res.Found {
 					fullHash, err := blake3File(srcPath)
 					if err != nil {
@@ -333,7 +350,13 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 						pCancel2()
 						if err != nil {
 							slog.Warn("ingest: content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
-						} else if res2.Found {
+							if serverUnreachable != nil {
+								var he *branchdam.HTTPError
+								if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented) {
+									*serverUnreachable = true
+								}
+							}
+						} else if res2.Found && isLiveLifecycleState(res2.LifecycleState) {
 							fr.Skipped = true
 							fr.SkipReason = fmt.Sprintf("duplicate: already in library as node %s at %s", res2.NodeUUID, res2.FilePath)
 							fr.ExistingNodeUUID = res2.NodeUUID
@@ -346,7 +369,6 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	}
 
 	writeRes, err := DualWrite(srcPath, archivePath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
-
 	if err != nil {
 		fr.Err = fmt.Errorf("dual write: %w", err)
 		return fr

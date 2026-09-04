@@ -450,8 +450,12 @@ type IngestConfig struct {
 	// the card-detection confirmation dialog (issue #79). When a newly mounted
 	// volume matches an entry here, it is ingested immediately without prompting.
 	AutoImportPaths []string `yaml:"autoImportPaths"`
-	// PreflightTimeoutSecs is the per-file timeout for the content dedup
-	// pre-flight check against the server. Defaults to 5 when <= 0.
+	// PreflightTimeoutSecs is the per-request HTTP timeout for content dedup
+	// pre-flight checks against the server (GET /api/v1/agent/check-content).
+	// When unset (<= 0), online ingest defaults to DefaultPreflightTimeoutSecs (5s)
+	// and offline ingest defaults to DefaultOfflinePreflightTimeoutSecs (2s).
+	// Note that this bounds each individual network request, not the total wall-clock
+	// time of any local disk hashing passes.
 	// Set to -1 to disable pre-flight entirely (server-side dedup is still active).
 	PreflightTimeoutSecs int `yaml:"preflightTimeoutSecs"`
 }

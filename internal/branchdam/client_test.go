@@ -2,6 +2,9 @@ package branchdam
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -436,14 +439,17 @@ func asHTTPError(err error, target **HTTPError) bool {
 
 func TestClientCheckContent(t *testing.T) {
 	t.Run("found with full hash", func(t *testing.T) {
-		var gotMethod, gotPath, gotQuery string
-		var gotAPIKey, gotSig string
+		var gotMethod, gotPath, gotQuery, gotRequestURI string
+		var gotAPIKey, gotSig, gotNonce, gotTimestamp string
 		_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 			gotMethod = r.Method
 			gotPath = r.URL.Path
 			gotQuery = r.URL.RawQuery
+			gotRequestURI = r.URL.RequestURI()
 			gotAPIKey = r.Header.Get("X-API-Key")
 			gotSig = r.Header.Get("X-Signature")
+			gotNonce = r.Header.Get("X-Nonce")
+			gotTimestamp = r.Header.Get("X-Timestamp")
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{
 				"found": true,
@@ -471,6 +477,12 @@ func TestClientCheckContent(t *testing.T) {
 		}
 		if gotSig == "" {
 			t.Error("expected X-Signature header to be set")
+		}
+		mac := hmac.New(sha256.New, []byte("test-api-key-0123456789012345678901"))
+		mac.Write([]byte("GET\n" + gotRequestURI + "\n" + gotNonce + "\n" + gotTimestamp + "\n"))
+		wantSig := hex.EncodeToString(mac.Sum(nil))
+		if gotSig != wantSig {
+			t.Errorf("X-Signature = %q, want HMAC over RequestURI = %q", gotSig, wantSig)
 		}
 		if !res.Found {
 			t.Errorf("res.Found = %v, want true", res.Found)

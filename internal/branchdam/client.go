@@ -142,11 +142,13 @@ func isLoopbackHost(h string) bool {
 
 // signRequest computes the S-3 replay-protection signature over the
 // canonical string "method\npath\nnonce\ntimestamp\n" followed by the
-// raw request body bytes, using HMAC-SHA256 keyed by the apiKey. The
-// server-side validator is a separate branchDAM PR gated on
-// server.signedRequests; the client contract is what this package
-// pins today (issue #95's "client-side nonce + signature, server-side
-// validation as follow-up" split).
+// raw request body bytes, using HMAC-SHA256 keyed by the apiKey.
+// For GET requests with query parameters (e.g. /api/v1/agent/check-content?fastHash=...),
+// path includes the full raw query string as passed to the request URI
+// (matching r.URL.RequestURI()). The server-side validator is a separate
+// branchDAM PR gated on server.signedRequests; the client contract is what
+// this package pins today (issue #95's "client-side nonce + signature,
+// server-side validation as follow-up" split).
 //
 // Body bytes are appended after the trailing "\n" so a request with an
 // empty body is a well-defined canonical string (no body bytes), not a
