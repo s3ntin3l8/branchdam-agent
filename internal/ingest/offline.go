@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/naming"
@@ -20,12 +22,14 @@ import (
 // rebase) may not have happened yet by the time IngestCardOffline returns;
 // see the Queued field and internal/ingest/drain.go's Drain.
 type OfflineFileResult struct {
-	SourcePath string
-	LocalPath  string
-	IsSidecar  bool
-	Skipped    bool
-	SkipReason string
-	NodeUUID   string
+	SourcePath       string
+	LocalPath        string
+	IsSidecar        bool
+	Skipped          bool
+	SkipReason       string
+	ExistingNodeUUID string
+	NodeUUID         string
+
 	// Queued is true once this file has a durable queue.db row -- the
 	// crash-safety boundary. A restart after Queued=true is guaranteed to
 	// resume this file's remaining steps without re-copying the local file
@@ -81,6 +85,21 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 		return OfflineCardResult{}, fmt.Errorf("ingest: IngestCardOffline requires a non-nil Engine.Queue")
 	}
 
+	var serverUnreachable bool
+	if checker, ok := e.Client.(contentChecker); ok && e.Ingest.PreflightTimeoutSecs >= 0 {
+		probeTimeout := 2 * time.Second
+		if e.Ingest.PreflightTimeoutSecs > 0 {
+			probeTimeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
+		}
+		probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
+		_, probeErr := checker.CheckContent(probeCtx, "", "")
+		probeCancel()
+		if probeErr != nil {
+			serverUnreachable = true
+			slog.Warn("ingest: offline pre-flight server probe unreachable -- skipping pre-flight checks for this run", "err", probeErr)
+		}
+	}
+
 	stemSuffix := make(map[string]string)
 	var result OfflineCardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
@@ -106,7 +125,7 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 			})
 			return nil
 		}
-		result.Files = append(result.Files, e.ingestFileOffline(ctx, path, stemSuffix))
+		result.Files = append(result.Files, e.ingestFileOfflineInternal(ctx, path, stemSuffix, &serverUnreachable))
 		return nil
 	})
 	if err != nil {
@@ -118,7 +137,7 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 // ingestFileOffline is IngestCardOffline's per-file worker. Ordering is the
 // entire point of this function, so it is spelled out here rather than left
 // implicit:
-//
+
 //  1. Check queue.db for an existing row keyed by this source path -- a
 //     restart resuming a previously-interrupted run over the same card. If
 //     found, trust it (the row only exists because step 4 below already
@@ -149,6 +168,10 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 // EVENT_NODE_CREATED, no rebase -- only the local write and the archive-copy
 // queue row, mirroring IngestCard's sidecar handling.
 func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuffix map[string]string) OfflineFileResult {
+	return e.ingestFileOfflineInternal(ctx, srcPath, stemSuffix, nil)
+}
+
+func (e *Engine) ingestFileOfflineInternal(ctx context.Context, srcPath string, stemSuffix map[string]string, serverUnreachable *bool) OfflineFileResult {
 	fr := OfflineFileResult{SourcePath: srcPath}
 
 	ext := extNoDot(srcPath)
@@ -221,6 +244,51 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		fr.Skipped = true
 		fr.SkipReason = "already ingested (identical file exists at destination)"
 		return fr
+	}
+
+	// Pre-flight BLAKE3 content dedup check before WriteLocal.
+	if (serverUnreachable == nil || !*serverUnreachable) && e.Ingest.PreflightTimeoutSecs >= 0 && e.Client != nil && !fr.IsSidecar {
+		if checker, ok := e.Client.(contentChecker); ok {
+			timeout := 2 * time.Second
+			if e.Ingest.PreflightTimeoutSecs > 0 {
+				timeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
+			}
+
+			fastHash, err := fastHashFile(srcPath, srcInfo.Size())
+			if err != nil {
+				slog.Warn("ingest: offline pre-flight fast hash failed", "source", srcPath, "err", err)
+			} else {
+				pCtx, pCancel := context.WithTimeout(ctx, timeout)
+				res, err := checker.CheckContent(pCtx, fastHash, "")
+				pCancel()
+				if err != nil {
+					slog.Warn("ingest: offline content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
+					if serverUnreachable != nil {
+						*serverUnreachable = true
+					}
+				} else if res.Found {
+					fullHash, err := blake3File(srcPath)
+					if err != nil {
+						slog.Warn("ingest: offline pre-flight full hash failed", "source", srcPath, "err", err)
+					} else {
+						pCtx2, pCancel2 := context.WithTimeout(ctx, timeout)
+						res2, err := checker.CheckContent(pCtx2, fastHash, fullHash)
+						pCancel2()
+						if err != nil {
+							slog.Warn("ingest: offline content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
+							if serverUnreachable != nil {
+								*serverUnreachable = true
+							}
+						} else if res2.Found {
+							fr.Skipped = true
+							fr.SkipReason = fmt.Sprintf("duplicate: already in library as node %s at %s", res2.NodeUUID, res2.FilePath)
+							fr.ExistingNodeUUID = res2.NodeUUID
+							return fr
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// An orphaned partial from a run that crashed after WriteLocal but

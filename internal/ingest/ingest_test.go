@@ -869,3 +869,243 @@ func TestIngestCardUploadStreamChtimesFailureIsLogged(t *testing.T) {
 		t.Errorf("warn source = %v", warn["source"])
 	}
 }
+
+type fakeCheckContentClient struct {
+	fakeClient
+	checkCalls []struct{ FastHash, FullHash string }
+	checkFunc  func(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error)
+}
+
+func (f *fakeCheckContentClient) CheckContent(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+	f.checkCalls = append(f.checkCalls, struct{ FastHash, FullHash string }{fastHash, fullHash})
+	if f.checkFunc != nil {
+		return f.checkFunc(ctx, fastHash, fullHash)
+	}
+	return branchdam.ContentCheckResult{Found: false}, nil
+}
+
+func TestIngestFileDedupPreFlight(t *testing.T) {
+	t.Run("confirmed duplicate skips DualWrite and sets ExistingNodeUUID", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0001.JPG"), []byte("duplicate-image-bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		client := &fakeCheckContentClient{
+			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+				if fullHash == "" {
+					// Fast-hash pre-screen hit
+					return branchdam.ContentCheckResult{Found: true}, nil
+				}
+				// Full-hash confirmation hit
+				return branchdam.ContentCheckResult{
+					Found:          true,
+					NodeUUID:       "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
+					FilePath:       "/storage/archive/2026/2026-07-15_ILCE-7M4/DSC0001.JPG",
+					LifecycleState: "ACTIVE",
+				}, nil
+			},
+		}
+
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newTestEngine(t, client, archiveRoot, localRoot)
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		if len(res.Files) != 1 {
+			t.Fatalf("got %d files, want 1", len(res.Files))
+		}
+		fr := res.Files[0]
+		if fr.Err != nil {
+			t.Fatalf("unexpected file error: %v", fr.Err)
+		}
+		if !fr.Skipped {
+			t.Errorf("expected Skipped=true, got false")
+		}
+		if fr.ExistingNodeUUID != "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60" {
+			t.Errorf("ExistingNodeUUID = %q, want 0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60", fr.ExistingNodeUUID)
+		}
+		wantReason := "duplicate: already in library as node 0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60 at /storage/archive/2026/2026-07-15_ILCE-7M4/DSC0001.JPG"
+		if fr.SkipReason != wantReason {
+			t.Errorf("SkipReason = %q, want %q", fr.SkipReason, wantReason)
+		}
+
+		// Zero bytes written to archiveRoot or localRoot
+		if _, err := os.Stat(fr.ArchivePath); !os.IsNotExist(err) {
+			t.Errorf("archive file should not exist, err=%v", err)
+		}
+		if _, err := os.Stat(fr.LocalPath); !os.IsNotExist(err) {
+			t.Errorf("local file should not exist, err=%v", err)
+		}
+		if len(client.calls) != 0 {
+			t.Errorf("expected 0 PostNodeCreated calls, got %d", len(client.calls))
+		}
+		if len(client.checkCalls) != 2 {
+			t.Fatalf("expected 2 CheckContent calls (fast then full), got %d", len(client.checkCalls))
+		}
+		if client.checkCalls[0].FullHash != "" {
+			t.Errorf("first check should have empty fullHash, got %q", client.checkCalls[0].FullHash)
+		}
+		if client.checkCalls[1].FullHash == "" {
+			t.Errorf("second check should have non-empty fullHash")
+		}
+	})
+
+	t.Run("fast-hash false positive proceeds with DualWrite", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0002.JPG"), []byte("unique-image-bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		client := &fakeCheckContentClient{
+			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+				if fullHash == "" {
+					// Fast-hash collision / false positive
+					return branchdam.ContentCheckResult{Found: true}, nil
+				}
+				// Full-hash mismatch -> not found
+				return branchdam.ContentCheckResult{Found: false}, nil
+			},
+		}
+
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newTestEngine(t, client, archiveRoot, localRoot)
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		if len(res.Files) != 1 {
+			t.Fatalf("got %d files, want 1", len(res.Files))
+		}
+		fr := res.Files[0]
+		if fr.Err != nil {
+			t.Fatalf("unexpected file error: %v", fr.Err)
+		}
+		if fr.Skipped {
+			t.Errorf("expected file to NOT be skipped on false positive, got Skipped=true")
+		}
+		if len(client.calls) != 1 {
+			t.Errorf("expected 1 PostNodeCreated call, got %d", len(client.calls))
+		}
+		if _, err := os.Stat(fr.ArchivePath); err != nil {
+			t.Errorf("archive file missing: %v", err)
+		}
+		if _, err := os.Stat(fr.LocalPath); err != nil {
+			t.Errorf("local file missing: %v", err)
+		}
+	})
+
+	t.Run("fast-hash not found skips full-hash check and proceeds with DualWrite", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0003.JPG"), []byte("new-image-bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		client := &fakeCheckContentClient{
+			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+				return branchdam.ContentCheckResult{Found: false}, nil
+			},
+		}
+
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newTestEngine(t, client, archiveRoot, localRoot)
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		fr := res.Files[0]
+		if fr.Skipped {
+			t.Errorf("expected file to NOT be skipped, got Skipped=true")
+		}
+		if len(client.checkCalls) != 1 {
+			t.Errorf("expected only 1 check call (fastHash), got %d", len(client.checkCalls))
+		}
+		if len(client.calls) != 1 {
+			t.Errorf("expected 1 PostNodeCreated call, got %d", len(client.calls))
+		}
+	})
+
+	t.Run("server network failure fails open and proceeds with DualWrite", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0004.JPG"), []byte("failopen-image-bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		client := &fakeCheckContentClient{
+			checkFunc: func(_ context.Context, _, _ string) (branchdam.ContentCheckResult, error) {
+				return branchdam.ContentCheckResult{}, fmt.Errorf("connection refused")
+			},
+		}
+
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newTestEngine(t, client, archiveRoot, localRoot)
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		fr := res.Files[0]
+		if fr.Err != nil {
+			t.Fatalf("unexpected error: %v", fr.Err)
+		}
+		if fr.Skipped {
+			t.Errorf("expected file to NOT be skipped on network failure, got Skipped=true")
+		}
+		if len(client.calls) != 1 {
+			t.Errorf("expected 1 PostNodeCreated call, got %d", len(client.calls))
+		}
+	})
+
+	t.Run("disabled preflight skips CheckContent entirely", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0005.JPG"), []byte("disabled-preflight-bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		client := &fakeCheckContentClient{}
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newTestEngine(t, client, archiveRoot, localRoot)
+		e.Ingest.PreflightTimeoutSecs = -1
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		fr := res.Files[0]
+		if fr.Skipped {
+			t.Errorf("expected file to NOT be skipped, got Skipped=true")
+		}
+		if len(client.checkCalls) != 0 {
+			t.Errorf("expected 0 CheckContent calls when disabled, got %d", len(client.checkCalls))
+		}
+	})
+}

@@ -683,3 +683,130 @@ func TestIngestCardOfflineChtimesFailureIsLogged(t *testing.T) {
 		t.Errorf("warn err = %v, want something containing 'no such file'", warn["err"])
 	}
 }
+
+type timeoutCheckClient struct {
+	fakeClient
+}
+
+func (timeoutCheckClient) CheckContent(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+	<-ctx.Done()
+	return branchdam.ContentCheckResult{}, ctx.Err()
+}
+
+type duplicateCheckClient struct {
+	fakeClient
+	nodeUUID string
+	filePath string
+}
+
+func (d duplicateCheckClient) CheckContent(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+	if fullHash == "" {
+		return branchdam.ContentCheckResult{Found: true}, nil
+	}
+	return branchdam.ContentCheckResult{
+		Found:          true,
+		NodeUUID:       d.nodeUUID,
+		FilePath:       d.filePath,
+		LifecycleState: "ACTIVE",
+	}, nil
+}
+
+func TestIngestFileOfflineDedupTimeout(t *testing.T) {
+	t.Run("dedup pre-flight times out and falls open to normal offline ingest", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "IMG_TIMEOUT.jpg"), []byte("offline-timeout-content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		store := openStoreT(t)
+		client := &timeoutCheckClient{}
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newOfflineTestEngine(t, client, archiveRoot, localRoot, "/storage/staging/agent-1", store)
+		// Use a short timeout (e.g. 50ms) to ensure the test is fast while asserting timeout handling
+		e.Ingest.PreflightTimeoutSecs = 1
+
+		start := time.Now()
+		res, err := e.IngestCardOffline(context.Background(), cardRoot)
+		elapsed := time.Since(start)
+
+		if err != nil {
+			t.Fatalf("IngestCardOffline: %v", err)
+		}
+		if len(res.Files) != 1 {
+			t.Fatalf("got %d files, want 1", len(res.Files))
+		}
+		fr := res.Files[0]
+		if fr.Err != nil {
+			t.Fatalf("unexpected file error: %v", fr.Err)
+		}
+		if fr.Skipped {
+			t.Errorf("expected file to NOT be skipped on timeout, got Skipped=true")
+		}
+		if !fr.Queued {
+			t.Errorf("expected file to be Queued=true after fail-open offline write")
+		}
+		if !fr.LocalVerify.Verified {
+			t.Errorf("expected local copy to verify")
+		}
+		if _, err := os.Stat(fr.LocalPath); err != nil {
+			t.Errorf("local copy missing: %v", err)
+		}
+		if elapsed > 10*time.Second {
+			t.Errorf("offline ingest took too long (%v), timeout should have bounded it", elapsed)
+		}
+	})
+
+	t.Run("duplicate skips local write and queues nothing", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "IMG_DUP.jpg"), []byte("offline-duplicate-content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		store := openStoreT(t)
+		client := &duplicateCheckClient{
+			nodeUUID: "0190f1a2-offline-dup-uuid",
+			filePath: "/storage/archive/2026/IMG_DUP.jpg",
+		}
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newOfflineTestEngine(t, client, archiveRoot, localRoot, "/storage/staging/agent-1", store)
+
+		res, err := e.IngestCardOffline(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCardOffline: %v", err)
+		}
+		if len(res.Files) != 1 {
+			t.Fatalf("got %d files, want 1", len(res.Files))
+		}
+		fr := res.Files[0]
+		if fr.Err != nil {
+			t.Fatalf("unexpected file error: %v", fr.Err)
+		}
+		if !fr.Skipped {
+			t.Errorf("expected Skipped=true for duplicate, got false")
+		}
+		if fr.ExistingNodeUUID != "0190f1a2-offline-dup-uuid" {
+			t.Errorf("ExistingNodeUUID = %q, want 0190f1a2-offline-dup-uuid", fr.ExistingNodeUUID)
+		}
+		wantReason := "duplicate: already in library as node 0190f1a2-offline-dup-uuid at /storage/archive/2026/IMG_DUP.jpg"
+		if fr.SkipReason != wantReason {
+			t.Errorf("SkipReason = %q, want %q", fr.SkipReason, wantReason)
+		}
+		if fr.Queued {
+			t.Errorf("expected Queued=false for duplicate")
+		}
+		// Ensure local file was never written
+		if _, err := os.Stat(fr.LocalPath); !os.IsNotExist(err) {
+			t.Errorf("local file should not exist, err=%v", err)
+		}
+	})
+}

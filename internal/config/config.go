@@ -450,7 +450,19 @@ type IngestConfig struct {
 	// the card-detection confirmation dialog (issue #79). When a newly mounted
 	// volume matches an entry here, it is ingested immediately without prompting.
 	AutoImportPaths []string `yaml:"autoImportPaths"`
+	// PreflightTimeoutSecs is the per-file timeout for the content dedup
+	// pre-flight check against the server. Defaults to 5 when <= 0.
+	// Set to -1 to disable pre-flight entirely (server-side dedup is still active).
+	PreflightTimeoutSecs int `yaml:"preflightTimeoutSecs"`
 }
+
+// DefaultPreflightTimeoutSecs is IngestConfig.PreflightTimeoutSecs's fallback
+// when unset (<= 0) during online ingest.
+const DefaultPreflightTimeoutSecs = 5
+
+// DefaultOfflinePreflightTimeoutSecs is the fallback preflight timeout when
+// unset (<= 0) during offline ingest.
+const DefaultOfflinePreflightTimeoutSecs = 2
 
 // ServerConfig is the branchDAM server this agent reports to.
 type ServerConfig struct {

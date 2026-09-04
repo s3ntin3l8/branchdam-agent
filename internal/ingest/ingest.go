@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/zeebo/blake3"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
@@ -50,6 +51,12 @@ func preserveMtimeAt(srcPath, dstPath string, mtime time.Time) {
 // tests can substitute a fake without a real HTTP server.
 type nodeCreator interface {
 	PostNodeCreated(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error)
+}
+
+// contentChecker is the subset of *branchdam.Client's surface Engine needs for
+// content deduplication pre-flight checks.
+type contentChecker interface {
+	CheckContent(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error)
 }
 
 // uploader is the subset of *branchdam.Client's surface Engine needs for direct HTTP streaming ingest.
@@ -129,21 +136,22 @@ func NewEngine(client nodeCreator, agentID string, ingestCfg config.IngestConfig
 
 // FileResult is one card file's outcome.
 type FileResult struct {
-	SourcePath    string
-	ArchivePath   string
-	LocalPath     string
-	IsSidecar     bool // .xmp/.srt -- copied to both destinations, no event submitted
-	Skipped       bool
-	SkipReason    string
-	NodeUUID      string
-	EventID       string
-	Write         WriteResult
-	ArchiveVerify VerifyResult
-	LocalVerify   VerifyResult
-	Exif          *ExifResult
-	PHash         *int64
-	GPSSource     string // "exif", "srt", or "" (no GPS)
-	Err           error
+	SourcePath       string
+	ArchivePath      string
+	LocalPath        string
+	IsSidecar        bool // .xmp/.srt -- copied to both destinations, no event submitted
+	Skipped          bool
+	SkipReason       string
+	ExistingNodeUUID string
+	NodeUUID         string
+	EventID          string
+	Write            WriteResult
+	ArchiveVerify    VerifyResult
+	LocalVerify      VerifyResult
+	Exif             *ExifResult
+	PHash            *int64
+	GPSSource        string // "exif", "srt", or "" (no GPS)
+	Err              error
 }
 
 // CardResult is one IngestCard call's full outcome.
@@ -295,7 +303,50 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 		return fr
 	}
 
+	// Pre-flight BLAKE3 content dedup check before DualWrite.
+	// When enabled, queries GET /api/v1/agent/check-content first with fastHash
+	// (xxHash64 sampled), and on a hit confirms with fullHash (BLAKE3-256) to
+	// skip writing duplicate bytes to archiveRoot / localEditRoot.
+	if e.Ingest.PreflightTimeoutSecs >= 0 && e.Client != nil && !fr.IsSidecar {
+		if checker, ok := e.Client.(contentChecker); ok {
+			timeout := 5 * time.Second
+			if e.Ingest.PreflightTimeoutSecs > 0 {
+				timeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
+			}
+
+			fastHash, err := fastHashFile(srcPath, srcInfo.Size())
+			if err != nil {
+				slog.Warn("ingest: pre-flight fast hash failed", "source", srcPath, "err", err)
+			} else {
+				pCtx, pCancel := context.WithTimeout(ctx, timeout)
+				res, err := checker.CheckContent(pCtx, fastHash, "")
+				pCancel()
+				if err != nil {
+					slog.Warn("ingest: content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
+				} else if res.Found {
+					fullHash, err := blake3File(srcPath)
+					if err != nil {
+						slog.Warn("ingest: pre-flight full hash failed", "source", srcPath, "err", err)
+					} else {
+						pCtx2, pCancel2 := context.WithTimeout(ctx, timeout)
+						res2, err := checker.CheckContent(pCtx2, fastHash, fullHash)
+						pCancel2()
+						if err != nil {
+							slog.Warn("ingest: content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
+						} else if res2.Found {
+							fr.Skipped = true
+							fr.SkipReason = fmt.Sprintf("duplicate: already in library as node %s at %s", res2.NodeUUID, res2.FilePath)
+							fr.ExistingNodeUUID = res2.NodeUUID
+							return fr
+						}
+					}
+				}
+			}
+		}
+	}
+
 	writeRes, err := DualWrite(srcPath, archivePath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
+
 	if err != nil {
 		fr.Err = fmt.Errorf("dual write: %w", err)
 		return fr
@@ -553,4 +604,19 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 	}
 
 	return fr
+}
+
+// blake3File computes the BLAKE3-256 hex digest of the file at p in a single pass.
+func blake3File(p string) (string, error) {
+	f, err := os.Open(p) //nolint:gosec // path is our source file
+	if err != nil {
+		return "", fmt.Errorf("open for blake3: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	h := blake3.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("hash blake3: %w", err)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
