@@ -275,6 +275,32 @@ type Runner struct {
 	inFlightDrain bool
 	inFlightPrune bool
 
+	// onSuccessfulHandshake is invoked after every TriggerDrain pass
+	// whose HandshakeOK is true, with the just-stamped
+	// summary.LastHandshakeAt as its argument. Wired by runTrayCmd to
+	// internal/runtime.Save so the freshness signal the status page
+	// renders as "last handshake: <since> ago" survives a tray
+	// restart (issue #149 / audit F-13 cross-session half). The
+	// callback is allowed to return an error -- failing to write
+	// runtime.json (disk full, permission revocation) must not block
+	// the drain pass, and a panicking callback is caught and
+	// recovered by the TriggerDrain hook site. Both the field and the
+	// setter/seed follow the same one-time-wired-after-construction
+	// shape as SetQueueDeps and SetErrorNotifier: the drain timer
+	// calls into this hook from a goroutine the tray owns, so a
+	// mid-flight swap is rare but not undefined, and the setter takes
+	// r.mu to be consistent with the rest of the Runner's setters.
+	//
+	// Stored in an atomic.Pointer so the TriggerDrain hook site can
+	// read it without holding r.mu (the save may be slow on a
+	// network share; holding r.mu across a slow Save would block
+	// the next drain pass's r.lastDrain write and the carry-forward
+	// key off r.lastDrain, breaking Key Invariant 9's
+	// serialization contract). An atomic read is a free snapshot
+	// of the current callback, with no torn-write window during a
+	// SetOnSuccessfulHandshake swap.
+	onSuccessfulHandshake atomic.Pointer[func(time.Time) error]
+
 	// syncers is nil-able per ID (issue #57), same contract as drainer/
 	// pruner above: an absent entry is "not configured" -- disabled, or
 	// enabled but missing a required config field -- never an error. Set
@@ -631,6 +657,89 @@ func (r *Runner) SetQueueDeps(reader QueueReader, drainer Drainer, pruner Pruner
 	r.pruner = pruner
 }
 
+// SeedLastHandshakeAt pre-populates the in-memory carry-forward
+// state with a prior successful handshake, so a tray that loaded a
+// persisted runtime.json at startup can render the status page's
+// "last handshake: <since> ago" line before the first in-session
+// drain pass runs (issue #149 / audit F-13 cross-session half).
+//
+// A zero time.Time is treated as the "never" sentinel and is a
+// no-op: a fresh install that loaded an empty runtime state file
+// (or no file at all) must not pre-populate lastDrain with the
+// zero time, which the template's
+// {{ if not .Status.LastHandshakeAt.IsZero }} guard already
+// suppresses but the test pins as a stronger invariant.
+//
+// If a real drain pass has already completed in this session
+// (r.lastDrain != nil), the seed is silently ignored: a fresh
+// in-memory signal from the running tray is always more accurate
+// than whatever the runtime.json file held, and overwriting it
+// with a stale persisted stamp would briefly regress the status
+// page to an older "successful Nh ago" line during the few
+// milliseconds between NewRunner returning and Seed being called.
+//
+// The guard is "r.lastDrain == nil || r.lastDrain.LastHandshakeAt
+// is zero" -- not just "r.lastDrain == nil" -- because the drain
+// timer can fire between NewRunner returning and Seed being called
+// (a 5s drain cadence on an offline server would, with high
+// probability, hit this race on a fresh install: NewRunner, then
+// SetQueueDeps + go startPeriodic, then the wiring code that calls
+// Seed). A failed first-drain pass leaves r.lastDrain non-nil with
+// a zero LastHandshakeAt, and keying the guard on the carry-forward
+// invariant (Key Invariant 11: "r.lastDrain != nil &&
+// !r.lastDrain.LastHandshakeAt.IsZero()") means the seed wins
+// whenever the in-memory state does not already have a successful
+// stamp. Otherwise a 5s blip on the first post-restart drain pass
+// would silently drop the cross-restart signal this whole PR exists
+// to defend.
+//
+// The seeded DrainSummary has HandshakeOK set to false, not true:
+// the seeded stamp is from a *prior session's* successful
+// handshake, and Status().HandshakeOK is the *current session's*
+// "last drain: handshake OK" signal. A pre-seed HandshakeOK=true
+// would briefly lie about the current session during the 0-5s
+// window before the drain timer's first tick. The first in-session
+// drain pass (successful or not) is what flips HandshakeOK to its
+// honest current-session value; the seed only contributes the
+// cross-session freshness stamp.
+func (r *Runner) SeedLastHandshakeAt(t time.Time) {
+	if t.IsZero() {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lastDrain != nil && !r.lastDrain.LastHandshakeAt.IsZero() {
+		return
+	}
+	r.lastDrain = &DrainSummary{
+		At:              t,
+		HandshakeOK:     false,
+		LastHandshakeAt: t,
+	}
+}
+
+// SetOnSuccessfulHandshake registers a callback invoked after every
+// TriggerDrain pass whose HandshakeOK is true, with the
+// just-stamped summary.LastHandshakeAt as its argument. The
+// callback may return an error; the error is logged at WARN level
+// but does NOT propagate to the drain pass's return value -- a
+// failing runtime state save (disk full, permission revocation)
+// must never block a drain pass, since the freshness signal the
+// state file preserves is non-critical and the in-memory
+// carry-forward is the primary correctness layer (issue #149 AC:
+// "failing os.WriteFile to the runtime state file should not block
+// the drain pass"). A panicking callback is also recovered, for
+// the same reason.
+//
+// Wired by runTrayCmd to internal/runtime.Save; nil disables
+// the persistence side of issue #149 (the in-memory carry-forward
+// in PR #148 stays in effect regardless, so this is never a
+// correctness regression -- only a loss of cross-restart
+// persistence).
+func (r *Runner) SetOnSuccessfulHandshake(cb func(t time.Time) error) {
+	r.onSuccessfulHandshake.Store(&cb)
+}
+
 // SetPauseUploadOnMetered sets whether queue drain and streaming upload
 // operations should be deferred when connected to a metered network.
 func (r *Runner) SetPauseUploadOnMetered(v bool) {
@@ -741,6 +850,41 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 	}
 	r.lastDrain = &summary
 	r.mu.Unlock()
+
+	// Cross-session persistence hook (issue #149): on every
+	// successful drain pass, ask the registered callback to write
+	// the just-stamped LastHandshakeAt to the runtime state file.
+	// The callback is allowed to fail (logged via slog from the
+	// call site) and panic (recovered here): a misbehaving save
+	// must not corrupt the drain pass's own return value, which
+	// is the trigger timer's only signal that the pass completed.
+	// We deliberately do this AFTER r.mu.Unlock() so a slow save
+	// (e.g. a slow SMB share holding runtime.json) does not block
+	// the next drain pass from acquiring the mutex.
+	//
+	// The callback is read via an atomic.Pointer (not
+	// r.onSuccessfulHandshake under r.mu) so a future
+	// SetOnSuccessfulHandshake swap from a settings-reload hook
+	// does not race the read here: at worst, a swap that lands
+	// between the Load and the call uses the *old* callback for
+	// this one drain pass and the *new* one from the next pass
+	// onward -- the freshness signal lands at one of the two
+	// configured destinations, never lost, which is the only
+	// invariant the persistence hook actually owns.
+	cbPtr := r.onSuccessfulHandshake.Load()
+	if summary.HandshakeOK && cbPtr != nil {
+		cb := *cbPtr
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					slog.Error("onSuccessfulHandshake callback panicked; runtime state will not be persisted this pass", "panic", rec)
+				}
+			}()
+			if err := cb(summary.LastHandshakeAt); err != nil {
+				slog.Warn("runtime state save failed; the last-handshake signal will not survive the next restart", "err", err)
+			}
+		}()
+	}
 
 	return summary, true
 }
