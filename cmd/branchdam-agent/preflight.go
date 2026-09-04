@@ -112,11 +112,19 @@ func runPreflightChecks(
 		}
 	}
 
-	// 2. exiftool on PATH. Non-fatal: the agent falls back to fast_hash-only
-	// indexing (matching branchDAM's own probe.go doc comment) when it's
-	// absent, same as a machine running branchDAM's own CI Go job.
-	if path, err := lookPath("exiftool"); err != nil {
-		checks = append(checks, preflightCheck{"WARN", "exiftool not found on PATH -- pHash RAW fallback and metadata extraction will be skipped"})
+	// 2. exiftool on PATH (or at cfg.Ingest.ExiftoolPath, when an operator
+	// has configured a non-default binary -- internal/ingest.NewExiftoolAt
+	// resolves the same way, so this check reports on the exact binary
+	// ingest will actually pool). Non-fatal: the agent falls back to
+	// fast_hash-only indexing (matching branchDAM's own probe.go doc
+	// comment) when it's absent, same as a machine running branchDAM's own
+	// CI Go job.
+	exiftoolBin := "exiftool"
+	if cfg.Ingest.ExiftoolPath != "" {
+		exiftoolBin = cfg.Ingest.ExiftoolPath
+	}
+	if path, err := lookPath(exiftoolBin); err != nil {
+		checks = append(checks, preflightCheck{"WARN", fmt.Sprintf("exiftool not found (looked for %q) -- pHash RAW fallback and metadata extraction will be skipped", exiftoolBin)})
 	} else if ver, err := runVersion(path); err != nil {
 		checks = append(checks, preflightCheck{"WARN", fmt.Sprintf("exiftool found at %s but `-ver` failed: %v", path, err)})
 	} else {

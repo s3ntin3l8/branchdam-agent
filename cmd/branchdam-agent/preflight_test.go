@@ -145,6 +145,29 @@ func TestRunPreflightChecksExiftoolMissingIsWarnNotFail(t *testing.T) {
 	}
 }
 
+// TestRunPreflightChecksUsesConfiguredExiftoolPath proves the exiftool
+// check looks up cfg.Ingest.ExiftoolPath, not a hardcoded "exiftool" --
+// matching internal/ingest.NewExiftoolAt's own resolution, so preflight
+// reports on the exact binary a real ingest run would pool.
+func TestRunPreflightChecksUsesConfiguredExiftoolPath(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Ingest.ExiftoolPath = "/opt/exiftool/exiftool-13"
+
+	var lookedUp []string
+	lookPath := func(file string) (string, error) {
+		lookedUp = append(lookedUp, file)
+		return "/opt/exiftool/exiftool-13", nil
+	}
+
+	client := &fakeHelloCaller{resp: &branchdam.HelloResponse{OK: true, Version: "0.42.0"}}
+	if _, ok := runPreflightChecks(context.Background(), cfg, client, lookPath, fakeRunVersionOK); !ok {
+		t.Fatal("expected ok=true")
+	}
+	if len(lookedUp) != 1 || lookedUp[0] != cfg.Ingest.ExiftoolPath {
+		t.Errorf("lookPath calls = %v, want exactly one call with %q", lookedUp, cfg.Ingest.ExiftoolPath)
+	}
+}
+
 func TestRunPreflightChecksPathMappingsPrinted(t *testing.T) {
 	cfg := baseCfg()
 	cfg.PathMappings = []config.PathMapping{

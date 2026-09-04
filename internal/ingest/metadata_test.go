@@ -145,7 +145,13 @@ func TestExifExtractsPromotedColumnsAndSidecarWins(t *testing.T) {
 		"XMP-xmpMM:DocumentID":         "base-doc-id-2",
 	})
 
-	e := &Exiftool{path: exiftoolPath}
+	// NewExiftoolAt (not a bare &Exiftool{path: ...} literal) so this
+	// exercises the actual pooled -stay_open path AC bullet 1 is about --
+	// jpegPath/sidecar live under t.TempDir() and never start with "-",
+	// so both the base read and the sidecar read below go through the
+	// pool, not the nil-pool fork fallback.
+	e := NewExiftoolAt(exiftoolPath)
+	defer e.Close()
 	res, err := e.Exif(context.Background(), jpegPath)
 	if err != nil {
 		t.Fatalf("Exif: %v", err)

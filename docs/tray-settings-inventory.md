@@ -31,6 +31,7 @@ These are in the audit comment block in [`internal/tray/settings.go`](../interna
 - **`offline.*` (config.go:103-125)** — `queueDbPath`, `tier0ContainerRoot`, `drainIntervalSecs`. Changing the SQLite path or the staging container root mid-run breaks in-flight drain state; `drainIntervalSecs` is a tuning knob operators rarely touch.
 - **`selfUpdate.repo` (config.go:211)** — a typo in the `owner/name` slug makes the next update check fetch from a non-existent or wrong repo. The hand-edit gate (plus a `selfupdate` log line that names the resolved repo on every check) is the safety net.
 - **`tray.statusAddr` (config.go:190)** — loopback bind address. A non-loopback value exposes the unauthenticated status page on the network. Restart-only and intentionally hand-edit.
+- **`ingest.exiftoolPath`** — overrides which exiftool binary `internal/exiftool.Pool` invokes; empty (the default) resolves `exiftool` through PATH. Added alongside the exiftool `-stay_open` pooling refactor (#104), not part of this issue's original enumeration. A rarely-touched operator override, not worth a menu slot.
 
 ## Graduation workflow
 

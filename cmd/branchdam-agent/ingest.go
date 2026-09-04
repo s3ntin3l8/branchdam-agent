@@ -66,6 +66,12 @@ func runIngestCmd(args []string) int {
 
 	client := branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
 	engine := ingest.NewEngine(client, cfg.AgentID, cfg.Ingest, cfg.PathMappings)
+	// This process exits right after this command returns -- a pooled
+	// exiftool subprocess left running would just be orphaned, not reaped
+	// by a finalizer that never gets a chance to run (see
+	// internal/exiftool's package doc for why sync.Pool eviction alone
+	// can't be relied on for that).
+	defer engine.Exiftool.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()

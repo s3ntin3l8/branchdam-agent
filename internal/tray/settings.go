@@ -188,6 +188,12 @@ type Settings interface {
 	//   * tray.statusAddr: loopback bind address; a non-loopback
 	//     value here would expose the unauthenticated status page on
 	//     the network. Restart-only and intentionally hand-edit.
+	//   * ingest.exiftoolPath: overrides which exiftool binary the
+	//     pooled subprocess manager (internal/exiftool.Pool) invokes;
+	//     empty (the default) resolves "exiftool" through PATH. A
+	//     rarely-touched operator override, not worth a menu slot --
+	//     OpenConfigFile is the path for the (uncommon) machine with
+	//     more than one exiftool install.
 	//
 	// Fields the issue (#110) lists as future graduates but that do
 	// not yet exist in the Config struct (no M5 sub-issue has landed):

@@ -1,17 +1,26 @@
 package phash
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"testing"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/exiftool"
 )
 
 // adversarialPaths mirrors branchDAM's own probe/argv_test.go fixture list --
-// paths crafted to look like exiftool flags, proving "--" actually stops
-// them from being parsed as such.
+// paths crafted to look like exiftool flags, proving a path that could be
+// misread as a flag is always protected by "--".
 var adversarialPaths = []string{
 	"/normal/path/DSC001.ARW",
 	"-overwrite_original",
@@ -19,16 +28,37 @@ var adversarialPaths = []string{
 	"--exec=rm -rf /",
 	"-b",
 	"",
+	// A filename containing a newline would split into two argfile lines
+	// in the pooled, line-oriented "-stay_open" protocol -- letting the
+	// text after the newline be read as its own argument -- even though
+	// it doesn't start with "-" itself. See exiftool.NeedsSeparator.
+	"/normal/path/foo\n-overwrite_original",
+	// exiftool's argfile reader skips a line starting with "#" as a
+	// comment and strips leading whitespace from any line -- neither is
+	// an injection risk, but both silently corrupt the request unless
+	// routed around the argfile protocol entirely. See NeedsSeparator.
+	"#not-a-comment.jpg",
+	"  /leading/whitespace.jpg",
 }
 
 var tagAssignmentRe = regexp.MustCompile(`^-[A-Za-z0-9:_-]+=`)
 
-func checkArgvShape(t *testing.T, fn func(string) []string) {
-	t.Helper()
+// TestPreviewArgsShape proves previewArgs' security property: any path
+// that could be misread as a flag or tag assignment (i.e. starts with "-")
+// is always preceded by a "--" separator, and the path is always the last
+// argument. A path that does NOT start with "-" is never at risk of being
+// misparsed regardless of "--", so previewArgs is free to omit it there --
+// see exiftool.NeedsSeparator's doc comment for why that's not just an
+// optimization but a requirement for the pooled path.
+func TestPreviewArgsShape(t *testing.T) {
 	for _, path := range adversarialPaths {
-		args := fn(path)
+		args := previewArgs(path)
+		if len(args) == 0 || args[len(args)-1] != path {
+			t.Fatalf("previewArgs(%q) = %v, want to end with the path", path, args)
+		}
+
 		sawSep := false
-		for _, a := range args {
+		for _, a := range args[:len(args)-1] {
 			if a == "--" {
 				sawSep = true
 				continue
@@ -37,52 +67,41 @@ func checkArgvShape(t *testing.T, fn func(string) []string) {
 				continue
 			}
 			if tagAssignmentRe.MatchString(a) {
-				t.Errorf("args(%q) contains a tag assignment before --: %v", path, args)
+				t.Errorf("previewArgs(%q) contains a tag assignment before --: %v", path, args)
 			}
 		}
-		if !sawSep {
-			t.Errorf("args(%q) has no -- separator: %v", path, args)
-		}
-		if args[len(args)-1] != path {
-			t.Errorf("args(%q) does not end with the path: %v", path, args)
+		if exiftool.NeedsSeparator(path) && !sawSep {
+			t.Errorf("previewArgs(%q) looks like a flag but has no -- separator: %v", path, args)
 		}
 	}
 }
 
-func TestPreviewImageArgsShape(t *testing.T)   { checkArgvShape(t, previewImageArgs) }
-func TestJpgFromRawArgsShape(t *testing.T)     { checkArgvShape(t, jpgFromRawArgs) }
-func TestThumbnailImageArgsShape(t *testing.T) { checkArgvShape(t, thumbnailImageArgs) }
-
-func TestPreviewImageArgsExactFlags(t *testing.T) {
-	if got, want := previewImageArgs("/x.arw"), []string{"-b", "-PreviewImage", "--", "/x.arw"}; !equalArgs(got, want) {
-		t.Errorf("previewImageArgs = %v, want %v", got, want)
-	}
-	if got, want := jpgFromRawArgs("/x.arw"), []string{"-b", "-JpgFromRaw", "--", "/x.arw"}; !equalArgs(got, want) {
-		t.Errorf("jpgFromRawArgs = %v, want %v", got, want)
-	}
-	if got, want := thumbnailImageArgs("/x.arw"), []string{"-b", "-ThumbnailImage", "--", "/x.arw"}; !equalArgs(got, want) {
-		t.Errorf("thumbnailImageArgs = %v, want %v", got, want)
-	}
-}
-
-func equalArgs(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+// TestPreviewArgsRequestsAllTagsAtOnce proves the "single invocation" part
+// of the design: one previewArgs call requests every tag in previewTags,
+// not just one -- the property that turns 3 exiftool invocations per RAW
+// file into 1.
+func TestPreviewArgsRequestsAllTagsAtOnce(t *testing.T) {
+	args := previewArgs("/x.arw")
+	for _, tag := range previewTags {
+		found := false
+		for _, a := range args {
+			if a == "-"+tag {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("previewArgs = %v, missing -%s", args, tag)
 		}
 	}
-	return true
 }
 
-// TestExtractDirectDecodeSkipsExiftool proves the fast path never shells out
-// at all: exiftoolPath points at a binary that does not exist, and Extract
-// must still succeed (and match hashing's own golden vector) because
-// gradient.png decodes directly.
+// TestExtractDirectDecodeSkipsExiftool proves the fast path never touches
+// the pool at all: pool is nil (which would panic on any Execute call),
+// and Extract must still succeed (and match hashing's own golden vector)
+// because gradient.png decodes directly.
 func TestExtractDirectDecodeSkipsExiftool(t *testing.T) {
-	got, err := Extract(context.Background(), "/nonexistent/exiftool-binary-that-must-never-run", "../hashing/testdata/gradient.png")
+	got, err := Extract(context.Background(), nil, "../hashing/testdata/gradient.png")
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
@@ -95,9 +114,9 @@ func TestExtractDirectDecodeSkipsExiftool(t *testing.T) {
 	}
 }
 
-// TestExtractNoExiftoolNoDirectDecode proves the (nil, nil) "nothing usable"
-// contract: a file that fails direct decode, with no exiftool available at
-// all (empty path), must return (nil, nil), not an error.
+// TestExtractNoExiftoolNoDirectDecode proves the (nil, nil) "nothing
+// usable" contract: a file that fails direct decode, with pool nil (the
+// exiftool-unavailable case), must return (nil, nil), not an error.
 func TestExtractNoExiftoolNoDirectDecode(t *testing.T) {
 	dir := t.TempDir()
 	notAnImage := filepath.Join(dir, "notanimage.arw")
@@ -105,7 +124,7 @@ func TestExtractNoExiftoolNoDirectDecode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := Extract(context.Background(), "", notAnImage)
+	got, err := Extract(context.Background(), nil, notAnImage)
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
@@ -114,122 +133,163 @@ func TestExtractNoExiftoolNoDirectDecode(t *testing.T) {
 	}
 }
 
-// fakeExiftool writes a minimal shell script standing in for exiftool: it
-// inspects the tag flag it was invoked with (argv[2], since argv[1] is
-// always "-b") and, per behaviors keyed by that tag, either prints nothing
-// (simulating an absent tag), prints undecodable garbage (simulating a
-// corrupt/empty embedded preview), or dumps a real decodable image fixture.
-// It also appends the tag it was called with, one per line, to a log file
-// so the test can assert both WHICH tags were tried and in WHAT ORDER --
-// the property that actually matters here, since real exiftool binary
-// behavior against a real RAW file is out of scope for this repo (no RAW
-// fixtures, and reproducing exiftool's RAW-parsing itself is explicitly not
-// what's being ported -- see the package doc).
-func fakeExiftool(t *testing.T, behaviors map[string]string, logPath string) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake exiftool shell script requires a POSIX shell")
-	}
+// fakeExecutor is a canned executor standing in for a pooled exiftool
+// process: it returns a fixed JSON row (as pool.Execute would) without
+// spawning anything, and records the args it was called with so a test can
+// assert on the request shape.
+type fakeExecutor struct {
+	row       map[string]any
+	calls     [][]string
+	returnErr error
+}
 
-	gradientPNG, err := os.ReadFile("../hashing/testdata/gradient.png")
+func (f *fakeExecutor) Execute(_ context.Context, args []string) ([]byte, error) {
+	f.calls = append(f.calls, args)
+	if f.returnErr != nil {
+		return nil, f.returnErr
+	}
+	return json.Marshal([]map[string]any{f.row})
+}
+
+func base64Tag(t *testing.T, data []byte) string {
+	t.Helper()
+	return "base64:" + base64.StdEncoding.EncodeToString(data)
+}
+
+// decodableGradientPNG loads the package's own golden-vector fixture, the
+// smallest real decodable image already checked into the repo.
+func decodableGradientPNG(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile("../hashing/testdata/gradient.png")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	dir := t.TempDir()
-	fixturePath := filepath.Join(dir, "gradient.png")
-	if err := os.WriteFile(fixturePath, gradientPNG, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	script := "#!/bin/sh\n" +
-		"tag=\"$2\"\n" +
-		"echo \"$tag\" >> " + shellQuote(logPath) + "\n" +
-		"case \"$tag\" in\n"
-	for tag, behavior := range behaviors {
-		switch behavior {
-		case "empty":
-			script += "  " + tag + ") exit 0 ;;\n"
-		case "garbage":
-			script += "  " + tag + ") printf 'not a real image' ;;\n"
-		case "decodable":
-			script += "  " + tag + ") cat " + shellQuote(fixturePath) + " ;;\n"
-		}
-	}
-	script += "esac\n"
-
-	scriptPath := filepath.Join(dir, "fake-exiftool.sh")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return scriptPath
+	return data
 }
 
-func shellQuote(s string) string {
-	return "'" + s + "'"
+// TestExtractPreviewJPEGFallbackChainOrderAndFirstDecodableWins is the
+// load-bearing test for the ported call sequence: PreviewImage absent
+// (skipped), JpgFromRaw present but undecodable garbage (skipped),
+// ThumbnailImage a real decodable image (taken) -- all from a single
+// canned JSON row, proving the client-side order/fallback logic without
+// needing three separate exiftool invocations.
+func TestExtractPreviewJPEGFallbackChainOrderAndFirstDecodableWins(t *testing.T) {
+	fake := &fakeExecutor{row: map[string]any{
+		// PreviewImage: absent entirely.
+		"JpgFromRaw":     base64Tag(t, []byte("not a real image")),
+		"ThumbnailImage": base64Tag(t, decodableGradientPNG(t)),
+	}}
+
+	got, err := extractPreviewJPEG(context.Background(), fake, "notanimage.arw")
+	if err != nil {
+		t.Fatalf("extractPreviewJPEG: %v", err)
+	}
+	if got == nil {
+		t.Fatal("extractPreviewJPEG returned nil, want the ThumbnailImage bytes")
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("exiftool invocation count = %d, want exactly 1 (single combined request)", len(fake.calls))
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(got))
+	if err != nil {
+		t.Fatalf("decode returned preview: %v", err)
+	}
+	if img.Bounds().Empty() {
+		t.Error("decoded preview image has an empty bounds rect")
+	}
 }
 
-// TestExtractFallbackChainOrderAndFirstDecodableWins is the load-bearing
-// test for the ported call sequence: PreviewImage empty (skipped),
-// JpgFromRaw present but undecodable garbage (skipped), ThumbnailImage a
-// real decodable image (taken) -- and never tries anything past that.
-func TestExtractFallbackChainOrderAndFirstDecodableWins(t *testing.T) {
+// TestExtractPreviewJPEGAllTagsExhausted proves that when every tag comes
+// up empty, extractPreviewJPEG returns (nil, nil), not an error -- the
+// normal case for a RAW with no embedded preview at all.
+func TestExtractPreviewJPEGAllTagsExhausted(t *testing.T) {
+	fake := &fakeExecutor{row: map[string]any{}}
+
+	got, err := extractPreviewJPEG(context.Background(), fake, "notanimage.arw")
+	if err != nil {
+		t.Fatalf("extractPreviewJPEG: %v", err)
+	}
+	if got != nil {
+		t.Errorf("extractPreviewJPEG with every tag empty = %v, want nil", got)
+	}
+}
+
+// TestExtractPreviewJPEGRequestFailure proves a failed Execute call (e.g.
+// the pool's own fallback fork also failing) is folded into (nil, nil),
+// matching the "no usable preview" contract rather than surfacing as an
+// error up through Extract.
+func TestExtractPreviewJPEGRequestFailure(t *testing.T) {
+	fake := &fakeExecutor{returnErr: errors.New("boom")}
+
+	got, err := extractPreviewJPEG(context.Background(), fake, "notanimage.arw")
+	if err != nil {
+		t.Fatalf("extractPreviewJPEG: %v", err)
+	}
+	if got != nil {
+		t.Errorf("extractPreviewJPEG on request failure = %v, want nil", got)
+	}
+}
+
+// TestExtractIntegrationWithRealExiftool exercises the full Extract path
+// (decodeFileAndHash fails, extractPreviewJPEG runs) against a real
+// exiftool -stay_open pooled process and a real embedded thumbnail,
+// proving the base64 JSON parsing and the pool wiring actually work end to
+// end, not just against fakeExecutor.
+func TestExtractIntegrationWithRealExiftool(t *testing.T) {
+	exiftoolPath, err := exec.LookPath("exiftool")
+	if err != nil {
+		t.Skip("exiftool not found on PATH -- skipping real-binary phash test")
+	}
+
 	dir := t.TempDir()
-	logPath := filepath.Join(dir, "invocations.log")
-	notAnImage := filepath.Join(dir, "notanimage.arw")
-	if err := os.WriteFile(notAnImage, []byte("raw sensor data, not decodable"), 0o644); err != nil {
+	basePath := filepath.Join(dir, "base.jpg")
+	thumbPath := filepath.Join(dir, "thumb.jpg")
+	if err := writeTinyJPEG(basePath, 4); err != nil {
+		t.Fatalf("write base fixture: %v", err)
+	}
+	if err := writeTinyJPEG(thumbPath, 2); err != nil {
+		t.Fatalf("write thumb fixture: %v", err)
+	}
+	cmd := exec.Command(exiftoolPath, "-overwrite_original", "-ThumbnailImage<="+thumbPath, "--", basePath) //nolint:gosec // test fixture paths under t.TempDir()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("exiftool write ThumbnailImage: %v\n%s", err, out)
+	}
+
+	// basePath itself IS a valid, directly-decodable JPEG, which would
+	// short-circuit before ever reaching exiftool -- rename it to a RAW-
+	// looking extension so decodeFileAndHash's image.Decode fails and
+	// Extract falls through to the exiftool preview chain, the path this
+	// test actually means to exercise.
+	rawPath := filepath.Join(dir, "base.arw")
+	if err := os.Rename(basePath, rawPath); err != nil {
 		t.Fatal(err)
 	}
 
-	exiftool := fakeExiftool(t, map[string]string{
-		"-PreviewImage":   "empty",
-		"-JpgFromRaw":     "garbage",
-		"-ThumbnailImage": "decodable",
-	}, logPath)
+	pool := exiftool.NewPool(exiftoolPath)
+	defer pool.Close()
 
-	got, err := Extract(context.Background(), exiftool, notAnImage)
+	got, err := Extract(context.Background(), pool, rawPath)
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
 	if got == nil {
-		t.Fatal("Extract returned nil, want a hash from the ThumbnailImage fallback")
-	}
-	const want = -6161209626521968640
-	if *got != want {
-		t.Errorf("Extract via fallback = %d, want %d", *got, want)
-	}
-
-	log, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read invocation log: %v", err)
-	}
-	const wantLog = "-PreviewImage\n-JpgFromRaw\n-ThumbnailImage\n"
-	if string(log) != wantLog {
-		t.Errorf("exiftool invocation order = %q, want %q", log, wantLog)
+		t.Fatal("Extract returned nil, want a hash from the embedded ThumbnailImage")
 	}
 }
 
-// TestExtractFallbackChainAllTagsExhausted proves that when every tag comes
-// up empty, Extract returns (nil, nil), not an error -- the normal case for
-// a RAW with no embedded preview at all.
-func TestExtractFallbackChainAllTagsExhausted(t *testing.T) {
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "invocations.log")
-	notAnImage := filepath.Join(dir, "notanimage.arw")
-	if err := os.WriteFile(notAnImage, []byte("raw sensor data, not decodable"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	exiftool := fakeExiftool(t, map[string]string{
-		"-PreviewImage":   "empty",
-		"-JpgFromRaw":     "empty",
-		"-ThumbnailImage": "empty",
-	}, logPath)
-
-	got, err := Extract(context.Background(), exiftool, notAnImage)
+func writeTinyJPEG(path string, size int) error {
+	f, err := os.Create(path) //nolint:gosec // test fixture path under t.TempDir()
 	if err != nil {
-		t.Fatalf("Extract: %v", err)
+		return err
 	}
-	if got != nil {
-		t.Errorf("Extract with every tag empty = %v, want nil", got)
+	defer func() { _ = f.Close() }()
+
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(x * 60), G: uint8(y * 60), B: 128, A: 255})
+		}
 	}
+	return jpeg.Encode(f, img, &jpeg.Options{Quality: 90})
 }
