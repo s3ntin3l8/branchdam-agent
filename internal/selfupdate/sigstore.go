@@ -211,20 +211,28 @@ func buildSyntheticBundle(archive, sig, cert []byte) (*bundle.Bundle, error) {
 // reason. ErrSigstoreAttestationDownload is the caller's responsibility
 // (the download happens in sigstorePreflight, not here).
 func sigstoreVerify(archive, sig, cert []byte) error {
+	return sigstoreVerifyWithIdentity(archive, sig, cert, sigstoreTrustedIdentity)
+}
+
+// sigstoreVerifyWithIdentity is the parameterized form. identity is
+// a parameter so tests can supply a permissive test identity instead
+// of the production-pinned one. Production callers should use
+// sigstoreVerify above.
+func sigstoreVerifyWithIdentity(archive, sig, cert []byte, identity verify.CertificateIdentity) error {
 	if len(sig) == 0 || len(cert) == 0 {
 		return fmt.Errorf("%w: .sig=%d bytes, .cert=%d bytes", ErrSigstoreAttestationMissing, len(sig), len(cert))
 	}
 	v, err := loadVerifier()
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrSigstoreVerificationFailed, err)
+		return fmt.Errorf("%w: %w", ErrSigstoreVerificationFailed, err)
 	}
 	b, err := buildSyntheticBundle(archive, sig, cert)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrSigstoreVerificationFailed, err)
+		return fmt.Errorf("%w: %w", ErrSigstoreVerificationFailed, err)
 	}
 	_, err = v.Verify(b, verify.NewPolicy(
 		verify.WithArtifact(bytes.NewReader(archive)),
-		verify.WithCertificateIdentity(sigstoreTrustedIdentity),
+		verify.WithCertificateIdentity(identity),
 	))
 	if err != nil {
 		// Always %w the underlying error so the tray can inspect it
