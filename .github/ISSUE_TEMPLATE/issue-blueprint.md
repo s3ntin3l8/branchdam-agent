@@ -25,7 +25,7 @@ assignees: ""
 ## Acceptance criteria
 
 - [ ] <!-- Requirement 1 -->
-- [ ] Docs updated (`docs/*.md`, `CLAUDE.md`) if behaviour or invariants changed
+- [ ] Docs updated (`docs/*.md`, `AGENTS.md`) if behaviour or invariants changed
 - [ ] Test coverage added/modified
 - [ ] `make lint && make check` green
 - [ ] `make build-windows` / `make build-darwin` still pass if a platform-specific path changed
