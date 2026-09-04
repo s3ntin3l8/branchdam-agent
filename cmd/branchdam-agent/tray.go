@@ -27,6 +27,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 	"github.com/s3ntin3l8/branchdam-agent/internal/resolvehook"
+	runtimeState "github.com/s3ntin3l8/branchdam-agent/internal/runtime"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
@@ -406,6 +407,11 @@ func runTrayCmd(args []string) int {
 			}
 		}()
 	})
+
+	// Runtime state persistence (issue #149): see
+	// wireRuntimeStatePersistence below for the full contract.
+	wireRuntimeStatePersistence(runner)
+
 	settings := newConfigSettings(resolvedPath, cfg, runner, dialog)
 
 	// Integration syncers (issue #57): started unconditionally, unlike the
@@ -624,6 +630,100 @@ func enableStartOnLogin(configPath string) error {
 		return fmt.Errorf("resolve config path %q: %w", configPath, err)
 	}
 	return autostart.Enable(execPath, []string{"tray", "-config", absConfigPath})
+}
+
+// wireRuntimeStatePersistence implements issue #149's "seed
+// from disk at startup + save on every successful handshake"
+// contract at the cmd wiring layer. Kept here, not inside
+// internal/tray, for the same reason SetQueueDeps accepts
+// narrow Drainer/Pruner interfaces from cmd/branchdam-agent
+// rather than importing *queue.Store directly: the tray
+// internal is interface-only, no direct I/O, unit-testable
+// with fakes; the cmd layer is the one place where the
+// concrete runtime state file path is known.
+//
+// The four branches correspond to the four runtime state
+// conditions on disk:
+//
+//  1. Path() errored (e.g. LOCALAPPDATA unset on Windows,
+//     os.UserHomeDir failed on a daemon). The cross-restart
+//     signal is unavailable for this session; we warn and
+//     skip both seeding and the save callback so no stale
+//     state can be written somewhere we can't predict.
+//  2. Load() errored but the file *exists* (Load returns
+//     (zero, nil) for missing/empty/corrupt, so a non-nil
+//     err means a real I/O failure -- usually a permission
+//     revocation on a file the agent used to own). The
+//     user had a cross-restart signal and has now lost it.
+//     We log at ERROR (this is the loudest non-fatal
+//     severity slog offers, reserved for "operator
+//     attention required") and skip the save callback so a
+//     successful drain doesn't silently overwrite the
+//     unreadable file with a fresh stamp -- which would
+//     hide the underlying permission problem from the
+//     next session's Load.
+//  3. Load() returned a non-zero LastHandshakeAt. The
+//     happy path: prior session ended with a successful
+//     handshake, this session should render it.
+//  4. Load() returned a zero LastHandshakeAt (missing,
+//     empty, or corrupt file). The "never" sentinel; we
+//     wire the save callback so this session establishes
+//     the first cross-restart signal.
+//
+// The runtime state file path, the Load function, and the
+// Save function are injected as fields on the
+// runtimeStateOps struct so a unit test can exercise all
+// four branches (the production wiring passes the real
+// runtime package functions; tests pass fakes that return
+// the condition under test). This is the same
+// dependency-injection shape tray.NewRunner uses for
+// Ingester/Drainer/Pruner -- the production code path
+// stays a one-liner that calls wireRuntimeStateWithOps
+// with the real ops, and the test code can call the same
+// function with synthetic ops.
+func wireRuntimeStatePersistence(runner *tray.Runner) {
+	wireRuntimeStateWithOps(runner, runtimeStateOps{
+		Path: runtimeState.Path,
+		Load: runtimeState.Load,
+		Save: runtimeState.Save,
+	})
+}
+
+// runtimeStateOps is the testable surface of
+// wireRuntimeStatePersistence. The function fields are
+// directly the runtime package's exported functions in
+// production, and stand-ins in tests -- the indirection is
+// the only way to exercise the four branches of the switch
+// (Path() can only return one specific kind of error per
+// platform; Load() can be made to return synthetic errors
+// for tests; Save() likewise).
+type runtimeStateOps struct {
+	Path func() (string, error)
+	Load func(path string) (runtimeState.State, error)
+	Save func(path string, st runtimeState.State) error
+}
+
+func wireRuntimeStateWithOps(runner *tray.Runner, ops runtimeStateOps) {
+	runtimePath, pathErr := ops.Path()
+	if pathErr != nil {
+		slog.Warn("could not resolve runtime state path; cross-restart LastHandshakeAt will not survive this session", "err", pathErr)
+		return
+	}
+	rt, loadErr := ops.Load(runtimePath)
+	switch {
+	case loadErr != nil:
+		slog.Error("runtime state load FAILED; cross-restart LastHandshakeAt is unavailable this session and the next save will be skipped to avoid overwriting an unreadable file with a fresh one (investigate filesystem permissions on the runtime state file)", "path", runtimePath, "err", loadErr)
+	case !rt.LastHandshakeAt.IsZero():
+		runner.SeedLastHandshakeAt(rt.LastHandshakeAt)
+		slog.Info("seeded LastHandshakeAt from runtime state", "path", runtimePath, "at", rt.LastHandshakeAt)
+		runner.SetOnSuccessfulHandshake(func(t time.Time) error {
+			return ops.Save(runtimePath, runtimeState.State{LastHandshakeAt: t})
+		})
+	default:
+		runner.SetOnSuccessfulHandshake(func(t time.Time) error {
+			return ops.Save(runtimePath, runtimeState.State{LastHandshakeAt: t})
+		})
+	}
 }
 
 // probeArchive tests whether the archive destination is reachable before an

@@ -2271,3 +2271,318 @@ func TestStatusPreservesLastHandshakeAtAcrossFailedPass(t *testing.T) {
 		}
 	})
 }
+
+// TestRunnerSeedLastHandshakeAtReflectsInStatus pins the cross-restart
+// signal: a SeedLastHandshakeAt call on a fresh Runner must surface
+// through to Status().LastHandshakeAt so a tray that loaded a
+// persisted runtime.json at startup can render "last handshake: <since>
+// ago" before the first in-session drain pass runs. This is the
+// Status() half of issue #149's AC: the Load happens in runTrayCmd,
+// this test pins the half that the tray internal itself owns.
+func TestRunnerSeedLastHandshakeAtReflectsInStatus(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	r.SeedLastHandshakeAt(when)
+
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.Equal(when) {
+		t.Errorf("Status().LastHandshakeAt = %v, want %v", st.LastHandshakeAt, when)
+	}
+	// Seed must also set HasDrained: the "have we ever heard from the
+	// server?" signal the status page renders alongside the freshness
+	// line should reflect a successful prior handshake, not "no drain
+	// run yet."
+	if !st.HasDrained {
+		t.Error("expected Status().HasDrained=true after SeedLastHandshakeAt")
+	}
+	// Seed must NOT set HandshakeOK: that signal is the
+	// current-session "last drain: handshake OK" line, and
+	// no drain has run *in this session* yet. The status
+	// page renders the prior-session stamp via
+	// LastHandshakeAt separately from HandshakeOK. A
+	// HandshakeOK=true from a seed would briefly say
+	// "handshake OK" when the very first post-restart
+	// drain hasn't completed -- misleading during the
+	// 0-5s window before the drain timer's first tick.
+	if st.HandshakeOK {
+		t.Error("expected Status().HandshakeOK=false after SeedLastHandshakeAt (the current-session handshake-OK signal must come from a real drain, not a persisted seed)")
+	}
+}
+
+// TestRunnerSeedLastHandshakeAtDoesNotConflateSeedWithDrained stamps
+// the load-bearing case behind TestRunnerSeedLastHandshakeAtReflectsInStatus's
+// HandshakeOK=false assertion: after a seed, a subsequent
+// *successful* drain must reset HandshakeOK to true (a real
+// in-session successful handshake now exists), and a subsequent
+// *failed* drain must keep HandshakeOK false (a real failed
+// handshake is the honest current-session signal). The test pins
+// both transitions, since each is a separate code path on the
+// happy/failed drain branches of TriggerDrain.
+func TestRunnerSeedLastHandshakeAtDoesNotConflateSeedWithDrained(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	t.Run("failed_drain_after_seed_keeps_handshake_ok_false", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+		r.SeedLastHandshakeAt(when)
+		fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+		r.SetQueueDeps(nil, fd, nil)
+		r.TriggerDrain(context.Background())
+
+		st := r.Status(UpdateStatus{})
+		if st.HandshakeOK {
+			t.Error("after failed drain following a seed: HandshakeOK=true, want false (the failed drain's HandshakeOK is the current-session truth)")
+		}
+		if !st.LastHandshakeAt.Equal(when) {
+			t.Errorf("after failed drain following a seed: LastHandshakeAt = %v, want %v (carry-forward preserves the seeded stamp)", st.LastHandshakeAt, when)
+		}
+	})
+
+	t.Run("successful_drain_after_seed_sets_handshake_ok_true", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+		r.SeedLastHandshakeAt(when)
+		fresh := time.Date(2026, 9, 3, 13, 0, 0, 0, time.UTC)
+		fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: fresh}}
+		r.SetQueueDeps(nil, fd, nil)
+		r.TriggerDrain(context.Background())
+
+		st := r.Status(UpdateStatus{})
+		if !st.HandshakeOK {
+			t.Error("after successful drain following a seed: HandshakeOK=false, want true (the real drain's HandshakeOK supersedes the seeded false)")
+		}
+		if !st.LastHandshakeAt.Equal(fresh) {
+			t.Errorf("after successful drain following a seed: LastHandshakeAt = %v, want %v (the real drain's stamp supersedes the seed)", st.LastHandshakeAt, fresh)
+		}
+	})
+}
+
+// TestRunnerSeedLastHandshakeAtIgnoredWhenAlreadyDrained pins the
+// "fresh signal beats persisted" invariant: if a real drain pass ran
+// before the tray finished loading the runtime.json (e.g. the drain
+// timer fired between NewRunner and SeedLastHandshakeAt), the real
+// pass's stamp must win. Without this guard, a slower-loaded persisted
+// stamp could overwrite a fresher in-memory one and the status page
+// would briefly regress to an older "successful Nh ago" line.
+func TestRunnerSeedLastHandshakeAtIgnoredWhenAlreadyDrained(t *testing.T) {
+	fresh := time.Date(2026, 9, 3, 13, 0, 0, 0, time.UTC)
+	persisted := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: fresh}}
+	r.SetQueueDeps(nil, fd, nil)
+	r.TriggerDrain(context.Background())
+
+	r.SeedLastHandshakeAt(persisted)
+
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.Equal(fresh) {
+		t.Errorf("Status().LastHandshakeAt = %v, want %v (real drain must beat persisted seed)", st.LastHandshakeAt, fresh)
+	}
+}
+
+// TestRunnerSeedLastHandshakeAtWinsOverFailedDrain pins the guard
+// fix for the reviewer's Critical #1: the seed must win when the
+// in-memory state has a drain pass that *failed* (lastDrain non-nil
+// with a zero LastHandshakeAt). A 5s drain cadence on an offline
+// server has a high probability of hitting this race on a fresh
+// install: NewRunner, then SetQueueDeps + go startPeriodic, then
+// the wiring code that calls Seed. Without this guard, the seed
+// is silently dropped when a single 5s blip precedes the load, and
+// the cross-restart signal this whole PR exists to defend is lost
+// for the entire session.
+//
+// The guard is the same expression as the in-memory carry-forward
+// (Key Invariant 11: "r.lastDrain != nil &&
+// !r.lastDrain.LastHandshakeAt.IsZero()"), so the seed wins
+// whenever the in-memory state does not already have a successful
+// stamp -- the same condition that the carry-forward would
+// preserve a fresh pass's stamp into.
+func TestRunnerSeedLastHandshakeAtWinsOverFailedDrain(t *testing.T) {
+	persisted := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	r := NewRunner(&fakeIngester{}, nil, "")
+	// Failed drain pass: leaves r.lastDrain non-nil with
+	// LastHandshakeAt zero.
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+	r.SetQueueDeps(nil, fd, nil)
+	r.TriggerDrain(context.Background())
+
+	r.SeedLastHandshakeAt(persisted)
+
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.Equal(persisted) {
+		t.Errorf("after failed drain then seed: LastHandshakeAt = %v, want %v (seed must win when the in-memory state has no successful stamp yet)", st.LastHandshakeAt, persisted)
+	}
+}
+
+// TestRunnerSeedLastHandshakeAtIgnoresZeroValue pins the "never
+// completed a successful handshake" sentinel: a zero time.Time passed
+// to SeedLastHandshakeAt must not pre-populate lastDrain, so a never-
+// connected install never accidentally surfaces a spurious "successful
+// 0001-01-01" line via the status page's
+// {{ if not .Status.LastHandshakeAt.IsZero }} template guard.
+func TestRunnerSeedLastHandshakeAtIgnoresZeroValue(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	r.SeedLastHandshakeAt(time.Time{})
+
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.IsZero() {
+		t.Errorf("Status().LastHandshakeAt = %v, want zero time.Time{} (zero seed must be a no-op)", st.LastHandshakeAt)
+	}
+	if st.HasDrained {
+		t.Error("expected Status().HasDrained=false after zero-value SeedLastHandshakeAt")
+	}
+}
+
+// TestTriggerDrainSuccessfulPassInvokesOnSuccessfulHandshake pins the
+// happy path for issue #149's "write-back on every successful
+// handshake" contract: when HandshakeOK is true, the Runner's
+// registered callback fires with summary.LastHandshakeAt, which
+// runTrayCmd wires to runtime.Save.
+func TestTriggerDrainSuccessfulPassInvokesOnSuccessfulHandshake(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	var got time.Time
+	var calls int
+	r.SetOnSuccessfulHandshake(func(t time.Time) error {
+		got = t
+		calls++
+		return nil
+	})
+
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+	r.SetQueueDeps(nil, fd, nil)
+	r.TriggerDrain(context.Background())
+
+	if calls != 1 {
+		t.Fatalf("onSuccessfulHandshake calls = %d, want 1", calls)
+	}
+	if !got.Equal(when) {
+		t.Errorf("callback t = %v, want %v", got, when)
+	}
+}
+
+// TestTriggerDrainFailedPassDoesNotInvokeOnSuccessfulHandshake pins
+// the "successful only" cadence: a failed handshake must NOT write
+// runtime.json. Writing on failure would defeat the in-memory
+// carry-forward (PR #148) by re-stamping a stale zero back to disk.
+// A failed pass leaves the prior successful stamp in memory AND on
+// disk unchanged.
+func TestTriggerDrainFailedPassDoesNotInvokeOnSuccessfulHandshake(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	var calls int
+	r.SetOnSuccessfulHandshake(func(time.Time) error { calls++; return nil })
+
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 0, HandshakeOK: false}}
+	r.SetQueueDeps(nil, fd, nil)
+	r.TriggerDrain(context.Background())
+
+	if calls != 0 {
+		t.Errorf("onSuccessfulHandshake calls = %d, want 0 (failed pass must not write runtime state)", calls)
+	}
+}
+
+// TestTriggerDrainWriteFailureDoesNotBreakDrain pins the "failing
+// WriteFile must not block the drain" contract from issue #149's
+// acceptance criteria. The callback is allowed to return an error
+// (e.g. disk full, permission revocation) but the drain pass itself
+// must still complete and surface HandshakeOK=true.
+func TestTriggerDrainWriteFailureDoesNotBreakDrain(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	r.SetOnSuccessfulHandshake(func(time.Time) error {
+		return errors.New("disk full")
+	})
+
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+	r.SetQueueDeps(nil, fd, nil)
+	summary, ran := r.TriggerDrain(context.Background())
+
+	if !ran {
+		t.Fatal("expected TriggerDrain to return ran=true")
+	}
+	if !summary.HandshakeOK {
+		t.Error("expected HandshakeOK=true even when the save callback returns an error")
+	}
+	if !summary.LastHandshakeAt.Equal(when) {
+		t.Errorf("summary.LastHandshakeAt = %v, want %v", summary.LastHandshakeAt, when)
+	}
+}
+
+// TestTriggerDrainCallbackPanicDoesNotBreakDrain is the panic-half
+// counterpart of TestTriggerDrainWriteFailureDoesNotBreakDrain: a
+// misbehaving callback that panics must not corrupt the drain
+// pass's state. The recover is in production code, the test pins
+// it from the outside.
+func TestTriggerDrainCallbackPanicDoesNotBreakDrain(t *testing.T) {
+	when := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	r.SetOnSuccessfulHandshake(func(time.Time) error {
+		panic("test-induced panic in save callback")
+	})
+
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 1, HandshakeOK: true, LastHandshakeAt: when}}
+	r.SetQueueDeps(nil, fd, nil)
+	summary, ran := r.TriggerDrain(context.Background())
+
+	if !ran {
+		t.Fatal("expected TriggerDrain to return ran=true even after a panicking callback")
+	}
+	if !summary.HandshakeOK {
+		t.Error("expected HandshakeOK=true after a panicking callback (drain must not be corrupted)")
+	}
+}
+
+// TestCrossRestartLastHandshakeAtSurvivesViaRuntimeFile is the
+// end-to-end test the issue specifically calls for: write a runtime
+// state file (simulating a prior tray session's last successful
+// drain), construct a fresh Runner, seed from the file, and assert
+// Status().LastHandshakeAt reflects the persisted timestamp before
+// any drain pass has run. This is the "Add a test that exercises the
+// cross-restart path" AC.
+func TestCrossRestartLastHandshakeAtSurvivesViaRuntimeFile(t *testing.T) {
+	// Prior session's last successful handshake -- 4 hours before
+	// "now" to make the human-readable freshness check obvious.
+	prior := time.Now().Add(-4 * time.Hour).UTC().Truncate(time.Second)
+
+	dir := t.TempDir()
+	rtPath := filepath.Join(dir, "runtime.json")
+	if err := osWriteJSON(rtPath, prior); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh session: new Runner, load the runtime state from disk.
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	// This is the wiring runTrayCmd does between NewRunner and the
+	// drain timer start; the test is pinning exactly that sequence.
+	loaded, err := loadRuntimeStateForTest(rtPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SeedLastHandshakeAt(loaded)
+
+	// No drain has run yet (the timer hasn't fired, the callback
+	// hasn't been invoked). The persisted stamp must already be
+	// visible on the status page, but HandshakeOK must remain
+	// false: that signal is the current-session "last drain:
+	// handshake OK" line, and a pre-restart successful handshake
+	// is not the same as a post-restart one. See
+	// TestRunnerSeedLastHandshakeAtReflectsInStatus for the
+	// load-bearing assertion and the longer rationale.
+	st := r.Status(UpdateStatus{})
+	if !st.LastHandshakeAt.Equal(prior) {
+		t.Errorf("after cross-restart seed: Status().LastHandshakeAt = %v, want %v (persisted)", st.LastHandshakeAt, prior)
+	}
+	if !st.HasDrained {
+		t.Error("expected HasDrained=true after cross-restart seed")
+	}
+	if st.HandshakeOK {
+		t.Error("expected HandshakeOK=false after cross-restart seed (current-session signal must come from a real drain, not a persisted stamp)")
+	}
+}
