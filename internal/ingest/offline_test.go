@@ -863,7 +863,7 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 		}
 	})
 
-	t.Run("HTTPError per-file error does not latch serverUnreachable", func(t *testing.T) {
+	t.Run("HTTPError per-file error does not latch dedupUnavailable", func(t *testing.T) {
 		dir := t.TempDir()
 		cardRoot := filepath.Join(dir, "card")
 		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
@@ -903,6 +903,73 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 		// Since HTTPError (500) is per-request and does not latch, both files should attempt preflight check
 		if callCount != 2 {
 			t.Errorf("expected 2 preflight attempts (not latched on 500), got %d", callCount)
+		}
+	})
+
+	t.Run("AlreadyIngested destination match skips pre-flight check", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		dir1 := filepath.Join(cardRoot, "DCIM", "100MSDCF")
+		dir2 := filepath.Join(cardRoot, "DCIM", "101MSDCF")
+		if err := os.MkdirAll(dir1, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(dir2, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := []byte("already-existing-content")
+		if err := os.WriteFile(filepath.Join(dir1, "IMG_DUP.jpg"), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir2, "IMG_DUP.jpg"), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		store := openStoreT(t)
+		callCount := 0
+		client := &fakeCheckContentClient{
+			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+				if fastHash == "" && fullHash == "" {
+					// Probe succeeds
+					return branchdam.ContentCheckResult{}, nil
+				}
+				callCount++
+				return branchdam.ContentCheckResult{Found: false}, nil
+			},
+		}
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newOfflineTestEngine(t, client, archiveRoot, localRoot, "/storage/staging/agent-1", store)
+		e.Ingest.PathTemplate = "{original_name}"
+
+		res, err := e.IngestCardOffline(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCardOffline: %v", err)
+		}
+		if len(res.Files) != 2 {
+			t.Fatalf("got %d files, want 2", len(res.Files))
+		}
+
+		var queued, skipped int
+		for _, f := range res.Files {
+			if f.Err != nil {
+				t.Fatalf("unexpected error: %v", f.Err)
+			}
+			if f.Skipped {
+				skipped++
+				if f.SkipReason != "already ingested (identical file exists at destination)" {
+					t.Errorf("SkipReason = %q, want 'already ingested (identical file exists at destination)'", f.SkipReason)
+				}
+			} else if f.Queued {
+				queued++
+			}
+		}
+		if queued != 1 || skipped != 1 {
+			t.Fatalf("got queued=%d skipped=%d, want 1 and 1", queued, skipped)
+		}
+		// First file called pre-flight (callCount=1); second file was AlreadyIngested so it skipped pre-flight check (callCount stays 1)
+		if callCount != 1 {
+			t.Errorf("expected exactly 1 CheckContent call (second file skipped pre-flight via AlreadyIngested), got %d", callCount)
 		}
 	})
 }

@@ -211,7 +211,7 @@ func isLiveLifecycleState(state string) bool {
 // followed by a re-run is a known-good recovery.
 func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, error) {
 	stemSuffix := make(map[string]string)
-	var serverUnreachable bool
+	var dedupUnavailable bool
 	var result CardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -236,7 +236,7 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 			})
 			return nil
 		}
-		result.Files = append(result.Files, e.ingestFile(ctx, path, stemSuffix, &serverUnreachable))
+		result.Files = append(result.Files, e.ingestFile(ctx, path, stemSuffix, &dedupUnavailable))
 		return nil
 	})
 	if err != nil {
@@ -248,7 +248,7 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 // ingestFile runs the full pipeline for one source file: metadata
 // extraction (needed up front to fill the naming template), dual-copy
 // write, verify, DJI .srt GPS, and (for non-sidecar files) submission.
-func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string, serverUnreachable *bool) FileResult {
+func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string, dedupUnavailable *bool) FileResult {
 	if e.Ingest.UploadStream {
 		return e.ingestFileUpload(ctx, srcPath)
 	}
@@ -316,9 +316,9 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 
 	// Pre-flight BLAKE3 content dedup check before DualWrite.
 	// When enabled, queries GET /api/v1/agent/check-content first with fastHash
-	// (xxHash64 sampled), and on a hit confirms with fullHash (BLAKE3-256) to
-	// skip writing duplicate bytes to archiveRoot / localEditRoot.
-	if (serverUnreachable == nil || !*serverUnreachable) && e.Ingest.PreflightTimeoutSecs >= 0 && e.Client != nil && !fr.IsSidecar {
+	// (xxHash64 sampled via fastHashFile), and on a hit confirms with fullHash
+	// (BLAKE3-256) to skip writing duplicate bytes to archiveRoot / localEditRoot.
+	if (dedupUnavailable == nil || !*dedupUnavailable) && e.Ingest.PreflightTimeoutSecs >= 0 && e.Client != nil && !fr.IsSidecar {
 		if checker, ok := e.Client.(contentChecker); ok {
 			timeout := time.Duration(config.DefaultPreflightTimeoutSecs) * time.Second
 			if e.Ingest.PreflightTimeoutSecs > 0 {
@@ -334,10 +334,10 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 				pCancel()
 				if err != nil {
 					slog.Warn("ingest: content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
-					if serverUnreachable != nil {
+					if dedupUnavailable != nil {
 						var he *branchdam.HTTPError
 						if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented) {
-							*serverUnreachable = true
+							*dedupUnavailable = true
 						}
 					}
 				} else if res.Found {
@@ -350,10 +350,10 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 						pCancel2()
 						if err != nil {
 							slog.Warn("ingest: content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
-							if serverUnreachable != nil {
+							if dedupUnavailable != nil {
 								var he *branchdam.HTTPError
 								if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented) {
-									*serverUnreachable = true
+									*dedupUnavailable = true
 								}
 							}
 						} else if res2.Found && isLiveLifecycleState(res2.LifecycleState) {

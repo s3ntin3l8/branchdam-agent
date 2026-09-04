@@ -1218,4 +1218,67 @@ func TestIngestFileDedupPreFlight(t *testing.T) {
 			t.Errorf("expected 0 CheckContent calls when disabled, got %d", len(client.checkCalls))
 		}
 	})
+
+	t.Run("AlreadyIngested destination match skips pre-flight check", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := []byte("already-ingested-image-bytes")
+		srcPath := filepath.Join(cardRoot, "DSC0006.JPG")
+		if err := os.WriteFile(srcPath, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		srcInfo, err := os.Stat(srcPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		client := &fakeCheckContentClient{
+			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
+				return branchdam.ContentCheckResult{Found: false}, nil
+			},
+		}
+		archiveRoot := filepath.Join(dir, "archive")
+		localRoot := filepath.Join(dir, "local")
+		e := newTestEngine(t, client, archiveRoot, localRoot)
+
+		vars := TemplateVars{
+			OriginalName: "DSC0006.JPG",
+			CapturedAt:   srcInfo.ModTime(),
+		}
+		destArchive := filepath.Join(archiveRoot, RenderPath(e.Ingest.PathTemplate, vars))
+		destLocal := filepath.Join(localRoot, RenderPath(e.Ingest.PathTemplate, vars))
+		if err := os.MkdirAll(filepath.Dir(destArchive), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(destLocal), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(destArchive, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(destLocal, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		if len(res.Files) != 1 {
+			t.Fatalf("got %d files, want 1", len(res.Files))
+		}
+		fr := res.Files[0]
+		if !fr.Skipped {
+			t.Errorf("expected Skipped=true, got false")
+		}
+		if fr.SkipReason != "already ingested (identical file exists at destination)" {
+			t.Errorf("SkipReason = %q, want 'already ingested (identical file exists at destination)'", fr.SkipReason)
+		}
+		if len(client.checkCalls) != 0 {
+			t.Errorf("expected 0 CheckContent calls for AlreadyIngested file, got %d", len(client.checkCalls))
+		}
+	})
 }
