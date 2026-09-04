@@ -6,14 +6,27 @@
 // separate, always-explicit action this flag does not by itself
 // authorize.
 //
-// Every download this package makes is verified against the release's
-// SHA256SUMS.txt via a su.ChecksumValidator, which is why Updater always
-// constructs go-selfupdate's Updater itself (NewUpdater below) rather than
-// ever calling the package-level su.DetectLatest/su.UpdateCommand helpers
-// -- those use a validator-less default Updater with no integrity check
-// at all. This is the *only* integrity control in this repo's release
-// pipeline; nothing is code-signed or notarized (see internal/appbundle's
-// doc comment for why the macOS bundle specifically must stay that way).
+// Every download this package makes is verified against two integrity
+// controls, in order:
+//
+//  1. A Sigstore keyless signature on the archive (and the
+//     SHA256SUMS.txt), produced at publish time by
+//     .github/workflows/release-binaries.yml via `cosign sign-blob` and
+//     verified in-process here by sigstoreVerify (sigstore.go) using
+//     github.com/sigstore/sigstore-go against the embedded Fulcio
+//     trusted root. Proves the release was built by this repo's signed
+//     release workflow, not by a non-maintainer who gained release-page
+//     write access. Rekor / SCT / TSA verifiers are deliberately
+//     disabled -- we want self-update to work for a host that is
+//     online only briefly, and the load-bearing threat (release-page
+//     forgery) is already closed by cert+issuer+SAN check alone.
+//  2. A SHA-256 checksum on every file inside the archive, via
+//     go-selfupdate's ChecksumValidator against the release's
+//     SHA256SUMS.txt. This is the original integrity control
+//     (pre-PR #131) and stays as defense in depth: even if a future
+//     cert-chain regression slipped past the Sigstore check, an
+//     archive with a forged .sig/.cert but a real SHA256 entry still
+//     passes (and vice versa).
 //
 // Apply never calls go-selfupdate's own UpdateCommand helper, for two
 // reasons UpdateCommand's own implementation doesn't handle: it compares
@@ -160,6 +173,26 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 		return "", ErrNotNewer
 	}
 
+	// NEW: preflight. Fetches .sig + .cert for every release target's
+	// asset. On failure, the cache is left empty and the per-target
+	// Validator below will refuse to apply.
+	cache := newAttestCache()
+	preflightAssets := make([]assetAttestation, 0, 1+len(layout.Siblings))
+	// Each go-selfupdate target uses its OWN Updater (see
+	// comment below) and all targets share the same archive, so
+	// the (Name, URL) pair is the same for every entry -- the dedupe
+	// in sigstorePreflight ensures only one network round trip even
+	// for the Windows two-target case.
+	for range layout.orderedTargets() {
+		preflightAssets = append(preflightAssets, assetAttestation{
+			Name: release.AssetName,
+			URL:  release.AssetURL,
+		})
+	}
+	if err := sigstorePreflight(ctx, preflightAssets, cache); err != nil {
+		return "", err
+	}
+
 	// Written BEFORE any target is touched, deliberately -- a Hermes
 	// review finding on this PR caught that writing it only after every
 	// UpdateTo succeeded meant a sidecar-write failure (e.g. a transient
@@ -176,7 +209,10 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 
 	for _, target := range layout.orderedTargets() {
 		targetUpdater, err := su.NewUpdater(su.Config{
-			Validator:   &su.ChecksumValidator{UniqueFilename: ChecksumAsset},
+			// The composed validator runs SHA256 (defense in depth)
+			// then Sigstore verify. The cache is populated by the
+			// preflight above.
+			Validator:   &sigstoreValidator{cache: cache},
 			OldSavePath: target + rollbackSuffix,
 		})
 		if err != nil {
