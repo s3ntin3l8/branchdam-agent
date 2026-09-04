@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.4.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.3.0...v1.4.0) (2026-09-02)
+
+
+### Features
+
+* **ingest:** skip OS metadata and apply AllowedExtensions filter ([#100](https://github.com/s3ntin3l8/branchdam-agent/issues/100)) ([#127](https://github.com/s3ntin3l8/branchdam-agent/issues/127)) ([dfe93da](https://github.com/s3ntin3l8/branchdam-agent/commit/dfe93dabef5b97ba9d750054437d307b720787ea))
+* **queue:** add status-column index + schema migration seam ([#106](https://github.com/s3ntin3l8/branchdam-agent/issues/106)) ([#119](https://github.com/s3ntin3l8/branchdam-agent/issues/119)) ([0ebfba5](https://github.com/s3ntin3l8/branchdam-agent/commit/0ebfba58821d38390015a6e7b6418ff8e0415fe9))
+* **tray/settings:** make ingest.cardRoots editable from Settings + live Detector restart ([#78](https://github.com/s3ntin3l8/branchdam-agent/issues/78)) ([#133](https://github.com/s3ntin3l8/branchdam-agent/issues/133)) ([0e3baee](https://github.com/s3ntin3l8/branchdam-agent/commit/0e3baeeeedfdf58498fd931ccc21e421eee74237))
+* **tray:** expose missing config fields in settings menu ([#110](https://github.com/s3ntin3l8/branchdam-agent/issues/110)) ([#132](https://github.com/s3ntin3l8/branchdam-agent/issues/132)) ([9e09f61](https://github.com/s3ntin3l8/branchdam-agent/commit/9e09f6183d4ed561334ce080c85680adfc68a005))
+* **tray:** surface handshake/in-flight status on status page ([#109](https://github.com/s3ntin3l8/branchdam-agent/issues/109)) ([#123](https://github.com/s3ntin3l8/branchdam-agent/issues/123)) ([22dd00c](https://github.com/s3ntin3l8/branchdam-agent/commit/22dd00c6b62c4b47e13684aad5700e4abef20d9f))
+
+
+### Bug Fixes
+
+* **autostart:** JSON-encode args to sidecar file to prevent injection ([#98](https://github.com/s3ntin3l8/branchdam-agent/issues/98)) ([#124](https://github.com/s3ntin3l8/branchdam-agent/issues/124)) ([92833fd](https://github.com/s3ntin3l8/branchdam-agent/commit/92833fddb2ed63e4326f92fc8e212dda2fea466a))
+* **config:** validate Server.BaseURL scheme and loopback policy ([#96](https://github.com/s3ntin3l8/branchdam-agent/issues/96)) ([#125](https://github.com/s3ntin3l8/branchdam-agent/issues/125)) ([2a7d415](https://github.com/s3ntin3l8/branchdam-agent/commit/2a7d415ea9535b0e9e40875ad687f534d87e4bef))
+* **config:** warn on world-readable config.yaml with apiKey ([#97](https://github.com/s3ntin3l8/branchdam-agent/issues/97)) ([#126](https://github.com/s3ntin3l8/branchdam-agent/issues/126)) ([5b13f7a](https://github.com/s3ntin3l8/branchdam-agent/commit/5b13f7ac1d102edcaee741c452f77ef8aecaab96))
+* **ingest:** add FastHash budget and short-circuit to collision loop ([#105](https://github.com/s3ntin3l8/branchdam-agent/issues/105)) ([#129](https://github.com/s3ntin3l8/branchdam-agent/issues/129)) ([19712be](https://github.com/s3ntin3l8/branchdam-agent/commit/19712be6ac07e639ba8f492a72b7a0ff587e8ebe))
+* **ingest:** fsync parent directories after DualWrite ([#117](https://github.com/s3ntin3l8/branchdam-agent/issues/117)) ([a7476bf](https://github.com/s3ntin3l8/branchdam-agent/commit/a7476bf3af7b43de17cd306a242930c15014b9ad)), closes [#101](https://github.com/s3ntin3l8/branchdam-agent/issues/101)
+* **ingest:** log os.Chtimes failures instead of silently swallowing ([#103](https://github.com/s3ntin3l8/branchdam-agent/issues/103)) ([#130](https://github.com/s3ntin3l8/branchdam-agent/issues/130)) ([92ef22c](https://github.com/s3ntin3l8/branchdam-agent/commit/92ef22c2d8a359ddf79a72a0e24fe08cb02b6429))
+* **ingest:** restrict verify fallback to EINVAL/EOPNOTSUPP only ([#102](https://github.com/s3ntin3l8/branchdam-agent/issues/102)) ([#122](https://github.com/s3ntin3l8/branchdam-agent/issues/122)) ([cb8213b](https://github.com/s3ntin3l8/branchdam-agent/commit/cb8213b13cc0d0572f4dd6d0ddcdb2a30f3dd353))
+* **ingest:** strip .. and bare . in sanitizeSegment ([#99](https://github.com/s3ntin3l8/branchdam-agent/issues/99)) ([#128](https://github.com/s3ntin3l8/branchdam-agent/issues/128)) ([cc407db](https://github.com/s3ntin3l8/branchdam-agent/commit/cc407dbc4788083940adb628e0d790be53cce86d))
+* **test:** skip parity test on dirty server checkout ([#116](https://github.com/s3ntin3l8/branchdam-agent/issues/116)) ([f4157af](https://github.com/s3ntin3l8/branchdam-agent/commit/f4157afc07a2985d71f84979d9a98de13b719b50)), closes [#113](https://github.com/s3ntin3l8/branchdam-agent/issues/113)
+
 ## [1.3.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.2.0...v1.3.0) (2026-08-29)
 
 
