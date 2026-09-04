@@ -1057,10 +1057,7 @@ func (r *Runner) SetHookState(id HookID, st HookState) {
 // outcome rather than the pre-install refresh snapshot -- pinned by
 // TestRefreshHookStateAfterInstallWins.
 func (r *Runner) RefreshHookState(id HookID, st HookState) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	stamped := st
-	r.hookState[id] = &stamped
+	r.SetHookState(id, st)
 }
 
 // TriggerHookInstall installs id's script hook via the registered
