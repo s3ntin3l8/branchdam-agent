@@ -338,6 +338,56 @@ stops tracking upstream if the configured `Validator` ever changes -- e.g. to a 
 extra ~10MB download on one platform, so this PR keeps calling `UpdateTo` per target and accepts
 the cost. See Known gaps.
 
+### Sigstore attestation
+
+The release workflow (`.github/workflows/release-binaries.yml`) signs every published asset
+with `cosign sign-blob --yes` (keyless OIDC mode, pinned to
+`https://token.actions.githubusercontent.com` as the OIDC issuer and to this repo's workflow
+URL as the certificate SAN). `internal/selfupdate.Apply` runs the matching keyless
+verification in-process via `github.com/sigstore/sigstore-go` before
+`go-selfupdate`'s `ChecksumValidator` checks the SHA-256. The verify proves the release was
+built by this repo's signed release workflow; a release page write by anyone without the
+workflow identity cannot produce a signature that passes.
+
+`Apply` runs a `sigstorePreflight` step once per call (between the `GreaterThan` check and
+the sidecar-write) that downloads the `.sig` + `.cert` next to the release archive on
+GitHub's release-asset CDN (~6 KB total), populating an in-memory cache keyed by asset
+name. The per-target `UpdateTo` calls share that cache via a composed
+`sigstoreValidator` (SHA-256 first, then Sigstore). The dedupe-by-name in the preflight
+ensures the Windows two-binary apply (`branchdam-agent.exe` + `branchdam-agent-tray.exe`
+sharing one archive) makes one network round trip per asset, not two. The fetch uses an
+`http.Client{Timeout: 30 * time.Second}` so a stalled CDN connection can't block the
+preflight indefinitely.
+
+What this does and does not prove:
+
+- **Proves:** the cert chains to a trusted Fulcio root (embedded in the binary, see
+  `internal/selfupdate/trusted_root_public_good.json`), the cert's OIDC issuer matches
+  `https://token.actions.githubusercontent.com` exactly, the cert's SAN matches
+  `^https://github.com/s3ntin3l8/branchdam-agent/`, and the signature is a valid
+  ECDSA-P256 over SHA-256 of the archive bytes.
+- **Does not prove:** the signing time (Rekor / SCT / TSA verifiers are deliberately
+  disabled). Fulcio certs are 10-minute validity windows; without Rekor, a signature
+  is "trusted" only as long as the cert was within its 10-minute window at the moment
+  of the verify call. This is an acceptable trade for an agent that may be online only
+  briefly for self-update: the load-bearing threat the verify closes is "a
+  non-maintainer with release-page write access mints a release," which cert+issuer+SAN
+  already defeats. Proving the *signing event* (Rekor) requires a workflow change
+  (upload the inclusion proof with the asset) and a new online dependency at apply time;
+  deferred.
+
+The trusted root is a hand-pruned subset of
+`https://github.com/sigstore/sigstore-go/blob/v1.3.0/examples/trusted-root-public-good.json`
+(Fulcio root + intermediate only; Rekor / CT / TSA sections are removed because the
+verify path skips those verifiers). When Sigstore rotates the Fulcio root, future
+releases will fail cert-chain verification against the stale embedded root. **At that
+point a future PR must re-fetch the upstream example, prune the same way, and re-commit
+`internal/selfupdate/trusted_root_public_good.json` -- otherwise every workstation
+running the agent will refuse to self-update.** Track
+`https://github.com/sigstore/Fulcio` for rotation announcements; see
+`internal/selfupdate/sigstore.go`'s package doc for the rotation cadence rationale.
+A live-refresh via TUF is the proper long-term answer but is out of scope here.
+
 ## Known gaps
 
 - **`LSUIElement=1` Dock-suppression is unverified on real hardware**, as is whether AppKit's
