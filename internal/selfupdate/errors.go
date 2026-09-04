@@ -30,3 +30,25 @@ var ErrTargetNotWritable = errors.New("selfupdate: install directory is not writ
 // there, and baking it into a login item would register a path that stops
 // existing. Move the .app to /Applications or ~/Applications to clear it.
 var ErrTranslocated = errors.New("selfupdate: running from a Gatekeeper-translocated path; move the app to /Applications or ~/Applications first")
+
+// ErrSigstoreAttestationMissing is returned by Apply when a release
+// asset's cosign-produced .sig or .cert is not present on the release
+// (HTTP 404, or a 200 with empty body). This is expected for releases
+// published before the workflow learned to sign in PR #131, and fatal
+// for any release that should have been signed.
+var ErrSigstoreAttestationMissing = errors.New("selfupdate: release asset's Sigstore attestation (.sig or .cert) is missing; this release was not built by a signing workflow")
+
+// ErrSigstoreAttestationDownload is returned by Apply when fetching
+// the .sig or .cert fails for any reason other than 404 -- a
+// transient network error, a TLS handshake failure, a context
+// cancellation. The underlying error is wrapped via %w.
+var ErrSigstoreAttestationDownload = errors.New("selfupdate: failed to download release asset's Sigstore attestation; check network connectivity")
+
+// ErrSigstoreVerificationFailed is returned by Apply when the Sigstore
+// signature verification itself fails -- cert does not chain to a
+// trusted Fulcio root, OIDC issuer does not match, SAN regex does
+// not match, or the signature is not a valid ECDSA-P256 over SHA-256
+// of the archive bytes. The underlying verify.ErrVerification (or
+// any other sigstore-go error) is preserved via %w and can be
+// inspected with errors.As.
+var ErrSigstoreVerificationFailed = errors.New("selfupdate: Sigstore signature verification failed; refusing to apply update")
