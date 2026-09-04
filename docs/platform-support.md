@@ -55,30 +55,48 @@ The tray menu now has a "Settings" submenu, split by what systray itself can ren
 versus what needs an external dialog:
 
 - **Native checkboxes/submenus** (no dialog, no restart): start at login, check for updates, the
-  update check interval (1 hour / 24 hours / never), require unbuffered verify.
+  update check interval (1 hour / 24 hours / never), require unbuffered verify, **Require DCIM
+  folder** (#81, skips volumes without a `DCIM/` subdirectory), **Auto-eject after ingest** (#87,
+  unmounts and ejects the card volume after a verified ingest — gated on the ingest summary
+  being `OK()`), **Pause upload on metered connection** (#84, short-circuits `TriggerDrain` on
+  a hotspot or metered link without blocking the local edit copy), **Pause ingest** (#83,
+  shoot-mode: short-circuits `TriggerIngest` / `TriggerDrain` / `TriggerPrune` and drops detector
+  events; session-only, not persisted).
 - **Free-text fields, via a `github.com/ncruces/zenity` dialog** (re-exec'd through the same hidden
   `dialog` subcommand issue #30's startup-error notification uses -- see that section below):
   server URL, API key (a password-style prompt; the current key is never pre-filled or otherwise
-  placed in a subprocess's argv), the archive root and local edit root (folder pickers), and the
-  naming template.
-- **Hand-edit only, on purpose** -- `pathMappings` and `ingest.cardRoots` are both multi-value
-  list fields; adding a dialog for editing a list is real additional UI work this PR didn't take
-  on. "Open config.yaml" and "Reveal config folder" menu items exist specifically so this path
-  never requires knowing where the file lives.
+  placed in a subprocess's argv), the archive root and local edit root (folder pickers), the
+  naming template, **Watch folders…** (#78, multi-value directory picker for `ingest.cardRoots`),
+  and **Allowed extensions…** (#81, comma-separated `ingest.allowedExtensions` allow-list).
+- **List-editing dialog** (separate from the free-text dialog because multi-value lists need a
+  different zenity kind) — `ingest.autoImportPaths` (#79, the allow-list that bypasses the
+  confirmation dialog for known card volumes) is edited through the same `SetStringSlice`
+  path the headless `settings.go` exposes.
+- **Hand-edit only, on purpose** -- `pathMappings` remains hand-edit (deliberate: it requires
+  operator judgement about container paths). `ingest.cardRoots` was previously in this category
+  but graduated to the free-text dialog by #78 alongside a live `Runner.ReconfigureDetector`
+  path so changing it does not require a process restart. "Open config.yaml" and "Reveal config
+  folder" menu items remain for any field that ever needs a hand-edit escape hatch.
 
 Every change applies through one mechanism, `Runner.Reconfigure` -- it rebuilds the
 affected components (`branchdam.Client`, `ingest.Engine`) and applies them atomically under a
-mutex lock. A field that requires a restart (`tray.statusAddr`, `ingest.cardRoots`) is caught
-by a snapshot diff in `SettingsView`, which shows "Restart now" instead of applying immediately.
-**Unverified on real hardware**, same caveat as issue #30's dialog work below -- the
-settings dialogs share the same re-exec'd `dialog` subcommand.
+mutex lock. A field that requires a restart (`tray.statusAddr` is the only remaining one;
+`ingest.cardRoots` is hot-reloaded by `ReconfigureDetector`) is caught by a snapshot diff in
+`SettingsView`, which shows "Restart now" instead of applying immediately. **Unverified on real
+hardware**, same caveat as issue #30's dialog work below -- the settings dialogs share the same
+re-exec'd `dialog` subcommand.
 
 The embedded status page (still the `<meta http-equiv="refresh">` HTML page from issue #3, no JS) now
 also renders an "Integrations" section (per-integration enabled/dry-run config state joined by ID
 against the last sync summary -- see the `integrationView` template func in
 `internal/tray/statusserver.go`) and a "DaVinci Resolve render hook" section (issue #60/#61) -- see
 the Status page section below. A `/status.json` route and a smoother live-refresh loop are still
-deferred to issue #32's own tray-timer work.
+deferred to issue #32's own tray-timer work. Live per-file ingest progress
+(per-file path, bytes done / total, phase, and elapsed time) is already
+shipped by #85: it renders in the tray tooltip while a card is being
+ingested and on the status page under the same busy-card header. See
+`internal/ingest/progress.go`'s `ProgressEvent` and `internal/tray/tooltip.go`'s
+`FormatIngestProgress`.
 
 ## Integrations menu
 
@@ -372,20 +390,23 @@ the cost. See Known gaps.
   original design doc flagged and this PR did not spike separately). `configSettings`'s own logic
   (persistence, reload, restart-required diffing) is pinned by tests substituting a fake
   `dialogRunner`; the dialogs' actual rendering is not.
-- **Tray queue status has no live rate/ETA or in-progress-transfer readout (issue #32).** The
-  status page and menu show a real `internal/queue.Store.Counts` snapshot (pending, permanently
-  failed, done) plus the last completed drain/prune pass's summary -- but not a live "copying
-  X.jpg, 40% done" or a bytes/sec rate while a drain's archive copy is in flight, even though
-  `internal/ingest`'s progress-callback plumbing (`ProgressEvent`) already exists and could feed
-  one. Deferred as its own follow-on: it needs a progress callback threaded through a
-  concurrently-running `Drain` pass with its own synchronization against `Runner`'s polled
-  `Status()` calls, which is meaningfully more design surface than the Counts-based readout this
-  PR shipped. `offline.drainIntervalSecs`/`prune.intervalMinutes` are also config-file-only for
-  now -- not yet exposed in the tray's settings menu. Note also that `Runner.Status()` performs a
-  real `queue.Store.Counts` read on every call -- the tray's 5s menu-refresh tick and every
-  status-page request -- bounded to 5s (`statusQueueReadTimeout`) so a wedged read can't hang the
-  whole tray menu, but still a real query against `queue.db` each time; this is more impactful the
-  larger or more NAS-backed-network-latency-prone `offline.queueDbPath`'s storage is.
+- **Tray queue status has no live rate/ETA or in-progress-transfer readout (issue #32, closed
+  by #85 for ingest; drain ETA still pending).** The status page and menu show a real
+  `internal/queue.Store.Counts` snapshot (pending, permanently failed, done) plus the last
+  completed drain/prune pass's summary. Live per-file ingest progress (path, bytes done / total,
+  phase, elapsed time) is shipped by #85: `internal/ingest/progress.go`'s `ProgressEvent` is
+  emitted by `DualWrite`, `WriteLocal`, `Verify`, `CopyToArchive`, and `Drain`'s archive copy,
+  rendered in the tray tooltip via `internal/tray/tooltip.go`'s `FormatIngestProgress` and on
+  the status page (`TestHandleIndexRendersIngestProgress`,
+  `TestRunnerIngestProgressRecordedAndCleared`). What remains open: a bytes/sec rate / ETA for
+  drain's archive copy (the bytes/sec signal exists per-file but is not yet aggregated across
+  the concurrent copy + verify pipeline). `offline.drainIntervalSecs`/`prune.intervalMinutes`
+  are also config-file-only for now -- not yet exposed in the tray's settings menu. Note also
+  that `Runner.Status()` performs a real `queue.Store.Counts` read on every call -- the tray's
+  5s menu-refresh tick and every status-page request -- bounded to 5s (`statusQueueReadTimeout`)
+  so a wedged read can't hang the whole tray menu, but still a real query against `queue.db`
+  each time; this is more impactful the larger or more NAS-backed-network-latency-prone
+  `offline.queueDbPath`'s storage is.
 - **Tray-driven drain/prune passes are unverified on real hardware.** `Runner.TriggerDrain`/
   `TriggerPrune`'s locking (a dedicated mutex for drain, sharing the ingest/self-update gate for
   prune) and the two background timers (`cmd/branchdam-agent/queueagent.go`'s `startPeriodic`) are
