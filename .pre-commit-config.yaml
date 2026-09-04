@@ -17,12 +17,6 @@ repos:
       - id: mixed-line-ending
         args: [--fix=lf]
 
-  - repo: https://github.com/golangci/golangci-lint
-    rev: v2.12.2
-    hooks:
-      - id: golangci-lint
-        args: ['--timeout', '5m']
-
   - repo: local
     hooks:
       - id: gofmt
@@ -71,3 +65,32 @@ repos:
         types: [go]
         pass_filenames: false
         stages: [pre-push]
+
+      - id: golangci-lint
+        name: golangci-lint
+        # Issue #163: the previously-bundled `repo: github.com/golangci/golangci-lint`
+        # hook installed a `+dirty` release-prep binary that panics inside
+        # honnef.co/go-tools@v0.7.0's buildir pass when running over the
+        # full repo (single-file `--files` runs pass; the panic is triggered
+        # by transitive analysis of the stdlib `net/poll` package).
+        #
+        # The panic is Go-toolchain-version-sensitive: it reproduces when
+        # golangci-lint@v2.12.2 is built with Go 1.26.6 but NOT when built
+        # with Go 1.26.7 (the panic-triggering AST shape in stdlib `net/poll`
+        # changed between those patch releases; honnef.co/go-tools' v0.7.0
+        # buildir handles the 1.26.7 shape correctly and panics on 1.26.6).
+        # CI uses Go 1.26.7 (per `go.mod`'s `toolchain go1.26.7` directive,
+        # which `actions/setup-go@v7` honors); a `go install` from local Go
+        # 1.26.6 reproduces the panic.
+        #
+        # Pivoting to `go install`-built golangci-lint in a repo-local
+        # `.bin/` (same pattern as the `govulncheck` hook above), pinned
+        # to the Go toolchain `go.mod` declares via `GOTOOLCHAIN=go1.26.7`
+        # so the binary is built with the exact same Go CI uses. This
+        # sidesteps the panic. The `@v2.12.2` pin MUST match
+        # `.github/workflows/ci-cd.yml`'s `golangci-lint-action@v9` `version:`
+        # so local and CI track the same upstream golangci-lint release.
+        entry: bash -c 'GOTOOLCHAIN=go1.26.7 GOBIN="$(git rev-parse --show-toplevel)/.bin" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 && "$(git rev-parse --show-toplevel)/.bin/golangci-lint" --timeout 5m run'
+        language: system
+        types: [go]
+        pass_filenames: false
