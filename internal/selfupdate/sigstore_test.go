@@ -196,7 +196,7 @@ func encodeSigBase64(t *testing.T, sig []byte) []byte {
 // just the chain + signature plumbing, not the production policy.
 //
 // sigstore-go's NewShortCertificateIdentity requires at least one of
-// issuer/sanValue (regex/value pairs); the regex "." matches anything.
+// issuer/sanValue (regex/value pairs); the regex ".*" matches anything.
 var permissiveTestIdentity = mustNewPermissiveIdentity()
 
 func mustNewPermissiveIdentity() verify.CertificateIdentity {
@@ -212,9 +212,9 @@ func mustNewPermissiveIdentity() verify.CertificateIdentity {
 	return id
 }
 
-// withTestTrustedRoot swaps the package-global cachedVerifier for one
-// built from a test CA, runs fn, and restores on cleanup. Use this
-// when you need a TrustedRoot that doesn't include the production
+// withTestTrustedRoot swaps the package-global cachedTrustedRoot for
+// one built from a test CA, runs fn, and restores on cleanup. Use
+// this when you need a TrustedRoot that doesn't include the production
 // public-good Fulcio (which can't be replayed offline -- certs are
 // short-lived).
 func withTestTrustedRoot(t *testing.T, ca *x509.Certificate) {
@@ -233,27 +233,23 @@ func withTestTrustedRoot(t *testing.T, ca *x509.Certificate) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := verify.NewVerifier(tr, verify.WithCurrentTime())
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// Swap. The package's sync.Once makes normal swap impossible;
-	// we just directly assign (test-only). The production verifier
-	// cache is never used by this test.
-	saved := cachedVerifier
-	savedErr := cachedVerifierErr
-	cachedVerifier = v
-	cachedVerifierErr = nil
+	// we just directly assign (test-only). The production trusted
+	// root cache is never used by this test.
+	saved := cachedTrustedRoot
+	savedErr := cachedTrustedErr
+	cachedTrustedRoot = tr
+	cachedTrustedErr = nil
 	t.Cleanup(func() {
-		cachedVerifier = saved
-		cachedVerifierErr = savedErr
+		cachedTrustedRoot = saved
+		cachedTrustedErr = savedErr
 	})
 }
 
 // TestSigstoreVerifyRejectsUntrustedCert proves the verify actually
 // verifies: a self-signed cert (not chained to the test CA in the
-// test verifier) must produce ErrSigstoreVerificationFailed.
+// trusted root) must produce ErrSigstoreVerificationFailed.
 func TestSigstoreVerifyRejectsUntrustedCert(t *testing.T) {
 	ca, _ := testCAKeypair(t, "test CA")
 	withTestTrustedRoot(t, ca)
@@ -262,7 +258,7 @@ func TestSigstoreVerifyRejectsUntrustedCert(t *testing.T) {
 	cert, priv := testCertKeypair(t, "untrusted-test")
 	sig := signECDSAP256SHA256(t, priv, archive)
 
-	err := sigstoreVerifyWithIdentity(archive, encodeSigBase64(t, sig), encodeCertPEM(t, cert), permissiveTestIdentity)
+	err := verifyAttestation(archive, encodeSigBase64(t, sig), encodeCertPEM(t, cert), permissiveTestIdentity)
 	if err == nil {
 		t.Fatal("sigstoreVerify accepted an untrusted cert; want ErrSigstoreVerificationFailed")
 	}
@@ -271,17 +267,17 @@ func TestSigstoreVerifyRejectsUntrustedCert(t *testing.T) {
 	}
 }
 
-// TestSigstoreVerifyAcceptsTestCA proves the synthetic-bundle + verifier
+// TestSigstoreVerifyAcceptsTestCA proves the cert-chain + signature
 // plumbing is correct end-to-end, using a test CA + leaf cert signed
 // by that CA. A real Fulcio-issued cert is short-lived and cannot be
 // replayed offline, so the only way to assert "the verify actually
 // works when the cert chains correctly" is via a test CA.
 //
-// The test uses sigstoreVerifyWithIdentity with a permissive identity
-// (not the production sigstoreTrustedIdentity) so the test certs can
-// be minimal -- no SAN, no Fulcio OIDC extension. This isolates the
-// chain-of-trust check from the identity check; the production
-// identity policy is exercised end-to-end at the next real release.
+// The test uses verifyAttestation with a permissive identity (not the
+// production sigstoreTrustedIdentity) so the test certs can be
+// minimal -- no Fulcio OIDC extension. This isolates the chain-of-
+// trust check from the identity check; the production identity
+// policy is exercised end-to-end at the next real release.
 func TestSigstoreVerifyAcceptsTestCA(t *testing.T) {
 	ca, caPriv := testCAKeypair(t, "test CA")
 	leaf, leafPriv := signLeafWithCA(t, ca, caPriv, "test leaf")
@@ -290,7 +286,7 @@ func TestSigstoreVerifyAcceptsTestCA(t *testing.T) {
 
 	withTestTrustedRoot(t, ca)
 
-	err := sigstoreVerifyWithIdentity(archive, encodeSigBase64(t, sig), encodeCertPEM(t, leaf), permissiveTestIdentity)
+	err := verifyAttestation(archive, encodeSigBase64(t, sig), encodeCertPEM(t, leaf), permissiveTestIdentity)
 	if err != nil {
 		t.Fatalf("sigstoreVerify rejected a cert chained to the test CA: %v", err)
 	}
@@ -309,7 +305,7 @@ func TestSigstoreVerifyRejectsTamperedArchive(t *testing.T) {
 
 	withTestTrustedRoot(t, ca)
 
-	err := sigstoreVerifyWithIdentity(tamperedArchive, encodeSigBase64(t, sig), encodeCertPEM(t, leaf), permissiveTestIdentity)
+	err := verifyAttestation(tamperedArchive, encodeSigBase64(t, sig), encodeCertPEM(t, leaf), permissiveTestIdentity)
 	if err == nil {
 		t.Fatal("sigstoreVerify accepted a tampered archive; want ErrSigstoreVerificationFailed")
 	}
@@ -318,40 +314,30 @@ func TestSigstoreVerifyRejectsTamperedArchive(t *testing.T) {
 	}
 }
 
-// TestBuildSyntheticBundle exercises the bundle construction with a
-// known-good (archive, sig, cert) triple, asserting the protobuf
-// fields are populated correctly. Complements the higher-level
-// TestSigstoreVerifyAcceptsTestCA which exercises the same path
-// through the full verify stack.
-func TestBuildSyntheticBundle(t *testing.T) {
-	archive := []byte("the archive bytes for bundle construction test")
-	cert, priv := testCertKeypair(t, "bundle-test")
-	sig := signECDSAP256SHA256(t, priv, archive)
-	sigB64 := encodeSigBase64(t, sig)
-	certPEM := encodeCertPEM(t, cert)
-
-	b, err := buildSyntheticBundle(archive, sigB64, certPEM)
-	if err != nil {
-		t.Fatalf("buildSyntheticBundle: %v", err)
-	}
-	if b == nil {
-		t.Fatal("buildSyntheticBundle returned nil bundle")
-	}
-
-	// The bundle's MediaType is what sigstore-go's verifier checks to
-	// decide the bundle format. v0.3 is the standard.
-	if got, want := b.GetMediaType(), "application/vnd.dev.sigstore.bundle+json;version=0.3"; got != want {
-		t.Errorf("MediaType = %q, want %q", got, want)
-	}
-
-	// Round-trip the bundle through the full verify stack to confirm
-	// the bundle's digest, signature, and cert fields are correctly
-	// populated (a malformed bundle would fail at verify time, not at
-	// type-assertion time). This is the actual end-to-end check.
-	withTestTrustedRoot(t, cert) // any self-signed cert works as a "root" here
-	if err := sigstoreVerifyWithIdentity(archive, sigB64, certPEM, permissiveTestIdentity); err != nil {
-		t.Errorf("round-trip through verify failed: %v", err)
-	}
+// TestSigstoreVerifyEmptyInput covers the "empty sig / empty cert"
+// paths. Both are reported as ErrSigstoreAttestationMissing (the
+// download would have surfaced a 404, but the function should still
+// fail closed if called with an empty body somehow -- e.g. the
+// per-target Validator being invoked before preflight completes).
+func TestSigstoreVerifyEmptyInput(t *testing.T) {
+	t.Run("empty sig", func(t *testing.T) {
+		err := sigstoreVerify([]byte("archive"), nil, []byte("cert"))
+		if !errors.Is(err, ErrSigstoreAttestationMissing) {
+			t.Errorf("err = %v, want ErrSigstoreAttestationMissing", err)
+		}
+	})
+	t.Run("empty cert", func(t *testing.T) {
+		err := sigstoreVerify([]byte("archive"), []byte("sig"), nil)
+		if !errors.Is(err, ErrSigstoreAttestationMissing) {
+			t.Errorf("err = %v, want ErrSigstoreAttestationMissing", err)
+		}
+	})
+	t.Run("both empty", func(t *testing.T) {
+		err := sigstoreVerify([]byte("archive"), nil, nil)
+		if !errors.Is(err, ErrSigstoreAttestationMissing) {
+			t.Errorf("err = %v, want ErrSigstoreAttestationMissing", err)
+		}
+	})
 }
 
 // TestSigstorePreflightHappyPath spins up a local httptest server
@@ -466,11 +452,10 @@ func TestSigstoreValidatorCompose(t *testing.T) {
 	t.Run("happy path: SHA256 + Sigstore both pass", func(t *testing.T) {
 		// For this subtest we need a leaf cert whose SAN and OIDC
 		// issuer satisfy the PRODUCTION sigstoreTrustedIdentity,
-		// because sigstoreValidator calls sigstoreVerifyWithIdentity
-		// with the production identity (not a test identity). The
-		// production identity is:
+		// because sigstoreValidator calls sigstoreVerify (which uses
+		// the production identity). The production identity is:
 		//   - OIDC issuer: https://token.actions.githubusercontent.com
-		//   - SAN regex:   ^https://github\.com/s3ntin3l8/branchdam-agent/
+		//   - SAN regex:   ^https://github\.com/s3ntin3l8/branchdam-agent/\.github/workflows/release-binaries\.yml@
 		// so the test leaf needs both. Sigstore-go still accepts the
 		// deprecated Fulcio v1 OIDC issuer extension (OID 1.3.6.1.4.1.57264.1.1)
 		// which carries the OIDC URL as raw bytes, no DER encoding
@@ -551,7 +536,7 @@ var fulcioV1IssuerExtensionOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 
 // signLeafWithProductionIdentity is like signLeafWithCA but adds
 // the SAN and OIDC issuer extension that production Fulcio-issued
 // certs carry -- required to pass the production
-// sigstoreTrustedIdentity policy used by sigstoreValidator.Validate.
+// sigstoreTrustedIdentity policy used by sigstoreVerify.
 func signLeafWithProductionIdentity(t *testing.T, ca *x509.Certificate, caPriv *ecdsa.PrivateKey, cn string) (*x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
 	leafPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

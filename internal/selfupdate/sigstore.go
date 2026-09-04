@@ -20,6 +20,7 @@ package selfupdate
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
 	_ "embed"
@@ -34,10 +35,7 @@ import (
 
 	su "github.com/creativeprojects/go-selfupdate"
 
-	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
-	protocommon "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
-
-	"github.com/sigstore/sigstore-go/pkg/bundle"
+	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/verify"
 )
@@ -64,9 +62,10 @@ var embeddedTrustedRoot []byte
 //   - OIDC issuer: https://token.actions.githubusercontent.com
 //     (a Fulcio cert issued from any other Sigstore instance, e.g.
 //     staging, is rejected)
-//   - SAN regex: ^https://github.com/s3ntin3l8/branchdam-agent/
-//     (a signature minted by a different repo's workflow, even one
-//     that uses keyless correctly, is also rejected)
+//   - SAN regex: ^https://github\.com/s3ntin3l8/branchdam-agent/\.github/workflows/release-binaries\.yml@
+//     pinned to the exact trusted workflow file. A signature minted
+//     by any other workflow (e.g. a future PR-triggered workflow
+//     that also has `id-token: write`) is rejected.
 var sigstoreTrustedIdentity = mustNewTrustedCertIdentity()
 
 func mustNewTrustedCertIdentity() verify.CertificateIdentity {
@@ -74,7 +73,7 @@ func mustNewTrustedCertIdentity() verify.CertificateIdentity {
 		"https://token.actions.githubusercontent.com",
 		"", // issuerRegex (unused; the hard issuer above is the exact match)
 		"", // sanValue (unused, the regex below is the only SAN criterion)
-		`^https://github\.com/s3ntin3l8/branchdam-agent/`,
+		`^https://github\.com/s3ntin3l8/branchdam-agent/\.github/workflows/release-binaries\.yml@`,
 	)
 	if err != nil {
 		panic(fmt.Sprintf("selfupdate: hard-coded Sigstore trusted identity: %v", err))
@@ -82,42 +81,28 @@ func mustNewTrustedCertIdentity() verify.CertificateIdentity {
 	return id
 }
 
-// cachedVerifier is built lazily on first use and reused for the
-// process lifetime. The Verifier is safe for concurrent use per the
+// trustedRootOnce ensures the trusted root is parsed exactly once
+// across all calls. TrustedRoot is safe for concurrent use per the
 // sigstore-go docs.
 var (
-	verifierOnce      sync.Once
-	cachedVerifier    *verify.Verifier
-	cachedVerifierErr error
+	trustedRootOnce   sync.Once
+	cachedTrustedRoot *root.TrustedRoot
+	cachedTrustedErr  error
 )
 
-func loadVerifier() (*verify.Verifier, error) {
-	verifierOnce.Do(func() {
+// loadTrustedRoot parses the embedded trusted root. Done lazily so a
+// parse failure (e.g. a botched rotation) doesn't take down package
+// init for the whole binary -- the failure surfaces on first Apply.
+func loadTrustedRoot() (*root.TrustedRoot, error) {
+	trustedRootOnce.Do(func() {
 		tr, err := root.NewTrustedRootFromJSON(embeddedTrustedRoot)
 		if err != nil {
-			cachedVerifierErr = fmt.Errorf("selfupdate: parse embedded trusted root: %w", err)
+			cachedTrustedErr = fmt.Errorf("selfupdate: parse embedded trusted root: %w", err)
 			return
 		}
-		// sigstore-go's Verifier requires *some* timestamp source to be
-		// selected via NewVerifier options; the choices are
-		// WithSignedTimestamps (RFC3161 TSA), WithObserverTimestamps
-		// (TSA + Rekor SET), WithIntegratedTimestamps (Rekor SET only),
-		// WithCurrentTime (use wall clock for chain validation), or
-		// WithNoObserverTimestamps (key-only verification). Per the
-		// package doc we deliberately skip Rekor/SCT/TSA, so the only
-		// option that gives us "just sig + cert chain against current
-		// time" is WithCurrentTime. This means a Fulcio cert is
-		// validated with time.Now() as the verification time -- fine
-		// for fresh releases; the embedded trusted root will be
-		// re-cut on Fulcio root rotation (see package doc).
-		v, err := verify.NewVerifier(tr, verify.WithCurrentTime())
-		if err != nil {
-			cachedVerifierErr = fmt.Errorf("selfupdate: build verifier: %w", err)
-			return
-		}
-		cachedVerifier = v
+		cachedTrustedRoot = tr
 	})
-	return cachedVerifier, cachedVerifierErr
+	return cachedTrustedRoot, cachedTrustedErr
 }
 
 // deriveSigURL returns the URL of <assetURL>.sig. The release workflow
@@ -156,98 +141,131 @@ func decodeBase64OrPassThrough(sig []byte) ([]byte, error) {
 	return trimmed, nil
 }
 
-// buildSyntheticBundle constructs a sigstore-go Bundle protobuf from
-// the archive bytes, the .sig bytes, and the .cert bytes. The shape
-// matches what sigstore-go's test/conformance and protobuf-specs define
-// for a MessageSignature with an X.509 Certificate verification material.
-func buildSyntheticBundle(archive, sig, cert []byte) (*bundle.Bundle, error) {
-	sigRaw, err := decodeBase64OrPassThrough(sig)
-	if err != nil {
-		return nil, fmt.Errorf("selfupdate: decode .sig: %w", err)
-	}
-
-	// .cert is PEM. Expect exactly one CERTIFICATE block; reject chains
-	// (the workflow does not use --certificate-chain).
-	block, rest := pem.Decode(cert)
-	if block == nil {
-		return nil, fmt.Errorf("selfupdate: .cert is not PEM-encoded")
-	}
-	if block.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("selfupdate: .cert PEM block is %q, want CERTIFICATE", block.Type)
-	}
-	if len(bytes.TrimSpace(rest)) > 0 {
-		return nil, fmt.Errorf("selfupdate: .cert contains more than one PEM block; cosign --certificate-chain output is not supported")
-	}
-
-	parsed, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("selfupdate: parse .cert DER: %w", err)
-	}
-
-	digest := sha256.Sum256(archive)
-
-	pb := &protobundle.Bundle{
-		MediaType: "application/vnd.dev.sigstore.bundle+json;version=0.3",
-		Content: &protobundle.Bundle_MessageSignature{
-			MessageSignature: &protocommon.MessageSignature{
-				MessageDigest: &protocommon.HashOutput{
-					Algorithm: protocommon.HashAlgorithm_SHA2_256,
-					Digest:    digest[:],
-				},
-				Signature: sigRaw,
-			},
-		},
-		VerificationMaterial: &protobundle.VerificationMaterial{
-			Content: &protobundle.VerificationMaterial_Certificate{
-				Certificate: &protocommon.X509Certificate{
-					RawBytes: parsed.Raw,
-				},
-			},
-		},
-	}
-
-	return bundle.NewBundle(pb)
-}
-
-// sigstoreVerify is the in-process verify. Returns nil on success,
-// ErrSigstoreAttestationMissing if cert or sig is empty, or a wrapped
-// error on failure (cert chain / issuer / SAN / sig check). The
-// underlying verify.ErrVerification (or any other sigstore-go error)
-// is preserved via %w / errors.As so the tray can log the specific
-// reason. ErrSigstoreAttestationDownload is the caller's responsibility
-// (the download happens in sigstorePreflight, not here).
+// sigstoreVerify is the in-process Sigstore keyless-signature
+// verification. Returns nil on success, ErrSigstoreAttestationMissing
+// if cert or sig is empty, or a wrapped error on failure.
+//
+// This deliberately bypasses sigstore-go's high-level Verifier. The
+// Verifier forces the cert chain validation time to be either
+// time.Now() (rejects short-lived Fulcio certs the moment their 10-min
+// NotAfter expires, which breaks every self-update that runs more
+// than 10 minutes after a release) or a timestamp from a TSA / Rekor
+// entry (which requires a workflow change to upload and is out of
+// scope for issue #156). The Sigstore spec for cert path validation
+// explicitly allows "a fake 'current time'" for the no-timestamp
+// case; we use the cert's own NotBefore, which is guaranteed to be
+// inside the cert's validity window by construction.
+//
+// The threat model is unchanged: we still prove (a) the cert chains
+// to the embedded Fulcio root, (b) the cert's OIDC issuer matches
+// the GitHub Actions OIDC issuer, (c) the cert's SAN matches the
+// expected workflow, and (d) the signature is a valid ECDSA-P256 over
+// SHA-256 of the archive bytes. We do NOT prove the signing event
+// happened at a specific time -- that requires Rekor/TSA and is
+// tracked separately.
 func sigstoreVerify(archive, sig, cert []byte) error {
-	return sigstoreVerifyWithIdentity(archive, sig, cert, sigstoreTrustedIdentity)
-}
-
-// sigstoreVerifyWithIdentity is the parameterized form. identity is
-// a parameter so tests can supply a permissive test identity instead
-// of the production-pinned one. Production callers should use
-// sigstoreVerify above.
-func sigstoreVerifyWithIdentity(archive, sig, cert []byte, identity verify.CertificateIdentity) error {
 	if len(sig) == 0 || len(cert) == 0 {
 		return fmt.Errorf("%w: .sig=%d bytes, .cert=%d bytes", ErrSigstoreAttestationMissing, len(sig), len(cert))
 	}
-	v, err := loadVerifier()
+	return verifyAttestation(archive, sig, cert, sigstoreTrustedIdentity)
+}
+
+// verifyAttestation is the core verify logic, extracted so tests can
+// pass a permissive test identity (see sigstore_test.go). Production
+// callers should use sigstoreVerify above.
+func verifyAttestation(archive, sig, cert []byte, identity verify.CertificateIdentity) error {
+	// Decode the leaf cert. We accept only a single PEM block (the
+	// release workflow uses cosign sign-blob --output-certificate
+	// without --certificate-chain, so the .cert is exactly one leaf).
+	leaf, err := parseLeafCert(cert)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrSigstoreVerificationFailed, err)
 	}
-	b, err := buildSyntheticBundle(archive, sig, cert)
+
+	// Decode the signature. The release workflow's .sig is the
+	// base64-encoded ECDSA-P256 ASN.1 DER; sigstoreVerifyWithIdentity
+	// would normally do this via the synthetic bundle, but we need
+	// the raw bytes for the ecdsa.VerifyASN1 call below.
+	sigRaw, err := decodeBase64OrPassThrough(sig)
+	if err != nil {
+		return fmt.Errorf("%w: decode .sig: %w", ErrSigstoreVerificationFailed, err)
+	}
+
+	// Cert chain validation at the cert's own NotBefore. Fulcio
+	// short-lived certs are valid for ~10 minutes; we validate the
+	// chain at the earliest moment the cert is valid, which by
+	// construction is inside the cert's validity window. This is
+	// the "fake current time" path the Sigstore spec allows.
+	tr, err := loadTrustedRoot()
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrSigstoreVerificationFailed, err)
 	}
-	_, err = v.Verify(b, verify.NewPolicy(
-		verify.WithArtifact(bytes.NewReader(archive)),
-		verify.WithCertificateIdentity(identity),
-	))
-	if err != nil {
-		// Always %w the underlying error so the tray can inspect it
-		// with errors.Is / errors.As for any sigstore-go error type
-		// (ErrVerification, ErrNoMatchingCertificateIdentity, etc.).
-		// The user-facing message stays the constant.
+	if err := verifyCertChain(leaf, tr, leaf.NotBefore); err != nil {
 		return fmt.Errorf("%w: %w", ErrSigstoreVerificationFailed, err)
 	}
+
+	// Identity check: OIDC issuer + SAN regex against the cert's
+	// summary. CertificateIdentities.Verify returns the matching
+	// identity (or an error) -- we use it to reuse sigstore-go's
+	// matchers (regex compilation, SAN URL extraction, etc.) rather
+	// than reimplementing them.
+	summary, err := certificate.SummarizeCertificate(leaf)
+	if err != nil {
+		return fmt.Errorf("%w: summarize cert: %w", ErrSigstoreVerificationFailed, err)
+	}
+	identities := verify.CertificateIdentities{identity}
+	if _, err := identities.Verify(summary); err != nil {
+		return fmt.Errorf("%w: %w", ErrSigstoreVerificationFailed, err)
+	}
+
+	// Signature verification: ECDSA-P256 over SHA-256(archive)
+	// against the leaf cert's public key. This is a plain
+	// cryptographic check -- no time component -- and is what
+	// proves the cert actually signed the bytes we're about to apply.
+	digest := sha256.Sum256(archive)
+	ecPub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("%w: leaf cert public key is %T, expected *ecdsa.PublicKey", ErrSigstoreVerificationFailed, leaf.PublicKey)
+	}
+	if !ecdsa.VerifyASN1(ecPub, digest[:], sigRaw) {
+		return fmt.Errorf("%w: ECDSA signature does not match archive", ErrSigstoreVerificationFailed)
+	}
+
 	return nil
+}
+
+// parseLeafCert decodes a single PEM CERTIFICATE block. The release
+// workflow emits exactly one block (cosign sign-blob --output-certificate
+// without --certificate-chain), so we reject anything else.
+func parseLeafCert(pemBytes []byte) (*x509.Certificate, error) {
+	block, rest := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, fmt.Errorf(".cert is not PEM-encoded")
+	}
+	if block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf(".cert PEM block is %q, want CERTIFICATE", block.Type)
+	}
+	if len(bytes.TrimSpace(rest)) > 0 {
+		return nil, fmt.Errorf(".cert contains more than one PEM block; cosign --certificate-chain output is not supported")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse .cert DER: %w", err)
+	}
+	return cert, nil
+}
+
+// verifyCertChain iterates the trusted root's Fulcio CAs and returns
+// nil on the first one that successfully chains the leaf at the
+// supplied observerTimestamp. The timestamp is the cert's own
+// NotBefore (see sigstoreVerify's doc comment for why).
+func verifyCertChain(leaf *x509.Certificate, tr *root.TrustedRoot, observerTimestamp time.Time) error {
+	for _, ca := range tr.FulcioCertificateAuthorities() {
+		if _, err := ca.Verify(leaf, observerTimestamp); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("leaf certificate does not chain to any trusted Fulcio root at %s", observerTimestamp.Format(time.RFC3339))
 }
 
 // attestCache holds the .sig + .cert bytes fetched during
@@ -404,5 +422,5 @@ func (v *sigstoreValidator) Validate(filename string, release, asset []byte) err
 		// preflight, or preflight didn't run for this asset name).
 		return fmt.Errorf("%w: no preflighted attestation for %s", ErrSigstoreAttestationMissing, filename)
 	}
-	return sigstoreVerifyWithIdentity(release, sig, cert, sigstoreTrustedIdentity)
+	return sigstoreVerify(release, sig, cert)
 }
