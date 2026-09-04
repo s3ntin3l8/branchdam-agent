@@ -1030,8 +1030,33 @@ func (r *Runner) SetHookInstallers(m map[HookID]HookInstaller) {
 // refresh -- or on every status-page request -- would reproduce the exact
 // hazard statusQueueReadTimeout (see Status' own doc comment) was added to
 // fix. TriggerHookInstall keeps this cache fresh after an install action
-// completes; nothing else ever needs to call this again.
+// completes; RefreshHookState keeps it fresh after a settings reload that
+// changes a field the installer reads (issue #154); nothing else ever
+// needs to call this again.
 func (r *Runner) SetHookState(id HookID, st HookState) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	stamped := st
+	r.hookState[id] = &stamped
+}
+
+// RefreshHookState overwrites the cached state for id with a fresh
+// snapshot the caller has already computed (typically a
+// resolvehook.Detect result against a freshly reloaded
+// integrations.resolve.scriptsDir). Mirrors SetHookState's own contract:
+// direct cache writer, never calls the registered installer, never
+// recomputes from Status() or a refresh tick -- the "compute" side
+// belongs to the cmd/branchdam-agent reload path, which has the new
+// config in hand and can decide whether the relevant field actually
+// changed (issue #154, audit F-17).
+//
+// The write races with TriggerHookInstall's own post-completion cache
+// write; whichever call grabs r.mu last wins. A slow install that
+// completes AFTER a refresh will still surface its own result, so a user
+// who clicks "Install" right after editing a setting sees the install
+// outcome rather than the pre-install refresh snapshot -- pinned by
+// TestRefreshHookStateAfterInstallWins.
+func (r *Runner) RefreshHookState(id HookID, st HookState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	stamped := st

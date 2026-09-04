@@ -10,10 +10,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/s3ntin3l8/branchdam-agent/hooks/resolve"
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
+	"github.com/s3ntin3l8/branchdam-agent/internal/resolvehook"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
@@ -985,5 +988,115 @@ func TestConfigSettingsPromptAndSetReSyncsNamingTemplate(t *testing.T) {
 	}
 	if snap.NamingTemplate != "{yyyy}/{mm}/{original_name}" {
 		t.Errorf("NamingTemplate = %q, want {yyyy}/{mm}/{original_name}", snap.NamingTemplate)
+	}
+}
+
+// TestConfigSettingsReloadRefreshesHookStateOnScriptsDirChange pins
+// issue #154 / audit F-17: when the operator edits
+// integrations.resolve.scriptsDir from the Settings menu, the cached
+// HookState in Runner.hookState must be re-Detected against the new
+// dir before the next /status render, so the "installed and up to date"
+// line reflects ground truth rather than the prior periodic-poll
+// snapshot. Also: the resolveHookInstaller's own scriptsDir must be
+// updated, so a subsequent TriggerHookInstall targets the new dir
+// rather than the startup-captured one.
+//
+// Setup: pre-seed Runner.hookState with the "/old" install, hand-edit
+// config.yaml to point scriptsDir at "/new" (which has no install),
+// Reload, then assert Status() reports the "/new" view (Dir="",
+// Installed=false).
+func TestConfigSettingsReloadRefreshesHookStateOnScriptsDirChange(t *testing.T) {
+	dir := t.TempDir()
+	oldDir := filepath.Join(dir, "old-scripts")
+	newDir := filepath.Join(dir, "new-scripts")
+	if err := os.MkdirAll(oldDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hand-write the real hook file at /old so resolvehook.Detect against
+	// /old reports Installed=true. The file body must match
+	// resolve.SourceSHA256 for UpToDate=true; any body yields
+	// Installed=true and UpToDate=false, which is also fine for this
+	// test -- only the Installed/UpToDate path matters.
+	if err := os.WriteFile(filepath.Join(oldDir, "branchdam_render_hook.py"), []byte("# placeholder\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"http://localhost:8080\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
+		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"integrations:\n" +
+		"  resolve:\n" +
+		"    scriptsDir: \"" + oldDir + "\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
+
+	// Seed Runner.hookState the same way runTrayCmd does at startup --
+	// against the OLD scriptsDir, with the real Detect result.
+	resolveInstaller := &resolveHookInstaller{scriptsDir: cfg.Integrations.Resolve.ScriptsDir}
+	runner.SetHookInstallers(map[tray.HookID]tray.HookInstaller{tray.HookResolve: resolveInstaller})
+	oldDetect := resolvehook.Detect(resolveHookCandidateDirs(cfg.Integrations.Resolve.ScriptsDir), resolve.FileName, resolve.SourceSHA256)
+	runner.SetHookState(tray.HookResolve, tray.HookState{
+		At:        time.Now(),
+		Dir:       oldDetect.Dir,
+		Path:      oldDetect.Path,
+		Installed: oldDetect.Installed,
+		UpToDate:  oldDetect.UpToDate,
+	})
+
+	s := newConfigSettings(path, cfg, runner, nil)
+	s.SetResolveInstaller(resolveInstaller)
+
+	// Sanity: the seeded state reflects /old, with Installed=true.
+	preStatus := runner.Status(tray.UpdateStatus{})
+	preHook, ok := preStatus.Hook(tray.HookResolve)
+	if !ok || preHook.State == nil {
+		t.Fatal("expected initial hook state to be seeded in Status()")
+	}
+	if preHook.State.Dir != oldDir {
+		t.Fatalf("initial Dir = %q, want %q", preHook.State.Dir, oldDir)
+	}
+	if !preHook.State.Installed {
+		t.Fatalf("initial Installed = false, want true (we wrote the file at %s)", oldDir)
+	}
+
+	// Hand-edit the config file to point scriptsDir at /new.
+	editConfigFile(t, path, "scriptsDir: \""+oldDir+"\"", "scriptsDir: \""+newDir+"\"")
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	// Post-reload: the installer's scriptsDir must be /new, so a later
+	// TriggerHookInstall would target the right directory.
+	if got := resolveInstaller.scriptsDir; got != newDir {
+		t.Errorf("installer.scriptsDir = %q, want %q (reload() must update the installer on a settings change)", got, newDir)
+	}
+
+	// Post-reload: Runner.hookState must reflect a fresh Detect against
+	// /new. /new has no install, so we expect Installed=false. Without
+	// the issue #154 fix, this would still report the /old install.
+	postStatus := runner.Status(tray.UpdateStatus{})
+	postHook, ok := postStatus.Hook(tray.HookResolve)
+	if !ok || postHook.State == nil {
+		t.Fatal("expected Runner.hookState to be set after reload")
+	}
+	if postHook.State.Dir != "" {
+		t.Errorf("post-reload Dir = %q, want \"\" -- reload() must re-Detect against %q, not surface the prior %q cached snapshot", postHook.State.Dir, newDir, oldDir)
+	}
+	if postHook.State.Installed {
+		t.Errorf("post-reload Installed = true, want false -- the file at %s is gone from the cache's view of the world", newDir)
 	}
 }

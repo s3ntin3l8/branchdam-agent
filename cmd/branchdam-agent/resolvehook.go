@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sync"
 
 	"github.com/s3ntin3l8/branchdam-agent/hooks/resolve"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
@@ -53,11 +54,27 @@ func resolveHookInstallTarget(dirs []string, detected resolvehook.HookState) str
 // internal/resolvehook -- the concrete wiring cmd/branchdam-agent owns,
 // matching luminarSyncer's own relationship to tray.IntegrationSyncer.
 type resolveHookInstaller struct {
-	scriptsDir string // integrations.resolve.scriptsDir; "" means autodetect
+	mu         sync.Mutex // guards scriptsDir (issue #154); see SetScriptsDir
+	scriptsDir string     // integrations.resolve.scriptsDir; "" means autodetect
 }
 
 func (h *resolveHookInstaller) candidateDirs() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	return resolveHookCandidateDirs(h.scriptsDir)
+}
+
+// SetScriptsDir updates the installer's scriptsDir override in place --
+// called from the settings-reload path (cmd/branchdam-agent/settings.go)
+// when integrations.resolve.scriptsDir changes, so the next TriggerHookInstall
+// uses the new directory rather than the one captured at startup. The
+// companion call, runner.RefreshHookState, re-runs resolvehook.Detect
+// against the new dir and seeds Runner.hookState with the fresh snapshot
+// (issue #154 / audit F-17: hook-state cache refresh after settings change).
+func (h *resolveHookInstaller) SetScriptsDir(dir string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.scriptsDir = dir
 }
 
 // Install installs via resolveHookInstallTarget's own preference rule --

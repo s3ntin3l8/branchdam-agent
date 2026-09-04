@@ -11,11 +11,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam-agent/hooks/resolve"
 	"github.com/s3ntin3l8/branchdam-agent/internal/autostart"
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
+	"github.com/s3ntin3l8/branchdam-agent/internal/resolvehook"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
@@ -29,6 +31,15 @@ type configSettings struct {
 	path   string
 	runner *tray.Runner
 	dialog dialogRunner
+
+	// resolveInstaller is the DaVinci Resolve render-hook installer
+	// (issue #60) registered on Runner at startup. reload() calls
+	// SetScriptsDir on it when integrations.resolve.scriptsDir changes
+	// and refreshes Runner.hookState via Runner.RefreshHookState -- the
+	// settings-reload invalidation seam for issue #154 / audit F-17. Nil
+	// in tests that don't register a hook installer; reload() short-
+	// circuits on a nil installer so those tests don't need to wire one.
+	resolveInstaller *resolveHookInstaller
 
 	// appliedStatusAddr is what THIS PROCESS actually bound at launch
 	// -- fixed for the whole process lifetime, unlike s.cfg below
@@ -70,6 +81,19 @@ func newConfigSettings(path string, cfg config.Config, runner *tray.Runner, dial
 		dialog:            dialog,
 		appliedStatusAddr: cfg.Tray.StatusAddrOrDefault(),
 	}
+}
+
+// SetResolveInstaller wires the DaVinci Resolve render-hook installer
+// registered on Runner at startup. reload() uses it to update the
+// installer's scriptsDir override and re-Detect against the new dir on
+// every settings change -- the seam for issue #154 / audit F-17 (hook
+// state cache refresh after settings change). Called once from
+// runTrayCmd, after the installer has been created. Left nil in tests
+// that don't register a hook installer; reload() short-circuits.
+func (s *configSettings) SetResolveInstaller(installer *resolveHookInstaller) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resolveInstaller = installer
 }
 
 // SetQueueStore wires the queue.db handle reload() needs to rebuild
@@ -555,9 +579,11 @@ func (s *configSettings) reload() error {
 	engine := ingest.NewEngine(client, newCfg.AgentID, newCfg.Ingest, newCfg.PathMappings)
 
 	s.mu.Lock()
+	oldResolveScriptsDir := s.cfg.Integrations.Resolve.ScriptsDir
 	s.cfg = newCfg
 	s.restartRequired = s.appliedStatusAddr != newCfg.Tray.StatusAddrOrDefault()
 	queueStore := s.queueStore
+	resolveInstaller := s.resolveInstaller
 	s.mu.Unlock()
 
 	if queueStore != nil {
@@ -583,6 +609,29 @@ func (s *configSettings) reload() error {
 	// indefinitely -- silently, since a 401 on an EVENT_EDGE_ATTACHED
 	// surfaces only as SyncSummary.Errors, not a visible failure.
 	s.runner.SetIntegrationSyncers(buildIntegrationDeps(newCfg, client))
+
+	// Hook-state cache refresh on settings change (issue #154 / audit
+	// F-17): if the operator edited integrations.resolve.scriptsDir (the
+	// only field the DaVinci Resolve hook installer reads from config),
+	// re-Detect against the new candidate dirs and seed Runner.hookState
+	// with the fresh snapshot -- otherwise the status page's "installed
+	// and up to date" / "not installed" line keeps showing the prior
+	// detect's result until the next tray restart, even though the
+	// installer's own view has changed. Also push the new scriptsDir
+	// into the installer so a subsequent TriggerHookInstall targets the
+	// new directory rather than the startup-captured one.
+	if resolveInstaller != nil && newCfg.Integrations.Resolve.ScriptsDir != oldResolveScriptsDir {
+		newDirs := resolveHookCandidateDirs(newCfg.Integrations.Resolve.ScriptsDir)
+		resolveInstaller.SetScriptsDir(newCfg.Integrations.Resolve.ScriptsDir)
+		detected := resolvehook.Detect(newDirs, resolve.FileName, resolve.SourceSHA256)
+		s.runner.RefreshHookState(tray.HookResolve, tray.HookState{
+			At:        time.Now(),
+			Dir:       detected.Dir,
+			Path:      detected.Path,
+			Installed: detected.Installed,
+			UpToDate:  detected.UpToDate,
+		})
+	}
 
 	if queueStore != nil {
 		var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: newCfg.AgentID}
