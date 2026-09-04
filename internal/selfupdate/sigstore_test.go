@@ -1,6 +1,7 @@
 package selfupdate
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,6 +12,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
@@ -346,5 +349,100 @@ func TestBuildSyntheticBundle(t *testing.T) {
 	withTestTrustedRoot(t, cert) // any self-signed cert works as a "root" here
 	if err := sigstoreVerifyWithIdentity(archive, sigB64, certPEM, permissiveTestIdentity); err != nil {
 		t.Errorf("round-trip through verify failed: %v", err)
+	}
+}
+
+// TestSigstorePreflightHappyPath spins up a local httptest server
+// that serves .sig and .cert for a known asset URL, runs
+// sigstorePreflight, and asserts the cache is populated.
+func TestSigstorePreflightHappyPath(t *testing.T) {
+	const (
+		sigBody  = "fake-sig-bytes"
+		certBody = "fake-cert-bytes"
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/releases/v1.2.3/branchdam-agent-linux-amd64.tar.gz.sig":
+			_, _ = w.Write([]byte(sigBody))
+		case "/releases/v1.2.3/branchdam-agent-linux-amd64.tar.gz.cert":
+			_, _ = w.Write([]byte(certBody))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	assetURL := srv.URL + "/releases/v1.2.3/branchdam-agent-linux-amd64.tar.gz"
+	cache := newAttestCache()
+	err := sigstorePreflight(context.Background(), []assetAttestation{
+		{Name: "branchdam-agent-linux-amd64.tar.gz", URL: assetURL},
+	}, cache)
+	if err != nil {
+		t.Fatalf("sigstorePreflight: %v", err)
+	}
+	sig, cert, ok := cache.lookup("branchdam-agent-linux-amd64.tar.gz")
+	if !ok {
+		t.Fatal("cache.lookup did not find the entry")
+	}
+	if string(sig) != sigBody {
+		t.Errorf("sig = %q, want %q", sig, sigBody)
+	}
+	if string(cert) != certBody {
+		t.Errorf("cert = %q, want %q", cert, certBody)
+	}
+}
+
+// TestSigstorePreflightMissingAttestation asserts the 404 path
+// returns ErrSigstoreAttestationMissing, NOT a generic HTTP error.
+func TestSigstorePreflightMissingAttestation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	assetURL := srv.URL + "/releases/v1.2.3/missing.tar.gz"
+	cache := newAttestCache()
+	err := sigstorePreflight(context.Background(), []assetAttestation{
+		{Name: "missing.tar.gz", URL: assetURL},
+	}, cache)
+	if !errors.Is(err, ErrSigstoreAttestationMissing) {
+		t.Errorf("err = %v, want errors.Is ErrSigstoreAttestationMissing", err)
+	}
+}
+
+// TestSigstorePreflightDeduplicatesByName asserts the dedupe path:
+// passing the same asset twice (the Windows case) makes only one
+// network round trip per file.
+func TestSigstorePreflightDeduplicatesByName(t *testing.T) {
+	var sigHits, certHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1.2.3/asset.tar.gz.sig":
+			sigHits++
+			_, _ = w.Write([]byte("sig"))
+		case "/v1.2.3/asset.tar.gz.cert":
+			certHits++
+			_, _ = w.Write([]byte("cert"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	assetURL := srv.URL + "/v1.2.3/asset.tar.gz"
+	cache := newAttestCache()
+	assets := []assetAttestation{
+		{Name: "asset.tar.gz", URL: assetURL},
+		{Name: "asset.tar.gz", URL: assetURL}, // duplicate, e.g. sibling + primary
+		{Name: "asset.tar.gz", URL: assetURL},
+	}
+	if err := sigstorePreflight(context.Background(), assets, cache); err != nil {
+		t.Fatalf("sigstorePreflight: %v", err)
+	}
+	if sigHits != 1 {
+		t.Errorf("sigHits = %d, want 1", sigHits)
+	}
+	if certHits != 1 {
+		t.Errorf("certHits = %d, want 1", certHits)
 	}
 }

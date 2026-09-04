@@ -19,14 +19,18 @@ package selfupdate
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	_ "embed"
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	protocommon "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
@@ -240,6 +244,114 @@ func sigstoreVerifyWithIdentity(archive, sig, cert []byte, identity verify.Certi
 		// (ErrVerification, ErrNoMatchingCertificateIdentity, etc.).
 		// The user-facing message stays the constant.
 		return fmt.Errorf("%w: %w", ErrSigstoreVerificationFailed, err)
+	}
+	return nil
+}
+
+// attestCache holds the .sig + .cert bytes fetched during
+// sigstorePreflight, keyed by the asset Name go-selfupdate passes to
+// the per-target Validator (i.e. release.AssetName). Lives for the
+// duration of one Apply call. The per-target Validator reads from
+// this cache via attestCache.lookup(name).
+type attestCache struct {
+	mu     sync.Mutex
+	byName map[string]attestPair
+}
+
+type attestPair struct {
+	sig, cert []byte
+}
+
+func newAttestCache() *attestCache {
+	return &attestCache{byName: make(map[string]attestPair)}
+}
+
+func (c *attestCache) put(name string, sig, cert []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.byName[name] = attestPair{sig: sig, cert: cert}
+}
+
+func (c *attestCache) lookup(name string) (sig, cert []byte, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p, ok := c.byName[name]
+	return p.sig, p.cert, ok
+}
+
+// assetAttestation pairs the asset name (cache key) with the URL
+// (where to fetch .sig and .cert from). Each go-selfupdate target
+// gets its own pair, but all targets in one Apply share the same
+// (Name, URL) because they all download the same release archive.
+type assetAttestation struct {
+	Name string
+	URL  string
+}
+
+// fetchClient is the HTTP client used for .sig/.cert downloads. It
+// has a Timeout to avoid an indefinite block on a stalled CDN
+// connection (http.DefaultClient has no timeout). 30s is generous
+// for a few-KB GET but bounded so a network stall surfaces
+// quickly. ctx cancellation still wins.
+var fetchClient = &http.Client{Timeout: 30 * time.Second}
+
+// fetchAttestation GETs url with ctx. Returns the body, nil on
+// 2xx; nil + nil on 404 (caller treats 404 as "missing"); non-nil
+// error on any other non-2xx or transport failure.
+func fetchAttestation(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	// GitHub release-asset CDN requires a User-Agent (returns 403
+	// without one) and accepts If-None-Match / Range but we don't
+	// need them -- a fresh GET is fine for a few-KB .sig/.cert.
+	req.Header.Set("User-Agent", "branchdam-agent-selfupdate")
+	req.Header.Set("Accept", "application/octet-stream")
+	resp, err := fetchClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// sigstorePreflight fetches the .sig and .cert for every named asset,
+// populating the cache for later per-target verify. Returns nil on
+// success; one of ErrSigstoreAttestationMissing or
+// ErrSigstoreAttestationDownload on failure.
+//
+// Called once per Apply, BEFORE the sidecar-write step (so a failed
+// preflight never leaves a "previous version" sidecar orphaning an
+// unapplied-update backup) and BEFORE any per-target UpdateTo.
+func sigstorePreflight(ctx context.Context, assets []assetAttestation, cache *attestCache) error {
+	for _, a := range assets {
+		// Skip the network round trip if this asset was already
+		// populated (multiple targets share the same archive).
+		if _, _, ok := cache.lookup(a.Name); ok {
+			continue
+		}
+		sig, err := fetchAttestation(ctx, deriveSigURL(a.URL))
+		if err != nil {
+			return fmt.Errorf("%w: .sig for %s: %w", ErrSigstoreAttestationDownload, a.Name, err)
+		}
+		if sig == nil {
+			return fmt.Errorf("%w: .sig for %s", ErrSigstoreAttestationMissing, a.Name)
+		}
+		cert, err := fetchAttestation(ctx, deriveCertURL(a.URL))
+		if err != nil {
+			return fmt.Errorf("%w: .cert for %s: %w", ErrSigstoreAttestationDownload, a.Name, err)
+		}
+		if cert == nil {
+			return fmt.Errorf("%w: .cert for %s", ErrSigstoreAttestationMissing, a.Name)
+		}
+		cache.put(a.Name, sig, cert)
 	}
 	return nil
 }
