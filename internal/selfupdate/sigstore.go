@@ -32,6 +32,8 @@ import (
 	"sync"
 	"time"
 
+	su "github.com/creativeprojects/go-selfupdate"
+
 	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
 	protocommon "github.com/sigstore/protobuf-specs/gen/pb-go/common/v1"
 
@@ -354,4 +356,53 @@ func sigstorePreflight(ctx context.Context, assets []assetAttestation, cache *at
 		cache.put(a.Name, sig, cert)
 	}
 	return nil
+}
+
+// sigstoreValidator implements go-selfupdate's Validator interface. It
+// runs the SHA256 ChecksumValidator first, then sigstoreVerify. Either
+// failure aborts Apply.
+//
+// go-selfupdate's Validator interface is a single Validate(filename,
+// release, asset) method plus a GetValidationAssetName that tells
+// DetectLatest/DetectVersion which sibling asset to download. We
+// re-run the (cheap) Sigstore verify on each call rather than caching
+// a pass/fail, matching the per-target ChecksumValidator pattern in
+// the existing Apply loop.
+type sigstoreValidator struct {
+	cache *attestCache
+}
+
+// Compile-time check that sigstoreValidator satisfies go-selfupdate's
+// Validator. The interface lives in creativeprojects/go-selfupdate
+// (imported as su at the top of this file); sigstoreValidator is
+// referenced by interface at the Apply call site via su.Config.Validator.
+var _ su.Validator = (*sigstoreValidator)(nil)
+
+// GetValidationAssetName returns the SHA256SUMS.txt asset name so
+// go-selfupdate downloads it during DetectLatest/DetectVersion. The
+// Sigstore .sig/.cert are fetched out-of-band by sigstorePreflight
+// in Apply, not by DetectLatest; this method only needs to tell
+// go-selfupdate about the SHA256SUMS sibling.
+func (v *sigstoreValidator) GetValidationAssetName(releaseFilename string) string {
+	return ChecksumAsset
+}
+
+func (v *sigstoreValidator) Validate(filename string, release, asset []byte) error {
+	// SHA256 first (existing behavior). This is identical to
+	// ChecksumValidator.Validate; we re-derive instead of delegating
+	// to avoid a second import path through go-selfupdate's source.
+	sha := &su.ChecksumValidator{UniqueFilename: ChecksumAsset}
+	if err := sha.Validate(filename, release, asset); err != nil {
+		return err
+	}
+	// Sigstore second.
+	sig, cert, ok := v.cache.lookup(filename)
+	if !ok {
+		// The per-target Validator should only be called for
+		// assets that sigstorePreflight populated. If it isn't,
+		// that's a programming error in Apply (we forgot to
+		// preflight, or preflight didn't run for this asset name).
+		return fmt.Errorf("%w: no preflighted attestation for %s", ErrSigstoreAttestationMissing, filename)
+	}
+	return sigstoreVerifyWithIdentity(release, sig, cert, sigstoreTrustedIdentity)
 }

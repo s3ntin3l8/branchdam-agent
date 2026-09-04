@@ -8,9 +8,11 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -445,4 +447,140 @@ func TestSigstorePreflightDeduplicatesByName(t *testing.T) {
 	if certHits != 1 {
 		t.Errorf("certHits = %d, want 1", certHits)
 	}
+}
+
+// TestSigstoreValidatorCompose is a direct unit test of the
+// composed sigstoreValidator.Validate method. It exercises the
+// three behaviors of the compose: (a) SHA256 first, (b) Sigstore
+// verify second, (c) "no preflighted attestation" programming-error
+// path. The per-target UpdateTo loop in Apply calls this method
+// for every target, so a regression here is a regression in Apply.
+func TestSigstoreValidatorCompose(t *testing.T) {
+	const filename = "branchdam-agent-linux-amd64.tar.gz"
+
+	// Build a SHA256SUMS.txt whose entry matches the test archive.
+	archive := []byte("the archive bytes for the compose test")
+	digest := sha256.Sum256(archive)
+	sums := []byte(fmt.Sprintf("%x  %s\n", digest, filename))
+
+	t.Run("happy path: SHA256 + Sigstore both pass", func(t *testing.T) {
+		// For this subtest we need a leaf cert whose SAN and OIDC
+		// issuer satisfy the PRODUCTION sigstoreTrustedIdentity,
+		// because sigstoreValidator calls sigstoreVerifyWithIdentity
+		// with the production identity (not a test identity). The
+		// production identity is:
+		//   - OIDC issuer: https://token.actions.githubusercontent.com
+		//   - SAN regex:   ^https://github\.com/s3ntin3l8/branchdam-agent/
+		// so the test leaf needs both. Sigstore-go still accepts the
+		// deprecated Fulcio v1 OIDC issuer extension (OID 1.3.6.1.4.1.57264.1.1)
+		// which carries the OIDC URL as raw bytes, no DER encoding
+		// needed.
+		ca, caPriv := testCAKeypair(t, "compose test CA")
+		leaf, leafPriv := signLeafWithProductionIdentity(t, ca, caPriv, "compose test leaf")
+		sig := signECDSAP256SHA256(t, leafPriv, archive)
+
+		cache := newAttestCache()
+		cache.put(filename, encodeSigBase64(t, sig), encodeCertPEM(t, leaf))
+		withTestTrustedRoot(t, ca)
+
+		v := &sigstoreValidator{cache: cache}
+		if err := v.Validate(filename, archive, sums); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	})
+
+	t.Run("SHA256 mismatch aborts before Sigstore", func(t *testing.T) {
+		// Cache is populated with a valid (sig, cert) pair, but the
+		// validationData (SHA256SUMS.txt) does NOT match the archive
+		// bytes. The SHA256 check must run first and abort; the
+		// Sigstore check must NOT be reached.
+		ca, caPriv := testCAKeypair(t, "compose mismatch CA")
+		leaf, leafPriv := signLeafWithCA(t, ca, caPriv, "compose mismatch leaf")
+		sig := signECDSAP256SHA256(t, leafPriv, archive)
+		wrongSums := []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256([]byte("totally different")), filename))
+
+		cache := newAttestCache()
+		cache.put(filename, encodeSigBase64(t, sig), encodeCertPEM(t, leaf))
+		withTestTrustedRoot(t, ca)
+
+		v := &sigstoreValidator{cache: cache}
+		err := v.Validate(filename, archive, wrongSums)
+		if err == nil {
+			t.Fatal("Validate accepted a SHA256 mismatch; want error")
+		}
+		// Should be a SHA256 error, not a Sigstore error. The
+		// go-selfupdate ChecksumValidator error has a specific
+		// string; just check it's not the Sigstore sentinel.
+		if errors.Is(err, ErrSigstoreVerificationFailed) {
+			t.Errorf("Validate returned a Sigstore error on SHA256 mismatch; SHA256 check should have aborted first: %v", err)
+		}
+	})
+
+	t.Run("missing cache entry returns ErrSigstoreAttestationMissing", func(t *testing.T) {
+		// Cache is empty. The per-target Validator was called
+		// without a corresponding preflight -- a programming error.
+		cache := newAttestCache()
+		// Intentionally no cache.put for `filename`.
+
+		v := &sigstoreValidator{cache: cache}
+		err := v.Validate(filename, archive, sums)
+		if !errors.Is(err, ErrSigstoreAttestationMissing) {
+			t.Errorf("err = %v, want errors.Is ErrSigstoreAttestationMissing", err)
+		}
+	})
+
+	t.Run("GetValidationAssetName returns ChecksumAsset", func(t *testing.T) {
+		// go-selfupdate's Validator interface requires this method
+		// even though the per-target UpdateTo in Apply never calls
+		// DetectLatest. Pin the contract so a future refactor
+		// doesn't return something that surprises go-selfupdate.
+		v := &sigstoreValidator{cache: newAttestCache()}
+		if got, want := v.GetValidationAssetName("anything"), ChecksumAsset; got != want {
+			t.Errorf("GetValidationAssetName = %q, want %q", got, want)
+		}
+	})
+}
+
+// fulcioV1IssuerExtensionOID is the deprecated Fulcio v1 OIDC
+// issuer extension OID. Sigstore-go's ParseExtensions reads the
+// raw bytes verbatim into Extensions.Issuer (no DER decoding),
+// which is the easier test-fixture path. The v2 OID would require
+// DER-encoded UTF8String.
+var fulcioV1IssuerExtensionOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 57264, 1, 1}
+
+// signLeafWithProductionIdentity is like signLeafWithCA but adds
+// the SAN and OIDC issuer extension that production Fulcio-issued
+// certs carry -- required to pass the production
+// sigstoreTrustedIdentity policy used by sigstoreValidator.Validate.
+func signLeafWithProductionIdentity(t *testing.T, ca *x509.Certificate, caPriv *ecdsa.PrivateKey, cn string) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	leafPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerExt := pkix.Extension{
+		Id:    fulcioV1IssuerExtensionOID,
+		Value: []byte("https://token.actions.githubusercontent.com"),
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+		URIs: []*url.URL{
+			{Scheme: "https", Host: "github.com", Path: "/s3ntin3l8/branchdam-agent/.github/workflows/release-binaries.yml@refs/tags/v1.0.0"},
+		},
+		ExtraExtensions: []pkix.Extension{issuerExt},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &leafPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert, leafPriv
 }
