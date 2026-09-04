@@ -534,9 +534,11 @@ appropriate:
 
 11. **Settings menu — M5 dialogs (#78, #79, #81):** with a config already in
     place, open the tray's Settings submenu and trigger each of the new M5
-    items -- "Watch folders…" (multi-value directory picker for `cardRoots`),
-    "Allowed extensions…" (comma-separated text for the extension allow-list),
-    and the autoImportPaths list-editing dialog (reached via the card-detection
+    items -- "Watch folders…" (comma-separated text entry for `cardRoots`; the
+    dialog kind is "entry", not a native directory picker, because
+    `cardRoots` is a multi-value list, not a single folder), "Allowed
+    extensions…" (comma-separated text for the extension allow-list), and the
+    autoImportPaths list-editing dialog (reached via the card-detection
     confirmation flow's "Always auto-import"). Confirm each dialog renders
     correctly while systray's own message pump is already running (the
     materially-different scenario from item 2's pre-`systray.Run` startup
@@ -556,11 +558,12 @@ appropriate:
     AND no dialog appears; toggle off, confirm a re-insert triggers the
     dialog again).
 13. **Live ingest progress in tooltip + status page (#85):** insert a card,
-    open the tray menu -- confirm the tooltip updates with the per-file
-    progress line within one tick (path, bytes done / total, phase, elapsed
-    time) and the status page renders the same data under the busy-card
-    header. Confirm the tooltip clears (reverts to the default "branchDAM
-    agent" string) within one tick of ingest completion.
+    open the tray menu -- confirm the tooltip updates within one tick with
+    the per-file line rendered by `FormatIngestProgress` (filename, bytes
+    done / total, percentage, speed, ETA); the status page renders the same
+    data plus the `phase` field under the busy-card header. Confirm the
+    tooltip clears (reverts to the default "branchDAM agent" string) within
+    one tick of ingest completion.
 14. **Pre-flight BLAKE3 dedup (#88):** ingest a card. Then re-insert the same
     card. Confirm the second ingest reports every file as
     `duplicate: already in library as node X` with zero bytes written to
@@ -572,21 +575,23 @@ appropriate:
 15. **Safe eject after verified ingest (#87):** with `autoEject: true` set,
     insert a camera card -- confirm the volume unmounts/ejects after the
     verified ingest completes and an OS notification appears. On Windows
-    specifically, confirm the tray surfaces `FSCTL_LOCK_VOLUME` +
-    `CM_Request_Device_Eject` cleanly (no "device in use" dialog from the
-    OS -- the card must have been closed by `Verify`'s unbuffered re-open
-    before the eject call). On macOS, confirm `diskutil unmountDisk` reports
-    `Volume X on diskY unmounted` and the card disappears from Finder. On
-    Linux, confirm the udev eject path runs (visible in
-    `%XDG_STATE_HOME%/branchdam-agent/agent.log`) and the card's mount point
+    specifically, confirm the tray surfaces `IOCTL_STORAGE_EJECT_MEDIA` via
+    `DeviceIoControl` cleanly (no "device in use" dialog from the OS -- the
+    card must have been closed by `Verify`'s unbuffered re-open before the
+    eject call). On macOS, confirm `diskutil unmountDisk` reports `Volume X
+    on diskY unmounted` and the card disappears from Finder. On Linux,
+    confirm the udisks2 path runs (`udisksctl unmount -b <dev>` then
+    `udisksctl power-off -b <dev>`, with the device resolved from
+    `/proc/mounts` -- no direct udev interaction), visible in
+    `%XDG_STATE_HOME%/branchdam-agent/agent.log`, and the card's mount point
     is gone from `mount`.
 
 All M5 items above are also pinned by tests that run on Linux CI --
 `internal/ingest/offline_test.go::TestIngestFileOfflineDedupTimeout` for
 #88's offline timeout fall-open, `internal/tray/tray_test.go::TestAutoEject*`
-for #87, `internal/tray/run_supported_test.go`-shaped (or, on Linux, the
-`run_unsupported_test.go` counterpart) coverage for #83 / #84's gate logic,
-`internal/ingest/progress_test.go::Test*Progress` for #85, and the unit
-tests called out in AGENTS.md invariant #17 for the rest. What this
-checklist adds is the real-OS-integration half that no test on Linux CI
-can substitute for.
+for #87, `internal/tray/tray_test.go::TestTriggerIngestSkipsWhenPaused` (1893),
+`TestTriggerDrainSkipsWhenPaused` (1915), and `TestTriggerDrainPauseOnMetered`
+(1943) for #83 / #84's gate logic, `internal/ingest/progress_test.go::Test*Progress`
+for #85, and the unit tests called out in AGENTS.md invariants #15–#17 for
+the rest (added in PR-B #165). What this checklist adds is the real-OS-integration
+half that no test on Linux CI can substitute for.
