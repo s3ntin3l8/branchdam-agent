@@ -1,6 +1,6 @@
 // Package tray is the tray-resident shell around internal/ingest.Engine
 // (issue #3, M1's tray half). Per the plan doc's "UI stack (M1)" section
-// and this repo's CLAUDE.md ingest-core comment, the ingest core has no UI
+// and this repo's AGENTS.md ingest-core comment, the ingest core has no UI
 // imports on purpose -- this package is a thin driver over it, not a
 // reimplementation. Everything in this file is platform-independent (no
 // fyne.io/systray import): the actual tray icon/menu wiring lives in

@@ -59,7 +59,7 @@ type dialogFuncs struct {
 // native dialogs on Windows, AppleScript (osascript) on macOS, and the
 // zenity/matedialog/qarma binary on Linux -- none of which is cgo, so this
 // import doesn't change any of this repo's cross-compile properties (see
-// CLAUDE.md's build-windows/build-darwin invariants). The `dialog`
+// AGENTS.md's build-windows/build-darwin invariants). The `dialog`
 // subcommand -- not internal/tray -- owns this import, since the tray's
 // systray-based menu (windows/darwin only) and this headless subcommand
 // have no reason to share a build tag: `dialog` compiles and could in
@@ -131,7 +131,7 @@ var realDialogFuncs = dialogFuncs{
 // (Linux) development environment: whether a Win32 dialog renders correctly
 // from a `-H windowsgui`-linked process before systray's own message pump
 // has started, and whatever state a macOS `.app` launched by launchd
-// assumes about the calling process. See CLAUDE.md's self-update/tray
+// assumes about the calling process. See AGENTS.md's self-update/tray
 // invariants for the general pattern (isolate the platform-uncertain part
 // in its own process) and issue #30 for why this exists at all.
 func runDialogCmd(args []string, dlg dialogFuncs) int {
