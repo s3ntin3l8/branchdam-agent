@@ -39,3 +39,23 @@ a fork's own copy of the workflow file on the self-hosted runner (this repo is p
 maintainer can still get a review on a fork PR by commenting `@s3ntin3l8-hermes Review` --
 `issue_comment` always runs the default branch's copy of the workflow, in the base repo's
 context, gated by commenter trust rather than fork origin.
+
+## Pre-release gating for queue.db schema changes
+
+Any PR that touches `internal/queue/store.go` or `internal/queue/migrations.go` -- i.e. a
+schema-affecting change to `queue.db` -- must be released as a **pre-release**, not a
+regular tagged release. The mechanism is `release-please-config.json`'s
+`"prerelease": true` on the `.` package, which marks the next release-please PR as
+`1.x.y-pr.N` instead of `1.x.y`; downstream agents on the previous stable version are
+then notified of the pre-release rather than silently picking up an incompatible schema
+via auto-update.
+
+`release-please` itself does not auto-detect "this PR touched the queue schema"; the
+`prerelease: true` setting here is currently **unconditional** on the package (every
+release of this repo goes out as a pre-release for the same reason), but the rule above
+is the contract: a release that ships a queue.db schema change without the pre-release
+flag set is a bug -- the `prerelease` setting must remain on, and a future tightening to
+"only this kind of change" via release-please's package-level config would not break the
+contract. See [`docs/offline-queue.md`](docs/offline-queue.md) for the migration contract
+this rule exists to protect (forward-only, idempotent, `PRAGMA user_version`-driven --
+issue #106 / PR #119).
