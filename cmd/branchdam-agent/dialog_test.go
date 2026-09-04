@@ -43,7 +43,8 @@ func fakeDialogFuncs() dialogFuncs {
 		file: func(title, defaultPath string, patterns []string) (string, error) {
 			return "/chosen/file.db", nil
 		},
-		question: func(title, message string) error { return nil },
+		question: func(title, message, okLabel, cancelLabel, extraButton string) error { return nil },
+		notify:   func(title, message string) error { return nil },
 	}
 }
 
@@ -218,10 +219,27 @@ func TestRunDialogCmdQuestionOK(t *testing.T) {
 // without logging it as a render failure.
 func TestRunDialogCmdQuestionCanceled(t *testing.T) {
 	dlg := fakeDialogFuncs()
-	dlg.question = func(title, message string) error { return zenity.ErrCanceled }
+	dlg.question = func(title, message, okLabel, cancelLabel, extraButton string) error { return zenity.ErrCanceled }
 	got := runDialogCmd([]string{"-kind", "question", "-title", "T", "-message", "M"}, dlg)
 	if got != dialogExitCanceled {
 		t.Errorf("got exit %d, want %d (canceled)", got, dialogExitCanceled)
+	}
+}
+
+// TestRunDialogCmdQuestionExtraButton tests that ErrExtraButton is mapped to dialogExitExtraButton.
+func TestRunDialogCmdQuestionExtraButton(t *testing.T) {
+	dlg := fakeDialogFuncs()
+	dlg.question = func(title, message, okLabel, cancelLabel, extraButton string) error { return zenity.ErrExtraButton }
+	got := runDialogCmd([]string{
+		"-kind", "question",
+		"-title", "New volume detected",
+		"-message", "New volume detected: CANON R5 (32 GB)",
+		"-ok-label", "Import",
+		"-cancel-label", "Skip this time",
+		"-extra-button", "Always auto-import",
+	}, dlg)
+	if got != dialogExitExtraButton {
+		t.Errorf("got exit %d, want %d (extra button)", got, dialogExitExtraButton)
 	}
 }
 
@@ -235,7 +253,7 @@ func TestRunDialogCmdQuestionCanceled(t *testing.T) {
 // can't show a dialog."
 func TestRunDialogCmdQuestionFailure(t *testing.T) {
 	dlg := fakeDialogFuncs()
-	dlg.question = func(title, message string) error { return errors.New("no display") }
+	dlg.question = func(title, message, okLabel, cancelLabel, extraButton string) error { return errors.New("no display") }
 	got := runDialogCmd([]string{"-kind", "question", "-title", "T", "-message", "M"}, dlg)
 	if got != dialogExitFailed {
 		t.Errorf("got exit %d, want %d (failed)", got, dialogExitFailed)
@@ -248,18 +266,86 @@ func TestRunDialogCmdQuestionFailure(t *testing.T) {
 // swapped title/message at the call site (or dropped -title) would
 // silently render a blank dialog and stay green.
 func TestRunDialogCmdQuestionPassesTitleAndMessage(t *testing.T) {
-	var gotTitle, gotMessage string
+	var gotTitle, gotMessage, gotOK, gotCancel, gotExtra string
 	dlg := fakeDialogFuncs()
-	dlg.question = func(title, message string) error {
-		gotTitle, gotMessage = title, message
+	dlg.question = func(title, message, okLabel, cancelLabel, extraButton string) error {
+		gotTitle, gotMessage, gotOK, gotCancel, gotExtra = title, message, okLabel, cancelLabel, extraButton
 		return nil
 	}
-	runDialogCmd([]string{"-kind", "question", "-title", "Confirm prune", "-message", "Delete files?"}, dlg)
+	runDialogCmd([]string{
+		"-kind", "question",
+		"-title", "Confirm prune",
+		"-message", "Delete files?",
+		"-ok-label", "Yes",
+		"-cancel-label", "No",
+		"-extra-button", "Always",
+	}, dlg)
 	if gotTitle != "Confirm prune" {
 		t.Errorf("got title %q, want %q", gotTitle, "Confirm prune")
 	}
 	if gotMessage != "Delete files?" {
 		t.Errorf("got message %q, want %q", gotMessage, "Delete files?")
+	}
+	if gotOK != "Yes" {
+		t.Errorf("got ok-label %q, want %q", gotOK, "Yes")
+	}
+	if gotCancel != "No" {
+		t.Errorf("got cancel-label %q, want %q", gotCancel, "No")
+	}
+	if gotExtra != "Always" {
+		t.Errorf("got extra-button %q, want %q", gotExtra, "Always")
+	}
+}
+
+func TestRunDialogCmdNotify(t *testing.T) {
+	var gotTitle, gotMessage string
+	dlg := fakeDialogFuncs()
+	dlg.notify = func(title, message string) error {
+		gotTitle, gotMessage = title, message
+		return nil
+	}
+	got := runDialogCmd([]string{"-kind", "notify", "-title", "branchDAM Agent", "-message", "8 photos imported from CANON R5"}, dlg)
+	if got != dialogExitOK {
+		t.Errorf("got exit %d, want %d", got, dialogExitOK)
+	}
+	if gotTitle != "branchDAM Agent" {
+		t.Errorf("got title %q, want %q", gotTitle, "branchDAM Agent")
+	}
+	if gotMessage != "8 photos imported from CANON R5" {
+		t.Errorf("got message %q, want %q", gotMessage, "8 photos imported from CANON R5")
+	}
+}
+
+func TestRunDialogCmdNotifyFailure(t *testing.T) {
+	dlg := fakeDialogFuncs()
+	dlg.notify = func(title, message string) error { return errors.New("notify failed") }
+	got := runDialogCmd([]string{"-kind", "notify", "-title", "T", "-message", "M"}, dlg)
+	if got != dialogExitFailed {
+		t.Errorf("got exit %d, want %d", got, dialogExitFailed)
+	}
+}
+
+func TestRunDialogCmdNotifyOK(t *testing.T) {
+	dlg := fakeDialogFuncs()
+	got := runDialogCmd([]string{"-kind", "notify", "-title", "branchDAM Agent", "-message", "Already ingesting this path"}, dlg)
+	if got != dialogExitOK {
+		t.Errorf("got exit %d, want %d", got, dialogExitOK)
+	}
+}
+
+func TestRunDialogCmdNotifyPassesTitleAndMessage(t *testing.T) {
+	var gotTitle, gotMessage string
+	dlg := fakeDialogFuncs()
+	dlg.notify = func(title, message string) error {
+		gotTitle, gotMessage = title, message
+		return nil
+	}
+	runDialogCmd([]string{"-kind", "notify", "-title", "Custom Title", "-message", "Custom notification message"}, dlg)
+	if gotTitle != "Custom Title" {
+		t.Errorf("got title %q, want %q", gotTitle, "Custom Title")
+	}
+	if gotMessage != "Custom notification message" {
+		t.Errorf("got message %q, want %q", gotMessage, "Custom notification message")
 	}
 }
 

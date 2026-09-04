@@ -75,15 +75,30 @@ func TestParityAgentIngestVsServerScan(t *testing.T) {
 	// proves each side did its own independent work.
 	copyDir(t, cardDir, serverScanDir)
 
-	// --- Start the branchDAM server. ---
-	dbPath := filepath.Join(dir, "branchdam.db")
-	port := freePort(t)
-	cfgPath := filepath.Join(dir, "server-config.yaml")
-	writeServerConfig(t, cfgPath, serverConfigVars{
-		DBPath:           dbPath,
-		Port:             port,
+	// --- Start the branchDAM servers. ---
+	// Server scan and agent ingest run against independent server instances with
+	// isolated databases so the server's unique full_hash index (migration 14)
+	// does not reject indexing identical fixture bytes in the second location.
+	serverScanDBPath := filepath.Join(dir, "branchdam-serverscan.db")
+	serverScanPort := freePort(t)
+	serverScanCfgPath := filepath.Join(dir, "serverscan-config.yaml")
+	writeServerConfig(t, serverScanCfgPath, serverConfigVars{
+		DBPath:           serverScanDBPath,
+		Port:             serverScanPort,
 		APIKey:           parityTestAPIKey,
-		ThumbsDir:        filepath.Join(dir, "thumbs"),
+		ThumbsDir:        filepath.Join(dir, "thumbs-serverscan"),
+		ServerScanRoot:   serverScanDir,
+		AgentArchiveRoot: agentArchiveDir,
+	})
+
+	agentArchiveDBPath := filepath.Join(dir, "branchdam-agentarchive.db")
+	agentArchivePort := freePort(t)
+	agentArchiveCfgPath := filepath.Join(dir, "agentarchive-config.yaml")
+	writeServerConfig(t, agentArchiveCfgPath, serverConfigVars{
+		DBPath:           agentArchiveDBPath,
+		Port:             agentArchivePort,
+		APIKey:           parityTestAPIKey,
+		ThumbsDir:        filepath.Join(dir, "thumbs-agentarchive"),
 		ServerScanRoot:   serverScanDir,
 		AgentArchiveRoot: agentArchiveDir,
 	})
@@ -91,32 +106,49 @@ func TestParityAgentIngestVsServerScan(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	serverCmd := exec.CommandContext(ctx, serverBin, "-config", cfgPath)
-	var serverLog strings.Builder
-	serverCmd.Stdout = &serverLog
-	serverCmd.Stderr = &serverLog
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("start branchDAM server: %v", err)
+	serverScanCmd := exec.CommandContext(ctx, serverBin, "-config", serverScanCfgPath)
+	var serverScanLog strings.Builder
+	serverScanCmd.Stdout = &serverScanLog
+	serverScanCmd.Stderr = &serverScanLog
+	if err := serverScanCmd.Start(); err != nil {
+		t.Fatalf("start branchDAM server (serverscan): %v", err)
 	}
 	t.Cleanup(func() {
-		_ = serverCmd.Process.Kill()
-		_ = serverCmd.Wait()
+		_ = serverScanCmd.Process.Kill()
+		_ = serverScanCmd.Wait()
 		if t.Failed() {
-			t.Logf("branchDAM server log:\n%s", serverLog.String())
+			t.Logf("branchDAM serverscan log:\n%s", serverScanLog.String())
 		}
 	})
 
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForHealthz(t, baseURL, 20*time.Second)
+	agentArchiveCmd := exec.CommandContext(ctx, serverBin, "-config", agentArchiveCfgPath)
+	var agentArchiveLog strings.Builder
+	agentArchiveCmd.Stdout = &agentArchiveLog
+	agentArchiveCmd.Stderr = &agentArchiveLog
+	if err := agentArchiveCmd.Start(); err != nil {
+		t.Fatalf("start branchDAM server (agentarchive): %v", err)
+	}
+	t.Cleanup(func() {
+		_ = agentArchiveCmd.Process.Kill()
+		_ = agentArchiveCmd.Wait()
+		if t.Failed() {
+			t.Logf("branchDAM agentarchive log:\n%s", agentArchiveLog.String())
+		}
+	})
+
+	serverScanBaseURL := fmt.Sprintf("http://127.0.0.1:%d", serverScanPort)
+	agentArchiveBaseURL := fmt.Sprintf("http://127.0.0.1:%d", agentArchivePort)
+	waitForHealthz(t, serverScanBaseURL, 20*time.Second)
+	waitForHealthz(t, agentArchiveBaseURL, 20*time.Second)
 
 	// --- Resolve storage location IDs (seeded from config.yaml at startup). ---
-	serverScanLocID := waitForStorageLocationID(t, dbPath, "serverscan", 10*time.Second)
-	agentArchiveLocID := waitForStorageLocationID(t, dbPath, "agentarchive", 10*time.Second)
+	serverScanLocID := waitForStorageLocationID(t, serverScanDBPath, "serverscan", 10*time.Second)
+	agentArchiveLocID := waitForStorageLocationID(t, agentArchiveDBPath, "agentarchive", 10*time.Second)
 
 	// --- Run the agent's headless ingest binary against the card fixtures. ---
 	agentCfgPath := filepath.Join(dir, "agent-config.yaml")
 	writeAgentConfig(t, agentCfgPath, agentConfigVars{
-		BaseURL:          baseURL,
+		BaseURL:          agentArchiveBaseURL,
 		APIKey:           parityTestAPIKey,
 		AgentArchiveRoot: agentArchiveDir,
 		LocalEditRoot:    filepath.Join(dir, "localedit"),
@@ -124,17 +156,17 @@ func TestParityAgentIngestVsServerScan(t *testing.T) {
 	runAgentIngest(t, agentBin, agentCfgPath, cardDir)
 
 	// --- Trigger the normal server-side scan over the identical bytes. ---
-	triggerServerScan(t, baseURL, serverScanLocID)
+	triggerServerScan(t, serverScanBaseURL, serverScanLocID)
 
 	// --- Wait for both sides to finish indexing (async on both: the scan
 	// pipeline batches commits, the agent's events drain on a 2s ticker). ---
 	wantFiles := []string{"photo.jpg", "photo.arw", "clip.mp4"}
-	waitForMediaNodeCount(t, dbPath, serverScanLocID, len(wantFiles), 20*time.Second)
-	waitForMediaNodeCount(t, dbPath, agentArchiveLocID, len(wantFiles), 20*time.Second)
+	waitForMediaNodeCount(t, serverScanDBPath, serverScanLocID, len(wantFiles), 20*time.Second)
+	waitForMediaNodeCount(t, agentArchiveDBPath, agentArchiveLocID, len(wantFiles), 20*time.Second)
 
 	// --- The actual diff. ---
-	serverRows := readMediaNodes(t, dbPath, serverScanLocID)
-	agentRows := readMediaNodes(t, dbPath, agentArchiveLocID)
+	serverRows := readMediaNodes(t, serverScanDBPath, serverScanLocID)
+	agentRows := readMediaNodes(t, agentArchiveDBPath, agentArchiveLocID)
 
 	for _, name := range wantFiles {
 		sRow, sOK := serverRows[name]
@@ -152,8 +184,8 @@ func TestParityAgentIngestVsServerScan(t *testing.T) {
 
 	// AC: the DJI .srt fixture produces a GPS-populated video node, with no
 	// separate node for the .srt file itself.
-	assertNoNodeFor(t, dbPath, agentArchiveLocID, "clip.srt")
-	assertGPSMetadata(t, dbPath, agentArchiveLocID, "clip.mp4", 30.335120, -81.655480)
+	assertNoNodeFor(t, agentArchiveDBPath, agentArchiveLocID, "clip.srt")
+	assertGPSMetadata(t, agentArchiveDBPath, agentArchiveLocID, "clip.mp4", 30.335120, -81.655480)
 }
 
 // parityRow is the eight-column comparison set issue #2 specifies, plus
@@ -286,11 +318,23 @@ func writeParityFixtures(t *testing.T, cardDir string) {
 	// dedicated unit coverage in internal/phash/phash_test.go (a fake
 	// exiftool script asserting the fallback order), ported from M0.
 	arwPath := filepath.Join(cardDir, "photo.arw")
-	jpegBytes, err := os.ReadFile(jpegPath)
-	if err != nil {
-		t.Fatalf("read tagged photo.jpg: %v", err)
+	arwSourceJPEG := filepath.Join(t.TempDir(), "source_arw.jpg")
+	if err := makeMinimalJPEG(arwSourceJPEG); err != nil {
+		t.Fatalf("create source_arw.jpg fixture: %v", err)
 	}
-	if err := os.WriteFile(arwPath, jpegBytes, 0o644); err != nil {
+	arwTags := map[string]string{
+		"EXIF:Model":              "ILCE-7RM4",
+		"EXIF:SerialNumber":       "PARITY-SERIAL-RAW",
+		"EXIF:LensModel":          "FE 24-70mm F2.8 GM",
+		"EXIF:DateTimeOriginal":   "2024:03:20 12:59:17",
+		"EXIF:OffsetTimeOriginal": "-04:00",
+	}
+	writeTags(t, exiftoolPath, arwSourceJPEG, arwTags)
+	arwBytes, err := os.ReadFile(arwSourceJPEG)
+	if err != nil {
+		t.Fatalf("read tagged source_arw.jpg: %v", err)
+	}
+	if err := os.WriteFile(arwPath, arwBytes, 0o644); err != nil {
 		t.Fatalf("create photo.arw fixture: %v", err)
 	}
 

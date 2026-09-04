@@ -42,8 +42,20 @@ type QueueReader interface {
 // Drainer implementation, so it always reflects when the tray actually
 // ran the pass.
 type DrainSummary struct {
-	At                time.Time
-	HandshakeOK       bool
+	At          time.Time
+	HandshakeOK bool
+	// LastHandshakeAt is the timestamp the agent last completed a drain
+	// pass with a successful server handshake -- the freshness signal the
+	// status page's "last handshake" line renders. A zero value means
+	// "never completed a successful handshake" and the template suppresses
+	// the line in that case (issue #109 / audit F-13 follow-up; the
+	// boolean HandshakeOK above collapses "drained 5 minutes ago" and
+	// "drained 3 weeks ago" into the same true value, which is what this
+	// field disambiguates). The Drainer implementation stamps this only
+	// when HandshakeOK is true, and Runner.TriggerDrain additionally
+	// preserves the prior successful stamp when a newer pass's handshake
+	// failed -- a fresh failed pass must not erase "successful 4h ago".
+	LastHandshakeAt   time.Time `json:"lastHandshakeAt,omitempty"`
 	NodeCreatedSent   int
 	ArchiveCopiesDone int
 	RebasesDone       int

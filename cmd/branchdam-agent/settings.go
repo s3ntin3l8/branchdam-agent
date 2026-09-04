@@ -126,6 +126,7 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		SelfUpdateCheckIntervalHrs: cfg.SelfUpdate.CheckIntervalHours,
 		RequireUnbuffered:          cfg.Ingest.RequireUnbuffered,
 		RequireDCIM:                cfg.Ingest.RequireDCIM,
+		PauseUploadOnMetered:       cfg.Ingest.PauseUploadOnMetered,
 		ServerBaseURL:              cfg.Server.BaseURL,
 		ServerAPIKeySet:            cfg.Server.APIKey != "",
 		ArchiveRoot:                cfg.Ingest.ArchiveRoot,
@@ -175,6 +176,16 @@ func (s *configSettings) SetInt(key string, v int) error {
 	return s.reload()
 }
 
+func (s *configSettings) SetStringSlice(key string, v []string) error {
+	if err := s.validateStringSliceChange(key, v); err != nil {
+		return err
+	}
+	if err := config.Patch(s.path, map[string]any{key: v}); err != nil {
+		return fmt.Errorf("save %s: %w", key, err)
+	}
+	return s.reload()
+}
+
 // validateBoolChange/validateIntChange/validateStringChange each build a
 // copy of the current config with one field hypothetically changed and
 // run Validate() against it -- entirely in memory, before config.Patch
@@ -198,6 +209,8 @@ func (s *configSettings) validateBoolChange(key string, v bool) error {
 		cfg.Ingest.RequireUnbuffered = v
 	case "ingest.requireDCIM":
 		cfg.Ingest.RequireDCIM = v
+	case "ingest.pauseUploadOnMetered":
+		cfg.Ingest.PauseUploadOnMetered = v
 	default:
 		// config.Patch does no schema validation of its own -- these three
 		// switches (this one plus validateIntChange/validateStringChange
@@ -272,6 +285,23 @@ func (s *configSettings) validateStringChange(key, v string) error {
 		if !applyIntegrationStringChange(&cfg, key, v) {
 			return fmt.Errorf("settings: %q is not a settable string key", key)
 		}
+	}
+	return firstValidateProblem(cfg)
+}
+
+func (s *configSettings) validateStringSliceChange(key string, v []string) error {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	switch key {
+	case "ingest.autoImportPaths":
+		cfg.Ingest.AutoImportPaths = append([]string(nil), v...)
+	case "ingest.cardRoots":
+		cfg.Ingest.CardRoots = append([]string(nil), v...)
+	case "ingest.allowedExtensions":
+		cfg.Ingest.AllowedExtensions = append([]string(nil), v...)
+	default:
+		return fmt.Errorf("settings: %q is not a settable string slice key", key)
 	}
 	return firstValidateProblem(cfg)
 }
@@ -506,8 +536,22 @@ func (s *configSettings) reload() error {
 	if problem := firstBlockingProblem(newCfg); problem != nil {
 		return fmt.Errorf("config problem: %s", problem)
 	}
+	if newCfg.Offline.QueueDBPath != "" && newCfg.Offline.Tier0ContainerRoot == "" {
+		return fmt.Errorf("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")
+	}
 
 	client := branchdam.New(newCfg.Server.BaseURL, newCfg.Server.APIKey)
+
+	// Synchronize naming template from server handshake if available (issue #86).
+	// Handshake failure must not block settings reload -- continue with config-file template.
+	hsCtx, hsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: newCfg.AgentID}); err != nil {
+		slog.Warn("could not sync naming template from server handshake on reload; using config value", "err", err)
+	} else if hs.NamingTemplate != "" {
+		newCfg.Ingest.PathTemplate = hs.NamingTemplate
+	}
+	hsCancel()
+
 	engine := ingest.NewEngine(client, newCfg.AgentID, newCfg.Ingest, newCfg.PathMappings)
 
 	s.mu.Lock()
@@ -516,8 +560,18 @@ func (s *configSettings) reload() error {
 	queueStore := s.queueStore
 	s.mu.Unlock()
 
+	if queueStore != nil {
+		engine.Queue = queueStore
+		engine.Tier0ContainerRoot = newCfg.Offline.Tier0ContainerRoot
+	}
+
+	s.runner.SetArchiveRoot(newCfg.Ingest.ArchiveRoot)
+	s.runner.SetArchiveProber(func(pctx context.Context, root string) bool {
+		return probeArchive(pctx, root, client, newCfg.Ingest.UploadStream)
+	})
 	s.runner.SetDetectorInterval(time.Duration(newCfg.Ingest.PollIntervalSecs) * time.Second)
 	s.runner.SetDetectorRequireDCIM(newCfg.Ingest.RequireDCIM)
+	s.runner.SetPauseUploadOnMetered(newCfg.Ingest.PauseUploadOnMetered)
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
 
 	// Rebuild every integration syncer against the freshly reloaded

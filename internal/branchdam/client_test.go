@@ -2,6 +2,9 @@ package branchdam
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -432,4 +435,99 @@ func asHTTPError(err error, target **HTTPError) bool {
 	}
 	*target = he
 	return true
+}
+
+func TestClientCheckContent(t *testing.T) {
+	t.Run("found with full hash", func(t *testing.T) {
+		var gotMethod, gotPath, gotQuery, gotRequestURI string
+		var gotAPIKey, gotSig, gotNonce, gotTimestamp string
+		_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			gotMethod = r.Method
+			gotPath = r.URL.Path
+			gotQuery = r.URL.RawQuery
+			gotRequestURI = r.URL.RequestURI()
+			gotAPIKey = r.Header.Get("X-API-Key")
+			gotSig = r.Header.Get("X-Signature")
+			gotNonce = r.Header.Get("X-Nonce")
+			gotTimestamp = r.Header.Get("X-Timestamp")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"found": true,
+				"nodeUuid": "018f-uuid-1234",
+				"filePath": "/storage/archive/2026/DSC0001.JPG",
+				"lifecycleState": "ACTIVE"
+			}`))
+		})
+
+		res, err := c.CheckContent(context.Background(), "fasthash123", "fullhash456")
+		if err != nil {
+			t.Fatalf("CheckContent: %v", err)
+		}
+		if gotMethod != http.MethodGet {
+			t.Errorf("method = %q, want GET", gotMethod)
+		}
+		if gotPath != "/api/v1/agent/check-content" {
+			t.Errorf("path = %q, want /api/v1/agent/check-content", gotPath)
+		}
+		if !strings.Contains(gotQuery, "fastHash=fasthash123") || !strings.Contains(gotQuery, "fullHash=fullhash456") {
+			t.Errorf("query = %q, want fastHash and fullHash params", gotQuery)
+		}
+		if gotAPIKey == "" {
+			t.Error("expected X-API-Key header to be set")
+		}
+		if gotSig == "" {
+			t.Error("expected X-Signature header to be set")
+		}
+		mac := hmac.New(sha256.New, []byte("test-api-key-0123456789012345678901"))
+		mac.Write([]byte("GET\n" + gotRequestURI + "\n" + gotNonce + "\n" + gotTimestamp + "\n"))
+		wantSig := hex.EncodeToString(mac.Sum(nil))
+		if gotSig != wantSig {
+			t.Errorf("X-Signature = %q, want HMAC over RequestURI = %q", gotSig, wantSig)
+		}
+		if !res.Found {
+			t.Errorf("res.Found = %v, want true", res.Found)
+		}
+		if res.NodeUUID != "018f-uuid-1234" {
+			t.Errorf("res.NodeUUID = %q, want 018f-uuid-1234", res.NodeUUID)
+		}
+		if res.FilePath != "/storage/archive/2026/DSC0001.JPG" {
+			t.Errorf("res.FilePath = %q, want /storage/archive/2026/DSC0001.JPG", res.FilePath)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"found": false}`))
+		})
+
+		res, err := c.CheckContent(context.Background(), "fasthash123", "")
+		if err != nil {
+			t.Fatalf("CheckContent: %v", err)
+		}
+		if res.Found {
+			t.Errorf("res.Found = %v, want false", res.Found)
+		}
+		if res.NodeUUID != "" {
+			t.Errorf("res.NodeUUID = %q, want empty", res.NodeUUID)
+		}
+	})
+
+	t.Run("server error", func(t *testing.T) {
+		_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "server unavailable", http.StatusServiceUnavailable)
+		})
+
+		_, err := c.CheckContent(context.Background(), "fast", "full")
+		if err == nil {
+			t.Fatal("expected error on 503 response, got nil")
+		}
+		var he *HTTPError
+		if !asHTTPError(err, &he) {
+			t.Fatalf("expected *HTTPError, got %T: %v", err, err)
+		}
+		if he.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want 503", he.StatusCode)
+		}
+	})
 }

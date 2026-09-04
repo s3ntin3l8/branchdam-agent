@@ -27,6 +27,19 @@ type TemplateVars struct {
 	OriginalName string    // the source file's base name, unchanged
 }
 
+func buildTemplateVars(exif *ExifResult, srcPath string, modTime time.Time) TemplateVars {
+	vars := TemplateVars{OriginalName: filepath.Base(srcPath)}
+	if exif != nil && exif.CapturedAt != nil {
+		vars.CapturedAt = *exif.CapturedAt
+	} else {
+		vars.CapturedAt = modTime
+	}
+	if exif != nil {
+		vars.CameraModel = exif.CameraModel
+	}
+	return vars
+}
+
 // splitBase splits a filename into its stem and extension (without dot).
 // If the filename has no extension (or is a dotfile with no additional extension),
 // stem is the full name and ext is empty.

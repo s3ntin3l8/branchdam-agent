@@ -211,7 +211,7 @@ type TrayConfig struct {
 // GitHub API call, never a download or a binary write. Applying an
 // update found by a check is a separate, always-explicit action (a tray
 // menu click, or `update`'s confirmation/-yes) that this flag does not
-// by itself authorize; see CLAUDE.md's self-update invariants.
+// by itself authorize; see AGENTS.md's self-update invariants.
 type SelfUpdateConfig struct {
 	// Enabled turns self-update checks on. Default true (see
 	// defaultConfig()) -- set to false explicitly for zero outbound
@@ -452,7 +452,30 @@ type IngestConfig struct {
 	// as-is. Empty (the default) resolves "exiftool" through PATH, same
 	// as every existing config.
 	ExiftoolPath string `yaml:"exiftoolPath"`
+	// AutoImportPaths is the allowlist of volume paths or labels that bypass
+	// the card-detection confirmation dialog (issue #79). When a newly mounted
+	// volume matches an entry here, it is ingested immediately without prompting.
+	AutoImportPaths []string `yaml:"autoImportPaths"`
+	// PreflightTimeoutSecs is the per-request HTTP timeout for content dedup
+	// pre-flight checks against the server (GET /api/v1/agent/check-content).
+	// When unset (<= 0), online ingest defaults to DefaultPreflightTimeoutSecs (5s)
+	// and offline ingest defaults to DefaultOfflinePreflightTimeoutSecs (2s).
+	// Note that this bounds each individual network request, not the total wall-clock
+	// time of any local disk hashing passes.
+	// Set to -1 to disable pre-flight entirely (server-side dedup is still active).
+	PreflightTimeoutSecs int `yaml:"preflightTimeoutSecs"`
+	// PauseUploadOnMetered defers network-touching operations (upload-stream bytes,
+	// queue drain HTTP calls) when on a metered or hotspot connection. Defaults to false.
+	PauseUploadOnMetered bool `yaml:"pauseUploadOnMetered"`
 }
+
+// DefaultPreflightTimeoutSecs is IngestConfig.PreflightTimeoutSecs's fallback
+// when unset (<= 0) during online ingest.
+const DefaultPreflightTimeoutSecs = 5
+
+// DefaultOfflinePreflightTimeoutSecs is the fallback preflight timeout when
+// unset (<= 0) during offline ingest.
+const DefaultOfflinePreflightTimeoutSecs = 2
 
 // ServerConfig is the branchDAM server this agent reports to.
 type ServerConfig struct {
@@ -487,7 +510,7 @@ func defaultConfig() Config {
 		// Applying one is a separate, always-explicit decision (a tray
 		// menu click, or `update`'s confirmation prompt / -yes) that
 		// this flag does not by itself authorize -- see
-		// internal/selfupdate's doc comment and CLAUDE.md's self-update
+		// internal/selfupdate's doc comment and AGENTS.md's self-update
 		// invariants. An operator who wants zero outbound GitHub traffic
 		// sets selfUpdate.enabled: false explicitly.
 		SelfUpdate: SelfUpdateConfig{Enabled: true},
@@ -757,6 +780,9 @@ func (c Config) Validate() []Problem {
 	checkPlaceholder("ingest.pathTemplate", c.Ingest.PathTemplate)
 	for i, root := range c.Ingest.CardRoots {
 		checkPlaceholder(fmt.Sprintf("ingest.cardRoots[%d]", i), root)
+	}
+	for i, path := range c.Ingest.AutoImportPaths {
+		checkPlaceholder(fmt.Sprintf("ingest.autoImportPaths[%d]", i), path)
 	}
 	checkPlaceholder("offline.queueDbPath", c.Offline.QueueDBPath)
 	checkPlaceholder("offline.tier0ContainerRoot", c.Offline.Tier0ContainerRoot)

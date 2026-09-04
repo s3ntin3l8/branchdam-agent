@@ -20,10 +20,10 @@ type ProgressEvent struct {
 	// Path is the destination this progress applies to: the local
 	// destination for DualWrite/WriteLocal, the archive destination for
 	// CopyToArchive, or whichever path Verify was called against.
-	Path       string
-	Phase      ProgressPhase
-	BytesDone  int64
-	TotalBytes int64
+	Path       string        `json:"path"`
+	Phase      ProgressPhase `json:"phase"`
+	BytesDone  int64         `json:"bytesDone"`
+	TotalBytes int64         `json:"totalBytes"`
 }
 
 // WriteOption configures optional behavior on DualWrite/WriteLocal/

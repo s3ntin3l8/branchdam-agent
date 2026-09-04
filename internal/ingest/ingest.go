@@ -2,18 +2,23 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/zeebo/blake3"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/naming"
+	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
 	"github.com/s3ntin3l8/branchdam-agent/internal/phash"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 )
@@ -52,6 +57,12 @@ type nodeCreator interface {
 	PostNodeCreated(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error)
 }
 
+// contentChecker is the subset of *branchdam.Client's surface Engine needs for
+// content deduplication pre-flight checks.
+type contentChecker interface {
+	CheckContent(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error)
+}
+
 // uploader is the subset of *branchdam.Client's surface Engine needs for direct HTTP streaming ingest.
 type uploader interface {
 	Upload(ctx context.Context, body io.Reader, opts branchdam.UploadOptions) (*branchdam.UploadResponse, error)
@@ -87,6 +98,8 @@ type Engine struct {
 	// real UUIDv7 mint (google/uuid.NewV7) via NewEngine.
 	Now         func() time.Time
 	NewNodeUUID func() (string, error)
+	// IsMetered is overridable for tests; default to netgate.IsMetered via NewEngine.
+	IsMetered func() (bool, error)
 
 	// Progress, if set, is called with byte-progress samples during a
 	// file's copy and verify phases (DualWrite/WriteLocal's copy, Verify's
@@ -120,6 +133,7 @@ func NewEngine(client nodeCreator, agentID string, ingestCfg config.IngestConfig
 		Exiftool:    NewExiftoolAt(ingestCfg.ExiftoolPath),
 		Now:         time.Now,
 		NewNodeUUID: func() (string, error) { id, err := uuid.NewV7(); return id.String(), err },
+		IsMetered:   netgate.IsMetered,
 	}
 	if u, ok := client.(uploader); ok {
 		e.Uploader = u
@@ -129,26 +143,34 @@ func NewEngine(client nodeCreator, agentID string, ingestCfg config.IngestConfig
 
 // FileResult is one card file's outcome.
 type FileResult struct {
-	SourcePath    string
-	ArchivePath   string
-	LocalPath     string
-	IsSidecar     bool // .xmp/.srt -- copied to both destinations, no event submitted
-	Skipped       bool
-	SkipReason    string
-	NodeUUID      string
-	EventID       string
-	Write         WriteResult
-	ArchiveVerify VerifyResult
-	LocalVerify   VerifyResult
-	Exif          *ExifResult
-	PHash         *int64
-	GPSSource     string // "exif", "srt", or "" (no GPS)
-	Err           error
+	SourcePath       string
+	ArchivePath      string
+	LocalPath        string
+	IsSidecar        bool // .xmp/.srt -- copied to both destinations, no event submitted
+	Skipped          bool
+	SkipReason       string
+	ExistingNodeUUID string
+	NodeUUID         string
+	EventID          string
+	Write            WriteResult
+	ArchiveVerify    VerifyResult
+	LocalVerify      VerifyResult
+	Exif             *ExifResult
+	PHash            *int64
+	GPSSource        string // "exif", "srt", or "" (no GPS)
+	Err              error
 }
 
 // CardResult is one IngestCard call's full outcome.
 type CardResult struct {
 	Files []FileResult
+}
+
+// isLiveLifecycleState returns true if lifecycleState represents an active, live node.
+// An empty string (default/unspecified) or "ACTIVE" is considered live. Non-live states
+// (e.g. "ARCHIVED", "TRASHED", "DELETED") do not prevent ingest so content is not lost.
+func isLiveLifecycleState(state string) bool {
+	return state == "" || strings.EqualFold(state, "ACTIVE")
 }
 
 // IngestCard walks cardRoot (a mounted card's root directory, or the
@@ -193,6 +215,7 @@ type CardResult struct {
 // followed by a re-run is a known-good recovery.
 func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, error) {
 	stemSuffix := make(map[string]string)
+	var dedupUnavailable bool
 	var result CardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -217,7 +240,7 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 			})
 			return nil
 		}
-		result.Files = append(result.Files, e.ingestFile(ctx, path, stemSuffix))
+		result.Files = append(result.Files, e.ingestFile(ctx, path, stemSuffix, &dedupUnavailable))
 		return nil
 	})
 	if err != nil {
@@ -229,7 +252,9 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 // ingestFile runs the full pipeline for one source file: metadata
 // extraction (needed up front to fill the naming template), dual-copy
 // write, verify, DJI .srt GPS, and (for non-sidecar files) submission.
-func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string) FileResult {
+func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string, dedupUnavailable *bool) FileResult {
+	// UploadStream mode sends bytes directly to the server upload endpoint;
+	// server-side dedup is the backstop for that path.
 	if e.Ingest.UploadStream {
 		return e.ingestFileUpload(ctx, srcPath)
 	}
@@ -260,15 +285,7 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	}
 	fr.Exif = exif
 
-	vars := TemplateVars{OriginalName: filepath.Base(srcPath)}
-	if exif != nil && exif.CapturedAt != nil {
-		vars.CapturedAt = *exif.CapturedAt
-	} else {
-		vars.CapturedAt = srcInfo.ModTime()
-	}
-	if exif != nil {
-		vars.CameraModel = exif.CameraModel
-	}
+	vars := buildTemplateVars(exif, srcPath, srcInfo.ModTime())
 
 	stem, _ := splitBase(filepath.Base(srcPath))
 	stemKey := filepath.Join(filepath.Dir(srcPath), stem)
@@ -293,6 +310,16 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 		fr.Skipped = true
 		fr.SkipReason = "already ingested (identical file exists at destination)"
 		return fr
+	}
+
+	// Pre-flight BLAKE3 content dedup check before DualWrite.
+	if !fr.IsSidecar {
+		if skip, existingUUID, skipReason := e.checkContentDedup(ctx, srcPath, srcInfo.Size(), config.DefaultPreflightTimeoutSecs, dedupUnavailable); skip {
+			fr.Skipped = true
+			fr.SkipReason = skipReason
+			fr.ExistingNodeUUID = existingUUID
+			return fr
+		}
 	}
 
 	writeRes, err := DualWrite(srcPath, archivePath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
@@ -481,6 +508,58 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 		cameraModel = exif.CameraModel
 	}
 
+	if e.Ingest.PauseUploadOnMetered {
+		if metered, mErr := e.IsMetered(); metered || mErr != nil {
+			if mErr != nil {
+				slog.Debug("metered probe failed, treating as metered (fail-closed)", "err", mErr)
+			}
+			slog.Info("upload skipped on metered connection -- re-insert card to retry", "path", srcPath)
+
+			vars := buildTemplateVars(exif, srcPath, srcInfo.ModTime())
+
+			relPath := RenderPath(e.Ingest.PathTemplate, vars)
+			localPath := filepath.Join(e.Ingest.LocalEditRoot, relPath)
+			fr.LocalPath = localPath
+
+			writeRes, err := WriteLocal(srcPath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
+			if err != nil {
+				fr.Err = fmt.Errorf("write local copy: %w", err)
+				return fr
+			}
+			fr.Write = writeRes
+			preserveMtimeAt(srcPath, localPath, srcInfo.ModTime())
+
+			localVerify, err := Verify(localPath, writeRes.FullHash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+			if err != nil {
+				_ = os.Remove(localPath)
+				fr.Err = fmt.Errorf("verify local copy: %w", err)
+				return fr
+			}
+			fr.LocalVerify = localVerify
+
+			if !localVerify.Verified {
+				_ = os.Remove(localPath)
+				fr.Err = fmt.Errorf("ingest: verification failed for %s -- safe-eject withheld", srcPath)
+				return fr
+			}
+
+			if e.Ingest.RequireUnbuffered && localVerify.Method == VerifyMethodBufferedFloor {
+				fr.Err = fmt.Errorf("ingest: unbuffered verify required by config, but verify fell back to buffered floor (local=%s) -- safe-eject withheld", localVerify.Method)
+				return fr
+			}
+
+			if isImageExt(ext) && e.Exiftool != nil {
+				if ph, err := phash.Extract(ctx, e.Exiftool.Pool(), localPath); err == nil {
+					fr.PHash = ph
+				}
+			}
+
+			fr.Skipped = true
+			fr.SkipReason = "upload skipped on metered connection -- re-insert card to retry"
+			return fr
+		}
+	}
+
 	if e.Uploader == nil {
 		fr.Err = fmt.Errorf("ingest: uploadStream is true but client does not support upload")
 		return fr
@@ -553,4 +632,95 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 	}
 
 	return fr
+}
+
+// blake3File computes the BLAKE3-256 hex digest of the file at p in a single pass.
+func blake3File(p string) (string, error) {
+	f, err := os.Open(p) //nolint:gosec // path is our source file
+	if err != nil {
+		return "", fmt.Errorf("open for blake3: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	h := blake3.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("hash blake3: %w", err)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// checkContentDedup performs the best-effort pre-flight BLAKE3 content dedup check.
+// It queries GET /api/v1/agent/check-content with fastHash (xxHash64 sampled via fastHashFile
+// using canonical 2MiB regions matching the server's fast_hash column), and on a hit
+// confirms with fullHash (BLAKE3-256). If confirmed duplicate with a live lifecycle state,
+// returns skip=true along with the existing node UUID and human-readable skip reason.
+func (e *Engine) checkContentDedup(ctx context.Context, srcPath string, srcSize int64, defaultTimeoutSecs int, dedupUnavailable *bool) (skip bool, existingNodeUUID, skipReason string) {
+	if (dedupUnavailable != nil && *dedupUnavailable) || e.Ingest.PreflightTimeoutSecs < 0 || e.Client == nil {
+		return false, "", ""
+	}
+	checker, ok := e.Client.(contentChecker)
+	if !ok {
+		return false, "", ""
+	}
+	timeout := time.Duration(defaultTimeoutSecs) * time.Second
+	if e.Ingest.PreflightTimeoutSecs > 0 {
+		timeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
+	}
+
+	fastHash, err := fastHashFile(srcPath, srcSize)
+	if err != nil {
+		slog.Warn("ingest: pre-flight fast hash failed", "source", srcPath, "err", err)
+		return false, "", ""
+	}
+
+	pCtx, pCancel := context.WithTimeout(ctx, timeout)
+	res, err := checker.CheckContent(pCtx, fastHash, "")
+	pCancel()
+	if err != nil {
+		if dedupUnavailable != nil && *dedupUnavailable {
+			slog.Debug("ingest: content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
+		} else {
+			slog.Warn("ingest: content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
+		}
+		if dedupUnavailable != nil {
+			var he *branchdam.HTTPError
+			if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented || he.StatusCode == http.StatusBadRequest) {
+				*dedupUnavailable = true
+			}
+		}
+		return false, "", ""
+	}
+
+	if !res.Found {
+		return false, "", ""
+	}
+
+	fullHash, err := blake3File(srcPath)
+	if err != nil {
+		slog.Warn("ingest: pre-flight full hash failed", "source", srcPath, "err", err)
+		return false, "", ""
+	}
+
+	pCtx2, pCancel2 := context.WithTimeout(ctx, timeout)
+	res2, err := checker.CheckContent(pCtx2, fastHash, fullHash)
+	pCancel2()
+	if err != nil {
+		if dedupUnavailable != nil && *dedupUnavailable {
+			slog.Debug("ingest: content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
+		} else {
+			slog.Warn("ingest: content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
+		}
+		if dedupUnavailable != nil {
+			var he *branchdam.HTTPError
+			if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented || he.StatusCode == http.StatusBadRequest) {
+				*dedupUnavailable = true
+			}
+		}
+		return false, "", ""
+	}
+
+	if res2.Found && isLiveLifecycleState(res2.LifecycleState) {
+		return true, res2.NodeUUID, fmt.Sprintf("duplicate: already in library as node %s at %s", res2.NodeUUID, res2.FilePath)
+	}
+	return false, "", ""
 }

@@ -45,8 +45,9 @@ type SettingsView struct {
 	// "never re-check after the initial one."
 	SelfUpdateCheckIntervalHrs int
 
-	RequireUnbuffered bool
-	RequireDCIM       bool
+	RequireUnbuffered    bool
+	RequireDCIM          bool
+	PauseUploadOnMetered bool
 
 	ServerBaseURL   string
 	ServerAPIKeySet bool
@@ -124,12 +125,13 @@ func (v SettingsView) Integration(id IntegrationID) (IntegrationView, bool) {
 type Settings interface {
 	Snapshot() SettingsView
 
-	// SetBool/SetInt persist one dotted config key (e.g.
-	// "tray.startOnLogin", "selfUpdate.checkIntervalHours") and reconfigure
-	// the running tray to reflect it, where that's possible without a
+	// SetBool/SetInt/SetStringSlice persist one dotted config key (e.g.
+	// "tray.startOnLogin", "selfUpdate.checkIntervalHours", "ingest.autoImportPaths")
+	// and reconfigure the running tray to reflect it, where that's possible without a
 	// restart -- see Runner.Reconfigure.
 	SetBool(key string, v bool) error
 	SetInt(key string, v int) error
+	SetStringSlice(key string, v []string) error
 
 	// PromptAndSet shows whatever dialog backend the implementation uses
 	// for field, applies the answer if one was given, and reconfigures the
@@ -198,10 +200,11 @@ type Settings interface {
 	// Fields the issue (#110) lists as future graduates but that do
 	// not yet exist in the Config struct (no M5 sub-issue has landed):
 	// ingest.autoEject (#87), ingest.requireDCIM (#81),
-	// ingest.pauseUploadOnMetered (#84), ingest.autoImportPaths (#79),
-	// tray.confirmDestructive (E3 #S2-14). Each appears in
-	// docs/tray-settings-inventory.md's table as a not-yet-applicable
-	// row -- it is a settings.go follow-up, not a pre-existing gap.
+	// ingest.pauseUploadOnMetered (#84),
+	// ingest.autoImportPaths (#79), tray.confirmDestructive (E3 #S2-14).
+	// Each appears in docs/tray-settings-inventory.md's table as a
+	// not-yet-applicable row -- it is a settings.go follow-up, not a
+	// pre-existing gap.
 	OpenConfigFile() error
 	RevealConfigFolder() error
 }

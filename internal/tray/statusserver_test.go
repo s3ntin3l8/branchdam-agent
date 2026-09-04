@@ -1,11 +1,14 @@
 package tray
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 )
 
 func TestNormalizeLoopbackRewritesBarePort(t *testing.T) {
@@ -471,10 +474,134 @@ func TestHandleIndexHTMLInjectionPrevented(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.handleIndex(rec, req)
 	body := rec.Body.String()
-	if strings.Contains(body, "<script>") {
+	if strings.Contains(body, "<script>alert('xss')</script>") {
 		t.Errorf("response body must escape HTML in error messages to prevent injection\n---\n%s", body)
 	}
-	if !strings.Contains(body, "&lt;script&gt;") {
+	if !strings.Contains(body, "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;") {
 		t.Errorf("response body should contain escaped HTML entities\n---\n%s", body)
+	}
+}
+
+func TestHandleIndexRendersIngestProgress(t *testing.T) {
+	s := &StatusServer{
+		StatusFunc: func() Status {
+			return Status{
+				Busy:     true,
+				BusyCard: "/media/card1",
+				IngestProgress: &ingest.ProgressEvent{
+					Path:       "/local/DSC_0042.ARW",
+					Phase:      ingest.ProgressPhaseCopying,
+					BytesDone:  2469606195,
+					TotalBytes: 8697308774,
+				},
+			}
+		},
+	}
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "/local/DSC_0042.ARW") {
+		t.Errorf("response body missing file path\n---\n%s", body)
+	}
+	if !strings.Contains(body, "copying") {
+		t.Errorf("response body missing phase\n---\n%s", body)
+	}
+	if !strings.Contains(body, "2469606195 / 8697308774") {
+		t.Errorf("response body missing bytes done/total\n---\n%s", body)
+	}
+	if !strings.Contains(body, "<progress") {
+		t.Errorf("response body missing <progress> element\n---\n%s", body)
+	}
+}
+
+func TestHandleStatusJSON(t *testing.T) {
+	s := &StatusServer{
+		Version: "1.2.3",
+		StatusFunc: func() Status {
+			return Status{
+				Busy:     true,
+				BusyCard: "/media/card1",
+				IngestProgress: &ingest.ProgressEvent{
+					Path:       "/local/DSC_0042.ARW",
+					Phase:      ingest.ProgressPhaseCopying,
+					BytesDone:  2469606195,
+					TotalBytes: 8697308774,
+				},
+			}
+		},
+	}
+	req := httptest.NewRequest("GET", "/status", nil)
+	rec := httptest.NewRecorder()
+	s.handleStatusJSON(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("got status %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("got Content-Type %q, want application/json", ct)
+	}
+
+	var data struct {
+		Version string `json:"version"`
+		Status  struct {
+			Busy           bool                  `json:"busy"`
+			BusyCard       string                `json:"busyCard"`
+			IngestProgress *ingest.ProgressEvent `json:"ingestProgress"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &data); err != nil {
+		t.Fatalf("failed to decode JSON: %v\n---\n%s", err, rec.Body.String())
+	}
+	if data.Version != "1.2.3" {
+		t.Errorf("got Version=%q, want 1.2.3", data.Version)
+	}
+	if !data.Status.Busy || data.Status.BusyCard != "/media/card1" {
+		t.Errorf("unexpected Status: %+v", data.Status)
+	}
+	if data.Status.IngestProgress == nil || data.Status.IngestProgress.Path != "/local/DSC_0042.ARW" {
+		t.Errorf("unexpected IngestProgress: %+v", data.Status.IngestProgress)
+	}
+	if data.Status.IngestProgress.BytesDone != 2469606195 || data.Status.IngestProgress.TotalBytes != 8697308774 {
+		t.Errorf("unexpected IngestProgress bytes: %+v", data.Status.IngestProgress)
+	}
+}
+
+func TestHandleIndexAcceptJSON(t *testing.T) {
+	s := &StatusServer{
+		Version: "1.2.3",
+		StatusFunc: func() Status {
+			return Status{
+				Busy: false,
+			}
+		},
+	}
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("got status %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("got Content-Type %q, want application/json", ct)
+	}
+}
+
+func TestHandleIndexRendersPaused(t *testing.T) {
+	s := &StatusServer{StatusFunc: func() Status {
+		return Status{
+			Paused: true,
+		}
+	}}
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	s.handleIndex(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "Ingest paused by user") {
+		t.Errorf("response body missing 'Ingest paused by user' when Paused=true\n---\n%s", body)
 	}
 }

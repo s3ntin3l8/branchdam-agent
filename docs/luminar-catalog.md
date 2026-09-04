@@ -160,7 +160,7 @@ silently dropped a true pair.
 
 `PairDerivatives` deliberately does **not** call `internal/naming.Stem`. That package is a
 byte-for-byte port of branchDAM's own `naming.Stem` under an explicit invariant (see this repo's
-CLAUDE.md); its role-suffix pattern has no `_upscale`/`_panorama` and must never gain
+AGENTS.md); its role-suffix pattern has no `_upscale`/`_panorama` and must never gain
 Luminar-specific suffixes just because this package needs something similar-shaped. `derive.go`
 has its own small, local `stem` helper instead.
 

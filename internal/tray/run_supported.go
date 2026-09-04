@@ -19,11 +19,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"runtime"
 	"time"
 
 	"fyne.io/systray"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
 )
 
 // menuRefreshInterval is how often the informational (disabled) menu items
@@ -129,7 +132,20 @@ type menuActionResult struct {
 // config. confirm itself is a function the production wiring supplies
 // (a re-exec of `dialog -kind question ...`); Run never imports a
 // dialog backend directly.
-func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, settings Settings, confirm func(ctx context.Context, title, body string) bool, confirmDestructive bool) (Outcome, error) {
+//
+// pickDir and notify are the OS dialog callbacks for "Import from folder…"
+// and tray notifications (issue #80).
+func Run(
+	ctx context.Context,
+	r *Runner,
+	statusURL string,
+	up SelfUpdater,
+	settings Settings,
+	confirm func(ctx context.Context, title, body string) bool,
+	confirmDestructive bool,
+	pickDir func(ctx context.Context, title string) (string, error),
+	notify func(ctx context.Context, title, message string),
+) (Outcome, error) {
 	errCh := make(chan error, 1)
 	var outcome Outcome
 
@@ -154,6 +170,8 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 		watchItem := systray.AddMenuItem("Watch directories: none configured", "Directories polled for inserted cards")
 		watchItem.Disable()
 		ingestNow := systray.AddMenuItem("Ingest now", "Run one ingest pass over every configured watch directory")
+		pauseItem := systray.AddMenuItemCheckbox("⏸ Pause ingest", "Temporarily suspend automatic card detection and queue draining", false)
+		importFolder := systray.AddMenuItem("Import from folder…", "Ingest files from a selected folder")
 		systray.AddSeparator()
 
 		queueItem := systray.AddMenuItem("Queue: not configured", "Offline queue backlog (offline.queueDbPath)")
@@ -212,8 +230,24 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 		refresh := func() {
 			us := up.Status()
 			st := r.Status(us)
+			systray.SetTooltip(FormatTooltip(st))
 			statusItem.SetTitle("Status: " + summarize(st))
 			updateItem.SetTitle("Self-update: " + us.Note())
+
+			if st.Paused {
+				pauseItem.Check()
+				pauseItem.SetTitle("▶ Resume ingest")
+				pauseItem.SetTooltip("Resume automatic card detection and queue draining")
+				systray.SetIcon(buildPausedTrayIcon())
+				systray.SetTooltip("branchDAM agent (ingest paused)")
+			} else {
+				pauseItem.Uncheck()
+				pauseItem.SetTitle("⏸ Pause ingest")
+				pauseItem.SetTooltip("Temporarily suspend automatic card detection and queue draining")
+				systray.SetIcon(buildTrayIcon())
+
+				systray.SetTooltip(FormatTooltip(st))
+			}
 
 			// Watch dirs can change out from under this menu now that
 			// Reconfigure exists (issue #31's settings menu) -- re-render
@@ -245,7 +279,7 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 			}
 
 			if drainSkipped {
-				drainNow.SetTitle("Drain queue now (skipped just now -- a pass was already running)")
+				drainNow.SetTitle("Drain queue now (skipped -- already running, metered, or paused)")
 				drainSkipped = false
 			} else {
 				drainNow.SetTitle("Drain queue now")
@@ -265,6 +299,19 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 				restartNowItem.Show()
 			} else {
 				restartNowItem.Hide()
+			}
+
+			if sv.PauseUploadOnMetered {
+				if metered, mErr := netgate.IsMetered(); metered || mErr != nil {
+					if mErr != nil {
+						slog.Debug("metered probe failed for tooltip", "err", mErr)
+					}
+					systray.SetTooltip("Upload paused (metered connection)")
+				} else {
+					systray.SetTooltip("branchDAM agent")
+				}
+			} else {
+				systray.SetTooltip("branchDAM agent")
 			}
 
 			switch {
@@ -308,6 +355,9 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 		ticker := time.NewTicker(menuRefreshInterval)
 		defer ticker.Stop()
 
+		r.SetOnPauseChange(func(paused bool) {
+			refresh()
+		})
 		r.SetOnCardIngested(refresh)
 		r.SetDetectorErrorHandler(func(err error) {
 			if err != nil && !errors.Is(err, context.Canceled) {
@@ -335,6 +385,30 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 					r.TriggerIngest(ctx, dir)
 				}
 				ingestDoneCh <- struct{}{}
+			}
+		}()
+
+		// "Import from folder…" manual source selection (issue #80): opens
+		// an OS directory picker dialog, checks whether the chosen directory
+		// is already being watched/ingested (showing an OS notification if so),
+		// and passes it to TriggerIngest directly. Running it in a worker
+		// goroutine avoids freezing the GUI loop while the picker is open or
+		// while ingest is running.
+		importFolderDoneCh := make(chan struct{}, 1)
+		importFolderRequestCh := make(chan struct{}, 1)
+		go func() {
+			for range importFolderRequestCh {
+				handleImportFolder(ctx, r, func(pctx context.Context) (string, error) {
+					if pickDir == nil {
+						return "", errors.New("tray: no directory picker configured")
+					}
+					return pickDir(pctx, "Import from folder…")
+				}, func(nctx context.Context, msg string) {
+					if notify != nil {
+						notify(nctx, "branchDAM Agent", msg)
+					}
+				})
+				importFolderDoneCh <- struct{}{}
 			}
 		}()
 
@@ -481,6 +555,8 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 				return
 			case <-openStatus.ClickedCh:
 				_ = openBrowser(statusURL)
+			case <-pauseItem.ClickedCh:
+				r.SetPaused(!r.Paused())
 			case <-ingestNow.ClickedCh:
 				select {
 				case ingestRequestCh <- struct{}{}:
@@ -489,6 +565,15 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 					// this click rather than pile up requests.
 				}
 			case <-ingestDoneCh:
+				refresh()
+			case <-importFolder.ClickedCh:
+				select {
+				case importFolderRequestCh <- struct{}{}:
+				default:
+					// a folder import is already queued/running; drop
+					// this click rather than pile up requests.
+				}
+			case <-importFolderDoneCh:
 				refresh()
 			case <-drainNow.ClickedCh:
 				// Confirmation gate (issue #108 / E3 #S2-14): a drain
@@ -709,6 +794,7 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 	}
 
 	onExit := func() {
+		r.SetOnPauseChange(nil)
 		r.SetOnCardIngested(nil)
 		r.SetDetectorErrorHandler(nil)
 		r.StopDetector()
@@ -728,6 +814,9 @@ func Run(ctx context.Context, r *Runner, statusURL string, up SelfUpdater, setti
 }
 
 func summarize(st Status) string {
+	if st.Paused {
+		return "ingest paused by user"
+	}
 	if st.Busy {
 		return fmt.Sprintf("ingesting %s...", st.BusyCard)
 	}
@@ -737,6 +826,18 @@ func summarize(st Status) string {
 	li := st.LastIngest
 	if li.Err != nil {
 		return fmt.Sprintf("last ingest FAILED: %v", li.Err)
+	}
+	if li.Offline {
+		if li.Failed == 0 && li.Skipped == 0 {
+			if li.Submitted == 1 {
+				return fmt.Sprintf("last ingest %s ago: 1 file queued offline, pending upload",
+					time.Since(li.StartedAt).Round(time.Second))
+			}
+			return fmt.Sprintf("last ingest %s ago: %d files queued offline, pending upload",
+				time.Since(li.StartedAt).Round(time.Second), li.Submitted)
+		}
+		return fmt.Sprintf("last ingest %s ago (offline): %d queued offline, %d skipped, %d failed",
+			time.Since(li.StartedAt).Round(time.Second), li.Submitted, li.Skipped, li.Failed)
 	}
 	return fmt.Sprintf("last ingest %s ago: %d ok, %d skipped, %d failed",
 		time.Since(li.StartedAt).Round(time.Second), li.Submitted, li.Skipped, li.Failed)

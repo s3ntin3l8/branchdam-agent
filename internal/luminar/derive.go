@@ -73,7 +73,7 @@ type Ambiguity struct {
 
 // stem lowercases fileName and strips its extension at the last '.'.
 // Deliberately NOT internal/naming.Stem: that package is a byte-for-byte
-// port of branchDAM's own naming.Stem under an explicit CLAUDE.md invariant,
+// port of branchDAM's own naming.Stem under an explicit AGENTS.md invariant,
 // its role-suffix pattern has no "_upscale"/"_panorama", and it must not
 // gain Luminar-specific suffixes just because this package needs something
 // similar-looking.

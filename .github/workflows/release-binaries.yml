@@ -45,7 +45,7 @@ permissions:
 jobs:
   # linux/amd64: native build. The tray itself is Windows/macOS-only
   # (internal/tray/run_unsupported.go returns ErrUnsupported at runtime on
-  # Linux -- see CLAUDE.md), but every other subcommand (preflight, ingest,
+  # Linux -- see AGENTS.md), but every other subcommand (preflight, ingest,
   # luminar-sync, queue-drain) is fully supported headless on Linux, so a
   # Linux build is still worth publishing.
   build-linux:

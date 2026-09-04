@@ -10,7 +10,7 @@
 // comment), and `update` (the headless equivalent of the tray's
 // "Install and restart" menu item, for hosts that never run a tray; see
 // internal/selfupdate's doc comment). See docs/roadmap.md in the
-// branchdam repo and this repo's CLAUDE.md.
+// branchdam repo and this repo's AGENTS.md.
 package main
 
 import (
