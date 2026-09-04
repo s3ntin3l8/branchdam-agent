@@ -871,6 +871,7 @@ func TestIngestCardUploadStreamChtimesFailureIsLogged(t *testing.T) {
 		t.Errorf("warn source = %v", warn["source"])
 	}
 }
+
 type fakeCheckContentClient struct {
 	fakeClient
 	checkCalls []struct{ FastHash, FullHash string }
