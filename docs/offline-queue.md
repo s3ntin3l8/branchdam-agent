@@ -43,11 +43,12 @@ tracked as their own node" behavior.
 
 ## Ordering invariants
 
-**1. `queue.db`'s row commits before any network call.** `Engine.ingestFileOffline` writes and
-verifies the local copy, then `Store.InsertPending` -- the durability boundary -- *then* makes one
-best-effort opportunistic `PostNodeCreated` attempt. A crash between the POST succeeding and the
-row being written would leave a server-side node nothing local remembers, with no read endpoint to
-recover it; getting the order backwards was the first thing worth getting wrong here, so it isn't.
+**1. `queue.db`'s row commits before any network mutation.** `Engine.ingestFileOffline` optionally
+queries `GET /api/v1/agent/check-content` (pre-flight BLAKE3 content dedup), writes and verifies the
+local copy, then `Store.InsertPending` -- the durability boundary -- *then* makes one best-effort
+opportunistic `PostNodeCreated` attempt. A crash between the POST succeeding and the row being written
+would leave a server-side node nothing local remembers, with no read endpoint to recover it; getting
+the order backwards was the first thing worth getting wrong here, so it isn't.
 
 **2. The archive copy never writes directly to the final path.** `CopyToArchive` writes to a
 deterministically-named temp file in the destination directory and renames into place only after a

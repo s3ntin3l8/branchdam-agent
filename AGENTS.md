@@ -29,7 +29,7 @@ make build-darwin-app# Assembles macOS .app bundle via tools/mkbundle
 | Package | Responsibility |
 |---|---|
 | `cmd/branchdam-agent` | Subcommand dispatch (`preflight`, `ingest`, `tray`, `update`, `prune`, `luminar-sync`, `init`, hidden `dialog`) |
-| `internal/branchdam` | REST client for branchDAM `/api/v1/agent/*` contract (`hello`, `handshake`, `events`, `rebase`, `node-status`) |
+| `internal/branchdam` | REST client for branchDAM `/api/v1/agent/*` contract (`hello`, `handshake`, `events`, `rebase`, `node-status`, `check-content`) |
 | `internal/ingest` | DualWrite (streaming multi-writer), cache-defeating Verify, EXIF/SRT metadata extraction, naming engine |
 | `internal/queue` | Local SQLite queue (`queue.db`) persisting ingest records and retry states for offline field operation |
 | `internal/tray` | Menu bar / system tray companion (Windows/macOS) with loopback HTTP status server (`127.0.0.1:38080`, `config.DefaultStatusAddr`) |

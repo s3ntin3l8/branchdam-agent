@@ -450,10 +450,26 @@ type IngestConfig struct {
 	// the card-detection confirmation dialog (issue #79). When a newly mounted
 	// volume matches an entry here, it is ingested immediately without prompting.
 	AutoImportPaths []string `yaml:"autoImportPaths"`
+	// PreflightTimeoutSecs is the per-request HTTP timeout for content dedup
+	// pre-flight checks against the server (GET /api/v1/agent/check-content).
+	// When unset (<= 0), online ingest defaults to DefaultPreflightTimeoutSecs (5s)
+	// and offline ingest defaults to DefaultOfflinePreflightTimeoutSecs (2s).
+	// Note that this bounds each individual network request, not the total wall-clock
+	// time of any local disk hashing passes.
+	// Set to -1 to disable pre-flight entirely (server-side dedup is still active).
+	PreflightTimeoutSecs int `yaml:"preflightTimeoutSecs"`
 	// PauseUploadOnMetered defers network-touching operations (upload-stream bytes,
 	// queue drain HTTP calls) when on a metered or hotspot connection. Defaults to false.
 	PauseUploadOnMetered bool `yaml:"pauseUploadOnMetered"`
 }
+
+// DefaultPreflightTimeoutSecs is IngestConfig.PreflightTimeoutSecs's fallback
+// when unset (<= 0) during online ingest.
+const DefaultPreflightTimeoutSecs = 5
+
+// DefaultOfflinePreflightTimeoutSecs is the fallback preflight timeout when
+// unset (<= 0) during offline ingest.
+const DefaultOfflinePreflightTimeoutSecs = 2
 
 // ServerConfig is the branchDAM server this agent reports to.
 type ServerConfig struct {

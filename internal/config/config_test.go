@@ -110,6 +110,28 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 }
 
+func TestLoadIngestPreflightTimeoutSecs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	content := `
+ingest:
+  preflightTimeoutSecs: 10
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Ingest.PreflightTimeoutSecs != 10 {
+		t.Errorf("preflightTimeoutSecs = %d, want 10", cfg.Ingest.PreflightTimeoutSecs)
+	}
+}
+
 // TestTrayAndSelfUpdateDefaults checks the bare Go zero value of Config,
 // not what Load() actually hands an operator -- see
 // TestLoadSelfUpdateEnabledByDefault for that. The zero value keeping

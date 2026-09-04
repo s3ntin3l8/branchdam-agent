@@ -3,12 +3,17 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
+	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/naming"
 	"github.com/s3ntin3l8/branchdam-agent/internal/phash"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
@@ -20,12 +25,14 @@ import (
 // rebase) may not have happened yet by the time IngestCardOffline returns;
 // see the Queued field and internal/ingest/drain.go's Drain.
 type OfflineFileResult struct {
-	SourcePath string
-	LocalPath  string
-	IsSidecar  bool
-	Skipped    bool
-	SkipReason string
-	NodeUUID   string
+	SourcePath       string
+	LocalPath        string
+	IsSidecar        bool
+	Skipped          bool
+	SkipReason       string
+	ExistingNodeUUID string
+	NodeUUID         string
+
 	// Queued is true once this file has a durable queue.db row -- the
 	// crash-safety boundary. A restart after Queued=true is guaranteed to
 	// resume this file's remaining steps without re-copying the local file
@@ -81,6 +88,26 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 		return OfflineCardResult{}, fmt.Errorf("ingest: IngestCardOffline requires a non-nil Engine.Queue")
 	}
 
+	var dedupUnavailable bool
+	if checker, ok := e.Client.(contentChecker); ok && e.Ingest.PreflightTimeoutSecs >= 0 {
+		probeTimeout := time.Duration(config.DefaultOfflinePreflightTimeoutSecs) * time.Second
+		if e.Ingest.PreflightTimeoutSecs > 0 {
+			probeTimeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
+		}
+		probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
+		_, probeErr := checker.CheckContent(probeCtx, "", "")
+		probeCancel()
+		if probeErr != nil {
+			var he *branchdam.HTTPError
+			if !errors.As(probeErr, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented || he.StatusCode == http.StatusBadRequest) {
+				dedupUnavailable = true
+				slog.Warn("ingest: offline pre-flight dedup endpoint unavailable -- skipping pre-flight checks for this run", "err", probeErr)
+			} else {
+				slog.Warn("ingest: offline pre-flight probe returned error (proceeding per-file)", "err", probeErr)
+			}
+		}
+	}
+
 	stemSuffix := make(map[string]string)
 	var result OfflineCardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
@@ -106,7 +133,7 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 			})
 			return nil
 		}
-		result.Files = append(result.Files, e.ingestFileOffline(ctx, path, stemSuffix))
+		result.Files = append(result.Files, e.ingestFileOffline(ctx, path, stemSuffix, &dedupUnavailable))
 		return nil
 	})
 	if err != nil {
@@ -121,34 +148,40 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 //
 //  1. Check queue.db for an existing row keyed by this source path -- a
 //     restart resuming a previously-interrupted run over the same card. If
-//     found, trust it (the row only exists because step 4 below already
+//     found, trust it (the row only exists because step 5 below already
 //     completed on the earlier run) and return without touching the
 //     filesystem again.
-//  2. Otherwise, before writing anything: if localPath already exists on
+//  2. If ResolveDestination finds an identical file already at destination,
+//     skip.
+//  3. Pre-flight content dedup check: if server is reachable and pre-flight
+//     is enabled, query GET /api/v1/agent/check-content with fastHash and
+//     fullHash. If confirmed duplicate with active lifecycle state, skip
+//     without writing local copy or deleting existing files.
+//  4. Otherwise, before writing anything: if localPath already exists on
 //     disk but no queue row claims it, it's an orphaned partial from a run
-//     that crashed between step 3 and step 4 below -- remove it so
+//     that crashed between step 5 and step 6 below -- remove it so
 //     WriteLocal's O_EXCL doesn't wedge forever (mirrors DualWrite's own
 //     "caller must clean up a surviving partial before retrying" contract).
-//  3. Write and verify the local copy. This step has no server-durable side
-//     effect yet -- if the process dies here, restart lands back at step 2
+//  5. Write and verify the local copy. This step has no server-durable side
+//     effect yet -- if the process dies here, restart lands back at step 4
 //     with nothing to resume, which is correct: nothing was ever promised
 //     to branchDAM about this file.
-//  4. Mint NodeUUID, build both container paths and the NodeCreatedPayload,
+//  6. Mint NodeUUID, build both container paths and the NodeCreatedPayload,
 //     and INSERT the queue.db row. This commit is the durability boundary:
 //     once it returns, the file's identity and intent are permanent, and
 //     every step after this point is safe to retry indefinitely because it
 //     is idempotent against that same NodeUUID.
-//  5. Only after the row is durably queued, make one best-effort attempt at
+//  7. Only after the row is durably queued, make one best-effort attempt at
 //     POST EVENT_NODE_CREATED. Whether this succeeds or fails is not
 //     load-bearing for correctness -- Drain retries it either way -- it
 //     just means a workstation that's actually online (just missing the NAS
 //     mount, say) doesn't wait for the next Drain pass to start tracking the
 //     node server-side.
 //
-// Sidecars (.xmp/.srt) skip steps 4-5 entirely: no NodeCreatedPayload, no
+// Sidecars (.xmp/.srt) skip steps 6-7 entirely: no NodeCreatedPayload, no
 // EVENT_NODE_CREATED, no rebase -- only the local write and the archive-copy
 // queue row, mirroring IngestCard's sidecar handling.
-func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuffix map[string]string) OfflineFileResult {
+func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuffix map[string]string, dedupUnavailable *bool) OfflineFileResult {
 	fr := OfflineFileResult{SourcePath: srcPath}
 
 	ext := extNoDot(srcPath)
@@ -221,6 +254,16 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		fr.Skipped = true
 		fr.SkipReason = "already ingested (identical file exists at destination)"
 		return fr
+	}
+
+	// Pre-flight BLAKE3 content dedup check before WriteLocal.
+	if !fr.IsSidecar {
+		if skip, existingUUID, skipReason := e.checkContentDedup(ctx, srcPath, srcInfo.Size(), config.DefaultOfflinePreflightTimeoutSecs, dedupUnavailable); skip {
+			fr.Skipped = true
+			fr.SkipReason = skipReason
+			fr.ExistingNodeUUID = existingUUID
+			return fr
+		}
 	}
 
 	// An orphaned partial from a run that crashed after WriteLocal but
