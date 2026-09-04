@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/exiftool"
 )
 
 // ErrExiftoolUnavailable mirrors branchDAM's probe.ErrToolUnavailable --
@@ -40,11 +42,16 @@ type ExifResult struct {
 	GPSLongitude *float64
 }
 
-// exiftoolArgs is byte-for-byte the same fixed allowlist argv as branchDAM's
-// probe.exiftoolArgs: JSON output, grouped tag names, numeric values, "--"
-// path-injection guard.
+// exiftoolArgs is the same fixed allowlist flags as branchDAM's
+// probe.exiftoolArgs -- JSON output, grouped tag names, numeric values --
+// plus a "--" path-injection guard, added only when path actually needs it
+// (see exiftool.NeedsSeparator: an unconditional "--" would be safe for a
+// one-shot fork but permanently wedges a pooled -stay_open process).
 func exiftoolArgs(path string) []string {
-	return []string{"-j", "-n", "-G", "--", path}
+	if exiftool.NeedsSeparator(path) {
+		return []string{"-j", "-n", "-G", "--", path}
+	}
+	return []string{"-j", "-n", "-G", path}
 }
 
 const sidecarExt = ".xmp"
@@ -141,11 +148,13 @@ func valFloatPtr(row map[string]any, key string) *float64 {
 	return &f
 }
 
-// Exiftool wraps a resolved exiftool binary path, mirroring branchDAM's
-// probe.Prober but scoped to only what this agent needs (read + sidecar
-// merge; no WriteTags, no ffprobe/ffmpeg -- those stay server-side).
+// Exiftool wraps a resolved exiftool binary path plus a pooled exiftool
+// subprocess, mirroring branchDAM's probe.Prober but scoped to only what
+// this agent needs (read + sidecar merge; no WriteTags, no ffprobe/ffmpeg
+// -- those stay server-side).
 type Exiftool struct {
 	path string
+	pool *exiftool.Pool
 }
 
 // NewExiftool resolves exiftool via exec.LookPath. A missing binary is not
@@ -157,16 +166,68 @@ func NewExiftool() *Exiftool {
 	if err != nil {
 		return &Exiftool{}
 	}
-	return &Exiftool{path: path}
+	return newExiftoolAtResolvedPath(path)
+}
+
+// NewExiftoolAt builds an Exiftool bound to configuredPath (e.g.
+// config.IngestConfig.ExiftoolPath). A bare command name is resolved
+// through PATH via exec.LookPath, same as NewExiftool; an absolute path is
+// used as-is if it exists and is executable. An empty configuredPath falls
+// back to NewExiftool's own PATH discovery.
+func NewExiftoolAt(configuredPath string) *Exiftool {
+	if configuredPath == "" {
+		return NewExiftool()
+	}
+	path, err := exec.LookPath(configuredPath)
+	if err != nil {
+		return &Exiftool{}
+	}
+	return newExiftoolAtResolvedPath(path)
+}
+
+func newExiftoolAtResolvedPath(path string) *Exiftool {
+	return &Exiftool{path: path, pool: exiftool.NewPool(path)}
 }
 
 // HasExiftool reports whether exiftool was found at construction time.
 func (e *Exiftool) HasExiftool() bool { return e.path != "" }
 
 // Path returns the resolved exiftool binary path, or "" if unavailable.
-// Used by internal/phash.Extract, which takes the path as a plain string
-// rather than depending on this type.
 func (e *Exiftool) Path() string { return e.path }
+
+// Pool returns the pooled exiftool subprocess manager backing this
+// Exiftool, or nil if none was constructed (e.g. exiftool unavailable, or
+// this Exiftool was built as a bare struct literal rather than through
+// NewExiftool/NewExiftoolAt -- a pattern this package's own tests use).
+// Used by internal/phash.Extract, which takes the pool directly rather
+// than depending on this type.
+func (e *Exiftool) Pool() *exiftool.Pool { return e.pool }
+
+// Close terminates every pooled exiftool subprocess. Safe to call on an
+// Exiftool with no pool (e.g. exiftool unavailable).
+func (e *Exiftool) Close() {
+	if e.pool != nil {
+		e.pool.Close()
+	}
+}
+
+// execute runs exiftool with args through the pool when one is set,
+// falling back to a plain one-shot fork otherwise -- the latter keeps a
+// bare &Exiftool{path: ...} literal (as this package's own tests build)
+// working without requiring every call site to go through a constructor.
+func (e *Exiftool) execute(ctx context.Context, args []string) ([]byte, error) {
+	if e.pool != nil {
+		return e.pool.Execute(ctx, args)
+	}
+	cmd := exec.CommandContext(ctx, e.path, args...) //nolint:gosec // path is a resolved exiftool binary, args are caller-built
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("exiftool fork %v: %w (stderr: %s)", args, err, stderr.String())
+	}
+	return stdout.Bytes(), nil
+}
 
 // Exif runs exiftool against path, merges a sibling .xmp sidecar's tags
 // (sidecar-wins) when one exists, and extracts exactly the promoted-column
@@ -176,16 +237,13 @@ func (e *Exiftool) Exif(ctx context.Context, path string) (*ExifResult, error) {
 		return nil, ErrExiftoolUnavailable
 	}
 
-	cmd := exec.CommandContext(ctx, e.path, exiftoolArgs(path)...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ingest: exiftool %s: %w (stderr: %s)", path, err, stderr.String())
+	stdout, err := e.execute(ctx, exiftoolArgs(path))
+	if err != nil {
+		return nil, fmt.Errorf("ingest: exiftool %s: %w", path, err)
 	}
 
 	var rows []map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+	if err := json.Unmarshal(stdout, &rows); err != nil {
 		return nil, fmt.Errorf("ingest: parse exiftool output for %s: %w", path, err)
 	}
 	if len(rows) == 0 {
@@ -227,15 +285,13 @@ func (e *Exiftool) readSidecarRow(ctx context.Context, path string) (map[string]
 		return nil, false
 	}
 
-	cmd := exec.CommandContext(ctx, e.path, exiftoolArgs(sidecar)...)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
+	stdout, err := e.execute(ctx, exiftoolArgs(sidecar))
+	if err != nil {
 		return nil, false
 	}
 
 	var rows []map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil || len(rows) == 0 {
+	if err := json.Unmarshal(stdout, &rows); err != nil || len(rows) == 0 {
 		return nil, false
 	}
 	return rows[0], true

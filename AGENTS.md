@@ -39,6 +39,7 @@ make build-darwin-app# Assembles macOS .app bundle via tools/mkbundle
 | `internal/nodeindex` | File path to `nodeUuid` lookup resolver |
 | `internal/hashing` | Ported xxHash64 `FastHash`, `StreamingFastHasher`, BLAKE3 `FullHash`, and `PerceptualHash` |
 | `internal/config` | YAML config loader with environment expansion and surgical `yaml.Node` atomic patcher |
+| `internal/exiftool` | Pooled `exiftool -stay_open` subprocess manager (`Pool`), shared by `internal/ingest`'s EXIF extraction and `internal/phash`'s RAW preview fallback |
 
 ## Key Invariants
 

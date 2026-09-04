@@ -130,7 +130,7 @@ func NewEngine(client nodeCreator, agentID string, ingestCfg config.IngestConfig
 		AgentID:     agentID,
 		Ingest:      ingestCfg,
 		Mappings:    mappings,
-		Exiftool:    NewExiftool(),
+		Exiftool:    NewExiftoolAt(ingestCfg.ExiftoolPath),
 		Now:         time.Now,
 		NewNodeUUID: func() (string, error) { id, err := uuid.NewV7(); return id.String(), err },
 		IsMetered:   netgate.IsMetered,
@@ -383,7 +383,7 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	// (potentially several) decode/preview-extraction attempts avoids a
 	// second hit against a slow card reader.
 	if e.Exiftool != nil && isImageExt(ext) {
-		if ph, err := phash.Extract(ctx, e.Exiftool.Path(), localPath); err == nil {
+		if ph, err := phash.Extract(ctx, e.Exiftool.Pool(), localPath); err == nil {
 			fr.PHash = ph
 		}
 	}
@@ -549,7 +549,7 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 			}
 
 			if isImageExt(ext) && e.Exiftool != nil {
-				if ph, err := phash.Extract(ctx, e.Exiftool.Path(), localPath); err == nil {
+				if ph, err := phash.Extract(ctx, e.Exiftool.Pool(), localPath); err == nil {
 					fr.PHash = ph
 				}
 			}
@@ -626,7 +626,7 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 	}
 
 	if isImageExt(ext) && e.Exiftool != nil {
-		if ph, err := phash.Extract(ctx, e.Exiftool.Path(), localPath); err == nil {
+		if ph, err := phash.Extract(ctx, e.Exiftool.Pool(), localPath); err == nil {
 			fr.PHash = ph
 		}
 	}

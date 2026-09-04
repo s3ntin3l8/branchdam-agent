@@ -446,6 +446,12 @@ type IngestConfig struct {
 	// Extensions are compared without the leading dot ("jpg" in YAML
 	// matches "IMG_0001.jpg" on disk).
 	AllowedExtensions []string `yaml:"allowedExtensions"`
+	// ExiftoolPath overrides which exiftool binary the agent pools and
+	// invokes for metadata/preview extraction. A bare command name (e.g.
+	// "exiftool-13") is resolved through PATH; an absolute path is used
+	// as-is. Empty (the default) resolves "exiftool" through PATH, same
+	// as every existing config.
+	ExiftoolPath string `yaml:"exiftoolPath"`
 	// AutoImportPaths is the allowlist of volume paths or labels that bypass
 	// the card-detection confirmation dialog (issue #79). When a newly mounted
 	// volume matches an entry here, it is ingested immediately without prompting.

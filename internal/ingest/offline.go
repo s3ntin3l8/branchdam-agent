@@ -340,7 +340,7 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 	}
 
 	if e.Exiftool != nil && isImageExt(ext) {
-		if ph, err := phash.Extract(ctx, e.Exiftool.Path(), localPath); err == nil {
+		if ph, err := phash.Extract(ctx, e.Exiftool.Pool(), localPath); err == nil {
 			fr.PHash = ph
 		}
 	}
