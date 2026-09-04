@@ -112,7 +112,7 @@ func (r Record) Done() bool {
 // not database-scoped, so a pool of more than one connection would apply
 // them to whichever connection happened to run the PRAGMA statement and
 // leave the others at SQLite's defaults -- the same trap class as
-// branchDAM's own PRAGMA foreign_keys invariant (see that repo's CLAUDE.md).
+// branchDAM's own PRAGMA foreign_keys invariant (see that repo's AGENTS.md).
 // One connection also matches this package's actual concurrency
 // requirement: one agent process, one queue.db, never written from two
 // goroutines at once.
