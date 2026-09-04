@@ -253,6 +253,8 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 // extraction (needed up front to fill the naming template), dual-copy
 // write, verify, DJI .srt GPS, and (for non-sidecar files) submission.
 func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string, dedupUnavailable *bool) FileResult {
+	// UploadStream mode sends bytes directly to the server upload endpoint;
+	// server-side dedup is the backstop for that path.
 	if e.Ingest.UploadStream {
 		return e.ingestFileUpload(ctx, srcPath)
 	}
@@ -311,56 +313,12 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	}
 
 	// Pre-flight BLAKE3 content dedup check before DualWrite.
-	// When enabled, queries GET /api/v1/agent/check-content first with fastHash
-	// (xxHash64 sampled via fastHashFile), and on a hit confirms with fullHash
-	// (BLAKE3-256) to skip writing duplicate bytes to archiveRoot / localEditRoot.
-	if (dedupUnavailable == nil || !*dedupUnavailable) && e.Ingest.PreflightTimeoutSecs >= 0 && e.Client != nil && !fr.IsSidecar {
-		if checker, ok := e.Client.(contentChecker); ok {
-			timeout := time.Duration(config.DefaultPreflightTimeoutSecs) * time.Second
-			if e.Ingest.PreflightTimeoutSecs > 0 {
-				timeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
-			}
-
-			fastHash, err := fastHashFile(srcPath, srcInfo.Size())
-			if err != nil {
-				slog.Warn("ingest: pre-flight fast hash failed", "source", srcPath, "err", err)
-			} else {
-				pCtx, pCancel := context.WithTimeout(ctx, timeout)
-				res, err := checker.CheckContent(pCtx, fastHash, "")
-				pCancel()
-				if err != nil {
-					slog.Warn("ingest: content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
-					if dedupUnavailable != nil {
-						var he *branchdam.HTTPError
-						if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented) {
-							*dedupUnavailable = true
-						}
-					}
-				} else if res.Found {
-					fullHash, err := blake3File(srcPath)
-					if err != nil {
-						slog.Warn("ingest: pre-flight full hash failed", "source", srcPath, "err", err)
-					} else {
-						pCtx2, pCancel2 := context.WithTimeout(ctx, timeout)
-						res2, err := checker.CheckContent(pCtx2, fastHash, fullHash)
-						pCancel2()
-						if err != nil {
-							slog.Warn("ingest: content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
-							if dedupUnavailable != nil {
-								var he *branchdam.HTTPError
-								if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented) {
-									*dedupUnavailable = true
-								}
-							}
-						} else if res2.Found && isLiveLifecycleState(res2.LifecycleState) {
-							fr.Skipped = true
-							fr.SkipReason = fmt.Sprintf("duplicate: already in library as node %s at %s", res2.NodeUUID, res2.FilePath)
-							fr.ExistingNodeUUID = res2.NodeUUID
-							return fr
-						}
-					}
-				}
-			}
+	if !fr.IsSidecar {
+		if skip, existingUUID, skipReason := e.checkContentDedup(ctx, srcPath, srcInfo.Size(), config.DefaultPreflightTimeoutSecs, dedupUnavailable); skip {
+			fr.Skipped = true
+			fr.SkipReason = skipReason
+			fr.ExistingNodeUUID = existingUUID
+			return fr
 		}
 	}
 
@@ -689,4 +647,80 @@ func blake3File(p string) (string, error) {
 		return "", fmt.Errorf("hash blake3: %w", err)
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// checkContentDedup performs the best-effort pre-flight BLAKE3 content dedup check.
+// It queries GET /api/v1/agent/check-content with fastHash (xxHash64 sampled via fastHashFile
+// using canonical 2MiB regions matching the server's fast_hash column), and on a hit
+// confirms with fullHash (BLAKE3-256). If confirmed duplicate with a live lifecycle state,
+// returns skip=true along with the existing node UUID and human-readable skip reason.
+func (e *Engine) checkContentDedup(ctx context.Context, srcPath string, srcSize int64, defaultTimeoutSecs int, dedupUnavailable *bool) (skip bool, existingNodeUUID, skipReason string) {
+	if (dedupUnavailable != nil && *dedupUnavailable) || e.Ingest.PreflightTimeoutSecs < 0 || e.Client == nil {
+		return false, "", ""
+	}
+	checker, ok := e.Client.(contentChecker)
+	if !ok {
+		return false, "", ""
+	}
+	timeout := time.Duration(defaultTimeoutSecs) * time.Second
+	if e.Ingest.PreflightTimeoutSecs > 0 {
+		timeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
+	}
+
+	fastHash, err := fastHashFile(srcPath, srcSize)
+	if err != nil {
+		slog.Warn("ingest: pre-flight fast hash failed", "source", srcPath, "err", err)
+		return false, "", ""
+	}
+
+	pCtx, pCancel := context.WithTimeout(ctx, timeout)
+	res, err := checker.CheckContent(pCtx, fastHash, "")
+	pCancel()
+	if err != nil {
+		if dedupUnavailable != nil && *dedupUnavailable {
+			slog.Debug("ingest: content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
+		} else {
+			slog.Warn("ingest: content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
+		}
+		if dedupUnavailable != nil {
+			var he *branchdam.HTTPError
+			if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented || he.StatusCode == http.StatusBadRequest) {
+				*dedupUnavailable = true
+			}
+		}
+		return false, "", ""
+	}
+
+	if !res.Found {
+		return false, "", ""
+	}
+
+	fullHash, err := blake3File(srcPath)
+	if err != nil {
+		slog.Warn("ingest: pre-flight full hash failed", "source", srcPath, "err", err)
+		return false, "", ""
+	}
+
+	pCtx2, pCancel2 := context.WithTimeout(ctx, timeout)
+	res2, err := checker.CheckContent(pCtx2, fastHash, fullHash)
+	pCancel2()
+	if err != nil {
+		if dedupUnavailable != nil && *dedupUnavailable {
+			slog.Debug("ingest: content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
+		} else {
+			slog.Warn("ingest: content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
+		}
+		if dedupUnavailable != nil {
+			var he *branchdam.HTTPError
+			if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented || he.StatusCode == http.StatusBadRequest) {
+				*dedupUnavailable = true
+			}
+		}
+		return false, "", ""
+	}
+
+	if res2.Found && isLiveLifecycleState(res2.LifecycleState) {
+		return true, res2.NodeUUID, fmt.Sprintf("duplicate: already in library as node %s at %s", res2.NodeUUID, res2.FilePath)
+	}
+	return false, "", ""
 }

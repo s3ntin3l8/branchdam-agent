@@ -1281,6 +1281,35 @@ func TestIngestFileDedupPreFlight(t *testing.T) {
 			t.Errorf("expected 0 CheckContent calls for AlreadyIngested file, got %d", len(client.checkCalls))
 		}
 	})
+
+	t.Run("UploadStream mode bypasses pre-flight CheckContent", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0007.JPG"), []byte("upload-stream-data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		uploader := &fakeUploaderClient{}
+		e := NewEngine(uploader, "test-agent", config.IngestConfig{
+			LocalEditRoot:        filepath.Join(dir, "local"),
+			UploadStream:         true,
+			PreflightTimeoutSecs: 5,
+		}, nil)
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		if len(res.Files) != 1 {
+			t.Fatalf("got %d files, want 1", len(res.Files))
+		}
+		if len(uploader.uploadCalls) != 1 {
+			t.Errorf("expected 1 upload call, got %d", len(uploader.uploadCalls))
+		}
+	})
 }
 
 // TestIngestCardCameraModelTraversalE2E is the end-to-end assertion that

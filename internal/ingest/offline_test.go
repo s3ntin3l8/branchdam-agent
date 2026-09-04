@@ -773,7 +773,7 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 
 		// Verify that the per-file timeout warning was logged
 		logStr := buf.String()
-		if !strings.Contains(logStr, "offline content check pre-flight failed (fail-open)") {
+		if !strings.Contains(logStr, "content check pre-flight failed (fail-open)") {
 			t.Errorf("expected per-file timeout warning in logs, got:\n%s", logStr)
 		}
 	})

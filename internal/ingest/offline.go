@@ -99,7 +99,7 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 		probeCancel()
 		if probeErr != nil {
 			var he *branchdam.HTTPError
-			if !errors.As(probeErr, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented) {
+			if !errors.As(probeErr, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented || he.StatusCode == http.StatusBadRequest) {
 				dedupUnavailable = true
 				slog.Warn("ingest: offline pre-flight dedup endpoint unavailable -- skipping pre-flight checks for this run", "err", probeErr)
 			} else {
@@ -257,53 +257,12 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 	}
 
 	// Pre-flight BLAKE3 content dedup check before WriteLocal.
-	if (dedupUnavailable == nil || !*dedupUnavailable) && e.Ingest.PreflightTimeoutSecs >= 0 && e.Client != nil && !fr.IsSidecar {
-		if checker, ok := e.Client.(contentChecker); ok {
-			timeout := time.Duration(config.DefaultOfflinePreflightTimeoutSecs) * time.Second
-			if e.Ingest.PreflightTimeoutSecs > 0 {
-				timeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
-			}
-
-			fastHash, err := fastHashFile(srcPath, srcInfo.Size())
-			if err != nil {
-				slog.Warn("ingest: offline pre-flight fast hash failed", "source", srcPath, "err", err)
-			} else {
-				pCtx, pCancel := context.WithTimeout(ctx, timeout)
-				res, err := checker.CheckContent(pCtx, fastHash, "")
-				pCancel()
-				if err != nil {
-					slog.Warn("ingest: offline content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
-					if dedupUnavailable != nil {
-						var he *branchdam.HTTPError
-						if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented) {
-							*dedupUnavailable = true
-						}
-					}
-				} else if res.Found {
-					fullHash, err := blake3File(srcPath)
-					if err != nil {
-						slog.Warn("ingest: offline pre-flight full hash failed", "source", srcPath, "err", err)
-					} else {
-						pCtx2, pCancel2 := context.WithTimeout(ctx, timeout)
-						res2, err := checker.CheckContent(pCtx2, fastHash, fullHash)
-						pCancel2()
-						if err != nil {
-							slog.Warn("ingest: offline content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
-							if dedupUnavailable != nil {
-								var he *branchdam.HTTPError
-								if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented) {
-									*dedupUnavailable = true
-								}
-							}
-						} else if res2.Found && isLiveLifecycleState(res2.LifecycleState) {
-							fr.Skipped = true
-							fr.SkipReason = fmt.Sprintf("duplicate: already in library as node %s at %s", res2.NodeUUID, res2.FilePath)
-							fr.ExistingNodeUUID = res2.NodeUUID
-							return fr
-						}
-					}
-				}
-			}
+	if !fr.IsSidecar {
+		if skip, existingUUID, skipReason := e.checkContentDedup(ctx, srcPath, srcInfo.Size(), config.DefaultOfflinePreflightTimeoutSecs, dedupUnavailable); skip {
+			fr.Skipped = true
+			fr.SkipReason = skipReason
+			fr.ExistingNodeUUID = existingUUID
+			return fr
 		}
 	}
 

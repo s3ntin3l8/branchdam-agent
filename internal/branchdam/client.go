@@ -252,7 +252,9 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 }
 
 // get issues a GET to c.baseURL+path, JSON-unmarshalling a 2xx response into out
-// (skipped if out is nil). A non-2xx response is returned as *HTTPError.
+// (skipped if out is nil). path must be the exact request URI path + query string
+// (e.g. constructed via url.Values.Encode) as transmitted to the server, matching
+// the URI string signed in X-Signature. A non-2xx response is returned as *HTTPError.
 func (c *Client) get(ctx context.Context, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
