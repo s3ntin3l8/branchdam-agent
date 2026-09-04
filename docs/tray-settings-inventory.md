@@ -12,7 +12,7 @@ The issue body lists the graduation candidates in its acceptance-criteria checkl
 
 | Field | In `Config` today? | Sub-issue | Graduator |
 |---|---|---|---|
-| `ingest.autoEject: bool` (default `false`) | No | M5 #87 | New `SettingsView.AutoEject` + `SetBool("ingest.autoEject", ...)` |
+| `ingest.autoEject: bool` (default `false`) | **Yes** (`IngestConfig.AutoEject`, `config.go:455`) | M5 #87 | New `SettingsView.AutoEject` + `SetBool("ingest.autoEject", ...)` |
 | `ingest.requireDCIM: bool` (default `false`) | No | M5 #81 | New `SettingsView.RequireDCIM` + `SetBool("ingest.requireDCIM", ...)` |
 | `ingest.allowedExtensions: []string` (default `[]`) | **Yes** (`IngestConfig.AllowedExtensions`, `config.go:433`) | M5 #81 | New `SettingsView.AllowedExtensions` + a list-editing dialog (multi-select / comma-separated) — the existing `PromptAndSet` is single-value only, so a new `PromptAndSetList(SettingsField)` is likely needed |
 | `ingest.pauseUploadOnMetered: bool` (default `false`) | **Yes** (`IngestConfig.PauseUploadOnMetered`, `config.go:450`) | M5 #84 | Graduated: `SettingsView.PauseUploadOnMetered` + `SetBool("ingest.pauseUploadOnMetered", ...)` |

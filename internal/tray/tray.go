@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam-agent/internal/eject"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
 )
@@ -359,6 +360,10 @@ type Runner struct {
 	detectorErrHandler   func(err error)
 	pauseUploadOnMetered bool
 	isMeteredFn          func() (bool, error)
+
+	// autoEject gates OS-level safe eject after verified ingest (issue #87).
+	autoEject bool
+	ejectFn   func(mountPath string) error
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -375,6 +380,7 @@ func NewRunner(ingester Ingester, watchDirs []string, scratchDir string) *Runner
 		lastSync:         map[IntegrationID]*SyncSummary{},
 		hookInFlight:     map[HookID]bool{},
 		hookState:        map[HookID]*HookState{},
+		ejectFn:          eject.Eject,
 	}
 	r.wireProgress(ingester)
 	return r
@@ -578,10 +584,27 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 	r.mu.Lock()
 	r.last = &summary
 	notifier := r.notifier
+	autoEject := r.autoEject
+	ejectFn := r.ejectFn
 	r.mu.Unlock()
 
-	if notifier != nil && summary.OK() && summary.Submitted > 0 {
-		volName := filepath.Base(cardPath)
+	volName := filepath.Base(cardPath)
+
+	if summary.OK() && autoEject {
+		if ejectFn == nil {
+			ejectFn = eject.Eject
+		}
+		if err := ejectFn(cardPath); err != nil {
+			slog.Error("failed to eject card", "card", cardPath, "err", err)
+			if notifier != nil {
+				notifier("branchDAM Agent", "Eject failed — please eject manually")
+			}
+		} else {
+			if notifier != nil {
+				notifier("branchDAM Agent", fmt.Sprintf("%s ejected — safe to remove", volName))
+			}
+		}
+	} else if notifier != nil && summary.OK() && summary.Submitted > 0 {
 		action := "imported"
 		if summary.Offline {
 			action = "queued offline"
@@ -1138,6 +1161,31 @@ func (r *Runner) SetNotifier(fn func(title, message string)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.notifier = fn
+}
+
+// SetAutoEject sets whether cards should be automatically unmounted/ejected
+// after a successful verified ingest (issue #87).
+func (r *Runner) SetAutoEject(v bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.autoEject = v
+}
+
+// AutoEject reports whether auto-eject is enabled.
+func (r *Runner) AutoEject() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.autoEject
+}
+
+// SetEjectFunc overrides the eject implementation called when autoEject is enabled (used for tests).
+func (r *Runner) SetEjectFunc(fn func(mountPath string) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if fn == nil {
+		fn = eject.Eject
+	}
+	r.ejectFn = fn
 }
 
 // ForgetSkipped clears a volume path from the session-scoped skip set

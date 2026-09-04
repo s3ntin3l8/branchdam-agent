@@ -10,6 +10,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
+	"github.com/s3ntin3l8/branchdam-agent/internal/eject"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 )
@@ -97,6 +98,11 @@ func runIngestCmd(args []string) int {
 	if !ok {
 		return 1
 	}
+	if cfg.Ingest.AutoEject {
+		if err := eject.Eject(*cardPath); err != nil {
+			fmt.Fprintf(os.Stderr, "branchdam-agent ingest: auto-eject failed: %v\n", err)
+		}
+	}
 	return 0
 }
 
@@ -132,7 +138,13 @@ func runIngestOffline(ctx context.Context, engine *ingest.Engine, cfg config.Con
 		return 1
 	}
 
-	return printOfflineIngestReport(os.Stdout, cardPath, result, time.Since(start))
+	exitCode := printOfflineIngestReport(os.Stdout, cardPath, result, time.Since(start))
+	if exitCode == 0 && cfg.Ingest.AutoEject {
+		if err := eject.Eject(cardPath); err != nil {
+			fmt.Fprintf(os.Stderr, "branchdam-agent ingest -offline: auto-eject failed: %v\n", err)
+		}
+	}
+	return exitCode
 }
 
 // printOfflineIngestReport mirrors printIngestReport's shape, adapted to

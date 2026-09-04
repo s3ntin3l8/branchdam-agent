@@ -467,6 +467,9 @@ type IngestConfig struct {
 	// PauseUploadOnMetered defers network-touching operations (upload-stream bytes,
 	// queue drain HTTP calls) when on a metered or hotspot connection. Defaults to false.
 	PauseUploadOnMetered bool `yaml:"pauseUploadOnMetered"`
+	// AutoEject unmounts and ejects the card volume after a successful verified ingest.
+	// Defaults to false (opt-in).
+	AutoEject bool `yaml:"autoEject"`
 }
 
 // DefaultPreflightTimeoutSecs is IngestConfig.PreflightTimeoutSecs's fallback

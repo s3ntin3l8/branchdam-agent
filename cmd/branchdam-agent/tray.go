@@ -512,6 +512,7 @@ func runTrayCmd(args []string) int {
 
 	runner.SetDetectorInterval(time.Duration(cfg.Ingest.PollIntervalSecs) * time.Second)
 	runner.SetDetectorRequireDCIM(cfg.Ingest.RequireDCIM)
+	runner.SetAutoEject(cfg.Ingest.AutoEject)
 	runner.SetIngestGate(newTrayIngestGate(dialog, settings))
 	runner.SetNotifier(func(title, message string) {
 		go func() {

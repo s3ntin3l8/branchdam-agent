@@ -1109,3 +1109,28 @@ func TestConfigSettingsReloadRefreshesHookStateOnScriptsDirChange(t *testing.T) 
 		t.Errorf("post-reload Installed = true, want false -- the file at %s is gone from the cache's view of the world", newDir)
 	}
 }
+
+func TestConfigSettingsSetBoolAutoEject(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetBool("ingest.autoEject", true); err != nil {
+		t.Fatalf("SetBool ingest.autoEject: %v", err)
+	}
+
+	if !s.Snapshot().AutoEject {
+		t.Error("expected Snapshot to reflect AutoEject=true")
+	}
+
+	if !runner.AutoEject() {
+		t.Error("expected runner.AutoEject() to be true after reload")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Ingest.AutoEject {
+		t.Error("expected ingest.autoEject to be persisted to disk")
+	}
+}
