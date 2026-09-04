@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -31,6 +32,7 @@ func runIngestCmd(args []string) int {
 	timeout := fs.Duration("timeout", 10*time.Minute, "overall ingest run timeout")
 	offline := fs.Bool("offline", false, "offline mode (issue #4): write the local copy only, queue the archive copy and EVENT_NODE_CREATED in queue.db for a later `queue-drain` -- see offline.* in config and docs/offline-queue.md")
 	upload := fs.Bool("upload", false, "direct HTTP streaming upload to POST /api/v1/agent/upload instead of local archiveRoot dual-write")
+	allowedExts := fs.String("allowed-extensions", "", "comma-separated allowlist of file extensions (issue #159, override of ingest.allowedExtensions in config.yaml). Case-insensitive, leading dot optional on each entry. Empty = no override.")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -51,6 +53,27 @@ func runIngestCmd(args []string) int {
 	}
 	if *upload {
 		cfg.Ingest.UploadStream = true
+	}
+	if *allowedExts != "" {
+		// Override config's allowlist for this invocation only. Normalized
+		// the same way internal/ingest/filter.go normalizes it at
+		// comparison time (lowercase + TrimPrefix ".") so what an
+		// operator types on the CLI matches what's compared against a
+		// file's extNoDot. Empty-string entries (e.g. a trailing comma)
+		// are dropped rather than treated as a literal "" extension,
+		// which the filter would otherwise interpret as "this empty
+		// string is on the list" via its `if ext == ""` short-circuit
+		// (the safer default -- see filter.go's doc comment on why
+		// ext=="" is never filtered).
+		raw := strings.Split(*allowedExts, ",")
+		exts := make([]string, 0, len(raw))
+		for _, e := range raw {
+			e = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(e), "."))
+			if e != "" {
+				exts = append(exts, e)
+			}
+		}
+		cfg.Ingest.AllowedExtensions = exts
 	}
 	if cfg.Server.APIKey == "" {
 		fmt.Fprintln(os.Stderr, "branchdam-agent ingest: server.apiKey is empty in config")

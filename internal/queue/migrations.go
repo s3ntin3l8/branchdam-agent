@@ -24,6 +24,16 @@ var migrations = []struct {
 		// aggregates on the same two columns. Leading with
 		// archive_copy_status maximizes leftmost-prefix utilization for the
 		// most selective filter (PENDING vs non-PENDING).
+		//
+		// Deliberately NOT keyed on node_created_status (issue #161):
+		// every query in store.go filters/aggregates on
+		// archive_copy_status and/or rebase_status only --
+		// node_created_status is set/updated by MarkNodeCreatedDone
+		// (store.go:380) but is never used in a WHERE/GROUP BY
+		// clause, so adding it as the index's leading column would
+		// widen the index without improving any query plan. The
+		// narrower (archive_copy_status, rebase_status) index is
+		// functionally correct and faster.
 		sql: `
 CREATE TABLE IF NOT EXISTS queue_nodes (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -10,6 +10,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// fcntlFncacheFn is the indirection used to call fcntl(F_NOCACHE) on a
+// file descriptor. Indirected through a package var so tests can
+// substitute an error-returning stub (mirrors writer.go's
+// syncParentDirFn and ingest.go's cHtimesFn patterns) without having to
+// reach a real filesystem that legitimately rejects F_NOCACHE -- a
+// property macOS's own APFS doesn't reliably exhibit, even on a tmpfs-
+// backed t.TempDir().
+var fcntlFncacheFn = func(fd uintptr) error {
+	_, err := unix.FcntlInt(fd, unix.F_NOCACHE, 1)
+	return err
+}
+
 // openForVerify on macOS attempts to bypass the OS page cache via F_NOCACHE
 // (fcntl). If fcntl succeeds, unbuffered direct I/O is achieved. If fcntl
 // fails with ENOTSUP (unsupported filesystem), it falls back to the
@@ -22,7 +34,7 @@ func openForVerify(path string) (io.ReadCloser, VerifyMethod, error) {
 		return nil, "", err
 	}
 
-	if _, err := unix.FcntlInt(f.Fd(), unix.F_NOCACHE, 1); err == nil {
+	if err := fcntlFncacheFn(f.Fd()); err == nil {
 		return f, VerifyMethodUnbuffered, nil
 	} else if !errors.Is(err, unix.ENOTSUP) {
 		f.Close()

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,181 @@ import (
 	"sync"
 	"testing"
 )
+
+// TestRunIngestAllowedExtensionsFlag pins issue #159: the
+// `-allowed-extensions` CLI flag on `branchdam-agent ingest` must
+// override whatever's in config.yaml for the duration of that
+// invocation. A non-empty comma-separated list narrows the walk to
+// only matching extensions (case-insensitive, leading-dot optional),
+// mirroring `internal/ingest/filter.go`'s normalization. Files with
+// no extension are NOT filtered (Hermes review on #127: positive
+// identification via isImageExt/isVideoExt is the safer default).
+func TestRunIngestAllowedExtensionsFlag(t *testing.T) {
+	var mu sync.Mutex
+	var envelopes []map[string]any
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/events", func(w http.ResponseWriter, r *http.Request) {
+		var env map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&env)
+		mu.Lock()
+		envelopes = append(envelopes, env)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"eventId":"evt-1"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	archiveRoot := filepath.Join(dir, "archive")
+	localRoot := filepath.Join(dir, "local")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Mixed extensions: only jpg and mp4 should reach /events.
+	for _, name := range []string{
+		"a.jpg", // allowed
+		"b.MP4", // allowed (case)
+		"c.txt", // filtered
+		"d.png", // filtered
+		"e",     // no ext -- NOT filtered (passes through to isImageExt/isVideoExt)
+	} {
+		if err := os.WriteFile(filepath.Join(cardRoot, name), []byte("bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"" + srv.URL + "\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"pathMappings:\n" +
+		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"    containerPath: \"/storage/archive\"\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + archiveRoot + "\"\n" +
+		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  pathTemplate: \"{original_name}\"\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mixed-case list with leading-dot variants to exercise normalization.
+	got := run([]string{
+		"ingest",
+		"-config", cfgPath,
+		"-card", cardRoot,
+		"-timeout", "30s",
+		"-allowed-extensions", ".JPG, mp4, .PNG-noop",
+	})
+	if got != 0 {
+		t.Fatalf("run([ingest -allowed-extensions]) = %d, want 0", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// 2 submitted (a.jpg + b.MP4) + 1 no-ext (e). txt and png filtered.
+	// .PNG-noop isn't a real file extension on disk -- included to confirm
+	// the parser doesn't choke on syntactically-valid-but-noisy values.
+	if len(envelopes) != 3 {
+		names := make([]string, 0, len(envelopes))
+		for _, env := range envelopes {
+			payloadStr, _ := env["payload"].(string)
+			var p map[string]any
+			_ = json.Unmarshal([]byte(payloadStr), &p)
+			names = append(names, fmt.Sprintf("%v", p["fileName"]))
+		}
+		t.Fatalf("got %d envelopes, want 3 (a.jpg, b.MP4, e); saw: %v", len(envelopes), names)
+	}
+	for _, env := range envelopes {
+		payloadStr, ok := env["payload"].(string)
+		if !ok {
+			t.Fatalf("payload is not a JSON string: %T", env["payload"])
+		}
+		var p map[string]any
+		if err := json.Unmarshal([]byte(payloadStr), &p); err != nil {
+			t.Fatalf("payload does not parse: %v", err)
+		}
+		name, _ := p["fileName"].(string)
+		switch name {
+		case "a.jpg", "b.MP4", "e":
+			// allowed
+		default:
+			t.Errorf("unexpected file reached server: %q", name)
+		}
+	}
+}
+
+// TestRunIngestAllowedExtensionsFlagNotSet pins regression: when the
+// flag is absent, config.yaml's allowedExtensions (here, empty) is
+// used unchanged -- no override behavior. Mirrors the
+// #100 default behavior pinned by TestIngestCardAllowedExtensionsAcceptsAllWhenEmpty.
+func TestRunIngestAllowedExtensionsFlagNotSet(t *testing.T) {
+	var mu sync.Mutex
+	var envelopes []map[string]any
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/events", func(w http.ResponseWriter, r *http.Request) {
+		var env map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&env)
+		mu.Lock()
+		envelopes = append(envelopes, env)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"eventId":"evt-1"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	archiveRoot := filepath.Join(dir, "archive")
+	localRoot := filepath.Join(dir, "local")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Both files are valid media; with no flag and empty config list,
+	// the walk accepts both (Hermes: empty list = "accept all").
+	for _, name := range []string{"a.jpg", "b.mp4"} {
+		if err := os.WriteFile(filepath.Join(cardRoot, name), []byte("bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"" + srv.URL + "\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"pathMappings:\n" +
+		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"    containerPath: \"/storage/archive\"\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + archiveRoot + "\"\n" +
+		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  pathTemplate: \"{original_name}\"\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := run([]string{"ingest", "-config", cfgPath, "-card", cardRoot, "-timeout", "30s"})
+	if got != 0 {
+		t.Fatalf("run([ingest]) = %d, want 0", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(envelopes) != 2 {
+		t.Fatalf("got %d envelopes, want 2 (no flag, empty config list = accept all)", len(envelopes))
+	}
+}
 
 // TestRunIngestAgainstRealHTTPServer exercises the full ingest stack --
 // config.Load, branchdam.New, ingest.Engine, and a real POST
