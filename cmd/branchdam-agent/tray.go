@@ -446,9 +446,15 @@ func runTrayCmd(args []string) int {
 	// HookState's own doc comment for why a live Detect on every refresh
 	// tick would reproduce the statusQueueReadTimeout hazard. Detect runs
 	// exactly once here, at startup; the only other place it runs again is
-	// inside TriggerHookInstall, after a successful install.
+	// inside TriggerHookInstall, after a successful install, and from
+	// settings.reload() when integrations.resolve.scriptsDir changes
+	// (issue #154 / audit F-17: hook-state cache refresh after settings
+	// change). The settings-reload seam calls SetResolveInstaller below
+	// so reload() can re-Detect against a freshly reloaded scriptsDir and
+	// seed Runner.hookState with the snapshot via Runner.RefreshHookState.
 	resolveInstaller := &resolveHookInstaller{scriptsDir: cfg.Integrations.Resolve.ScriptsDir}
 	runner.SetHookInstallers(map[tray.HookID]tray.HookInstaller{tray.HookResolve: resolveInstaller})
+	settings.SetResolveInstaller(resolveInstaller)
 	initialHookState := resolvehook.Detect(resolveHookCandidateDirs(cfg.Integrations.Resolve.ScriptsDir), resolve.FileName, resolve.SourceSHA256)
 	runner.SetHookState(tray.HookResolve, tray.HookState{
 		At:        time.Now(),

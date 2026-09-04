@@ -770,6 +770,145 @@ func TestSetHookStateSeedsCacheWithoutCallingInstaller(t *testing.T) {
 	}
 }
 
+// TestRefreshHookStateOverwritesSeedAndDoesNotCallInstaller pins the
+// settings-reload invalidation contract for issue #154: when the operator
+// edits integrations.resolve.scriptsDir (or any other field the hook
+// installer reads) and the cmd/branchdam-agent reload path re-runs
+// resolvehook.Detect against the new config, the resulting snapshot must
+// overwrite the prior cached state in Runner.hookState. RefreshHookState
+// is a direct cache writer like SetHookState -- it MUST NOT call the
+// registered installer (caller already did the Detect), and it MUST NOT
+// race a concurrent in-flight TriggerHookInstall (so the install's own
+// post-completion cache write wins, not a stale post-reload snapshot
+// overwriting a fresh install result).
+func TestRefreshHookStateOverwritesSeedAndDoesNotCallInstaller(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fh := &fakeHookInstaller{}
+	r.SetHookInstallers(map[HookID]HookInstaller{HookResolve: fh})
+
+	r.SetHookState(HookResolve, HookState{At: time.Now(), Dir: "/old/scripts", Installed: true, UpToDate: true})
+	r.RefreshHookState(HookResolve, HookState{Dir: "/new/scripts", Installed: false})
+
+	st := r.Status(UpdateStatus{})
+	hs, ok := st.Hook(HookResolve)
+	if !ok || hs.State == nil {
+		t.Fatal("expected RefreshHookState to be reflected in Status()")
+	}
+	if hs.State.Dir != "/new/scripts" {
+		t.Errorf("got Dir=%q, want %q -- RefreshHookState must overwrite the prior seeded state", hs.State.Dir, "/new/scripts")
+	}
+	if hs.State.Installed {
+		t.Errorf("got Installed=true, want false from the refresh snapshot")
+	}
+	if fh.calls != 0 {
+		t.Errorf("expected RefreshHookState to never call the installer, got %d calls", fh.calls)
+	}
+}
+
+// TestRefreshHookStateAfterInstallWins pins the race the AC explicitly
+// calls out: a TriggerHookInstall that completes AFTER a reload-path
+// RefreshHookState (because the install's I/O was slower than the reload)
+// must overwrite the refresh snapshot with its own post-install result.
+// Otherwise a user who clicks "Install" right after editing a setting
+// would see "not installed" until the next startup.
+//
+// This is a real concurrency test, not a sequential one: the install
+// runs in its own goroutine, blocks on fakeHookInstaller's `started`/
+// `release` channels, and the refresh call is timed to land in the
+// correct order relative to the install's lock-release. With r.mu
+// serializing both writes, the write that grabs the lock LAST is the
+// one that survives -- so the assertion is exactly that, for this
+// ordering, the install's post-Install write wins over the earlier
+// refresh write.
+func TestRefreshHookStateAfterInstallWins(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fh := &fakeHookInstaller{state: HookState{Dir: "/installed", Installed: true, UpToDate: true}, started: started, release: release}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetHookInstallers(map[HookID]HookInstaller{HookResolve: fh})
+
+	// Kick off the install in a goroutine. It will close `started` (to
+	// signal it has entered Install and is blocked on `release`) and
+	// then wait. The test holds the install open here and decides when
+	// to release it, so the interleaving with RefreshHookState is
+	// deterministic.
+	installDone := make(chan struct{})
+	go func() {
+		defer close(installDone)
+		_, ran := r.TriggerHookInstall(context.Background(), HookResolve)
+		if !ran {
+			t.Errorf("expected the install to run")
+		}
+	}()
+
+	// Wait until the install is past its hookInFlight bookkeeping and
+	// blocked inside Install (i.e. has released r.mu after the inflight
+	// flag was set). After this, RefreshHookState issued by the test
+	// goroutine is guaranteed to acquire r.mu before the install
+	// completes, so the refresh write lands FIRST and the install's
+	// own post-Install write (which re-takes r.mu) lands LAST and
+	// wins.
+	<-started
+
+	r.RefreshHookState(HookResolve, HookState{Dir: "/new/scripts", Installed: false})
+	close(release)
+	<-installDone
+
+	st := r.Status(UpdateStatus{})
+	hs, ok := st.Hook(HookResolve)
+	if !ok || hs.State == nil {
+		t.Fatal("expected install result to be reflected in Status()")
+	}
+	if hs.State.Dir != "/installed" {
+		t.Errorf("got Dir=%q, want %q -- a TriggerHookInstall that completes after RefreshHookState must overwrite the refresh snapshot (real concurrency, not sequential)", hs.State.Dir, "/installed")
+	}
+	if !hs.State.Installed || !hs.State.UpToDate {
+		t.Errorf("got %+v, want Installed=true UpToDate=true from the install result", hs.State)
+	}
+}
+
+// TestRefreshHookStateAfterCompletedInstallWins is the reverse-ordering
+// pin: an install that has FULLY COMPLETED, then a reload-path
+// RefreshHookState fires, then the operator's view should reflect the
+// fresh reload snapshot, not the install's earlier result. The other
+// direction (a refresh lands between the install's hookInFlight set and
+// its post-Install write) is covered by TestRefreshHookStateAfterInstallWins
+// above; this one pins the simpler "install returned, refresh races
+// nothing, refresh's write is the last one" path -- a regression guard
+// against a future refactor that accidentally reorders RefreshHookState
+// to read-then-write without holding r.mu.
+func TestRefreshHookStateAfterCompletedInstallWins(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fh := &fakeHookInstaller{state: HookState{Dir: "/installed", Installed: true, UpToDate: true}}
+	r.SetHookInstallers(map[HookID]HookInstaller{HookResolve: fh})
+
+	// Install completes synchronously (no started/release wiring).
+	if _, ran := r.TriggerHookInstall(context.Background(), HookResolve); !ran {
+		t.Fatal("expected the install to run")
+	}
+
+	// Sanity: the install's result is the current cache.
+	if got := r.Status(UpdateStatus{}).Hooks[0].State.Dir; got != "/installed" {
+		t.Fatalf("post-install Dir = %q, want %q", got, "/installed")
+	}
+
+	// Now the reload path fires its RefreshHookState -- the operator
+	// just edited scriptsDir. The cache must surface the new snapshot.
+	r.RefreshHookState(HookResolve, HookState{Dir: "/new", Installed: false})
+
+	st := r.Status(UpdateStatus{})
+	hs, ok := st.Hook(HookResolve)
+	if !ok || hs.State == nil {
+		t.Fatal("expected RefreshHookState to be reflected in Status()")
+	}
+	if hs.State.Dir != "/new" {
+		t.Errorf("got Dir=%q, want %q -- a RefreshHookState that lands after a completed install must overwrite the install's result", hs.State.Dir, "/new")
+	}
+	if hs.State.Installed {
+		t.Errorf("got Installed=true, want false from the refresh snapshot")
+	}
+}
+
 func TestStatusHooksOrderedByRegistry(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, nil, "")
 	st := r.Status(UpdateStatus{})
