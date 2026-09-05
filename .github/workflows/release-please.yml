@@ -15,6 +15,14 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # issues: write is needed for the post-release labeling step
+      # (removeIssueLabels + addIssueLabels on the release PR -- labels are
+      # an issues-API surface even on PRs). It may also be what the
+      # createRelease call's 403 "Resource not accessible by integration"
+      # actually wants in this repo's token scope, despite contents: write
+      # being documented as sufficient for POST /repos/{owner}/{repo}/releases
+      # -- grant it and see.
+      issues: write
     uses: s3ntin3l8/.github/.github/workflows/release-please.yml@main
 
   # Chained here, in the same run, rather than triggered by release-binaries.yml's
