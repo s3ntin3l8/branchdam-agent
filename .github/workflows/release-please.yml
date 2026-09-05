@@ -27,6 +27,15 @@ jobs:
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     permissions:
       contents: write
+      # id-token: write must be granted by the CALLER for any job-level
+      # permission the reusable workflow requests -- release-binaries.yml's
+      # upload job needs it for keyless Sigstore attestation (`cosign
+      # sign-blob --yes` mints a Fulcio-signed cert via this job's OIDC
+      # token). Without it the whole release-please run fails with
+      # `startup_failure` and 0 jobs because GitHub validates the full
+      # permission chain (caller + every referenced reusable workflow) at
+      # workflow parse time.
+      id-token: write
     uses: ./.github/workflows/release-binaries.yml
     with:
       release-tag: ${{ needs.release-please.outputs.tag_name }}

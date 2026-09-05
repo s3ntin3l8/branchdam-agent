@@ -1,10 +1,7 @@
 {
   "packages": {
     ".": {
-      "release-type": "go",
-      "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true,
-      "prerelease": true
+      "release-type": "go"
     }
   }
 }
