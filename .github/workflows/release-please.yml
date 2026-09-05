@@ -15,20 +15,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    # skip-github-release: true because the v1.4.0 release commit's diff
-    # to the current default-branch tip touches .github/workflows/* (the
-    # Sigstore patch in the merged #118 release PR modified
-    # release-binaries.yml), and GitHub's createRelease endpoint requires
-    # the token to be authorized for workflows in that case. The default
-    # GITHUB_TOKEN explicitly cannot be granted this -- no
-    # `permissions:` block changes that. The action still updates the
-    # manifest + CHANGELOG + opens the release PR; we create the GitHub
-    # Release + tag out-of-band (admin PAT, see "Manual v1.4.0 release"
-    # runbook below). When the next release's target commit has no
-    # workflow-file diff, flip this back to false (or omit it).
     uses: s3ntin3l8/.github/.github/workflows/release-please.yml@main
-    with:
-      skip-github-release: true
 
   # Chained here, in the same run, rather than triggered by release-binaries.yml's
   # own `on: release` -- release-please creates the release with the default
