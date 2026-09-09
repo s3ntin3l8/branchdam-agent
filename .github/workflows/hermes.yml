@@ -38,18 +38,13 @@ name: Hermes (review)
 #
 # SECURITY: this repo is public, and this is its first workflow that needs a
 # self-hosted runner (LAN-reachable to the Hermes API on hermes-01) --
-# `ci-cd.yml`'s jobs all run on `ubuntu-latest`/`macos-26`, not this. For a
-# `pull_request` event, GitHub runs the workflow FILE from the PR's own
-# head ref, i.e. a fork's copy of this file, on whatever runner the `if:`
-# lets it reach. Without the `head.repo.full_name` guard below, any stranger
-# could open a fork PR whose version of auto-review's job runs arbitrary
-# steps on that runner -- fork PRs get no secrets and a read-only token, but
-# the runner itself (its filesystem and LAN access) is the trust boundary,
-# not the token. The on-demand path is unaffected: `issue_comment` always
-# runs the DEFAULT BRANCH's copy of this file, so the author_association
-# gate there is sufficient on its own; a maintainer's @mention on a fork PR
-# still works. (Same finding as branchDAM's own hermes.yml -- see
-# s3ntin3l8/branchdam#76.)
+# `ci-cd.yml`'s jobs all run on `ubuntu-latest`/`macos-26`, not this. The
+# fork guard is now enforced inside the reusable workflow itself
+# (s3ntin3l8/.github#53), so a fork PR cannot rewrite the job's `run:`
+# steps to execute attacker code on that runner -- the runner itself (its
+# filesystem and LAN access) is the trust boundary, not the secrets.
+# (Originally added caller-side by s3ntin3l8/branchdam#76; moved into the
+# reusable as defense-in-depth so future callers are safe by default.)
 #
 # release-please's own release PR is opened/updated with the default
 # `GITHUB_TOKEN`, and GitHub's Actions recursion guard means a
@@ -83,7 +78,6 @@ jobs:
   auto-review:
     if: >-
       github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
       github.actor != 's3ntin3l8-hermes[bot]' &&
       github.actor != 'dependabot[bot]' &&
       github.actor != 'github-actions[bot]' &&
