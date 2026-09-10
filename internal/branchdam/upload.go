@@ -33,6 +33,9 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions)
 	if opts.Blake3Hash != "" {
 		req.Header.Set("X-Blake3-Hash", opts.Blake3Hash)
 	}
+	if opts.SourcePathHash != "" {
+		req.Header.Set("X-Source-Path-Hash", opts.SourcePathHash)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

@@ -10,7 +10,7 @@ import (
 )
 
 func TestClientUpload(t *testing.T) {
-	var gotMethod, gotPath, gotAPIKey, gotFilename, gotCamera, gotTimestamp, gotHash, gotContentType string
+	var gotMethod, gotPath, gotAPIKey, gotFilename, gotCamera, gotTimestamp, gotHash, gotContentType, gotSourcePathHash string
 	var gotBody []byte
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -21,6 +21,7 @@ func TestClientUpload(t *testing.T) {
 		gotCamera = r.Header.Get("X-Camera-Model")
 		gotTimestamp = r.Header.Get("X-Capture-Timestamp")
 		gotHash = r.Header.Get("X-Blake3-Hash")
+		gotSourcePathHash = r.Header.Get("X-Source-Path-Hash")
 		gotContentType = r.Header.Get("Content-Type")
 
 		var err error
@@ -47,6 +48,7 @@ func TestClientUpload(t *testing.T) {
 		CameraModel:      "Pixel-9-Pro",
 		CaptureTimestamp: 1756470000,
 		Blake3Hash:       "b3f1c4d9e2a7568013c9a4d2e8f7b1063c5a9d7e2f4b8016938ac1d4e7f2b09a",
+		SourcePathHash:   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // pragma: allowlist secret
 	}
 
 	resp, err := c.Upload(context.Background(), strings.NewReader("hello upload"), opts)
@@ -74,6 +76,9 @@ func TestClientUpload(t *testing.T) {
 	}
 	if gotHash != "b3f1c4d9e2a7568013c9a4d2e8f7b1063c5a9d7e2f4b8016938ac1d4e7f2b09a" {
 		t.Errorf("hash = %q", gotHash)
+	}
+	if gotSourcePathHash != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" { // pragma: allowlist secret
+		t.Errorf("sourcePathHash = %q", gotSourcePathHash)
 	}
 	if gotContentType != "application/octet-stream" {
 		t.Errorf("contentType = %q", gotContentType)

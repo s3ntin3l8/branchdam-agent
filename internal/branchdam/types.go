@@ -196,6 +196,7 @@ type UploadOptions struct {
 	CameraModel      string
 	CaptureTimestamp int64
 	Blake3Hash       string
+	SourcePathHash   string // SHA-256 hex (64 chars) of original workstation file path
 }
 
 // UploadResponse is the response body for POST /api/v1/agent/upload
@@ -281,4 +282,41 @@ type ContentCheckResult struct {
 	NodeUUID       string `json:"nodeUuid,omitempty"`
 	FilePath       string `json:"filePath,omitempty"`
 	LifecycleState string `json:"lifecycleState,omitempty"`
+}
+
+// AgentScratchStorageDTO mirrors the scratchStorage sub-object of
+// POST /api/v1/agent/telemetry on branchDAM server.
+type AgentScratchStorageDTO struct {
+	MountPath            string `json:"mountPath"`
+	TotalBytes           int64  `json:"totalBytes"`
+	FreeBytes            int64  `json:"freeBytes"`
+	UsedBytes            int64  `json:"usedBytes"`
+	MirrorsSizeBytes     int64  `json:"mirrorsSizeBytes"`
+	RenderCacheSizeBytes int64  `json:"renderCacheSizeBytes"`
+	ProxiesSizeBytes     int64  `json:"proxiesSizeBytes"`
+	PrunableBytes        int64  `json:"prunableBytes"`
+}
+
+// AgentPruneStatsDTO mirrors the pruneStats sub-object of
+// POST /api/v1/agent/telemetry on branchDAM server.
+type AgentPruneStatsDTO struct {
+	LastPruneTimestampUnix int64          `json:"lastPruneTimestampUnix"`
+	LastReclaimedBytes     int64          `json:"lastReclaimedBytes"`
+	LastPruneDurationMs    int64          `json:"lastPruneDurationMs"`
+	PrunedItemCounts       map[string]int `json:"prunedItemCounts,omitempty"`
+}
+
+// AgentTelemetryInput is the request body for POST /api/v1/agent/telemetry.
+type AgentTelemetryInput struct {
+	AgentID        string                 `json:"agentId"`
+	ClientVersion  string                 `json:"clientVersion,omitempty"`
+	TimestampUnix  int64                  `json:"timestampUnix"`
+	ScratchStorage AgentScratchStorageDTO `json:"scratchStorage"`
+	PruneStats     *AgentPruneStatsDTO    `json:"pruneStats,omitempty"`
+}
+
+// AgentTelemetryOutput is the response body for POST /api/v1/agent/telemetry.
+type AgentTelemetryOutput struct {
+	OK                 bool  `json:"ok"`
+	AcknowledgedAtUnix int64 `json:"acknowledgedAtUnix"`
 }
