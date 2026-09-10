@@ -63,6 +63,12 @@ make build-darwin-app# Assembles macOS .app bundle via tools/mkbundle
 
 ## Review thread resolution
 
+Hermes reviews automatically on open (`.github/workflows/hermes.yml`'s
+`auto-review` job) — don't also `@s3ntin3l8-hermes Review` right after
+opening the PR, or you'll trigger a redundant second review. A re-review
+can be requested the same way after pushing fixes, but keep it to a
+couple of rounds — don't loop on it indefinitely.
+
 Every review thread (Hermes or human) must be replied to and resolved before
 a PR is mergeable. This is a GraphQL-only concept, not a `gh pr` verb:
 
