@@ -24,15 +24,15 @@ name: Hermes (review)
 # IMPORTANT: do NOT add `synchronize` back. It re-triggers a fresh review on
 # EVERY subsequent push, which on a PR under active iteration is an unbounded
 # review loop (each review's comments prompt more commits, each commit fires
-# another review...). Confirmed in practice on mullion's PR #16: 5 pushes
-# produced 3 separate Hermes review submissions (not 5 -- corrected count,
-# re-checked against the actual review timestamps). `ready_for_review` is
-# safe to keep alongside `opened` for the reason explained on that trigger's
-# own `on:` comment below: it can fire more than once, but the reusable
-# workflow's own re-trigger guard bounds repeat auto-reviews -- that guard
-# was actually broken until s3ntin3l8/.github#54 (a `gh api --jq --arg`
-# invocation that silently failed and always reported "no prior review
-# found"), fixed there.
+# another review...). Confirmed in practice on mullion-session-manager#16: 5
+# commits produced 3 separate Hermes review submissions. `ready_for_review`
+# is safe to keep alongside `opened` for the reason explained on that
+# trigger's own `on:` comment below: it can fire more than once, but the
+# reusable workflow's own re-trigger guard bounds repeat auto-reviews --
+# that guard actually errored (`gh api --jq --arg` is invalid; `gh api`
+# takes exactly one `--jq` argument) until s3ntin3l8/.github#54 fixed it,
+# and the error was swallowed by `2>/dev/null || echo 0`, so it always read
+# "no prior review found" instead of failing loud.
 #
 # IMPORTANT: do NOT subscribe to `pull_request_review` or
 # `pull_request_review_comment` either. A submitted review fires those
@@ -84,7 +84,10 @@ jobs:
     # NOTE: excluding by PR *author* (github.event.pull_request.user.login),
     # not github.actor -- on `ready_for_review`, github.actor is whoever
     # clicked "Ready for review", which is not necessarily who opened the
-    # PR. Author-based exclusion keeps working on both trigger types.
+    # PR. Author-based exclusion keeps working on both trigger types. This
+    # bot-author list is now byte-identical to the reusable's own centralized
+    # check (hermes-review.yml@main), which is the real enforcement -- this
+    # copy is defense-in-depth, so the two must be hand-kept in sync.
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.user.login != 's3ntin3l8-hermes[bot]' &&
