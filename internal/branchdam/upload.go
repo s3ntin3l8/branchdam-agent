@@ -8,12 +8,21 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // Upload streams raw media bytes directly to POST /api/v1/agent/upload.
 // Returns an *UploadResponse containing the created NodeUUID, relativePath in the Master Archive,
 // bytesWritten, and verified BLAKE3 hash.
 func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions) (*UploadResponse, error) {
+	if opts.SourcePathHash != "" {
+		h := strings.ToLower(strings.TrimSpace(opts.SourcePathHash))
+		if len(h) != 64 || !isHex(h) {
+			return nil, fmt.Errorf("branchdam: invalid SourcePathHash: must be 64 lowercase hex characters")
+		}
+		opts.SourcePathHash = h
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/agent/upload", body)
 	if err != nil {
 		return nil, fmt.Errorf("branchdam: build upload request: %w", err)
@@ -57,4 +66,14 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions)
 		return nil, fmt.Errorf("branchdam: decode upload response: %w", err)
 	}
 	return &out, nil
+}
+
+func isHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }

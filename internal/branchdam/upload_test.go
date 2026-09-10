@@ -146,3 +146,21 @@ func TestHandshake_WithNamingTemplate(t *testing.T) {
 		t.Errorf("NamingTemplate = %q", resp.NamingTemplate)
 	}
 }
+
+func TestClientUpload_InvalidSourcePathHash(t *testing.T) {
+	c := New("http://127.0.0.1:8080", "test-api-key")
+
+	badHashes := []string{
+		"not-a-hash",
+		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8555",
+		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85z",
+	}
+
+	for _, bad := range badHashes {
+		_, err := c.Upload(context.Background(), strings.NewReader(""), UploadOptions{SourcePathHash: bad})
+		if err == nil {
+			t.Errorf("expected error for bad hash %q, got nil", bad)
+		}
+	}
+}
