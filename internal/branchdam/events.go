@@ -24,16 +24,13 @@ var mintEventUUID = func() string {
 // AgentEventInput.Body.Payload is declared `json:"payload" required:"true"`
 // as a Go string server-side), mints or preserves an EventUUID for transport-level
 // idempotency, and POSTs the envelope. Returns the 202 response's eventId.
-func (c *Client) postEvent(ctx context.Context, agentID, eventType string, payload any, customUUID ...string) (*EventResponse, error) {
+func (c *Client) postEvent(ctx context.Context, agentID, eventType string, payload any, eventUUID string) (*EventResponse, error) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("branchdam: marshal %s payload: %w", eventType, err)
 	}
 
-	var eventUUID string
-	if len(customUUID) > 0 && customUUID[0] != "" {
-		eventUUID = customUUID[0]
-	} else {
+	if eventUUID == "" {
 		eventUUID = mintEventUUID()
 	}
 
@@ -75,22 +72,22 @@ func (c *Client) PostEdgeAttached(ctx context.Context, agentID string, payload E
 	if err := ValidateEdgeAttached(payload); err != nil {
 		return nil, err
 	}
-	return c.postEvent(ctx, agentID, EventEdgeAttached, payload)
+	return c.postEvent(ctx, agentID, EventEdgeAttached, payload, "")
 }
 
 // PostNodeMoved sends EVENT_NODE_MOVED.
 func (c *Client) PostNodeMoved(ctx context.Context, agentID string, payload NodeMovedPayload) (*EventResponse, error) {
-	return c.postEvent(ctx, agentID, EventNodeMoved, payload)
+	return c.postEvent(ctx, agentID, EventNodeMoved, payload, "")
 }
 
 // PostNodeDeleted sends EVENT_NODE_DELETED.
 func (c *Client) PostNodeDeleted(ctx context.Context, agentID string, payload NodeDeletedPayload) (*EventResponse, error) {
-	return c.postEvent(ctx, agentID, EventNodeDeleted, payload)
+	return c.postEvent(ctx, agentID, EventNodeDeleted, payload, "")
 }
 
 // PostPathRebased sends EVENT_PATH_REBASED. Prefer Client.Rebase
 // (POST /api/v1/agent/rebase) when a synchronous result is needed -- this
 // event-queue path is fire-and-forget like every other /events call.
 func (c *Client) PostPathRebased(ctx context.Context, agentID string, payload PathRebasedPayload) (*EventResponse, error) {
-	return c.postEvent(ctx, agentID, EventPathRebased, payload)
+	return c.postEvent(ctx, agentID, EventPathRebased, payload, "")
 }

@@ -22,8 +22,9 @@ type fakeDrainClient struct {
 	nodeCreated func(payload branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error)
 	rebase      func(req branchdam.RebaseRequest) (*branchdam.RebaseResponse, error)
 
-	nodeCreatedCalls []branchdam.NodeCreatedPayload
-	rebaseCalls      []branchdam.RebaseRequest
+	nodeCreatedCalls     []branchdam.NodeCreatedPayload
+	nodeCreatedUUIDCalls []string
+	rebaseCalls          []branchdam.RebaseRequest
 }
 
 func (f *fakeDrainClient) Handshake(context.Context, branchdam.HandshakeRequest) (*branchdam.HandshakeResponse, error) {
@@ -39,6 +40,11 @@ func (f *fakeDrainClient) PostNodeCreated(_ context.Context, _ string, payload b
 		return f.nodeCreated(payload)
 	}
 	return &branchdam.EventResponse{EventID: "evt-" + payload.NodeUUID}, nil
+}
+
+func (f *fakeDrainClient) PostNodeCreatedWithUUID(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload, eventUUID string) (*branchdam.EventResponse, error) {
+	f.nodeCreatedUUIDCalls = append(f.nodeCreatedUUIDCalls, eventUUID)
+	return f.PostNodeCreated(ctx, agentID, payload)
 }
 
 func (f *fakeDrainClient) Rebase(_ context.Context, req branchdam.RebaseRequest) (*branchdam.RebaseResponse, error) {
@@ -575,5 +581,82 @@ func TestF28BackoffCapAllowsReEntry(t *testing.T) {
 	}
 	if stats.Remaining != 0 {
 		t.Errorf("Remaining = %d, want 0 (row should be submitted and archive-copy pending)", stats.Remaining)
+	}
+}
+
+func TestDrainNodeCreatedIdempotentEventUUIDAcrossRetries(t *testing.T) {
+	dir := t.TempDir()
+	store := openStoreT(t)
+
+	expectedEventUUID := "0191f618-502a-714e-b5f6-3475d6585141"
+	localPath := filepath.Join(dir, "local", "n1.bin")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPath, []byte("media-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := branchdam.NodeCreatedPayload{
+		NodeUUID: "n1",
+		FilePath: "/storage/staging/agent-1/n1.bin",
+	}
+	payloadJSON, _ := json.Marshal(payload)
+
+	rec := queue.NewRecord{
+		NodeUUID:               "n1",
+		Kind:                   queue.KindMedia,
+		SourcePath:             "/card/n1.bin",
+		LocalPath:              localPath,
+		ArchivePath:            filepath.Join(dir, "archive", "n1.bin"),
+		ArchiveContainerPath:   "/storage/archive/n1.bin",
+		Tier0ContainerPath:     payload.FilePath,
+		FileName:               "n1.bin",
+		FileExt:                "bin",
+		SizeBytes:              int64(len("media-bytes")),
+		MtimeUnix:              1700000000,
+		FullHash:               blake3Hex(t, localPath),
+		FastHash:               "0123456789abcdef",
+		NodeCreatedPayloadJSON: string(payloadJSON),
+		NodeCreatedEventUUID:   expectedEventUUID,
+	}
+	if err := store.InsertPending(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+
+	attempts := 0
+	client := &fakeDrainClient{
+		nodeCreated: func(p branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error) {
+			attempts++
+			if attempts == 1 {
+				return nil, fmt.Errorf("simulated network timeout")
+			}
+			return &branchdam.EventResponse{EventID: "evt-ok"}, nil
+		},
+	}
+
+	t0 := time.Unix(1700000000, 0)
+	// Pass 1: fails
+	if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0)); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.nodeCreatedUUIDCalls) != 1 {
+		t.Fatalf("expected 1 call on pass 1, got %d", len(client.nodeCreatedUUIDCalls))
+	}
+
+	// Pass 2: retries after backoff (t0+2s)
+	if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(2*time.Second))); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.nodeCreatedUUIDCalls) != 2 {
+		t.Fatalf("expected 2 calls after retry, got %d", len(client.nodeCreatedUUIDCalls))
+	}
+
+	// Assert that BOTH attempts re-sent the EXACT same client-minted EventUUID from the queue store
+	if client.nodeCreatedUUIDCalls[0] != expectedEventUUID {
+		t.Errorf("call 0 eventUUID = %q, want %q", client.nodeCreatedUUIDCalls[0], expectedEventUUID)
+	}
+	if client.nodeCreatedUUIDCalls[1] != expectedEventUUID {
+		t.Errorf("call 1 eventUUID = %q, want %q", client.nodeCreatedUUIDCalls[1], expectedEventUUID)
 	}
 }
