@@ -144,6 +144,7 @@ type PathRebasedPayload struct {
 // asynchronously, in the drainer -- with no feedback channel back to the
 // agent (plan gap 3).
 type EventEnvelope struct {
+	EventUUID string `json:"eventUuid,omitempty"`
 	AgentID   string `json:"agentId"`
 	EventType string `json:"eventType"`
 	Payload   string `json:"payload"`

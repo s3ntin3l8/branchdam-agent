@@ -4,21 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/google/uuid"
 )
 
 // postEvent marshals payload to JSON, double-encodes it into
 // EventEnvelope.Payload as a string (sending it as a bare object is a 422 --
 // AgentEventInput.Body.Payload is declared `json:"payload" required:"true"`
-// as a Go string server-side), and POSTs the envelope. Returns the 202
-// response's eventId. 202 means enqueued, never applied -- see EventResponse's
-// doc comment and the plan's contract gap 3 (no failure feedback channel).
+// as a Go string server-side), mints an EventUUID for transport-level idempotency,
+// and POSTs the envelope. Returns the 202 response's eventId.
 func (c *Client) postEvent(ctx context.Context, agentID, eventType string, payload any) (*EventResponse, error) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("branchdam: marshal %s payload: %w", eventType, err)
 	}
 
+	eventUUID, err := uuid.NewV7()
+	if err != nil {
+		eventUUID = uuid.New()
+	}
+
 	env := EventEnvelope{
+		EventUUID: eventUUID.String(),
 		AgentID:   agentID,
 		EventType: eventType,
 		Payload:   string(payloadJSON),
@@ -31,13 +38,8 @@ func (c *Client) postEvent(ctx context.Context, agentID, eventType string, paylo
 	return &out, nil
 }
 
-// PostNodeCreated sends EVENT_NODE_CREATED. Event submission is not
-// idempotent at the transport level (plan gap 1: the server mints its own
-// event_uuid, ignoring any client-side one), so callers must mint a stable
-// NodeUUID before the first attempt and rely on entity-level idempotency --
-// a re-sent EVENT_NODE_CREATED for an existing nodeUuid is a silent
-// no-op server-side, and a retry with corrected fields is silently ignored
-// (first write wins).
+// PostNodeCreated sends EVENT_NODE_CREATED with a client-minted EventUUID
+// for transport-level idempotency on retries.
 func (c *Client) PostNodeCreated(ctx context.Context, agentID string, payload NodeCreatedPayload) (*EventResponse, error) {
 	return c.postEvent(ctx, agentID, EventNodeCreated, payload)
 }

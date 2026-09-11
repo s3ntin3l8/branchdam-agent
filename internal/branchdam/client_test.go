@@ -197,6 +197,9 @@ func TestClientPostEventDoubleEncodesPayload(t *testing.T) {
 		t.Errorf("EventID = %q, want evt-1", resp.EventID)
 	}
 
+	if gotEnvelope.EventUUID == "" {
+		t.Error("EventUUID is empty, want client-minted UUID")
+	}
 	if gotEnvelope.AgentID != "agent-01" {
 		t.Errorf("AgentID = %q, want agent-01", gotEnvelope.AgentID)
 	}
