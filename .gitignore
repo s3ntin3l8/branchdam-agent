@@ -73,3 +73,7 @@ compose.override.yml
 
 # govulncheck JSON output (transient, written by `make vulncheck`)
 /govulncheck.json
+
+# Developer worktrees (per AGENTS.md make wt convention)
+.wt/
+
