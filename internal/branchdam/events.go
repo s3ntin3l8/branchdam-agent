@@ -19,6 +19,12 @@ var mintEventUUID = func() string {
 	return u.String()
 }
 
+// MintEventUUID generates a UUIDv7 for transport-level event idempotency,
+// falling back to UUIDv4 if v7 generation fails.
+func MintEventUUID() string {
+	return mintEventUUID()
+}
+
 // postEvent marshals payload to JSON, double-encodes it into
 // EventEnvelope.Payload as a string (sending it as a bare object is a 422 --
 // AgentEventInput.Body.Payload is declared `json:"payload" required:"true"`

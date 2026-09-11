@@ -23,7 +23,8 @@ import (
 )
 
 type fakeClient struct {
-	calls []branchdam.NodeCreatedPayload
+	calls     []branchdam.NodeCreatedPayload
+	uuidCalls []string
 }
 
 func (f *fakeClient) PostNodeCreated(_ context.Context, _ string, payload branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error) {
@@ -31,8 +32,9 @@ func (f *fakeClient) PostNodeCreated(_ context.Context, _ string, payload branch
 	return &branchdam.EventResponse{EventID: "evt-" + payload.NodeUUID}, nil
 }
 
-func (f *fakeClient) PostNodeCreatedWithUUID(_ context.Context, _ string, payload branchdam.NodeCreatedPayload, _ string) (*branchdam.EventResponse, error) {
+func (f *fakeClient) PostNodeCreatedWithUUID(_ context.Context, _ string, payload branchdam.NodeCreatedPayload, eventUUID string) (*branchdam.EventResponse, error) {
 	f.calls = append(f.calls, payload)
+	f.uuidCalls = append(f.uuidCalls, eventUUID)
 	return &branchdam.EventResponse{EventID: "evt-" + payload.NodeUUID}, nil
 }
 

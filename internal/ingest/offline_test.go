@@ -169,6 +169,98 @@ func TestIngestCardOfflineOpportunisticSubmitSucceeds(t *testing.T) {
 	if rec.NodeCreatedEventID == "" {
 		t.Error("expected a stored event ID")
 	}
+	if len(client.uuidCalls) != 1 {
+		t.Fatalf("expected 1 PostNodeCreatedWithUUID call, got %d", len(client.uuidCalls))
+	}
+	if client.uuidCalls[0] == "" {
+		t.Error("expected non-empty eventUUID on opportunistic submission")
+	}
+	if rec.NodeCreatedEventUUID != client.uuidCalls[0] {
+		t.Errorf("queue rec.NodeCreatedEventUUID = %q, want submitted %q", rec.NodeCreatedEventUUID, client.uuidCalls[0])
+	}
+}
+
+// TestIngestCardOfflineEventUUIDStabilityInlineToDrain tests that the same
+// client-minted EventUUID is preserved end-to-end between an opportunistic
+// inline submission failure and the subsequent offline queue drain re-send.
+func TestIngestCardOfflineEventUUIDStabilityInlineToDrain(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "shot.jpg"), []byte("image-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openStoreT(t)
+
+	shouldFail := true
+	client := &fakeDrainClient{
+		nodeCreated: func(p branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error) {
+			if shouldFail {
+				return nil, fmt.Errorf("simulated network blip on opportunistic inline submit")
+			}
+			return &branchdam.EventResponse{EventID: "evt-offline-success"}, nil
+		},
+	}
+
+	e := newOfflineTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"), "/storage/staging/agent-1", store)
+
+	res, err := e.IngestCardOffline(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Files) != 1 {
+		t.Fatalf("got %d files, want 1", len(res.Files))
+	}
+	fr := res.Files[0]
+	if !fr.Queued {
+		t.Fatal("expected Queued=true")
+	}
+	if fr.SubmittedInline {
+		t.Fatal("expected SubmittedInline=false due to simulated network blip")
+	}
+
+	if len(client.nodeCreatedUUIDCalls) != 1 {
+		t.Fatalf("expected 1 inline opportunistic call, got %d", len(client.nodeCreatedUUIDCalls))
+	}
+	inlineUUID := client.nodeCreatedUUIDCalls[0]
+	if inlineUUID == "" {
+		t.Fatal("expected non-empty eventUUID on inline opportunistic attempt")
+	}
+
+	rec, ok, err := store.ByNodeUUID(context.Background(), fr.NodeUUID)
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if rec.NodeCreatedEventUUID != inlineUUID {
+		t.Errorf("stored NodeCreatedEventUUID = %q, want inline attempt %q", rec.NodeCreatedEventUUID, inlineUUID)
+	}
+
+	// Now network recovers; Drain the offline queue.
+	shouldFail = false
+	if _, err := Drain(context.Background(), client, store, "agent-1", e.Now); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	if len(client.nodeCreatedUUIDCalls) != 2 {
+		t.Fatalf("expected 2 calls total (1 inline + 1 drain), got %d", len(client.nodeCreatedUUIDCalls))
+	}
+	drainUUID := client.nodeCreatedUUIDCalls[1]
+
+	// Assert the UUID sent during drain matches the one sent during the failed inline attempt
+	if drainUUID != inlineUUID {
+		t.Errorf("drain retry eventUUID = %q, want inline eventUUID %q", drainUUID, inlineUUID)
+	}
+
+	recAfter, ok, err := store.ByNodeUUID(context.Background(), fr.NodeUUID)
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if recAfter.NodeCreatedStatus != queue.StatusSubmitted {
+		t.Errorf("NodeCreatedStatus after drain = %q, want SUBMITTED", recAfter.NodeCreatedStatus)
+	}
 }
 
 func TestIngestCardOfflineSidecarNeverSubmitsEvent(t *testing.T) {

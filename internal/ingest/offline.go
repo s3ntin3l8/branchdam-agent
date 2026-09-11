@@ -406,11 +406,7 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		return fr
 	}
 
-	eventUUID, err := e.NewNodeUUID()
-	if err != nil {
-		fr.Err = fmt.Errorf("mint event uuid: %w", err)
-		return fr
-	}
+	eventUUID := e.mintEventUUID()
 
 	rec := queue.NewRecord{
 		NodeUUID:               nodeUUID,
