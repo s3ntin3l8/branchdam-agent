@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // newTestServer builds an httptest.Server plus a Client pointed at it. h is
@@ -200,6 +202,13 @@ func TestClientPostEventDoubleEncodesPayload(t *testing.T) {
 	if gotEnvelope.EventUUID == "" {
 		t.Error("EventUUID is empty, want client-minted UUID")
 	}
+	parsedUUID, err := uuid.Parse(gotEnvelope.EventUUID)
+	if err != nil {
+		t.Fatalf("EventUUID is not a valid UUID: %v", err)
+	}
+	if parsedUUID.Version() != 7 {
+		t.Errorf("EventUUID version = %d, want 7 (UUIDv7)", parsedUUID.Version())
+	}
 	if gotEnvelope.AgentID != "agent-01" {
 		t.Errorf("AgentID = %q, want agent-01", gotEnvelope.AgentID)
 	}
@@ -215,6 +224,53 @@ func TestClientPostEventDoubleEncodesPayload(t *testing.T) {
 	}
 	if inner.NodeUUID != "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60" {
 		t.Errorf("inner.NodeUUID = %q", inner.NodeUUID)
+	}
+}
+
+func TestClientPostEventFallbackAndCustomUUID(t *testing.T) {
+	var gotEnvelope EventEnvelope
+	srv, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotEnvelope); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"eventId":"evt-2"}`))
+	})
+	_ = srv
+
+	// 1. Explicit customUUID is preserved across retry calls
+	const customUUID = "018f3a9b-8d76-7890-a123-456789abcdef"
+	_, err := c.PostNodeCreatedWithUUID(context.Background(), "agent-01", NodeCreatedPayload{
+		NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
+		FilePath: "/storage/archive/f.arw",
+	}, customUUID)
+	if err != nil {
+		t.Fatalf("PostNodeCreated with customUUID: %v", err)
+	}
+	if gotEnvelope.EventUUID != customUUID {
+		t.Errorf("EventUUID = %q, want %q", gotEnvelope.EventUUID, customUUID)
+	}
+
+	// 2. UUIDv4 fallback path when UUIDv7 generation fails
+	origMint := mintEventUUID
+	t.Cleanup(func() { mintEventUUID = origMint })
+	mintEventUUID = func() string {
+		return uuid.New().String() // returns v4
+	}
+
+	_, err = c.PostNodeCreated(context.Background(), "agent-01", NodeCreatedPayload{
+		NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
+		FilePath: "/storage/archive/f.arw",
+	})
+	if err != nil {
+		t.Fatalf("PostNodeCreated fallback: %v", err)
+	}
+	fallbackParsed, err := uuid.Parse(gotEnvelope.EventUUID)
+	if err != nil {
+		t.Fatalf("parse fallback UUID: %v", err)
+	}
+	if fallbackParsed.Version() != 4 {
+		t.Errorf("fallback UUID version = %d, want 4 (UUIDv4)", fallbackParsed.Version())
 	}
 }
 

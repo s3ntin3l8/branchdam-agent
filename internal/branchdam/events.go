@@ -8,24 +8,37 @@ import (
 	"github.com/google/uuid"
 )
 
+// mintEventUUID generates a UUIDv7 for transport-level event idempotency,
+// falling back to UUIDv4 if v7 generation fails. Package-level variable so tests
+// can verify the v4 fallback path without flaky clock manipulation.
+var mintEventUUID = func() string {
+	u, err := uuid.NewV7()
+	if err != nil {
+		return uuid.New().String()
+	}
+	return u.String()
+}
+
 // postEvent marshals payload to JSON, double-encodes it into
 // EventEnvelope.Payload as a string (sending it as a bare object is a 422 --
 // AgentEventInput.Body.Payload is declared `json:"payload" required:"true"`
-// as a Go string server-side), mints an EventUUID for transport-level idempotency,
-// and POSTs the envelope. Returns the 202 response's eventId.
-func (c *Client) postEvent(ctx context.Context, agentID, eventType string, payload any) (*EventResponse, error) {
+// as a Go string server-side), mints or preserves an EventUUID for transport-level
+// idempotency, and POSTs the envelope. Returns the 202 response's eventId.
+func (c *Client) postEvent(ctx context.Context, agentID, eventType string, payload any, customUUID ...string) (*EventResponse, error) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("branchdam: marshal %s payload: %w", eventType, err)
 	}
 
-	eventUUID, err := uuid.NewV7()
-	if err != nil {
-		eventUUID = uuid.New()
+	var eventUUID string
+	if len(customUUID) > 0 && customUUID[0] != "" {
+		eventUUID = customUUID[0]
+	} else {
+		eventUUID = mintEventUUID()
 	}
 
 	env := EventEnvelope{
-		EventUUID: eventUUID.String(),
+		EventUUID: eventUUID,
 		AgentID:   agentID,
 		EventType: eventType,
 		Payload:   string(payloadJSON),
@@ -41,7 +54,14 @@ func (c *Client) postEvent(ctx context.Context, agentID, eventType string, paylo
 // PostNodeCreated sends EVENT_NODE_CREATED with a client-minted EventUUID
 // for transport-level idempotency on retries.
 func (c *Client) PostNodeCreated(ctx context.Context, agentID string, payload NodeCreatedPayload) (*EventResponse, error) {
-	return c.postEvent(ctx, agentID, EventNodeCreated, payload)
+	return c.postEvent(ctx, agentID, EventNodeCreated, payload, "")
+}
+
+// PostNodeCreatedWithUUID sends EVENT_NODE_CREATED with an explicit EventUUID,
+// guaranteeing that retries of the same logical event re-send the same UUID
+// across network or drain retry boundaries.
+func (c *Client) PostNodeCreatedWithUUID(ctx context.Context, agentID string, payload NodeCreatedPayload, eventUUID string) (*EventResponse, error) {
+	return c.postEvent(ctx, agentID, EventNodeCreated, payload, eventUUID)
 }
 
 // PostEdgeAttached sends EVENT_EDGE_ATTACHED, after running
