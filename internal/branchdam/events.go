@@ -64,6 +64,9 @@ func (c *Client) PostNodeCreated(ctx context.Context, agentID string, payload No
 // guaranteeing that retries of the same logical event re-send the same UUID
 // across network or drain retry boundaries.
 func (c *Client) PostNodeCreatedWithUUID(ctx context.Context, agentID string, payload NodeCreatedPayload, eventUUID string) (*EventResponse, error) {
+	if eventUUID == "" {
+		return nil, fmt.Errorf("branchdam: eventUUID must not be empty")
+	}
 	return c.postEvent(ctx, agentID, EventNodeCreated, payload, eventUUID)
 }
 

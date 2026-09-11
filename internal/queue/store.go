@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
 
@@ -206,7 +207,12 @@ func (s *Store) InsertPending(ctx context.Context, rec NewRecord) error {
 
 	eventUUID := rec.NodeCreatedEventUUID
 	if eventUUID == "" && rec.Kind == KindMedia {
-		eventUUID = rec.NodeUUID
+		u, err := uuid.NewV7()
+		if err != nil {
+			eventUUID = uuid.New().String()
+		} else {
+			eventUUID = u.String()
+		}
 	}
 
 	_, err := s.db.ExecContext(ctx, `

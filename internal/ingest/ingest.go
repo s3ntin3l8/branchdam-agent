@@ -54,7 +54,6 @@ func preserveMtimeAt(srcPath, dstPath string, mtime time.Time) {
 // nodeCreator is the subset of *branchdam.Client's surface Engine needs, so
 // tests can substitute a fake without a real HTTP server.
 type nodeCreator interface {
-	PostNodeCreated(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error)
 	PostNodeCreatedWithUUID(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload, eventUUID string) (*branchdam.EventResponse, error)
 }
 
@@ -458,7 +457,8 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 		}
 	}
 
-	resp, err := e.Client.PostNodeCreated(ctx, e.AgentID, payload)
+	eventUUID := e.mintEventUUID()
+	resp, err := e.Client.PostNodeCreatedWithUUID(ctx, e.AgentID, payload, eventUUID)
 	if err != nil {
 		fr.Err = fmt.Errorf("submit EVENT_NODE_CREATED: %w", err)
 		return fr
