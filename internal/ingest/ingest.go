@@ -55,6 +55,7 @@ func preserveMtimeAt(srcPath, dstPath string, mtime time.Time) {
 // tests can substitute a fake without a real HTTP server.
 type nodeCreator interface {
 	PostNodeCreated(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error)
+	PostNodeCreatedWithUUID(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload, eventUUID string) (*branchdam.EventResponse, error)
 }
 
 // contentChecker is the subset of *branchdam.Client's surface Engine needs for

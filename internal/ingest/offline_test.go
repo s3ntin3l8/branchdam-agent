@@ -59,6 +59,10 @@ func (failingClient) PostNodeCreated(context.Context, string, branchdam.NodeCrea
 	return nil, context.DeadlineExceeded
 }
 
+func (failingClient) PostNodeCreatedWithUUID(context.Context, string, branchdam.NodeCreatedPayload, string) (*branchdam.EventResponse, error) {
+	return nil, context.DeadlineExceeded
+}
+
 func TestIngestCardOfflineQueuesRowBeforeSubmission(t *testing.T) {
 	dir := t.TempDir()
 	cardRoot := filepath.Join(dir, "card")

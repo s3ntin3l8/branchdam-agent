@@ -441,18 +441,7 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 	// Opportunistic fast path, strictly best-effort: failure here changes
 	// nothing about correctness, since Drain will retry regardless (see this
 	// function's doc comment, step 5).
-	type nodeCreatorWithUUID interface {
-		PostNodeCreatedWithUUID(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload, eventUUID string) (*branchdam.EventResponse, error)
-	}
-	var (
-		resp    *branchdam.EventResponse
-		postErr error
-	)
-	if creatorWithUUID, ok := e.Client.(nodeCreatorWithUUID); ok {
-		resp, postErr = creatorWithUUID.PostNodeCreatedWithUUID(ctx, e.AgentID, payload, rec.NodeCreatedEventUUID)
-	} else {
-		resp, postErr = e.Client.PostNodeCreated(ctx, e.AgentID, payload)
-	}
+	resp, postErr := e.Client.PostNodeCreatedWithUUID(ctx, e.AgentID, payload, rec.NodeCreatedEventUUID)
 	if postErr == nil {
 		if markErr := e.Queue.MarkNodeCreatedSubmitted(ctx, nodeUUID, resp.EventID, e.now()); markErr == nil {
 			fr.SubmittedInline = true
