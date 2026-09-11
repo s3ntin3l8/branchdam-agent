@@ -28,7 +28,7 @@ The agent communicates with the branchDAM server via its `/api/v1/agent/*` REST 
 - [`docs/offline-queue.md`](docs/offline-queue.md) — Offline queue state machine and crash safety.
 - [`docs/platform-support.md`](docs/platform-support.md) — OS support matrix and tray details.
 - [`docs/luminar-catalog.md`](docs/luminar-catalog.md) — Luminar Neo catalog extraction.
-- [branchDAM Agent Protocol](https://github.com/s3ntin3l8/branchdam/blob/main/docs/agent-protocol.md) — Wire contract and REST DTO specifications.
+- [branchDAM Agent Protocol](https://github.com/s3ntin3l8/branchdam/blob/main/docs/agent-api.md) — Wire contract and REST DTO specifications.
 
 ---
 

@@ -3,6 +3,8 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -385,6 +387,10 @@ func TestIngestCardUploadStream(t *testing.T) {
 	}
 	if uploader.uploadCalls[0].Filename != "IMG_0042.jpg" {
 		t.Errorf("uploaded filename = %q, want IMG_0042.jpg", uploader.uploadCalls[0].Filename)
+	}
+	wantSrcHash := sha256.Sum256([]byte(filepath.Join(cardRoot, "IMG_0042.jpg")))
+	if uploader.uploadCalls[0].SourcePathHash != hex.EncodeToString(wantSrcHash[:]) {
+		t.Errorf("sourcePathHash = %q, want %q", uploader.uploadCalls[0].SourcePathHash, hex.EncodeToString(wantSrcHash[:]))
 	}
 
 	// Local file was written under LocalEditRoot + relativePath returned by server

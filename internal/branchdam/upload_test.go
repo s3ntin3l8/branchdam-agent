@@ -10,7 +10,7 @@ import (
 )
 
 func TestClientUpload(t *testing.T) {
-	var gotMethod, gotPath, gotAPIKey, gotFilename, gotCamera, gotTimestamp, gotHash, gotContentType string
+	var gotMethod, gotPath, gotAPIKey, gotFilename, gotCamera, gotTimestamp, gotHash, gotContentType, gotSourcePathHash string
 	var gotBody []byte
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -21,6 +21,7 @@ func TestClientUpload(t *testing.T) {
 		gotCamera = r.Header.Get("X-Camera-Model")
 		gotTimestamp = r.Header.Get("X-Capture-Timestamp")
 		gotHash = r.Header.Get("X-Blake3-Hash")
+		gotSourcePathHash = r.Header.Get("X-Source-Path-Hash")
 		gotContentType = r.Header.Get("Content-Type")
 
 		var err error
@@ -47,6 +48,7 @@ func TestClientUpload(t *testing.T) {
 		CameraModel:      "Pixel-9-Pro",
 		CaptureTimestamp: 1756470000,
 		Blake3Hash:       "b3f1c4d9e2a7568013c9a4d2e8f7b1063c5a9d7e2f4b8016938ac1d4e7f2b09a",
+		SourcePathHash:   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // pragma: allowlist secret
 	}
 
 	resp, err := c.Upload(context.Background(), strings.NewReader("hello upload"), opts)
@@ -74,6 +76,9 @@ func TestClientUpload(t *testing.T) {
 	}
 	if gotHash != "b3f1c4d9e2a7568013c9a4d2e8f7b1063c5a9d7e2f4b8016938ac1d4e7f2b09a" {
 		t.Errorf("hash = %q", gotHash)
+	}
+	if gotSourcePathHash != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" { // pragma: allowlist secret
+		t.Errorf("sourcePathHash = %q", gotSourcePathHash)
 	}
 	if gotContentType != "application/octet-stream" {
 		t.Errorf("contentType = %q", gotContentType)
@@ -139,5 +144,23 @@ func TestHandshake_WithNamingTemplate(t *testing.T) {
 	}
 	if resp.NamingTemplate != "{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}" {
 		t.Errorf("NamingTemplate = %q", resp.NamingTemplate)
+	}
+}
+
+func TestClientUpload_InvalidSourcePathHash(t *testing.T) {
+	c := New("http://127.0.0.1:8080", "test-api-key")
+
+	badHashes := []string{
+		"not-a-hash",
+		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8555",
+		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85z",
+	}
+
+	for _, bad := range badHashes {
+		_, err := c.Upload(context.Background(), strings.NewReader(""), UploadOptions{SourcePathHash: bad})
+		if err == nil {
+			t.Errorf("expected error for bad hash %q, got nil", bad)
+		}
 	}
 }

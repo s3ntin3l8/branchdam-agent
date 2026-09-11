@@ -2,6 +2,8 @@ package ingest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -588,10 +590,12 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 	}
 	defer func() { _ = srcFile.Close() }()
 
+	srcPathHash := sha256.Sum256([]byte(srcPath))
 	uploadOpts := branchdam.UploadOptions{
 		Filename:         filepath.Base(srcPath),
 		CameraModel:      cameraModel,
 		CaptureTimestamp: captureTimestamp,
+		SourcePathHash:   hex.EncodeToString(srcPathHash[:]),
 	}
 
 	var body io.Reader = srcFile
