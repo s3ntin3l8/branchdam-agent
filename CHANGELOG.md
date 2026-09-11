@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.5.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.4.0...v1.5.0) (2026-09-11)
+
+
+### Features
+
+* **branchdam:** add EventUUID for transport-level idempotency ([#182](https://github.com/s3ntin3l8/branchdam-agent/issues/182)) ([234af29](https://github.com/s3ntin3l8/branchdam-agent/commit/234af297e9f4db660b38fd1334d22385dd5c0a07))
+* **branchdam:** add scratch telemetry client and source path hash header ([#178](https://github.com/s3ntin3l8/branchdam-agent/issues/178)) ([e755544](https://github.com/s3ntin3l8/branchdam-agent/commit/e75554430407b205794392d7dbf44318e479b522))
+
+
+### Bug Fixes
+
+* **ci:** grant id-token to release-binaries caller, drop prerelease flag ([#169](https://github.com/s3ntin3l8/branchdam-agent/issues/169)) ([2c822ef](https://github.com/s3ntin3l8/branchdam-agent/commit/2c822ef3d683ea8ed089fbcff2820624c06f986e))
+* **ci:** grant issues: write to release-please job for PR labeling ([#170](https://github.com/s3ntin3l8/branchdam-agent/issues/170)) ([ffe1380](https://github.com/s3ntin3l8/branchdam-agent/commit/ffe13807db42226f198140b8fd83a3fd547ef6b4))
+* **ci:** skip github release for v1.4.0, create out-of-band ([#171](https://github.com/s3ntin3l8/branchdam-agent/issues/171)) ([db640a8](https://github.com/s3ntin3l8/branchdam-agent/commit/db640a807706c50cc509e4eab38a041389635265))
+* exclude bot-authored PRs by author, not actor; correct guard comment ([#176](https://github.com/s3ntin3l8/branchdam-agent/issues/176)) ([547c5d2](https://github.com/s3ntin3l8/branchdam-agent/commit/547c5d2a6921025a3fcb4136e483233b1d3e6369))
+
 ## [1.4.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.3.0...v1.4.0) (2026-09-02)
 
 
