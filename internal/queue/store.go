@@ -20,13 +20,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
 
 // currentSchemaVersion is the latest schema version Open/migrate must bring
 // a queue.db to. Bump this and add a migration entry to the migrations
 // slice whenever the schema changes in a backward-incompatible way.
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // Status values for the three independent per-step columns.
 const (
@@ -81,6 +82,7 @@ type Record struct {
 	FullHash                   string
 	FastHash                   string
 	NodeCreatedPayloadJSON     string // "" for SIDECAR
+	NodeCreatedEventUUID       string
 	NodeCreatedStatus          string
 	NodeCreatedEventID         string
 	NodeCreatedSubmittedAtUnix int64
@@ -183,6 +185,7 @@ type NewRecord struct {
 	FullHash               string
 	FastHash               string
 	NodeCreatedPayloadJSON string
+	NodeCreatedEventUUID   string
 }
 
 // InsertPending inserts rec as a fresh row with every step status at its
@@ -202,15 +205,25 @@ func (s *Store) InsertPending(ctx context.Context, rec NewRecord) error {
 		rebaseStatus = StatusSkipped
 	}
 
+	eventUUID := rec.NodeCreatedEventUUID
+	if eventUUID == "" && rec.Kind == KindMedia {
+		u, err := uuid.NewV7()
+		if err != nil {
+			eventUUID = uuid.New().String()
+		} else {
+			eventUUID = u.String()
+		}
+	}
+
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO queue_nodes (
 	node_uuid, kind, source_path, local_path, archive_path, archive_container_path,
 	tier0_container_path, file_name, file_ext, size_bytes, mtime_unix, full_hash, fast_hash,
-	node_created_payload_json, node_created_status, archive_copy_status, rebase_status, created_at_unix
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	node_created_payload_json, node_created_event_uuid, node_created_status, archive_copy_status, rebase_status, created_at_unix
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.NodeUUID, rec.Kind, rec.SourcePath, rec.LocalPath, rec.ArchivePath, rec.ArchiveContainerPath,
 		rec.Tier0ContainerPath, rec.FileName, rec.FileExt, rec.SizeBytes, rec.MtimeUnix, rec.FullHash, rec.FastHash,
-		rec.NodeCreatedPayloadJSON, nodeCreatedStatus, StatusPending, rebaseStatus, time.Now().Unix(),
+		rec.NodeCreatedPayloadJSON, eventUUID, nodeCreatedStatus, StatusPending, rebaseStatus, time.Now().Unix(),
 	)
 	if err != nil {
 		return fmt.Errorf("queue: insert pending row for %s: %w", rec.SourcePath, err)
@@ -457,7 +470,7 @@ func (s *Store) MarkRebaseFailed(ctx context.Context, nodeUUID, errMsg string) e
 const selectCols = `SELECT
 	id, node_uuid, kind, source_path, local_path, archive_path, archive_container_path,
 	tier0_container_path, file_name, file_ext, size_bytes, mtime_unix, full_hash, fast_hash,
-	node_created_payload_json, node_created_status, node_created_event_id,
+	node_created_payload_json, node_created_event_uuid, node_created_status, node_created_event_id,
 	node_created_submitted_at_unix, node_created_attempts, node_created_next_attempt_unix, node_created_last_error,
 	archive_copy_status, archive_copy_attempts, archive_copy_next_attempt_unix, archive_copy_last_error,
 	rebase_status, rebase_attempts, rebase_next_attempt_unix, rebase_last_error,
@@ -483,7 +496,7 @@ func scan(s rowScanner) (Record, error) {
 	err := s.Scan(
 		&r.ID, &r.NodeUUID, &r.Kind, &r.SourcePath, &r.LocalPath, &r.ArchivePath, &r.ArchiveContainerPath,
 		&r.Tier0ContainerPath, &r.FileName, &r.FileExt, &r.SizeBytes, &r.MtimeUnix, &r.FullHash, &r.FastHash,
-		&r.NodeCreatedPayloadJSON, &r.NodeCreatedStatus, &r.NodeCreatedEventID,
+		&r.NodeCreatedPayloadJSON, &r.NodeCreatedEventUUID, &r.NodeCreatedStatus, &r.NodeCreatedEventID,
 		&r.NodeCreatedSubmittedAtUnix, &r.NodeCreatedAttempts, &r.NodeCreatedNextAttemptUnix, &r.NodeCreatedLastError,
 		&r.ArchiveCopyStatus, &r.ArchiveCopyAttempts, &r.ArchiveCopyNextAttemptUnix, &r.ArchiveCopyLastError,
 		&r.RebaseStatus, &r.RebaseAttempts, &r.RebaseNextAttemptUnix, &r.RebaseLastError,

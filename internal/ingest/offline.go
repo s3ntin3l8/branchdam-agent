@@ -406,6 +406,8 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		return fr
 	}
 
+	eventUUID := e.mintEventUUID()
+
 	rec := queue.NewRecord{
 		NodeUUID:               nodeUUID,
 		Kind:                   queue.KindMedia,
@@ -421,6 +423,7 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		FullHash:               writeRes.FullHash,
 		FastHash:               writeRes.FastHash,
 		NodeCreatedPayloadJSON: string(payloadJSON),
+		NodeCreatedEventUUID:   eventUUID,
 	}
 
 	// This InsertPending call is the durability boundary described in this
@@ -434,7 +437,8 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 	// Opportunistic fast path, strictly best-effort: failure here changes
 	// nothing about correctness, since Drain will retry regardless (see this
 	// function's doc comment, step 5).
-	if resp, err := e.Client.PostNodeCreated(ctx, e.AgentID, payload); err == nil {
+	resp, postErr := e.Client.PostNodeCreatedWithUUID(ctx, e.AgentID, payload, rec.NodeCreatedEventUUID)
+	if postErr == nil {
 		if markErr := e.Queue.MarkNodeCreatedSubmitted(ctx, nodeUUID, resp.EventID, e.now()); markErr == nil {
 			fr.SubmittedInline = true
 		}
