@@ -4,21 +4,44 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/google/uuid"
 )
+
+// mintEventUUID generates a UUIDv7 for transport-level event idempotency,
+// falling back to UUIDv4 if v7 generation fails. Package-level variable so tests
+// can verify the v4 fallback path without flaky clock manipulation.
+var mintEventUUID = func() string {
+	u, err := uuid.NewV7()
+	if err != nil {
+		return uuid.New().String()
+	}
+	return u.String()
+}
+
+// MintEventUUID generates a UUIDv7 for transport-level event idempotency,
+// falling back to UUIDv4 if v7 generation fails.
+func MintEventUUID() string {
+	return mintEventUUID()
+}
 
 // postEvent marshals payload to JSON, double-encodes it into
 // EventEnvelope.Payload as a string (sending it as a bare object is a 422 --
 // AgentEventInput.Body.Payload is declared `json:"payload" required:"true"`
-// as a Go string server-side), and POSTs the envelope. Returns the 202
-// response's eventId. 202 means enqueued, never applied -- see EventResponse's
-// doc comment and the plan's contract gap 3 (no failure feedback channel).
-func (c *Client) postEvent(ctx context.Context, agentID, eventType string, payload any) (*EventResponse, error) {
+// as a Go string server-side), mints or preserves an EventUUID for transport-level
+// idempotency, and POSTs the envelope. Returns the 202 response's eventId.
+func (c *Client) postEvent(ctx context.Context, agentID, eventType string, payload any, eventUUID string) (*EventResponse, error) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("branchdam: marshal %s payload: %w", eventType, err)
 	}
 
+	if eventUUID == "" {
+		eventUUID = mintEventUUID()
+	}
+
 	env := EventEnvelope{
+		EventUUID: eventUUID,
 		AgentID:   agentID,
 		EventType: eventType,
 		Payload:   string(payloadJSON),
@@ -31,15 +54,20 @@ func (c *Client) postEvent(ctx context.Context, agentID, eventType string, paylo
 	return &out, nil
 }
 
-// PostNodeCreated sends EVENT_NODE_CREATED. Event submission is not
-// idempotent at the transport level (plan gap 1: the server mints its own
-// event_uuid, ignoring any client-side one), so callers must mint a stable
-// NodeUUID before the first attempt and rely on entity-level idempotency --
-// a re-sent EVENT_NODE_CREATED for an existing nodeUuid is a silent
-// no-op server-side, and a retry with corrected fields is silently ignored
-// (first write wins).
+// PostNodeCreated sends EVENT_NODE_CREATED with a client-minted EventUUID
+// for transport-level idempotency on retries.
 func (c *Client) PostNodeCreated(ctx context.Context, agentID string, payload NodeCreatedPayload) (*EventResponse, error) {
-	return c.postEvent(ctx, agentID, EventNodeCreated, payload)
+	return c.postEvent(ctx, agentID, EventNodeCreated, payload, "")
+}
+
+// PostNodeCreatedWithUUID sends EVENT_NODE_CREATED with an explicit EventUUID,
+// guaranteeing that retries of the same logical event re-send the same UUID
+// across network or drain retry boundaries.
+func (c *Client) PostNodeCreatedWithUUID(ctx context.Context, agentID string, payload NodeCreatedPayload, eventUUID string) (*EventResponse, error) {
+	if eventUUID == "" {
+		return nil, fmt.Errorf("branchdam: eventUUID must not be empty")
+	}
+	return c.postEvent(ctx, agentID, EventNodeCreated, payload, eventUUID)
 }
 
 // PostEdgeAttached sends EVENT_EDGE_ATTACHED, after running
@@ -53,22 +81,22 @@ func (c *Client) PostEdgeAttached(ctx context.Context, agentID string, payload E
 	if err := ValidateEdgeAttached(payload); err != nil {
 		return nil, err
 	}
-	return c.postEvent(ctx, agentID, EventEdgeAttached, payload)
+	return c.postEvent(ctx, agentID, EventEdgeAttached, payload, "")
 }
 
 // PostNodeMoved sends EVENT_NODE_MOVED.
 func (c *Client) PostNodeMoved(ctx context.Context, agentID string, payload NodeMovedPayload) (*EventResponse, error) {
-	return c.postEvent(ctx, agentID, EventNodeMoved, payload)
+	return c.postEvent(ctx, agentID, EventNodeMoved, payload, "")
 }
 
 // PostNodeDeleted sends EVENT_NODE_DELETED.
 func (c *Client) PostNodeDeleted(ctx context.Context, agentID string, payload NodeDeletedPayload) (*EventResponse, error) {
-	return c.postEvent(ctx, agentID, EventNodeDeleted, payload)
+	return c.postEvent(ctx, agentID, EventNodeDeleted, payload, "")
 }
 
 // PostPathRebased sends EVENT_PATH_REBASED. Prefer Client.Rebase
 // (POST /api/v1/agent/rebase) when a synchronous result is needed -- this
 // event-queue path is fire-and-forget like every other /events call.
 func (c *Client) PostPathRebased(ctx context.Context, agentID string, payload PathRebasedPayload) (*EventResponse, error) {
-	return c.postEvent(ctx, agentID, EventPathRebased, payload)
+	return c.postEvent(ctx, agentID, EventPathRebased, payload, "")
 }

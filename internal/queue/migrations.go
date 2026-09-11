@@ -72,6 +72,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_nodes_node_uuid ON queue_nodes(node_
 CREATE INDEX IF NOT EXISTS idx_queue_nodes_status ON queue_nodes(archive_copy_status, rebase_status);
 `,
 	},
+	{
+		fromVersion: 1,
+		sql: `
+ALTER TABLE queue_nodes ADD COLUMN node_created_event_uuid TEXT NOT NULL DEFAULT '';
+UPDATE queue_nodes SET node_created_event_uuid = node_uuid WHERE node_created_event_uuid = '';
+`,
+	},
 }
 
 // migrate reads PRAGMA user_version and applies every pending migration to

@@ -56,7 +56,7 @@ func preserveMtimeAt(srcPath, dstPath string, mtime time.Time) {
 // nodeCreator is the subset of *branchdam.Client's surface Engine needs, so
 // tests can substitute a fake without a real HTTP server.
 type nodeCreator interface {
-	PostNodeCreated(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error)
+	PostNodeCreatedWithUUID(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload, eventUUID string) (*branchdam.EventResponse, error)
 }
 
 // contentChecker is the subset of *branchdam.Client's surface Engine needs for
@@ -96,10 +96,11 @@ type Engine struct {
 	// IngestCardOffline; unused by IngestCard.
 	Tier0ContainerRoot string
 
-	// Now/NewNodeUUID are overridable for tests; default to time.Now and a
-	// real UUIDv7 mint (google/uuid.NewV7) via NewEngine.
-	Now         func() time.Time
-	NewNodeUUID func() (string, error)
+	// Now/NewNodeUUID/MintEventUUID are overridable for tests; default to time.Now, a
+	// real UUIDv7 mint (google/uuid.NewV7 with v4 fallback) and branchdam.MintEventUUID via NewEngine.
+	Now           func() time.Time
+	NewNodeUUID   func() (string, error)
+	MintEventUUID func() string
 	// IsMetered is overridable for tests; default to netgate.IsMetered via NewEngine.
 	IsMetered func() (bool, error)
 
@@ -110,6 +111,13 @@ type Engine struct {
 	// exists for a live "N of M bytes" readout (the tray's queue status,
 	// issue #32), not something the ingest core itself needs.
 	Progress func(ProgressEvent)
+}
+
+func (e *Engine) mintEventUUID() string {
+	if e != nil && e.MintEventUUID != nil {
+		return e.MintEventUUID()
+	}
+	return branchdam.MintEventUUID()
 }
 
 // progressOpts builds the WriteOption a DualWrite/WriteLocal/Verify call
@@ -128,14 +136,21 @@ func (e *Engine) progressOpts(path string, phase ProgressPhase, total int64) []W
 // NewEngine builds an Engine with real clock/UUID/exiftool dependencies.
 func NewEngine(client nodeCreator, agentID string, ingestCfg config.IngestConfig, mappings []config.PathMapping) *Engine {
 	e := &Engine{
-		Client:      client,
-		AgentID:     agentID,
-		Ingest:      ingestCfg,
-		Mappings:    mappings,
-		Exiftool:    NewExiftoolAt(ingestCfg.ExiftoolPath),
-		Now:         time.Now,
-		NewNodeUUID: func() (string, error) { id, err := uuid.NewV7(); return id.String(), err },
-		IsMetered:   netgate.IsMetered,
+		Client:        client,
+		AgentID:       agentID,
+		Ingest:        ingestCfg,
+		Mappings:      mappings,
+		Exiftool:      NewExiftoolAt(ingestCfg.ExiftoolPath),
+		Now:           time.Now,
+		MintEventUUID: branchdam.MintEventUUID,
+		NewNodeUUID: func() (string, error) {
+			id, err := uuid.NewV7()
+			if err != nil {
+				return uuid.New().String(), nil
+			}
+			return id.String(), nil
+		},
+		IsMetered: netgate.IsMetered,
 	}
 	if u, ok := client.(uploader); ok {
 		e.Uploader = u
@@ -444,7 +459,8 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 		}
 	}
 
-	resp, err := e.Client.PostNodeCreated(ctx, e.AgentID, payload)
+	eventUUID := e.mintEventUUID()
+	resp, err := e.Client.PostNodeCreatedWithUUID(ctx, e.AgentID, payload, eventUUID)
 	if err != nil {
 		fr.Err = fmt.Errorf("submit EVENT_NODE_CREATED: %w", err)
 		return fr

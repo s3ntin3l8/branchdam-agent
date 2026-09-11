@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -67,6 +68,7 @@ func sampleRecord(nodeUUID, sourcePath string) NewRecord {
 		FullHash:               "a" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc",
 		FastHash:               "0123456789abcdef",
 		NodeCreatedPayloadJSON: `{"nodeUuid":"` + nodeUUID + `"}`,
+		NodeCreatedEventUUID:   "evt-" + nodeUUID,
 	}
 }
 
@@ -496,7 +498,7 @@ func TestStatusIndexExistsAndIsUsedByPending(t *testing.T) {
 	err := s.db.QueryRowContext(ctx, `EXPLAIN QUERY PLAN
 SELECT id, node_uuid, kind, source_path, local_path, archive_path, archive_container_path,
 	tier0_container_path, file_name, file_ext, size_bytes, mtime_unix, full_hash, fast_hash,
-	node_created_payload_json, node_created_status, node_created_event_id,
+	node_created_payload_json, node_created_event_uuid, node_created_status, node_created_event_id,
 	node_created_submitted_at_unix, node_created_attempts, node_created_next_attempt_unix, node_created_last_error,
 	archive_copy_status, archive_copy_attempts, archive_copy_next_attempt_unix, archive_copy_last_error,
 	rebase_status, rebase_attempts, rebase_next_attempt_unix, rebase_last_error,
@@ -518,5 +520,76 @@ ORDER BY id ASC`).Scan(&id, &parent, &notused, &detail)
 	}
 	if len(pending) != 2 {
 		t.Errorf("Pending() = %d rows, want 2", len(pending))
+	}
+}
+
+func TestMigrateV1ToV2AddsNodeCreatedEventUUID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1_queue.db")
+	// Open raw DB and apply v1 schema
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	// Run migration 0 (v0 -> v1)
+	v0SQL := `CREATE TABLE queue_nodes (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	node_uuid TEXT NOT NULL UNIQUE,
+	kind TEXT NOT NULL CHECK (kind IN ('MEDIA','SIDECAR')),
+	source_path TEXT NOT NULL,
+	local_path TEXT NOT NULL,
+	archive_path TEXT NOT NULL,
+	archive_container_path TEXT NOT NULL,
+	tier0_container_path TEXT NOT NULL DEFAULT '',
+	file_name TEXT NOT NULL,
+	file_ext TEXT NOT NULL,
+	size_bytes INTEGER NOT NULL,
+	mtime_unix INTEGER NOT NULL,
+	full_hash TEXT NOT NULL,
+	fast_hash TEXT NOT NULL,
+	node_created_payload_json TEXT NOT NULL DEFAULT '',
+	node_created_status TEXT NOT NULL DEFAULT 'PENDING',
+	node_created_event_id TEXT NOT NULL DEFAULT '',
+	node_created_submitted_at_unix INTEGER NOT NULL DEFAULT 0,
+	node_created_attempts INTEGER NOT NULL DEFAULT 0,
+	node_created_next_attempt_unix INTEGER NOT NULL DEFAULT 0,
+	node_created_last_error TEXT NOT NULL DEFAULT '',
+	archive_copy_status TEXT NOT NULL DEFAULT 'PENDING',
+	archive_copy_attempts INTEGER NOT NULL DEFAULT 0,
+	archive_copy_next_attempt_unix INTEGER NOT NULL DEFAULT 0,
+	archive_copy_last_error TEXT NOT NULL DEFAULT '',
+	rebase_status TEXT NOT NULL DEFAULT 'PENDING',
+	rebase_attempts INTEGER NOT NULL DEFAULT 0,
+	rebase_next_attempt_unix INTEGER NOT NULL DEFAULT 0,
+	rebase_last_error TEXT NOT NULL DEFAULT '',
+	created_at_unix INTEGER NOT NULL
+);
+CREATE INDEX idx_queue_nodes_status ON queue_nodes(archive_copy_status, rebase_status);
+PRAGMA user_version = 1;`
+	if _, err := db.Exec(v0SQL); err != nil {
+		t.Fatalf("setup v1 db: %v", err)
+	}
+	// Insert a row in v1 DB with no node_created_event_uuid
+	_, err = db.Exec(`INSERT INTO queue_nodes (
+		node_uuid, kind, source_path, local_path, archive_path, archive_container_path,
+		file_name, file_ext, size_bytes, mtime_unix, full_hash, fast_hash, created_at_unix
+	) VALUES ('orig-uuid-1', 'MEDIA', 'p', 'l', 'a', 'ac', 'f.jpg', 'jpg', 10, 100, 'fh', 'fast', 100)`)
+	if err != nil {
+		t.Fatalf("insert v1 row: %v", err)
+	}
+	_ = db.Close()
+
+	// Open with Store.Open, which should migrate v1 -> v2
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	rec, ok, err := s.ByNodeUUID(context.Background(), "orig-uuid-1")
+	if err != nil || !ok {
+		t.Fatalf("ByNodeUUID: ok=%v, err=%v", ok, err)
+	}
+	if rec.NodeCreatedEventUUID != "orig-uuid-1" {
+		t.Errorf("NodeCreatedEventUUID = %q, want %q backfilled from node_uuid", rec.NodeCreatedEventUUID, "orig-uuid-1")
 	}
 }

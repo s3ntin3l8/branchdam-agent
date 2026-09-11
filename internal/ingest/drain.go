@@ -63,7 +63,7 @@ func backoffFor(attempts int, now time.Time) time.Time {
 // actually change server state, so tests can substitute a fake.
 type drainClient interface {
 	Handshake(ctx context.Context, req branchdam.HandshakeRequest) (*branchdam.HandshakeResponse, error)
-	PostNodeCreated(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload) (*branchdam.EventResponse, error)
+	PostNodeCreatedWithUUID(ctx context.Context, agentID string, payload branchdam.NodeCreatedPayload, eventUUID string) (*branchdam.EventResponse, error)
 	Rebase(ctx context.Context, req branchdam.RebaseRequest) (*branchdam.RebaseResponse, error)
 }
 
@@ -133,7 +133,13 @@ func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID 
 			_ = store.MarkNodeCreatedAttempt(ctx, r.NodeUUID, fmt.Sprintf("decode stored payload: %v", err), backoffFor(r.NodeCreatedAttempts+1, nowT))
 			continue
 		}
-		resp, err := client.PostNodeCreated(ctx, agentID, payload)
+		// NodeCreatedEventUUID is populated for all rows under schema v2 (and backfilled from
+		// node_uuid on upgrade); fallback to NodeUUID only defends against unexpected empty values.
+		eventUUID := r.NodeCreatedEventUUID
+		if eventUUID == "" {
+			eventUUID = r.NodeUUID
+		}
+		resp, err := client.PostNodeCreatedWithUUID(ctx, agentID, payload, eventUUID)
 		if err != nil {
 			_ = store.MarkNodeCreatedAttempt(ctx, r.NodeUUID, err.Error(), backoffFor(r.NodeCreatedAttempts+1, nowT))
 			continue
