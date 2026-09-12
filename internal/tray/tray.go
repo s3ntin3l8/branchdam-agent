@@ -212,6 +212,12 @@ type Status struct {
 	// isn't in Integrations()'s own registry (see HookID's own doc
 	// comment). Ordered by the compile-time Hooks() registry.
 	Hooks []HookStatus `json:"hooks,omitempty"`
+	// ConfigIncomplete is true when required config fields are missing
+	// (server.apiKey, server.baseUrl, ingest.archiveRoot, etc.). The
+	// tray starts anyway -- it shows a "not configured" icon and menu
+	// state, and the user configures through the Settings menu.
+	ConfigIncomplete bool     `json:"configIncomplete"`
+	MissingFields    []string `json:"missingFields,omitempty"`
 }
 
 // Runner owns the state a tray-resident process needs: the ingest engine
@@ -364,6 +370,12 @@ type Runner struct {
 	// autoEject gates OS-level safe eject after verified ingest (issue #87).
 	autoEject bool
 	ejectFn   func(mountPath string) error
+
+	// configIncomplete tracks whether required config fields are missing.
+	// The tray starts anyway in "setup mode" -- ingest is blocked, and
+	// the icon/menu show a "not configured" state.
+	configIncomplete bool
+	missingFields    []string
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -407,6 +419,16 @@ func (r *Runner) SetOnPauseChange(fn func(paused bool)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onPauseChange = fn
+}
+
+// SetConfigIncomplete marks the tray as running with an incomplete config.
+// The tray starts in "setup mode" -- ingest is blocked, and the icon/menu
+// show a "not configured" state until all required fields are set.
+func (r *Runner) SetConfigIncomplete(incomplete bool, missing []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.configIncomplete = incomplete
+	r.missingFields = append([]string(nil), missing...)
 }
 
 // SetArchiveRoot updates the archive destination directory (ingest.archiveRoot)
@@ -1432,6 +1454,8 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	lastPrune := r.lastPrune
 	inFlightDrain := r.inFlightDrain
 	inFlightPrune := r.inFlightPrune
+	configIncomplete := r.configIncomplete
+	missingFields := append([]string(nil), r.missingFields...)
 
 	// Built entirely under r.mu, not after unlocking: r.syncers/r.lastSync
 	// are read map entries here, not copied whole-map references, so a
@@ -1497,22 +1521,24 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	}
 
 	return Status{
-		WatchDirs:       watchDirs,
-		ScratchNote:     scratchNote,
-		QueueStatus:     qs,
-		LastIngest:      last,
-		SelfUpdate:      selfUpdate,
-		Paused:          r.paused.Load(),
-		Busy:            busy,
-		BusyCard:        busyCard,
-		BusySince:       busySince,
-		IngestProgress:  prog,
-		HandshakeOK:     lastDrain != nil && lastDrain.HandshakeOK,
-		LastHandshakeAt: lastHandshakeAt,
-		HasDrained:      lastDrain != nil,
-		InFlightDrain:   inFlightDrain,
-		InFlightPrune:   inFlightPrune,
-		Integrations:    integrations,
-		Hooks:           hooks,
+		WatchDirs:        watchDirs,
+		ScratchNote:      scratchNote,
+		QueueStatus:      qs,
+		LastIngest:       last,
+		SelfUpdate:       selfUpdate,
+		Paused:           r.paused.Load(),
+		Busy:             busy,
+		BusyCard:         busyCard,
+		BusySince:        busySince,
+		IngestProgress:   prog,
+		HandshakeOK:      lastDrain != nil && lastDrain.HandshakeOK,
+		LastHandshakeAt:  lastHandshakeAt,
+		HasDrained:       lastDrain != nil,
+		InFlightDrain:    inFlightDrain,
+		InFlightPrune:    inFlightPrune,
+		Integrations:     integrations,
+		Hooks:            hooks,
+		ConfigIncomplete: configIncomplete,
+		MissingFields:    missingFields,
 	}
 }

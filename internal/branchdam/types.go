@@ -189,6 +189,18 @@ type HandshakeResponse struct {
 	AcknowledgedEventUUID string `json:"acknowledgedEventUuid,omitempty"`
 	PendingEventsCount    int64  `json:"pendingEventsCount"`
 	NamingTemplate        string `json:"namingTemplate,omitempty"`
+	// PathMappings, when present, provides the server-side path mapping
+	// configuration for this agent. The agent applies these on successful
+	// handshake, overriding any empty pathMappings in config.yaml. When
+	// nil or empty, the agent falls back to config.yaml entries.
+	PathMappings []PathMapping `json:"pathMappings,omitempty"`
+}
+
+// PathMapping is one workstation-path → container-path rewrite rule,
+// as returned by the server handshake.
+type PathMapping struct {
+	WorkstationPrefix string `json:"workstationPrefix"`
+	ContainerPath     string `json:"containerPath"`
 }
 
 // UploadOptions configures headers for streaming upload to POST /api/v1/agent/upload.

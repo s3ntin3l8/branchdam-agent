@@ -24,20 +24,25 @@ const (
 	FieldNodeIndexPath
 	FieldCardRoots
 	FieldAllowedExtensions
+	// FieldAgentID is the self-asserted identity this agent reports to
+	// the server. Defaults to the hostname; editable from the Settings
+	// menu after install.
+	FieldAgentID
+	// FieldPathMappings is the workstation-path → container-path rewrite
+	// rules. Edited as a comma-separated list of
+	// "workstationPath:containerPath" pairs.
+	FieldPathMappings
 )
 
 // SettingsView is a read-only snapshot of the on-disk configuration
 // fields the settings menu renders. Booleans/enums render as native
-// checkboxes/submenus directly from these fields; the five free-text
-// fields (server URL, API key, the two ingest roots, naming template) are
-// edited via Settings.PromptAndSet instead -- ServerAPIKeySet is
-// deliberately a bool, never the key itself, so the menu can say
-// "configured" without ever holding the secret in memory it doesn't
-// already need for its own purposes.
+// checkboxes/submenus directly from these fields; the free-text
+// fields are edited via Settings.PromptAndSet instead.
 type SettingsView struct {
 	ConfigPath string
 
-	StartOnLogin bool
+	StartOnLogin     bool
+	ConfirmDestructive bool
 
 	SelfUpdateEnabled bool
 	// SelfUpdateCheckIntervalHrs mirrors config.SelfUpdateConfig.CheckIntervalHours
@@ -53,9 +58,11 @@ type SettingsView struct {
 	ServerBaseURL   string
 	ServerAPIKeySet bool
 
-	ArchiveRoot       string
-	LocalEditRoot     string
-	NamingTemplate    string
+	AgentID        string
+	ArchiveRoot    string
+	LocalEditRoot  string
+	NamingTemplate string
+	PathMappings   string // formatted as "workstationPath:containerPath, ..."
 	AllowedExtensions []string
 
 	// RestartRequired is true once a change to a restart-only field

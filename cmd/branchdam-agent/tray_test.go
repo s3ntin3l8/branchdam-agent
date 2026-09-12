@@ -157,20 +157,21 @@ func TestRunTrayValidatePlaceholderIsFatal(t *testing.T) {
 	}
 }
 
-// TestRunTrayMissingConfigFileBootstrapsThenFails exercises issue #30's
-// first-run path end to end when no dialog backend is available (the
-// common CI/headless case, via stubTrayDialog's default fail-every-call
-// runner): a starter config must still land on disk even though the
-// wizard itself can't complete, matching `init`'s "always leave something
-// to hand-edit" guarantee.
-func TestRunTrayMissingConfigFileBootstrapsThenFails(t *testing.T) {
+// TestRunTrayMissingConfigFileWritesStarterConfig exercises the first-run
+// path: when no config file exists, a starter config must land on disk
+// and the tray must start in "not configured" mode (exit code 0 on
+// supported platforms, or ErrUnsupported on Linux CI).
+func TestRunTrayMissingConfigFileWritesStarterConfig(t *testing.T) {
 	stubTrayDialog(t, nil)
 
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
 
-	if got := run([]string{"tray", "-config", cfgPath}); got != 1 {
-		t.Errorf("run([tray]) with missing config and no dialog backend = %d, want 1", got)
+	got := run([]string{"tray", "-config", cfgPath})
+	// On Linux CI, tray returns ErrUnsupported (exit 1). On Windows/macOS,
+	// it starts in "not configured" mode (exit 0). Both are acceptable.
+	if got != 0 && got != 1 {
+		t.Errorf("run([tray]) with missing config = %d, want 0 or 1", got)
 	}
 
 	if _, err := os.Stat(cfgPath); err != nil {
@@ -178,60 +179,37 @@ func TestRunTrayMissingConfigFileBootstrapsThenFails(t *testing.T) {
 	}
 }
 
-// TestRunTrayFirstRunBootstrapAppliesAnswers drives the setup wizard with a
-// fake dialogRunner answering every prompt, then confirms those answers
-// actually landed in the config before runTrayCmd went on to load it --
-// proving the bootstrap-then-load ordering in runTrayCmd, not just
-// bootstrapConfigInteractive in isolation (see bootstrap_test.go for that).
-func TestRunTrayFirstRunBootstrapAppliesAnswers(t *testing.T) {
-	answers := map[string]string{
-		"server.baseUrl":        "https://branchdam.example.com",
-		"server.apiKey":         "0123456789abcdef0123456789abcdef",
-		"ingest.archiveRoot":    "/archive",
-		"ingest.localEditRoot":  "/edit",
-		pathMappingContainerKey: "/storage/archive",
-	}
-	stubTrayDialog(t, func(_ context.Context, args ...string) (string, int, error) {
-		var title string
-		for i, a := range args {
-			if a == "-title" && i+1 < len(args) {
-				title = args[i+1]
-			}
-		}
-		for _, p := range bootstrapPrompts {
-			if p.title == title {
-				return answers[p.key], dialogExitOK, nil
-			}
-		}
-		// Anything else is runTrayCmd's own post-bootstrap startup-error
-		// notification (once tray.Run hits tray.ErrUnsupported on this
-		// platform, see TestRunTrayUnsupportedOnLinux) -- not a bootstrap
-		// prompt this test cares about the content of.
-		return "", dialogExitFailed, nil
-	})
+// TestRunTrayFirstRunWritesStarterConfig verifies that when no config file
+// exists, a starter config is written with default/empty fields. The old
+// bootstrap wizard (5 dialog prompts) has been replaced by an installer-driven
+// flow: the installer writes a starter config, then the tray starts in
+// "not configured" mode and the user configures through the Settings menu.
+func TestRunTrayFirstRunWritesStarterConfig(t *testing.T) {
+	stubTrayDialog(t, nil)
 
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
 
-	// Exit 1 is still expected here: bootstrap succeeds and runTrayCmd goes
-	// on to build a real Engine/Runner/status server, but tray.Run itself
-	// hits tray.ErrUnsupported on Linux (see TestRunTrayUnsupportedOnLinux).
-	// What this test actually pins is that bootstrap ran and its answers
-	// were persisted -- checked below, not the final exit code.
+	// Exit 1 is expected here: on Linux, tray.Run hits ErrUnsupported.
+	// What this test pins is that a starter config was written with
+	// empty fields -- checked below, not the final exit code.
 	_ = run([]string{"tray", "-config", cfgPath})
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		t.Fatalf("Load bootstrapped config: %v", err)
+		t.Fatalf("Load starter config: %v", err)
 	}
-	if cfg.Server.BaseURL != answers["server.baseUrl"] {
-		t.Errorf("server.baseUrl = %q, want %q", cfg.Server.BaseURL, answers["server.baseUrl"])
+	if cfg.Server.BaseURL != "" {
+		t.Errorf("server.baseUrl = %q, want empty (configured via tray Settings)", cfg.Server.BaseURL)
 	}
-	if cfg.Ingest.ArchiveRoot != answers["ingest.archiveRoot"] {
-		t.Errorf("ingest.archiveRoot = %q, want %q", cfg.Ingest.ArchiveRoot, answers["ingest.archiveRoot"])
+	if cfg.Server.APIKey != "" {
+		t.Errorf("server.apiKey = %q, want empty (configured via tray Settings)", cfg.Server.APIKey)
 	}
-	if len(cfg.PathMappings) != 1 || cfg.PathMappings[0].ContainerPath != answers[pathMappingContainerKey] {
-		t.Errorf("pathMappings = %+v, want one entry with containerPath %q", cfg.PathMappings, answers[pathMappingContainerKey])
+	if cfg.Ingest.ArchiveRoot != "" {
+		t.Errorf("ingest.archiveRoot = %q, want empty (configured via tray Settings)", cfg.Ingest.ArchiveRoot)
+	}
+	if len(cfg.PathMappings) != 0 {
+		t.Errorf("pathMappings = %+v, want empty (configured via tray Settings)", cfg.PathMappings)
 	}
 }
 

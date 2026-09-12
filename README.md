@@ -98,8 +98,29 @@ against the release's `SHA256SUMS.txt`:
 | Platform | Asset | Contains |
 |---|---|---|
 | Linux (amd64) | `branchdam-agent-linux-amd64.tar.gz` | `branchdam-agent` -- headless subcommands only, no tray |
+| Windows (amd64) | `branchdam-agent-setup.exe` | NSIS installer: extracts binaries, creates shortcuts, writes starter config, adds to Start Menu and Add/Remove Programs |
 | Windows (amd64) | `branchdam-agent-windows-amd64.zip` | `branchdam-agent.exe` (console, for CLI use) + `branchdam-agent-tray.exe` (no console, for the tray/login-item launch path) |
 | macOS (Apple Silicon) | `branchdam-agent-darwin-arm64.tar.gz` | `branchdam-agent.app` -- includes the tray; the CLI subcommands also work invoked directly at `branchdam-agent.app/Contents/MacOS/branchdam-agent` |
+
+### Windows Installer (Recommended)
+
+The NSIS installer provides a one-click setup experience:
+
+1. Download `branchdam-agent-setup.exe` from the latest release
+2. Run the installer - it will:
+   - Extract binaries to `%LOCALAPPDATA%\Programs\branchDAM\`
+   - Create Start Menu shortcuts
+   - Write a starter config with your computer name as the agent ID
+   - Add the agent to Add/Remove Programs
+3. On finish, check "Launch branchDAM Agent" to start the tray
+4. The tray starts in **"not configured" mode** (gray icon) - configure through the Settings menu:
+   - Set your server URL and API key
+   - Configure path mappings (archive root, edit root, container paths)
+   - Set card detection roots and other preferences
+
+The installer does not collect any configuration at install time (except the default agent ID) - all settings are configured through the tray's Settings menu after installation.
+
+### Manual Installation
 
 ```sh
 tar -xzf branchdam-agent-<platform>.tar.gz    # linux/darwin/macOS
