@@ -234,7 +234,10 @@ func Run(
 			statusItem.SetTitle("Status: " + summarize(st))
 			updateItem.SetTitle("Self-update: " + us.Note())
 
-			if st.Paused {
+			if st.ConfigIncomplete {
+				systray.SetIcon(buildUnconfiguredTrayIcon())
+				systray.SetTooltip("branchDAM agent — not configured")
+			} else if st.Paused {
 				pauseItem.Check()
 				pauseItem.SetTitle("▶ Resume ingest")
 				pauseItem.SetTooltip("Resume automatic card detection and queue draining")
@@ -252,7 +255,10 @@ func Run(
 			// Watch dirs can change out from under this menu now that
 			// Reconfigure exists (issue #31's settings menu) -- re-render
 			// on every tick rather than only at startup.
-			if len(st.WatchDirs) == 0 {
+			if st.ConfigIncomplete {
+				watchItem.SetTitle("Watch directories: not configured")
+				ingestNow.Disable()
+			} else if len(st.WatchDirs) == 0 {
 				watchItem.SetTitle("Watch directories: none configured")
 				ingestNow.Disable()
 			} else {
@@ -814,6 +820,9 @@ func Run(
 }
 
 func summarize(st Status) string {
+	if st.ConfigIncomplete {
+		return "not configured — open Settings to set up"
+	}
 	if st.Paused {
 		return "ingest paused by user"
 	}
