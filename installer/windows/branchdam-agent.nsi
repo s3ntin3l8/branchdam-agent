@@ -54,6 +54,9 @@ FunctionEnd
 Section "Install"
     SetOutPath "$INSTDIR"
 
+    ; Save computer name to $1 before FileOpen overwrites $0
+    StrCpy $1 $0
+
     ; Binaries
     File "..\..\dist\branchdam-agent.exe"
     File "..\..\dist\branchdam-agent-tray.exe"
@@ -71,7 +74,7 @@ Section "Install"
         FileWrite $0 "  baseUrl: """"$\r$\n"
         FileWrite $0 "  apiKey: """"$\r$\n"
         FileWrite $0 "$\r$\n"
-        FileWrite $0 "agentId: ""$0""$\r$\n"
+        FileWrite $0 "agentId: ""$1""$\r$\n"
         FileWrite $0 "$\r$\n"
         FileWrite $0 "pathMappings: []$\r$\n"
         FileWrite $0 "$\r$\n"

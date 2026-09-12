@@ -41,7 +41,7 @@ const (
 type SettingsView struct {
 	ConfigPath string
 
-	StartOnLogin     bool
+	StartOnLogin       bool
 	ConfirmDestructive bool
 
 	SelfUpdateEnabled bool
@@ -58,11 +58,11 @@ type SettingsView struct {
 	ServerBaseURL   string
 	ServerAPIKeySet bool
 
-	AgentID        string
-	ArchiveRoot    string
-	LocalEditRoot  string
-	NamingTemplate string
-	PathMappings   string // formatted as "workstationPath:containerPath, ..."
+	AgentID           string
+	ArchiveRoot       string
+	LocalEditRoot     string
+	NamingTemplate    string
+	PathMappings      string // formatted as "workstationPath:containerPath, ..."
 	AllowedExtensions []string
 
 	// RestartRequired is true once a change to a restart-only field

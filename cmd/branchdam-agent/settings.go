@@ -291,6 +291,10 @@ func (s *configSettings) validateStringChange(key, v string) error {
 	case "server.apiKey":
 		cfg.Server.APIKey = v
 	case "agentId":
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return fmt.Errorf("agentId must not be empty")
+		}
 		cfg.AgentID = v
 	case "ingest.archiveRoot":
 		cfg.Ingest.ArchiveRoot = v
@@ -372,6 +376,27 @@ func firstBlockingProblem(cfg config.Config) *config.Problem {
 	return nil
 }
 
+// missingRequiredFields returns the list of required config fields that
+// are empty. Used by both runTrayCmd and reload to compute the
+// configIncomplete flag consistently. pathMappings is excluded because
+// the server handshake can provide them.
+func missingRequiredFields(cfg config.Config) []string {
+	var missing []string
+	if cfg.Server.APIKey == "" {
+		missing = append(missing, "server.apiKey")
+	}
+	if cfg.Server.BaseURL == "" {
+		missing = append(missing, "server.baseUrl")
+	}
+	if cfg.Ingest.ArchiveRoot == "" {
+		missing = append(missing, "ingest.archiveRoot")
+	}
+	if cfg.Ingest.LocalEditRoot == "" {
+		missing = append(missing, "ingest.localEditRoot")
+	}
+	return missing
+}
+
 // settingsPrompt describes one PromptAndSet field's dialog.
 type settingsPrompt struct {
 	key     string
@@ -439,7 +464,7 @@ func settingsPromptFor(field tray.SettingsField) (settingsPrompt, error) {
 	case tray.FieldAgentID:
 		return settingsPrompt{
 			key: "agentId", kind: "entry", title: "Agent ID",
-			message: "Self-asserted identity for this workstation:",
+			message:      "Self-asserted identity for this workstation:",
 			defaultValue: func(cfg config.Config) string { return cfg.AgentID },
 		}, nil
 	case tray.FieldPathMappings:
@@ -598,22 +623,7 @@ func (s *configSettings) reload() error {
 	// Compute which required fields are missing. The tray starts
 	// regardless -- it shows a "not configured" state in the icon and
 	// menu, and ingest is blocked until all required fields are set.
-	var missingFields []string
-	if newCfg.Server.APIKey == "" {
-		missingFields = append(missingFields, "server.apiKey")
-	}
-	if newCfg.Server.BaseURL == "" {
-		missingFields = append(missingFields, "server.baseUrl")
-	}
-	if newCfg.Ingest.ArchiveRoot == "" {
-		missingFields = append(missingFields, "ingest.archiveRoot")
-	}
-	if newCfg.Ingest.LocalEditRoot == "" {
-		missingFields = append(missingFields, "ingest.localEditRoot")
-	}
-	if len(newCfg.PathMappings) == 0 {
-		missingFields = append(missingFields, "pathMappings")
-	}
+	missingFields := missingRequiredFields(newCfg)
 	configIncomplete := len(missingFields) > 0
 
 	// Create the branchdam client. When config is incomplete (no valid
@@ -628,29 +638,32 @@ func (s *configSettings) reload() error {
 
 	// Synchronize naming template from server handshake if available (issue #86).
 	// Handshake failure must not block settings reload -- continue with config-file template.
-	hsCtx, hsCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: newCfg.AgentID}); err != nil {
-		slog.Warn("could not sync naming template from server handshake on reload; using config value", "err", err)
-	} else {
-		if hs.NamingTemplate != "" {
-			newCfg.Ingest.PathTemplate = hs.NamingTemplate
-		}
-		// Apply server-provided path mappings when available and agent has none configured.
-		if len(hs.PathMappings) > 0 && len(newCfg.PathMappings) == 0 {
-			newCfg.PathMappings = make([]config.PathMapping, len(hs.PathMappings))
-			for i, pm := range hs.PathMappings {
-				newCfg.PathMappings[i] = config.PathMapping{
-					WorkstationPath: pm.WorkstationPrefix,
-					ContainerPath:   pm.ContainerPath,
+	// Skip handshake when config is incomplete (no valid server connection yet).
+	if !configIncomplete {
+		hsCtx, hsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: newCfg.AgentID}); err != nil {
+			slog.Warn("could not sync naming template from server handshake on reload; using config value", "err", err)
+		} else {
+			if hs.NamingTemplate != "" {
+				newCfg.Ingest.PathTemplate = hs.NamingTemplate
+			}
+			// Apply server-provided path mappings when available and agent has none configured.
+			if len(hs.PathMappings) > 0 && len(newCfg.PathMappings) == 0 {
+				newCfg.PathMappings = make([]config.PathMapping, len(hs.PathMappings))
+				for i, pm := range hs.PathMappings {
+					newCfg.PathMappings[i] = config.PathMapping{
+						WorkstationPath: pm.WorkstationPrefix,
+						ContainerPath:   pm.ContainerPath,
+					}
+				}
+				slog.Info("applied path mappings from server handshake on reload", "count", len(newCfg.PathMappings))
+				if err := config.Patch(s.path, map[string]any{"pathMappings": newCfg.PathMappings}); err != nil {
+					slog.Warn("could not persist server-provided path mappings to config on reload", "err", err)
 				}
 			}
-			slog.Info("applied path mappings from server handshake on reload", "count", len(newCfg.PathMappings))
-			if err := config.Patch(s.path, map[string]any{"pathMappings": newCfg.PathMappings}); err != nil {
-				slog.Warn("could not persist server-provided path mappings to config on reload", "err", err)
-			}
 		}
+		hsCancel()
 	}
-	hsCancel()
 
 	engine := ingest.NewEngine(client, newCfg.AgentID, newCfg.Ingest, newCfg.PathMappings)
 

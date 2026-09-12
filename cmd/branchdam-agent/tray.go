@@ -361,19 +361,10 @@ func runTrayCmd(args []string) int {
 	// Compute which required fields are missing. The tray starts
 	// regardless -- it shows a "not configured" state in the icon and
 	// menu, and ingest is blocked until all required fields are set.
-	var missingFields []string
-	if cfg.Server.APIKey == "" {
-		missingFields = append(missingFields, "server.apiKey")
-	}
-	if cfg.Server.BaseURL == "" {
-		missingFields = append(missingFields, "server.baseUrl")
-	}
-	if cfg.Ingest.ArchiveRoot == "" {
-		missingFields = append(missingFields, "ingest.archiveRoot")
-	}
-	if cfg.Ingest.LocalEditRoot == "" {
-		missingFields = append(missingFields, "ingest.localEditRoot")
-	}
+	missingFields := missingRequiredFields(cfg)
+	// pathMappings can be provided by server handshake, but ingest
+	// needs at least one mapping to function. Treat empty as
+	// "incomplete" for the UI state, but don't gate the handshake.
 	if len(cfg.PathMappings) == 0 {
 		missingFields = append(missingFields, "pathMappings")
 	}
