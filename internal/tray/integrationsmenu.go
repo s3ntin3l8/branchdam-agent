@@ -31,6 +31,14 @@ type integrationSubmenu struct {
 	interval60     *systray.MenuItem
 	intervalNever  *systray.MenuItem
 
+	timeoutParent *systray.MenuItem
+	timeout30s    *systray.MenuItem // 30 seconds (default)
+	timeout1m     *systray.MenuItem // 1 minute
+	timeout5m     *systray.MenuItem // 5 minutes
+	timeout10m    *systray.MenuItem // 10 minutes
+
+	pathRewrites *systray.MenuItem // Resolve only
+
 	syncNow *systray.MenuItem
 
 	// lastErr/syncSkipped are read/written ONLY from Run's own select
@@ -61,6 +69,16 @@ func newIntegrationSubmenu(d IntegrationDescriptor, iv IntegrationView) *integra
 	sub.interval15 = sub.intervalParent.AddSubMenuItemCheckbox("15 minutes", "", iv.SyncIntervalMinutes == 15)
 	sub.interval60 = sub.intervalParent.AddSubMenuItemCheckbox("60 minutes (default)", "", iv.SyncIntervalMinutes == 0 || iv.SyncIntervalMinutes == 60)
 	sub.intervalNever = sub.intervalParent.AddSubMenuItemCheckbox("Never (manual only)", "", iv.SyncIntervalMinutes < 0)
+
+	sub.timeoutParent = parent.AddSubMenuItem("Sync timeout", "How long one sync pass can run before timing out")
+	sub.timeout30s = sub.timeoutParent.AddSubMenuItemCheckbox("30 seconds (default)", "", iv.TimeoutSecs == 0 || iv.TimeoutSecs == 30)
+	sub.timeout1m = sub.timeoutParent.AddSubMenuItemCheckbox("1 minute", "", iv.TimeoutSecs == 60)
+	sub.timeout5m = sub.timeoutParent.AddSubMenuItemCheckbox("5 minutes", "", iv.TimeoutSecs == 300)
+	sub.timeout10m = sub.timeoutParent.AddSubMenuItemCheckbox("10 minutes", "", iv.TimeoutSecs == 600)
+
+	if d.ID == IntegrationResolveDB {
+		sub.pathRewrites = parent.AddSubMenuItem(pathRewritesTitle(iv.PathRewritesSet), "Windows-to-NAS path rewrite rules (from:to pairs)")
+	}
 
 	parent.AddSeparator()
 	sub.syncNow = parent.AddSubMenuItem("Sync now", "Run one sync pass right now")
@@ -93,6 +111,13 @@ func integrationKey(id IntegrationID, leaf string) string {
 
 func (sub *integrationSubmenu) dispatch(settings Settings, actionCh chan<- menuAction) {
 	id := sub.id
+	// Nil-safe channel for pathRewrites: sub.pathRewrites is only set for
+	// Resolve, so a nil *systray.MenuItem would panic on .ClickedCh.
+	// A nil channel blocks forever in select, which is the correct no-op.
+	var pathRewritesCh <-chan struct{}
+	if sub.pathRewrites != nil {
+		pathRewritesCh = sub.pathRewrites.ClickedCh
+	}
 	for {
 		select {
 		case <-sub.enabled.ClickedCh:
@@ -109,6 +134,16 @@ func (sub *integrationSubmenu) dispatch(settings Settings, actionCh chan<- menuA
 			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "syncIntervalMinutes"), 60) })
 		case <-sub.intervalNever.ClickedCh:
 			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "syncIntervalMinutes"), -1) })
+		case <-sub.timeout30s.ClickedCh:
+			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "timeoutSecs"), 30) })
+		case <-sub.timeout1m.ClickedCh:
+			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "timeoutSecs"), 60) })
+		case <-sub.timeout5m.ClickedCh:
+			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "timeoutSecs"), 300) })
+		case <-sub.timeout10m.ClickedCh:
+			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "timeoutSecs"), 600) })
+		case <-pathRewritesCh:
+			sub.send(actionCh, func() error { _, err := settings.PromptAndSetIntegrationRewrites(id); return err })
 		}
 	}
 }
@@ -153,7 +188,20 @@ func (sub *integrationSubmenu) sync(iv IntegrationView, status IntegrationStatus
 		sub.intervalParent.SetTitle("Sync every")
 	}
 
+	setChecked(sub.timeout30s, iv.TimeoutSecs == 0 || iv.TimeoutSecs == 30)
+	setChecked(sub.timeout1m, iv.TimeoutSecs == 60)
+	setChecked(sub.timeout5m, iv.TimeoutSecs == 300)
+	setChecked(sub.timeout10m, iv.TimeoutSecs == 600)
+	if iv.TimeoutSecs != 0 && iv.TimeoutSecs != 30 && iv.TimeoutSecs != 60 && iv.TimeoutSecs != 300 && iv.TimeoutSecs != 600 {
+		sub.timeoutParent.SetTitle(fmt.Sprintf("Sync timeout (currently: %ds, hand-configured)", iv.TimeoutSecs))
+	} else {
+		sub.timeoutParent.SetTitle("Sync timeout")
+	}
+
 	sub.catalogPath.SetTitle(catalogPathTitle(iv.CatalogPathSet))
+	if sub.pathRewrites != nil {
+		sub.pathRewrites.SetTitle(pathRewritesTitle(iv.PathRewritesSet))
+	}
 	sub.status.SetTitle(integrationStatusLine(sub.title, iv, status))
 
 	if sub.lastErr != nil {
@@ -311,6 +359,13 @@ func catalogPathTitle(set bool) string {
 		return "Catalog… (configured)"
 	}
 	return "Catalog… (not set)"
+}
+
+func pathRewritesTitle(set bool) string {
+	if set {
+		return "Path rewrites… (configured)"
+	}
+	return "Path rewrites… (not set)"
 }
 
 func nodeIndexTitle(set bool) string {

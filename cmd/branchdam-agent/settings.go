@@ -133,6 +133,12 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 	integrations := make([]tray.IntegrationView, 0, len(integrationBuilders))
 	for _, b := range integrationBuilders {
 		c := b.Current(cfg)
+		var pathRewrites string
+		pathRewritesSet := b.CurrentRewrites != nil
+		if pathRewritesSet {
+			pathRewrites = b.CurrentRewrites(cfg)
+			pathRewritesSet = pathRewrites != ""
+		}
 		integrations = append(integrations, tray.IntegrationView{
 			ID:                  b.ID,
 			Enabled:             c.Enabled,
@@ -140,6 +146,9 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 			CatalogPath:         c.CatalogPath,
 			CatalogPathSet:      c.CatalogPath != "",
 			SyncIntervalMinutes: c.SyncIntervalMinutes,
+			TimeoutSecs:         c.TimeoutSecs,
+			PathRewrites:        pathRewrites,
+			PathRewritesSet:     pathRewritesSet,
 		})
 	}
 
@@ -672,6 +681,64 @@ func (s *configSettings) PromptAndSetIntegrationPath(id tray.IntegrationID) (boo
 		return false, err
 	}
 	if err := config.Patch(s.path, map[string]any{key: value}); err != nil {
+		return false, fmt.Errorf("save %s: %w", key, err)
+	}
+	return true, s.reload()
+}
+
+// PromptAndSetIntegrationRewrites is PromptAndSetIntegrationPath's counterpart
+// for path rewrite rules. Only meaningful for integrations that have a
+// pathRewrites config field (Resolve).
+func (s *configSettings) PromptAndSetIntegrationRewrites(id tray.IntegrationID) (bool, error) {
+	b, ok := builderFor(id)
+	if !ok || b.ApplyRewrites == nil {
+		return false, fmt.Errorf("settings: integration %q does not support path rewrites", id)
+	}
+
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+
+	current := b.CurrentRewrites(cfg)
+	args := []string{
+		"-kind", "entry",
+		"-title", b.Title + " path rewrites",
+		"-message", "Path rewrites (one \"from:to\" pair per comma):\nExample: D:\\Videos\\:/storage/archive/videos/",
+	}
+	if current != "" {
+		args = append(args, "-default", current)
+	}
+
+	value, exitCode, err := s.dialog(context.Background(), args...)
+	key := b.ConfigKey("pathRewrites")
+	if err != nil {
+		return false, fmt.Errorf("run path rewrites dialog for %s: %w", key, err)
+	}
+	switch exitCode {
+	case dialogExitCanceled:
+		return false, nil
+	case dialogExitOK:
+		// fall through
+	default:
+		return false, fmt.Errorf("path rewrites dialog for %s failed (exit %d)", key, exitCode)
+	}
+
+	// Validate by parsing before persisting.
+	rewrites, err := parseResolvePathRewrites(value)
+	if err != nil {
+		return false, err
+	}
+	// Apply rewrites to a config copy so firstBlockingProblem validates
+	// the post-change state, not the stale snapshot taken before the dialog.
+	cfgForValidation := cfg
+	cfgForValidation.Integrations.ResolveDB.PathRewrites = rewrites
+	if problem := firstBlockingProblem(cfgForValidation); problem != nil {
+		return false, fmt.Errorf("config problem: %s", problem)
+	}
+
+	// Persist the parsed slice (not the formatted string) so YAML gets
+	// a proper list-of-maps structure.
+	if err := config.Patch(s.path, map[string]any{key: rewrites}); err != nil {
 		return false, fmt.Errorf("save %s: %w", key, err)
 	}
 	return true, s.reload()

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -70,6 +72,14 @@ type IntegrationBuilder struct {
 	// config.CatalogSyncConfig.SyncIntervalMinutes's own doc comment on
 	// why that's a real, deliberate mode, not an error.
 	Interval func(cfg config.Config) time.Duration
+
+	// CurrentRewrites formats the integration's path rewrite rules as a
+	// "from:to, from:to" string for display. Nil for integrations without
+	// pathRewrites (Luminar).
+	CurrentRewrites func(cfg config.Config) string
+	// ApplyRewrites parses a "from:to, from:to" string and applies it to
+	// the integration's config. Nil for integrations without pathRewrites.
+	ApplyRewrites func(cfg *config.Config, v string) error
 }
 
 // ConfigKey builds the dotted config.yaml key for one of this
@@ -195,6 +205,17 @@ var integrationBuilders = []IntegrationBuilder{
 		Interval: func(cfg config.Config) time.Duration {
 			return time.Duration(cfg.Integrations.ResolveDB.SyncIntervalMinutesOrDefault()) * time.Minute
 		},
+		CurrentRewrites: func(cfg config.Config) string {
+			return formatResolvePathRewrites(cfg.Integrations.ResolveDB.PathRewrites)
+		},
+		ApplyRewrites: func(cfg *config.Config, v string) error {
+			rewrites, err := parseResolvePathRewrites(v)
+			if err != nil {
+				return err
+			}
+			cfg.Integrations.ResolveDB.PathRewrites = rewrites
+			return nil
+		},
 	},
 }
 
@@ -231,14 +252,21 @@ func applyIntegrationBoolChange(cfg *config.Config, key string, v bool) (handled
 }
 
 // applyIntegrationIntChange is applyIntegrationBoolChange's counterpart
-// for "integrations.<id>.syncIntervalMinutes".
+// for "integrations.<id>.syncIntervalMinutes" and
+// "integrations.<id>.timeoutSecs".
 func applyIntegrationIntChange(cfg *config.Config, key string, v int) (handled bool) {
 	for _, b := range integrationBuilders {
-		if key != b.ConfigKey("syncIntervalMinutes") {
+		var c config.CatalogSyncConfig
+		switch key {
+		case b.ConfigKey("syncIntervalMinutes"):
+			c = b.Current(*cfg)
+			c.SyncIntervalMinutes = v
+		case b.ConfigKey("timeoutSecs"):
+			c = b.Current(*cfg)
+			c.TimeoutSecs = v
+		default:
 			continue
 		}
-		c := b.Current(*cfg)
-		c.SyncIntervalMinutes = v
 		b.Apply(cfg, c)
 		return true
 	}
@@ -495,3 +523,38 @@ const integrationSyncCheckInterval = 30 * time.Second
 // runs at most once an hour by default -- there is no cost to a more
 // generous ceiling.
 const integrationSyncTimeout = 10 * time.Minute
+
+// formatResolvePathRewrites formats a PathRewrite slice as a
+// comma-separated "from:to" string for display in the tray menu.
+func formatResolvePathRewrites(rewrites []config.ResolvePathRewrite) string {
+	var parts []string
+	for _, rw := range rewrites {
+		parts = append(parts, rw.From+":"+rw.To)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// parseResolvePathRewrites parses a comma-separated "from:to" string into a
+// ResolvePathRewrite slice. Each pair must contain exactly one colon.
+func parseResolvePathRewrites(s string) ([]config.ResolvePathRewrite, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var out []config.ResolvePathRewrite
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		idx := strings.LastIndex(part, ":")
+		if idx <= 0 || idx == len(part)-1 {
+			return nil, fmt.Errorf("path rewrite %q must be in format from:to", part)
+		}
+		out = append(out, config.ResolvePathRewrite{
+			From: strings.TrimSpace(part[:idx]),
+			To:   strings.TrimSpace(part[idx+1:]),
+		})
+	}
+	return out, nil
+}

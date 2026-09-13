@@ -197,7 +197,7 @@ func TestConfigSettingsSetIntRejectsUnknownKey(t *testing.T) {
 	}
 	s := newConfigSettings(path, cfg, runner, nil)
 
-	if err := s.SetInt("integrations.luminar.timeoutSecs", 45); err == nil {
+	if err := s.SetInt("integrations.luminar.bogusKey", 45); err == nil {
 		t.Fatal("expected SetInt to reject an unrecognized key")
 	}
 
@@ -207,6 +207,41 @@ func TestConfigSettingsSetIntRejectsUnknownKey(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Error("expected config.yaml to be byte-for-byte unchanged for an unrecognized SetInt key")
+	}
+}
+
+// TestConfigSettingsSetIntTimeoutSecs verifies that the new timeoutSecs
+// key round-trips through SetInt and persists to config.yaml.
+func TestConfigSettingsSetIntTimeoutSecs(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetInt("integrations.luminar.timeoutSecs", 120); err != nil {
+		t.Fatalf("SetInt timeoutSecs: %v", err)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.Integrations.Luminar.TimeoutSecs; got != 120 {
+		t.Errorf("timeoutSecs = %d, want 120", got)
+	}
+}
+
+// TestConfigSettingsSetIntResolveTimeoutSecs covers the Resolve builder.
+func TestConfigSettingsSetIntResolveTimeoutSecs(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetInt("integrations.resolvedb.timeoutSecs", 600); err != nil {
+		t.Fatalf("SetInt timeoutSecs: %v", err)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.Integrations.ResolveDB.TimeoutSecs; got != 600 {
+		t.Errorf("timeoutSecs = %d, want 600", got)
 	}
 }
 
@@ -1269,6 +1304,168 @@ func TestParsePathMappings(t *testing.T) {
 				if got[i] != tt.want[i] {
 					t.Errorf("parsePathMappings(%q)[%d] = %v, want %v", tt.input, i, got[i], tt.want[i])
 				}
+			}
+		})
+	}
+}
+
+// TestPromptAndSetIntegrationRewritesOK drives the full dialog → parse →
+// persist round-trip for Resolve path rewrites.
+func TestPromptAndSetIntegrationRewritesOK(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := &fakeDialogRunner{
+		stdout:   `D:\Videos\:/storage/archive/videos/`,
+		exitCode: dialogExitOK,
+	}
+	s := newConfigSettings(path, cfg, runner, dialog.Run)
+
+	ok, err := s.PromptAndSetIntegrationRewrites(tray.IntegrationResolveDB)
+	if err != nil {
+		t.Fatalf("PromptAndSetIntegrationRewrites: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true for dialogExitOK")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := reloaded.Integrations.ResolveDB.PathRewrites
+	if len(got) != 1 || got[0].From != `D:\Videos\` || got[0].To != "/storage/archive/videos/" {
+		t.Errorf("pathRewrites = %v, want [{D:\\Videos\\ /storage/archive/videos/}]", got)
+	}
+}
+
+// TestPromptAndSetIntegrationRewritesCancel verifies that a Cancel click
+// does not modify config.yaml.
+func TestPromptAndSetIntegrationRewritesCancel(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := &fakeDialogRunner{exitCode: dialogExitCanceled}
+	s := newConfigSettings(path, cfg, runner, dialog.Run)
+
+	ok, err := s.PromptAndSetIntegrationRewrites(tray.IntegrationResolveDB)
+	if err != nil {
+		t.Fatalf("PromptAndSetIntegrationRewrites: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false for cancel")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Integrations.ResolveDB.PathRewrites) != 0 {
+		t.Errorf("pathRewrites = %v, want empty", reloaded.Integrations.ResolveDB.PathRewrites)
+	}
+}
+
+// TestPromptAndSetIntegrationRewritesInvalid verifies that an invalid
+// format (no colon) is rejected without persisting.
+func TestPromptAndSetIntegrationRewritesInvalid(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	dialog := &fakeDialogRunner{
+		stdout:   `/mnt/nas/videos`,
+		exitCode: dialogExitOK,
+	}
+	s := newConfigSettings(path, cfg, runner, dialog.Run)
+
+	_, err := s.PromptAndSetIntegrationRewrites(tray.IntegrationResolveDB)
+	if err == nil {
+		t.Fatal("expected error for invalid format")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Integrations.ResolveDB.PathRewrites) != 0 {
+		t.Errorf("pathRewrites = %v, want empty (should not persist on invalid input)", reloaded.Integrations.ResolveDB.PathRewrites)
+	}
+}
+
+// TestPromptAndSetIntegrationRewritesUnsupported verifies that calling
+// PromptAndSetIntegrationRewrites for an integration without pathRewrites
+// (Luminar) returns an error.
+func TestPromptAndSetIntegrationRewritesUnsupported(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	_, err := s.PromptAndSetIntegrationRewrites(tray.IntegrationLuminar)
+	if err == nil {
+		t.Fatal("expected error for unsupported integration")
+	}
+}
+
+func TestParseResolvePathRewrites(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    []config.ResolvePathRewrite
+		wantErr bool
+	}{
+		{
+			name:  "single rule",
+			input: `D:\Videos\:/storage/archive/videos/`,
+			want:  []config.ResolvePathRewrite{{From: `D:\Videos\`, To: "/storage/archive/videos/"}},
+		},
+		{
+			name:  "multiple rules",
+			input: `D:\Videos\:/storage/archive/videos/, F:\:/storage/archive/`,
+			want: []config.ResolvePathRewrite{
+				{From: `D:\Videos\`, To: "/storage/archive/videos/"},
+				{From: `F:\`, To: "/storage/archive/"},
+			},
+		},
+		{
+			name:  "empty",
+			input: "",
+			want:  nil,
+		},
+		{
+			name:    "missing to path",
+			input:   `D:\Videos\:`,
+			wantErr: true,
+		},
+		{
+			name:    "missing from path",
+			input:   `:/storage`,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseResolvePathRewrites(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseResolvePathRewrites(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("parseResolvePathRewrites(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("parseResolvePathRewrites(%q)[%d] = %v, want %v", tt.input, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestFormatResolvePathRewrites(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []config.ResolvePathRewrite
+		want string
+	}{
+		{name: "nil", in: nil, want: ""},
+		{name: "single", in: []config.ResolvePathRewrite{{From: `D:\Videos`, To: "/archive"}}, want: `D:\Videos:/archive`},
+		{name: "multiple", in: []config.ResolvePathRewrite{{From: `D:\`, To: "/a"}, {From: `F:\`, To: "/b"}}, want: `D:\:/a, F:\:/b`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatResolvePathRewrites(tt.in); got != tt.want {
+				t.Errorf("formatResolvePathRewrites = %q, want %q", got, tt.want)
 			}
 		})
 	}
