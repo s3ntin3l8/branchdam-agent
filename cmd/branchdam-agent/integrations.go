@@ -8,6 +8,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/luminar"
 	"github.com/s3ntin3l8/branchdam-agent/internal/nodeindex"
+	"github.com/s3ntin3l8/branchdam-agent/internal/resolve"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
@@ -140,6 +141,61 @@ var integrationBuilders = []IntegrationBuilder{
 			return time.Duration(cfg.Integrations.Luminar.SyncIntervalMinutesOrDefault()) * time.Minute
 		},
 	},
+	{
+		ID:    tray.IntegrationResolveDB,
+		Title: "DaVinci Resolve",
+		Current: func(cfg config.Config) config.CatalogSyncConfig {
+			r := cfg.Integrations.ResolveDB
+			return config.CatalogSyncConfig{
+				Enabled:             r.Enabled,
+				CatalogPath:         r.DatabaseURL,
+				DryRun:              r.DryRun,
+				SyncIntervalMinutes: r.SyncIntervalMinutes,
+				TimeoutSecs:         r.TimeoutSecs,
+			}
+		},
+		Apply: func(cfg *config.Config, c config.CatalogSyncConfig) {
+			cfg.Integrations.ResolveDB.Enabled = c.Enabled
+			cfg.Integrations.ResolveDB.DatabaseURL = c.CatalogPath
+			cfg.Integrations.ResolveDB.DryRun = c.DryRun
+			cfg.Integrations.ResolveDB.SyncIntervalMinutes = c.SyncIntervalMinutes
+			cfg.Integrations.ResolveDB.TimeoutSecs = c.TimeoutSecs
+		},
+		CatalogFilePatterns: []string{"*.db", "*"},
+		Ready: func(cfg config.Config) bool {
+			r := cfg.Integrations.ResolveDB
+			if !r.Enabled || r.DatabaseURL == "" {
+				return false
+			}
+			if !r.DryRun && cfg.Integrations.NodeIndexPath == "" {
+				return false
+			}
+			return true
+		},
+		New: func(cfg config.Config, client *branchdam.Client) tray.IntegrationSyncer {
+			r := cfg.Integrations.ResolveDB
+			var edgeClient resolve.EdgeAttacher
+			if !r.DryRun {
+				edgeClient = client
+			}
+			rewrites := make([]resolve.PathRewrite, len(r.PathRewrites))
+			for i, rw := range r.PathRewrites {
+				rewrites[i] = resolve.PathRewrite{From: rw.From, To: rw.To}
+			}
+			return &resolveDBSyncer{
+				client:        edgeClient,
+				agentID:       cfg.AgentID,
+				databaseURL:   r.DatabaseURL,
+				nodeIndexPath: cfg.Integrations.NodeIndexPath,
+				dryRun:        r.DryRun,
+				pathRewrites:  rewrites,
+				timeout:       time.Duration(r.TimeoutSecsOrDefault()) * time.Second,
+			}
+		},
+		Interval: func(cfg config.Config) time.Duration {
+			return time.Duration(cfg.Integrations.ResolveDB.SyncIntervalMinutesOrDefault()) * time.Minute
+		},
+	},
 }
 
 // applyIntegrationBoolChange mutates cfg in place if key matches
@@ -190,19 +246,25 @@ func applyIntegrationIntChange(cfg *config.Config, key string, v int) (handled b
 }
 
 // applyIntegrationStringChange is applyIntegrationBoolChange's counterpart
-// for "integrations.<id>.catalogPath". integrations.nodeIndexPath is NOT
-// handled here -- it's a shared, top-level IntegrationsConfig field, not
-// per-integration, so validateStringChange's own switch handles it
-// directly alongside server.baseUrl and friends.
+// for "integrations.<id>.catalogPath" and "integrations.<id>.databaseUrl".
+// integrations.nodeIndexPath is NOT handled here -- it's a shared, top-level
+// IntegrationsConfig field, not per-integration, so validateStringChange's
+// own switch handles it directly alongside server.baseUrl and friends.
 func applyIntegrationStringChange(cfg *config.Config, key, v string) (handled bool) {
 	for _, b := range integrationBuilders {
-		if key != b.ConfigKey("catalogPath") {
-			continue
+		switch key {
+		case b.ConfigKey("catalogPath"):
+			c := b.Current(*cfg)
+			c.CatalogPath = v
+			b.Apply(cfg, c)
+			return true
+		case b.ConfigKey("databaseUrl"):
+			// ResolveDB uses DatabaseURL, mapped through CatalogPath in Current/Apply.
+			c := b.Current(*cfg)
+			c.CatalogPath = v
+			b.Apply(cfg, c)
+			return true
 		}
-		c := b.Current(*cfg)
-		c.CatalogPath = v
-		b.Apply(cfg, c)
-		return true
 	}
 	return false
 }
@@ -297,6 +359,70 @@ func (s *luminarSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 type emptyNodeIndex struct{}
 
 func (emptyNodeIndex) Resolve(_ string) (string, bool, error) { return "", false, nil }
+
+// resolveDBSyncer implements tray.IntegrationSyncer over internal/resolve --
+// the concrete wiring cmd/branchdam-agent owns, matching luminarSyncer's own
+// relationship to internal/luminar.
+//
+// It stores PATHS, not open handles: resolve.Open and nodeindex.Load both
+// run inside Sync and are released before it returns -- the database may be
+// actively written to by DaVinci Resolve, and re-resolving the node index
+// per pass means a regenerated index file is picked up without a tray
+// restart. client is nil in dry-run mode, mirroring luminarSyncer's own
+// treatment.
+type resolveDBSyncer struct {
+	client        resolve.EdgeAttacher
+	agentID       string
+	databaseURL   string
+	nodeIndexPath string
+	dryRun        bool
+	pathRewrites  []resolve.PathRewrite
+	timeout       time.Duration
+}
+
+func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	db, err := resolve.Open(ctx, s.databaseURL)
+	if err != nil {
+		return tray.SyncSummary{DryRun: s.dryRun}, err
+	}
+	defer func() { _ = db.Close() }()
+
+	// A dry run needs no node index at all -- every candidate simply
+	// can't resolve, which the summary's Skipped count already conveys.
+	var index nodeindex.Resolver
+	if s.nodeIndexPath != "" {
+		idx, err := nodeindex.Load(s.nodeIndexPath)
+		if err != nil {
+			return tray.SyncSummary{DryRun: s.dryRun}, err
+		}
+		index = idx
+	} else {
+		index = emptyNodeIndex{}
+	}
+
+	syncer := &resolve.Syncer{
+		DB:           db,
+		Index:        index,
+		Client:       s.client,
+		AgentID:      s.agentID,
+		DatabaseURL:  s.databaseURL,
+		DryRun:       s.dryRun,
+		PathRewrites: s.pathRewrites,
+	}
+
+	stats, err := syncer.Sync(ctx)
+	summary := tray.SyncSummary{
+		DryRun:     s.dryRun,
+		PairsFound: stats.ClipsFound,
+		Emitted:    stats.Emitted,
+		Skipped:    stats.Unresolved + stats.NoRewrite,
+		Errors:     stats.Errors,
+	}
+	return summary, err
+}
 
 // startPeriodicVar is startPeriodic (queueagent.go) with a DYNAMIC
 // interval, re-read from interval() before every cycle, rather than

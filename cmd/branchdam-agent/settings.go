@@ -648,7 +648,14 @@ func (s *configSettings) PromptAndSetIntegrationPath(id tray.IntegrationID) (boo
 	}
 
 	value, exitCode, err := s.dialog(context.Background(), args...)
-	key := b.ConfigKey("catalogPath")
+	// The config key differs per integration: "catalogPath" for most, but
+	// "databaseUrl" for resolveDb (which maps through CatalogPath in
+	// Current/Apply).
+	pathKey := "catalogPath"
+	if b.ID == tray.IntegrationResolveDB {
+		pathKey = "databaseUrl"
+	}
+	key := b.ConfigKey(pathKey)
 	if err != nil {
 		return false, fmt.Errorf("run settings dialog for %s: %w", key, err)
 	}

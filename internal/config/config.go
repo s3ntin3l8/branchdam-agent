@@ -288,6 +288,11 @@ type IntegrationsConfig struct {
 	// runtime knobs (see hooks/resolve/README.md), so there is no
 	// CatalogSyncConfig-shaped entry for it.
 	Resolve ResolveHookConfig `yaml:"resolve"`
+	// ResolveDB configures the DaVinci Resolve Project Server database
+	// watcher (internal/resolve). Reads the same schema the Scripting API
+	// uses, but via direct PostgreSQL/SQLite query — no Studio license
+	// required.
+	ResolveDB ResolveDBConfig `yaml:"resolvedb"`
 }
 
 // CatalogSyncConfig is the uniform shape every catalog-reader integration
@@ -355,6 +360,64 @@ type ResolveHookConfig struct {
 	// Scripts/Utility directories. Empty (the default) means "use the
 	// per-OS candidate list" -- see internal/resolvehook.CandidateDirs.
 	ScriptsDir string `yaml:"scriptsDir"`
+}
+
+// ResolveDBConfig configures the DaVinci Resolve Project Server database
+// watcher (internal/resolve). The watcher polls the Resolve database for
+// timeline changes and posts EVENT_EDGE_ATTACHED events to the branchDAM
+// server.
+type ResolveDBConfig struct {
+	// Enabled gates whether the tray registers a syncer for this
+	// integration at all -- false (the default) means it never runs.
+	Enabled bool `yaml:"enabled"`
+	// DatabaseURL is the connection string for the Resolve project database.
+	// PostgreSQL: "postgres://user:pass@host:5432/dbname"
+	// SQLite:     "file:/path/to/project.db?mode=ro"
+	// Must not contain unexpanded ${VAR} placeholders.
+	DatabaseURL string `yaml:"databaseUrl"`
+	// DryRun, when true, resolves and logs what a sync pass would emit
+	// without contacting the server at all. Defaults to true (see
+	// defaultConfig()).
+	DryRun bool `yaml:"dryRun"`
+	// SyncIntervalMinutes is how often the tray runs a sync pass on its
+	// own timer once this integration is enabled. Zero means the default
+	// (DefaultSyncIntervalMinutes); a NEGATIVE value means "manual only".
+	SyncIntervalMinutes int `yaml:"syncIntervalMinutes"`
+	// TimeoutSecs bounds one sync pass. Defaults to
+	// DefaultIntegrationTimeoutSecs when <= 0.
+	TimeoutSecs int `yaml:"timeoutSecs"`
+	// PathRewrites maps Windows path prefixes (as stored in
+	// Sm2TiItem.MediaFilePath) to NAS/container paths. Longest-prefix
+	// matching is used.
+	PathRewrites []ResolvePathRewrite `yaml:"pathRewrites"`
+}
+
+// ResolvePathRewrite maps a Windows path prefix to a NAS/container path
+// prefix. Used by the Resolve database watcher to translate
+// Sm2TiItem.MediaFilePath values (e.g. "D:\Videos\...") to branchDAM
+// storage paths (e.g. "/storage/archive/videos/...").
+type ResolvePathRewrite struct {
+	From string `yaml:"from"`
+	To   string `yaml:"to"`
+}
+
+// SyncIntervalMinutesOrDefault returns r.SyncIntervalMinutes, or
+// DefaultSyncIntervalMinutes when zero. A negative value is returned
+// verbatim and means "manual only".
+func (r ResolveDBConfig) SyncIntervalMinutesOrDefault() int {
+	if r.SyncIntervalMinutes == 0 {
+		return DefaultSyncIntervalMinutes
+	}
+	return r.SyncIntervalMinutes
+}
+
+// TimeoutSecsOrDefault returns r.TimeoutSecs, or
+// DefaultIntegrationTimeoutSecs when <= 0.
+func (r ResolveDBConfig) TimeoutSecsOrDefault() int {
+	if r.TimeoutSecs <= 0 {
+		return DefaultIntegrationTimeoutSecs
+	}
+	return r.TimeoutSecs
 }
 
 // DefaultSyncIntervalMinutes is CatalogSyncConfig.SyncIntervalMinutes's
@@ -794,6 +857,7 @@ func (c Config) Validate() []Problem {
 	checkPlaceholder("integrations.nodeIndexPath", c.Integrations.NodeIndexPath)
 	checkPlaceholder("integrations.luminar.catalogPath", c.Integrations.Luminar.CatalogPath)
 	checkPlaceholder("integrations.resolve.scriptsDir", c.Integrations.Resolve.ScriptsDir)
+	checkPlaceholder("integrations.resolvedb.databaseUrl", c.Integrations.ResolveDB.DatabaseURL)
 	for i, m := range c.PathMappings {
 		checkPlaceholder(fmt.Sprintf("pathMappings[%d].workstationPath", i), m.WorkstationPath)
 		checkPlaceholder(fmt.Sprintf("pathMappings[%d].containerPath", i), m.ContainerPath)
@@ -834,8 +898,12 @@ func (c Config) Validate() []Problem {
 	// fields go through this SAME checkCatalogSync call (one per
 	// integration, field-prefixed by its own key) -- not a hand-copied
 	// pair of checks -- so a future integration can't silently ship
-	// without the '?'/'#' catalog-path safety net or the timeoutSecs
+	// without the '?'/#' catalog-path safety net or the timeoutSecs
 	// sanity check.
+
+	if c.Integrations.ResolveDB.TimeoutSecs < 0 {
+		problems = append(problems, Problem{Field: "integrations.resolvedb.timeoutSecs", Message: "must not be negative"})
+	}
 
 	return problems
 }

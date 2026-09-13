@@ -14,6 +14,8 @@ type IntegrationID string
 const (
 	// IntegrationLuminar is Skylum Luminar Neo's catalog reader.
 	IntegrationLuminar IntegrationID = "luminar"
+	// IntegrationResolveDB is DaVinci Resolve's project database watcher.
+	IntegrationResolveDB IntegrationID = "resolvedb"
 	// Future entries: IntegrationLrcat ("lrcat", issue #47),
 	// IntegrationApplePhotos ("applephotos", issue #46).
 )
@@ -40,6 +42,7 @@ type IntegrationDescriptor struct {
 func Integrations() []IntegrationDescriptor {
 	return []IntegrationDescriptor{
 		{ID: IntegrationLuminar, Title: "Luminar Neo"},
+		{ID: IntegrationResolveDB, Title: "DaVinci Resolve"},
 	}
 }
 
