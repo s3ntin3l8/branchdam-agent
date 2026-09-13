@@ -3,5 +3,11 @@
   "serverVersion": "0.42.0",
   "serverTimeUnix": 1752591200,
   "acknowledgedEventUuid": "0190f1a2-9999-7000-8000-000000000000",
-  "pendingEventsCount": 3
+  "pendingEventsCount": 3,
+  "pathMappings": [
+    {
+      "workstationPrefix": "/mnt/nas",
+      "containerPath": "/storage/archive"
+    }
+  ]
 }

@@ -399,23 +399,7 @@ func runTrayCmd(args []string) int {
 			if hs.NamingTemplate != "" {
 				cfg.Ingest.PathTemplate = hs.NamingTemplate
 			}
-			// Apply server-provided path mappings when available (forward-compatible
-			// with the server-side handshake extension). Only applied when the server
-			// returns non-empty mappings and the agent has none configured yet.
-			if len(hs.PathMappings) > 0 && len(cfg.PathMappings) == 0 {
-				cfg.PathMappings = make([]config.PathMapping, len(hs.PathMappings))
-				for i, pm := range hs.PathMappings {
-					cfg.PathMappings[i] = config.PathMapping{
-						WorkstationPath: pm.WorkstationPrefix,
-						ContainerPath:   pm.ContainerPath,
-					}
-				}
-				slog.Info("applied path mappings from server handshake", "count", len(cfg.PathMappings))
-				// Persist to config.yaml so the mappings survive a restart.
-				if err := config.Patch(resolvedPath, map[string]any{"pathMappings": cfg.PathMappings}); err != nil {
-					slog.Warn("could not persist server-provided path mappings to config", "err", err)
-				}
-			}
+			applyServerPathMappings(&cfg, *hs, resolvedPath)
 		}
 		hsCancel()
 	}

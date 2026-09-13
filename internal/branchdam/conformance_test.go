@@ -192,6 +192,9 @@ func TestConformanceHandshakeRequestResponse(t *testing.T) {
 		ServerTimeUnix:        1752591200,
 		AcknowledgedEventUUID: "0190f1a2-9999-7000-8000-000000000000",
 		PendingEventsCount:    3,
+		PathMappings: []PathMapping{
+			{WorkstationPrefix: "/mnt/nas", ContainerPath: "/storage/archive"},
+		},
 	}
 	checkGolden(t, "handshake_response.golden.json", marshalIndent(t, resp))
 }

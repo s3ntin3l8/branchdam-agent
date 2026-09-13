@@ -397,6 +397,28 @@ func missingRequiredFields(cfg config.Config) []string {
 	return missing
 }
 
+// applyServerPathMappings applies server-provided path mappings to the config
+// when the agent has none configured yet. This is the single source of truth
+// for the handshake → config path-mapping sync, used by both runTrayCmd and
+// reload. Server wins when client has none; local mappings are never overwritten.
+func applyServerPathMappings(cfg *config.Config, hs branchdam.HandshakeResponse, configPath string) {
+	if len(hs.PathMappings) == 0 || len(cfg.PathMappings) > 0 {
+		return
+	}
+	cfg.PathMappings = make([]config.PathMapping, len(hs.PathMappings))
+	for i, pm := range hs.PathMappings {
+		cfg.PathMappings[i] = config.PathMapping{
+			WorkstationPath: pm.WorkstationPrefix,
+			ContainerPath:   pm.ContainerPath,
+		}
+	}
+	slog.Info("applied path mappings from server handshake", "count", len(cfg.PathMappings))
+	// Persist to config.yaml so the mappings survive a restart.
+	if err := config.Patch(configPath, map[string]any{"pathMappings": cfg.PathMappings}); err != nil {
+		slog.Warn("could not persist server-provided path mappings to config", "err", err)
+	}
+}
+
 // settingsPrompt describes one PromptAndSet field's dialog.
 type settingsPrompt struct {
 	key     string
@@ -647,20 +669,7 @@ func (s *configSettings) reload() error {
 			if hs.NamingTemplate != "" {
 				newCfg.Ingest.PathTemplate = hs.NamingTemplate
 			}
-			// Apply server-provided path mappings when available and agent has none configured.
-			if len(hs.PathMappings) > 0 && len(newCfg.PathMappings) == 0 {
-				newCfg.PathMappings = make([]config.PathMapping, len(hs.PathMappings))
-				for i, pm := range hs.PathMappings {
-					newCfg.PathMappings[i] = config.PathMapping{
-						WorkstationPath: pm.WorkstationPrefix,
-						ContainerPath:   pm.ContainerPath,
-					}
-				}
-				slog.Info("applied path mappings from server handshake on reload", "count", len(newCfg.PathMappings))
-				if err := config.Patch(s.path, map[string]any{"pathMappings": newCfg.PathMappings}); err != nil {
-					slog.Warn("could not persist server-provided path mappings to config on reload", "err", err)
-				}
-			}
+			applyServerPathMappings(&newCfg, *hs, s.path)
 		}
 		hsCancel()
 	}

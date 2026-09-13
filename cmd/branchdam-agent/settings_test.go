@@ -1134,3 +1134,70 @@ func TestConfigSettingsSetBoolAutoEject(t *testing.T) {
 		t.Error("expected ingest.autoEject to be persisted to disk")
 	}
 }
+
+func TestParsePathMappings(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    []config.PathMapping
+		wantErr bool
+	}{
+		{
+			name:  "empty",
+			input: "",
+			want:  nil,
+		},
+		{
+			name:  "single",
+			input: "/mnt/nas:/storage/archive",
+			want:  []config.PathMapping{{WorkstationPath: "/mnt/nas", ContainerPath: "/storage/archive"}},
+		},
+		{
+			name:  "multiple",
+			input: "/mnt/nas:/storage/archive, /mnt/edit:/edit",
+			want: []config.PathMapping{
+				{WorkstationPath: "/mnt/nas", ContainerPath: "/storage/archive"},
+				{WorkstationPath: "/mnt/edit", ContainerPath: "/edit"},
+			},
+		},
+		{
+			name:  "windows drive letter",
+			input: `C:\Users\me\video:/storage/archive`,
+			want:  []config.PathMapping{{WorkstationPath: `C:\Users\me\video`, ContainerPath: "/storage/archive"}},
+		},
+		{
+			name:  "windows multiple with drive letters",
+			input: `C:\Users\me\video:/storage/archive, D:\edit:/edit`,
+			want: []config.PathMapping{
+				{WorkstationPath: `C:\Users\me\video`, ContainerPath: "/storage/archive"},
+				{WorkstationPath: `D:\edit`, ContainerPath: "/edit"},
+			},
+		},
+		{
+			name:    "missing container path",
+			input:   "/mnt/nas:",
+			wantErr: true,
+		},
+		{
+			name:    "missing workstation path",
+			input:   ":/storage",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parsePathMappings(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parsePathMappings(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("parsePathMappings(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("parsePathMappings(%q)[%d] = %v, want %v", tt.input, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
