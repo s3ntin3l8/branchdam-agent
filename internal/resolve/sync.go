@@ -229,10 +229,11 @@ func stripCredentials(rawURL string) string {
 // when no prefix matches. Backslashes in the input are normalized to forward
 // slashes in the output (matching nodeindex.Resolver's verbatim convention).
 //
-// Note: rw.From is also normalized at every call. If the operator's YAML
-// contains a literal "D:\Videos\" (with a trailing backslash that JSON/YAML
-// parses), the length difference will misalign prefix matching. Use a
-// trailing forward slash in YAML: "D:\\Videos\\".
+// YAML snippet: D:\\Videos\\ (double-quoted, escaped backslash) and
+// 'D:\Videos\' (single-quoted, literal backslash) both yield the same
+// in-memory string D:\Videos\ — either form works. The trailing backslash
+// is what makes the prefix match correctly (e.g. D:\Videos\ matches
+// D:\Videos\file.mp4 but not D:\VideosExtra\file.mp4).
 func rewritePath(rewrites []PathRewrite, windowsPath string) (string, bool) {
 	// Normalize backslashes to forward slashes (Windows paths use backslashes,
 	// but nodeindex and branchdam use forward slashes).

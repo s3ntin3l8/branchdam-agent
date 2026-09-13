@@ -2,6 +2,8 @@ package resolve
 
 import (
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -301,9 +303,9 @@ func TestStripCredentials(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"postgres with creds", "postgres://admin:p@ssw0rd@localhost:5432/resolve", "postgres://localhost:5432/resolve"},
+		{"postgres with creds", "postgres://admin:REDACTED@localhost:5432/resolve", "postgres://localhost:5432/resolve"},
 		{"postgres no creds", "postgres://localhost:5432/resolve", "postgres://localhost:5432/resolve"},
-		{"postgresql with creds", "postgresql://user:pass@host/db", "postgresql://host/db"},
+		{"postgresql with creds", "postgresql://user:REDACTED@host/db", "postgresql://host/db"},
 		{"file URI", "file:/path/to/db?mode=ro", "file:/path/to/db?mode=ro"},
 		{"empty", "", ""},
 		{"unparseable", "not-a-url", "not-a-url"},
@@ -315,6 +317,55 @@ func TestStripCredentials(t *testing.T) {
 				t.Errorf("stripCredentials(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSyncerEvidenceStripsCredentials(t *testing.T) {
+	db, err := Open(context.Background(), "file::memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.db.ExecContext(context.Background(), resolveSchema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	insertClip(t, db, "t1", "Master", "seq1", "tr1", "i1", "PXL_001.mp4", `D:\Videos\Norway\PXL_001.mp4`, "262", "96319", "33")
+
+	index := &fakeIndex{entries: map[string]string{
+		"/storage/archive/videos/Norway/PXL_001.mp4": "node-uuid-001",
+	}}
+
+	// Capture slog output to verify credentials are stripped from evidence.
+	var logBuf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	syncer := &Syncer{
+		DB:          db,
+		Index:       index,
+		AgentID:     "test-agent",
+		DatabaseURL: "postgres://user:s3cretP@ss@localhost:5432/resolve",
+		DryRun:      false,
+		PathRewrites: []PathRewrite{
+			{From: "D:\\Videos\\", To: "/storage/archive/videos/"},
+		},
+		Logger: logger,
+	}
+
+	stats, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if stats.EvidenceOnly != 1 {
+		t.Fatalf("EvidenceOnly = %d, want 1", stats.EvidenceOnly)
+	}
+
+	output := logBuf.String()
+	if strings.Contains(output, "s3cretP@ss") {
+		t.Errorf("evidence log contains password — credential leak\nlog output: %s", output)
+	}
+	if !strings.Contains(output, "resolve-sync: resolve evidence") {
+		t.Errorf("expected 'resolve-sync: resolve evidence' in log output\nlog output: %s", output)
 	}
 }
 

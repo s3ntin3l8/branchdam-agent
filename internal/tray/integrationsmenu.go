@@ -205,8 +205,12 @@ func integrationStatusLine(title string, iv IntegrationView, status IntegrationS
 		if ls.Errors > 0 {
 			errNote = fmt.Sprintf(", %d error(s)", ls.Errors)
 		}
-		return fmt.Sprintf("%s: %s ago%s: %d pair(s), %d emitted, %d skipped%s",
-			title, since(ls.At), dryNote, ls.PairsFound, ls.Emitted, ls.Skipped, errNote)
+		evNote := ""
+		if ls.EvidenceOnly > 0 {
+			evNote = fmt.Sprintf(", %d evidence-only", ls.EvidenceOnly)
+		}
+		return fmt.Sprintf("%s: %s ago%s: %d pair(s), %d emitted, %d skipped%s%s",
+			title, since(ls.At), dryNote, ls.PairsFound, ls.Emitted, ls.Skipped, errNote, evNote)
 	}
 }
 
