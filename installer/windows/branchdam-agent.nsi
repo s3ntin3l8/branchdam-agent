@@ -39,6 +39,13 @@ Unicode True
 
 !insertmacro MUI_LANGUAGE "English"
 
+; AGENT_ID holds the default agent ID (computer name, or the fallback
+; below) computed once in .onInit. A named Var, rather than one of the
+; numbered registers, so it survives untouched through the MUI2 welcome/
+; license/directory pages and FileOpen's $0 reuse in Section "Install" --
+; unlike $0/$1, no MUI macro or plugin call touches a named Var.
+Var AGENT_ID
+
 ; --- Installer Init ---
 Function .onInit
     ; Generate default agent ID from computer name
@@ -46,14 +53,12 @@ Function .onInit
     ${If} $1 == 0
         StrCpy $0 "workstation-01"
     ${EndIf}
+    StrCpy $AGENT_ID $0
 FunctionEnd
 
 ; --- Installer Sections ---
 Section "Install"
     SetOutPath "$INSTDIR"
-
-    ; Save computer name to $1 before FileOpen overwrites $0
-    StrCpy $1 $0
 
     ; Binaries
     File "..\..\dist\branchdam-agent.exe"
@@ -69,16 +74,16 @@ Section "Install"
         FileWrite $0 "# branchDAM Agent configuration$\r$\n"
         FileWrite $0 "# Configured through the tray's Settings menu.$\r$\n"
         FileWrite $0 "server:$\r$\n"
-        FileWrite $0 "  baseUrl: $"$"$\r$\n"
-        FileWrite $0 "  apiKey: $"$"$\r$\n"
+        FileWrite $0 "  baseUrl: $\"$\"$\r$\n"
+        FileWrite $0 "  apiKey: $\"$\"$\r$\n"
         FileWrite $0 "$\r$\n"
-        FileWrite $0 "agentId: $"$1$"$\r$\n"
+        FileWrite $0 "agentId: $\"$AGENT_ID$\"$\r$\n"
         FileWrite $0 "$\r$\n"
         FileWrite $0 "pathMappings: []$\r$\n"
         FileWrite $0 "$\r$\n"
         FileWrite $0 "ingest:$\r$\n"
-        FileWrite $0 "  archiveRoot: $"$"$\r$\n"
-        FileWrite $0 "  localEditRoot: $"$"$\r$\n"
+        FileWrite $0 "  archiveRoot: $\"$\"$\r$\n"
+        FileWrite $0 "  localEditRoot: $\"$\"$\r$\n"
         FileWrite $0 "  cardRoots: []$\r$\n"
         FileClose $0
     config_exists:
@@ -101,8 +106,9 @@ Section "Install"
     WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "NoModify" 1
     WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "NoRepair" 1
 
-    ; Get installed size ($0/$1 deliberately reused here — $1 held the
-    ; computer name from .onInit but is dead after FileClose on line 85).
+    ; Get installed size. $0/$1/$2 are scratch registers here -- the agent
+    ; ID lives in the named $AGENT_ID var (untouched by this call), so
+    ; there's nothing left in $0/$1 worth preserving at this point.
     ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
     IntFmt $0 "0x%08X" $0
     WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "EstimatedSize" "$0"
@@ -124,8 +130,12 @@ Section "Uninstall"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
 
-    ; Remove config file and directory
-    Delete "$APPDATA\branchdam-agent\config.yaml"
+    ; config.yaml is deliberately left in place -- an uninstall/reinstall
+    ; cycle (a common Windows "repair" path) must not silently discard the
+    ; operator's server URL, API key, and roots, the same guarantee the
+    ; install-side IfFileExists check already gives an upgrade. RMDir
+    ; (non-recursive) below is a no-op while config.yaml still exists;
+    ; it only removes the directory once it's actually empty.
     RMDir "$APPDATA\branchdam-agent"
 
     ; Remove Start Menu shortcuts

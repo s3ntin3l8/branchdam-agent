@@ -354,51 +354,19 @@ func runTrayCmd(args []string) int {
 		return fail("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")
 	}
 
-	// Compute which required fields are missing. The tray starts
-	// regardless -- it shows a "not configured" state in the icon and
-	// menu, and ingest is blocked until all required fields are set.
-	missingFields := missingRequiredFields(cfg)
-	// pathMappings can be provided by server handshake, but ingest
-	// needs at least one mapping to function. Treat empty as
-	// "incomplete" for the UI state, but don't gate the handshake.
-	if len(cfg.PathMappings) == 0 {
-		missingFields = append(missingFields, "pathMappings")
-	}
-	configIncomplete := len(missingFields) > 0
-	if configIncomplete {
-		slog.Info("config incomplete, tray will start in setup mode", "missing", missingFields)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Create the branchdam client. When config is incomplete (missing
-	// required fields like server URL or API key), use a dummy client
-	// that will fail on any real request but allows the tray to start
-	// and show the "not configured" state.
-	var client *branchdam.Client
-	if !configIncomplete {
-		client = branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
-	} else {
-		// Dummy client for incomplete config -- the tray starts in
-		// "not configured" mode and ingest is blocked.
-		client = branchdam.New("http://localhost:1", "")
-	}
-
-	// Synchronize naming template from server handshake if available (issue #86).
-	// Handshake failure must not block tray startup -- continue with config-file template.
-	// Skip handshake when config is incomplete (no valid server connection yet).
-	if !configIncomplete {
-		hsCtx, hsCancel := context.WithTimeout(ctx, 5*time.Second)
-		if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: cfg.AgentID}); err != nil {
-			slog.Warn("could not sync naming template from server handshake; using config value", "err", err)
-		} else {
-			if hs.NamingTemplate != "" {
-				cfg.Ingest.PathTemplate = hs.NamingTemplate
-			}
-			applyServerPathMappings(&cfg, *hs, resolvedPath)
-		}
-		hsCancel()
+	// Create the client, handshake if the server side is configured (issue
+	// #86), and compute which required fields are still missing -- in
+	// that order, so a fresh install's server-provided pathMappings are
+	// reflected in missingFields below rather than deadlocking the
+	// handshake behind a flag the handshake itself was meant to clear.
+	// See resolveServerConfig's doc comment for the full rationale.
+	client, missingFields := resolveServerConfig(ctx, &cfg, resolvedPath, 5*time.Second, "")
+	configIncomplete := len(missingFields) > 0
+	if configIncomplete {
+		slog.Info("config incomplete, tray will start in setup mode", "missing", missingFields)
 	}
 
 	engine := ingest.NewEngine(client, cfg.AgentID, cfg.Ingest, cfg.PathMappings)
@@ -505,19 +473,22 @@ func runTrayCmd(args []string) int {
 			// all. TriggerDrain/TriggerPrune's own locking (drainMu /
 			// Runner.gate via TryLockIdle) is what keeps a timer tick and
 			// a menu click from ever racing each other into a double pass.
-			// Skip timers when config is incomplete (no valid server) --
-			// the dummy client would produce confusing connection errors.
-			if !configIncomplete {
-				drainInterval := time.Duration(cfg.Offline.DrainIntervalSecsOrDefault()) * time.Second
-				go startPeriodic(ctx, drainInterval, periodicPassTimeout, func(pctx context.Context) {
-					runner.TriggerDrain(pctx)
+			// Started unconditionally, same rationale as the integration
+			// syncers above: config can go from incomplete to complete at
+			// any time the tray is running (via the Settings menu), and a
+			// timer goroutine started only at startup would never notice.
+			// TriggerDrain/TriggerPrune each check Runner.ConfigIncomplete
+			// themselves and no-op (ran=false) while it's true -- see their
+			// own doc comments -- so this never dials the dummy client.
+			drainInterval := time.Duration(cfg.Offline.DrainIntervalSecsOrDefault()) * time.Second
+			go startPeriodic(ctx, drainInterval, periodicPassTimeout, func(pctx context.Context) {
+				runner.TriggerDrain(pctx)
+			})
+			if pruner != nil {
+				pruneInterval := time.Duration(cfg.Prune.IntervalMinutesOrDefault()) * time.Minute
+				go startPeriodic(ctx, pruneInterval, periodicPassTimeout, func(pctx context.Context) {
+					runner.TriggerPrune(pctx)
 				})
-				if pruner != nil {
-					pruneInterval := time.Duration(cfg.Prune.IntervalMinutesOrDefault()) * time.Minute
-					go startPeriodic(ctx, pruneInterval, periodicPassTimeout, func(pctx context.Context) {
-						runner.TriggerPrune(pctx)
-					})
-				}
 			}
 		}
 	}

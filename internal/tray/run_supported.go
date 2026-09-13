@@ -236,21 +236,32 @@ func Run(
 			statusItem.SetTitle("Status: " + summarize(st))
 			updateItem.SetTitle("Self-update: " + us.Note())
 
-			if st.ConfigIncomplete {
-				systray.SetIcon(buildUnconfiguredTrayIcon())
-				systray.SetTooltip("branchDAM agent — not configured")
-			} else if st.Paused {
+			// pauseItem's title/check/tooltip track st.Paused unconditionally --
+			// independent of whether config is complete, since an operator can
+			// toggle pause (a session-only, in-memory gate) at any time,
+			// including mid-setup. Only the tray icon and its own tooltip are
+			// chosen three-way below: ConfigIncomplete takes priority over
+			// Paused for the icon because "not configured" is the more
+			// actionable state to surface at a glance.
+			if st.Paused {
 				pauseItem.Check()
 				pauseItem.SetTitle("▶ Resume ingest")
 				pauseItem.SetTooltip("Resume automatic card detection and queue draining")
-				systray.SetIcon(buildPausedTrayIcon())
-				systray.SetTooltip("branchDAM agent (ingest paused)")
 			} else {
 				pauseItem.Uncheck()
 				pauseItem.SetTitle("⏸ Pause ingest")
 				pauseItem.SetTooltip("Temporarily suspend automatic card detection and queue draining")
-				systray.SetIcon(buildTrayIcon())
+			}
 
+			switch {
+			case st.ConfigIncomplete:
+				systray.SetIcon(buildUnconfiguredTrayIcon())
+				systray.SetTooltip("branchDAM agent — not configured")
+			case st.Paused:
+				systray.SetIcon(buildPausedTrayIcon())
+				systray.SetTooltip("branchDAM agent (ingest paused)")
+			default:
+				systray.SetIcon(buildTrayIcon())
 				systray.SetTooltip(FormatTooltip(st))
 			}
 
@@ -270,6 +281,9 @@ func Run(
 
 			qs := st.QueueStatus
 			switch {
+			case st.ConfigIncomplete:
+				queueItem.SetTitle("Queue: not configured")
+				drainNow.Disable()
 			case !qs.Configured:
 				queueItem.SetTitle("Queue: not configured")
 				drainNow.Disable()
@@ -280,7 +294,7 @@ func Run(
 				queueItem.SetTitle(fmt.Sprintf("Queue: %d pending, %d failed", qs.Counts.Pending(), qs.Counts.Failed))
 				drainNow.Enable()
 			}
-			if qs.Configured && qs.PruneEnabled {
+			if !st.ConfigIncomplete && qs.Configured && qs.PruneEnabled {
 				pruneNow.Enable()
 			} else {
 				pruneNow.Disable()

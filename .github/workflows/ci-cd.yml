@@ -63,6 +63,15 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make build-windows
+      # makensis only ran at release time (release-binaries.yml), never on
+      # a PR -- which is exactly why four Hermes review rounds landed
+      # NSIS string-escaping bugs one at a time (""""  ->  \"\"  ->  $"$")
+      # that a compile would have caught immediately. make build-windows
+      # above already produced both dist/*.exe the installer's File
+      # directives need, so this compiles the real script, not a stub.
+      - run: sudo apt-get update && sudo apt-get install -y nsis
+      - run: makensis -DVERSION=ci-check branchdam-agent.nsi
+        working-directory: installer/windows
 
   # darwin/arm64 build-only check, EXCLUDING internal/tray and
   # cmd/branchdam-agent (which imports it). Verified locally: Go's linker

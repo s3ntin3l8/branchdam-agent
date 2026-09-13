@@ -378,8 +378,12 @@ func firstBlockingProblem(cfg config.Config) *config.Problem {
 
 // missingRequiredFields returns the list of required config fields that
 // are empty. Used by both runTrayCmd and reload to compute the
-// configIncomplete flag consistently. pathMappings is excluded because
-// the server handshake can provide them.
+// configIncomplete flag consistently, AFTER the server handshake (if any)
+// has had a chance to run -- see resolveServerConfig. pathMappings is
+// included here because by the time this runs, applyServerPathMappings has
+// already had its opportunity to fill it in from the handshake; an empty
+// slice at this point means neither the operator nor the server has
+// supplied one, so ingest genuinely can't proceed.
 func missingRequiredFields(cfg config.Config) []string {
 	var missing []string
 	if cfg.Server.APIKey == "" {
@@ -394,7 +398,59 @@ func missingRequiredFields(cfg config.Config) []string {
 	if cfg.Ingest.LocalEditRoot == "" {
 		missing = append(missing, "ingest.localEditRoot")
 	}
+	if len(cfg.PathMappings) == 0 {
+		missing = append(missing, "pathMappings")
+	}
 	return missing
+}
+
+// serverConfigured reports whether cfg has enough server-side information
+// to attempt a real handshake. Both fields are required -- an API key
+// alone can't authenticate without a URL to send it to, and a URL alone
+// can't authenticate without a key (resolved thread PRRT_kwDOUALcu86h3ibx:
+// a missing API key must route to the dummy client even when baseUrl is
+// set, rather than attempting -- and silently failing -- a real dial).
+func serverConfigured(cfg config.Config) bool {
+	return cfg.Server.BaseURL != "" && cfg.Server.APIKey != ""
+}
+
+// resolveServerConfig is the single source of truth for the
+// "construct a client, maybe handshake, compute what's still missing"
+// sequence shared by runTrayCmd (startup) and reload() (Settings menu).
+// It deliberately runs the handshake -- and therefore
+// applyServerPathMappings -- BEFORE computing missingFields: a fresh
+// install's config.yaml has baseUrl/apiKey/archiveRoot/localEditRoot set
+// but an empty pathMappings, and the server handshake is the only way
+// that gap gets filled. Computing missingFields first (the pre-#185-fix
+// order) made configIncomplete true before the handshake ever had a
+// chance to run, which in turn skipped the handshake entirely (it's
+// gated on !configIncomplete) -- a chicken-and-egg deadlock that made
+// applyServerPathMappings unreachable on the only path that needs it.
+//
+// hsTimeout bounds the handshake call; warnPrefix distinguishes the
+// startup vs. reload log lines without duplicating the surrounding code.
+func resolveServerConfig(ctx context.Context, cfg *config.Config, configPath string, hsTimeout time.Duration, warnPrefix string) (client *branchdam.Client, missingFields []string) {
+	if serverConfigured(*cfg) {
+		client = branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
+
+		hsCtx, hsCancel := context.WithTimeout(ctx, hsTimeout)
+		if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: cfg.AgentID}); err != nil {
+			slog.Warn("could not sync naming template from server handshake"+warnPrefix+"; using config value", "err", err)
+		} else {
+			if hs.NamingTemplate != "" {
+				cfg.Ingest.PathTemplate = hs.NamingTemplate
+			}
+			applyServerPathMappings(cfg, *hs, configPath)
+		}
+		hsCancel()
+	} else {
+		// Dummy client -- the tray starts (or continues) in "not
+		// configured" mode and ingest/drain/prune are blocked via
+		// missingFields below.
+		client = branchdam.New("http://localhost:1", "")
+	}
+
+	return client, missingRequiredFields(*cfg)
 }
 
 // applyServerPathMappings applies server-provided path mappings to the config
@@ -653,38 +709,14 @@ func (s *configSettings) reload() error {
 		return fmt.Errorf("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")
 	}
 
-	// Compute which required fields are missing. The tray starts
-	// regardless -- it shows a "not configured" state in the icon and
-	// menu, and ingest is blocked until all required fields are set.
-	missingFields := missingRequiredFields(newCfg)
+	// Create the client, handshake if the server side is configured (issue
+	// #86), and compute which required fields are still missing -- in
+	// that order, so a handshake that supplies pathMappings is reflected
+	// in missingFields below. See resolveServerConfig's doc comment for
+	// why the order matters. Handshake failure must not block settings
+	// reload -- continue with config-file values.
+	client, missingFields := resolveServerConfig(context.Background(), &newCfg, s.path, 5*time.Second, " on reload")
 	configIncomplete := len(missingFields) > 0
-
-	// Create the branchdam client. When config is incomplete (missing
-	// required fields like server URL or API key), use a dummy client
-	// that will fail on any real request but allows the tray to continue
-	// in "not configured" state.
-	var client *branchdam.Client
-	if !configIncomplete {
-		client = branchdam.New(newCfg.Server.BaseURL, newCfg.Server.APIKey)
-	} else {
-		client = branchdam.New("http://localhost:1", "")
-	}
-
-	// Synchronize naming template from server handshake if available (issue #86).
-	// Handshake failure must not block settings reload -- continue with config-file template.
-	// Skip handshake when config is incomplete (no valid server connection yet).
-	if !configIncomplete {
-		hsCtx, hsCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: newCfg.AgentID}); err != nil {
-			slog.Warn("could not sync naming template from server handshake on reload; using config value", "err", err)
-		} else {
-			if hs.NamingTemplate != "" {
-				newCfg.Ingest.PathTemplate = hs.NamingTemplate
-			}
-			applyServerPathMappings(&newCfg, *hs, s.path)
-		}
-		hsCancel()
-	}
 
 	engine := ingest.NewEngine(client, newCfg.AgentID, newCfg.Ingest, newCfg.PathMappings)
 

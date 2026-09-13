@@ -267,6 +267,75 @@ func TestRunTraySyncsNamingTemplateAtStartup(t *testing.T) {
 	}
 }
 
+// TestRunTrayAppliesServerPathMappingsAtFreshInstallStartup pins the
+// chicken-and-egg deadlock a /code-review pass found on this PR: the
+// config here has server.baseUrl/apiKey/ingest roots set but an empty
+// pathMappings -- exactly the shape the NSIS installer's starter config
+// writes on a fresh install. Before the fix, missingFields (including a
+// pathMappings check) was computed BEFORE the handshake ran, which set
+// configIncomplete=true and skipped the handshake entirely (gated on
+// !configIncomplete) -- so applyServerPathMappings could never fire on
+// the one path that needed it. This asserts the handshake actually runs
+// on a fresh install and its path mapping lands on disk.
+func TestRunTrayAppliesServerPathMappingsAtFreshInstallStartup(t *testing.T) {
+	stubTrayDialog(t, nil)
+
+	var handshakeCalled int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/agent/handshake" {
+			atomic.AddInt32(&handshakeCalled, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"ok": true,
+				"serverVersion": "0.12.0",
+				"serverTimeUnix": 1756470000,
+				"pathMappings": [
+					{"workstationPrefix": "D:\\DCIM", "containerPath": "/mnt/dcim"}
+				]
+			}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	archiveRoot := filepath.Join(dir, "archive")
+	localRoot := filepath.Join(dir, "local")
+
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"" + srv.URL + "\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"pathMappings: []\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + archiveRoot + "\"\n" +
+		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"tray:\n" +
+		"  statusAddr: \"127.0.0.1:0\"\n" +
+		"selfUpdate:\n" +
+		"  enabled: false\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = run([]string{"tray", "-config", cfgPath})
+
+	if atomic.LoadInt32(&handshakeCalled) != 1 {
+		t.Fatalf("handshakeCalled = %d, want 1 -- the handshake must run on a fresh install even though pathMappings starts empty", handshakeCalled)
+	}
+
+	onDisk, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(onDisk.PathMappings) != 1 || onDisk.PathMappings[0].WorkstationPath != `D:\DCIM` {
+		t.Errorf("expected the server-provided path mapping to be persisted to config.yaml, got %+v", onDisk.PathMappings)
+	}
+}
+
 func TestRunTrayHandshakeUnreachableContinuesStartup(t *testing.T) {
 	stubTrayDialog(t, nil)
 

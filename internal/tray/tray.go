@@ -442,6 +442,18 @@ func (r *Runner) SetConfigIncomplete(incomplete bool, missing []string) {
 	r.missingFields = append([]string(nil), missing...)
 }
 
+// ConfigIncomplete reports whether the tray is currently running with a
+// config missing required fields. Mirrors ConfirmDestructive's pattern of
+// a locked getter over the field it guards -- triggerIngest, TriggerDrain,
+// and TriggerPrune all call this instead of reading r.configIncomplete
+// directly, since SetConfigIncomplete can be called concurrently from the
+// settings-reload goroutine while any of the three run on their own.
+func (r *Runner) ConfigIncomplete() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.configIncomplete
+}
+
 // SetConfirmDestructive updates the live confirmDestructive flag so the
 // operator's Settings toggle takes effect without a tray restart.
 func (r *Runner) SetConfirmDestructive(v bool) {
@@ -525,7 +537,7 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		slog.Info("tray: ingest paused, skipping", "path", cardPath)
 		return IngestSummary{CardPath: cardPath}
 	}
-	if r.configIncomplete {
+	if r.ConfigIncomplete() {
 		slog.Info("tray: config incomplete, skipping ingest", "path", cardPath)
 		return IngestSummary{CardPath: cardPath, Err: ErrConfigIncomplete}
 	}
@@ -850,12 +862,16 @@ func (r *Runner) SetIsMeteredFunc(fn func() (bool, error)) {
 // next-attempt timestamps in queue.db are the real backoff), so skipping a
 // tick outright when a previous pass is still running -- rather than
 // queuing behind it -- is always safe and is what keeps concurrent passes
-// from ever piling up. ran=false covers both "not configured", "already
-// running", and "ingest paused"; the caller (a timer tick or a menu click)
-// treats all three the same way: nothing to show beyond what Status()
-// already reports.
+// from ever piling up. ran=false covers "not configured", "already
+// running", "ingest paused", and "config incomplete" (the dummy client
+// used while required fields are missing -- see ConfigIncomplete); the
+// caller (a timer tick or a menu click) treats all four the same way:
+// nothing to show beyond what Status() already reports.
 func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bool) {
 	if r.paused.Load() {
+		return DrainSummary{}, false
+	}
+	if r.ConfigIncomplete() {
 		return DrainSummary{}, false
 	}
 	if !r.drainMu.TryLock() {
@@ -975,6 +991,9 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 // a busy tick is safe at prune's own (much longer) cadence.
 func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bool) {
 	if r.paused.Load() {
+		return PruneSummary{}, false
+	}
+	if r.ConfigIncomplete() {
 		return PruneSummary{}, false
 	}
 	release, ok := r.TryLockIdle()

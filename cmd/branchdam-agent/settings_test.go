@@ -694,11 +694,19 @@ func TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange(t *testing
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
+	// pathMappings is required here (not just server/ingest roots) -- this
+	// test is about the drainer rebuilding its client after a
+	// server.baseUrl change (issue #57), and would otherwise trip the
+	// finding-3 ConfigIncomplete gate on TriggerDrain added for the
+	// installer's "not configured" mode.
 	content := "" +
 		"server:\n" +
 		"  baseUrl: \"" + oldSrv.URL + "\"\n" +
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
+		"pathMappings:\n" +
+		"  - workstationPath: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"    containerPath: \"/container/local\"\n" +
 		"ingest:\n" +
 		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
 		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n"
@@ -904,6 +912,70 @@ func TestConfigSettingsReloadSyncsNamingTemplateFromServer(t *testing.T) {
 	}
 	if onDisk.Ingest.PathTemplate != "{original_name}" {
 		t.Errorf("onDisk PathTemplate = %q, want {original_name}", onDisk.Ingest.PathTemplate)
+	}
+}
+
+// TestConfigSettingsReloadAppliesServerPathMappingsAndClearsConfigIncomplete
+// covers the ordering resolveServerConfig now enforces: missingFields (and
+// therefore ConfigIncomplete) is computed AFTER the handshake has had a
+// chance to fill in pathMappings via applyServerPathMappings, not before.
+// The config here has server.baseUrl/apiKey/ingest roots all set but an
+// empty pathMappings -- exactly what the NSIS installer's starter config
+// writes -- so a single Reload() (the Settings-menu path an operator hits
+// after entering their server URL and key) must come out fully configured
+// once the server supplies a mapping, without a second reload.
+func TestConfigSettingsReloadAppliesServerPathMappingsAndClearsConfigIncomplete(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"ok": true,
+			"serverVersion": "0.12.0",
+			"serverTimeUnix": 1756470000,
+			"pathMappings": [
+				{"workstationPrefix": "D:\\DCIM", "containerPath": "/mnt/dcim"}
+			]
+		}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"" + srv.URL + "\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"pathMappings: []\n" +
+		"ingest:\n" +
+		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
+		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.PathMappings) != 0 {
+		t.Fatalf("expected empty pathMappings before reload, got %v", cfg.PathMappings)
+	}
+
+	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
+	s := newConfigSettings(path, cfg, runner, nil)
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	if runner.ConfigIncomplete() {
+		t.Errorf("expected ConfigIncomplete=false after Reload applies the server-provided path mapping, missing=%v", runner.Status(tray.UpdateStatus{}).MissingFields)
+	}
+
+	onDisk, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(onDisk.PathMappings) != 1 || onDisk.PathMappings[0].WorkstationPath != `D:\DCIM` {
+		t.Errorf("expected the server-provided mapping to be persisted to config.yaml, got %+v", onDisk.PathMappings)
 	}
 }
 
