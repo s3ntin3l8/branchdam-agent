@@ -12,6 +12,7 @@ require (
 	github.com/creativeprojects/go-selfupdate v1.6.0
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/google/uuid v1.6.0
+	github.com/lib/pq v1.12.3
 	github.com/ncruces/zenity v0.10.15
 	github.com/sigstore/sigstore-go v1.3.0
 	github.com/zeebo/blake3 v0.2.4
