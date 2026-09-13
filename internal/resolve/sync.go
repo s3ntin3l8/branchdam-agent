@@ -47,11 +47,11 @@ type PathRewrite struct {
 
 // Stats summarizes one Sync run.
 type Stats struct {
-	ClipsFound  int // unique file paths found in timelines
-	Emitted     int // edges actually posted (or, in a dry run, that would have been)
-	Unresolved  int // clips whose rewritten path had no node-index entry
-	NoRewrite   int // clips whose Windows path matched no PathRewrite rule
-	Errors      int // PostEdgeAttached calls that returned an error
+	ClipsFound   int // unique file paths found in timelines
+	Emitted      int // edges actually posted (or, in a dry run, that would have been)
+	Unresolved   int // clips whose rewritten path had no node-index entry
+	NoRewrite    int // clips whose Windows path matched no PathRewrite rule
+	Errors       int // PostEdgeAttached calls that returned an error
 	EvidenceOnly int // clips whose evidence was logged but no edge emitted (virtual project node not yet supported)
 }
 
@@ -116,8 +116,8 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	// edge per unique file path; evidence.TimelineNames collects all
 	// timelines that reference the file.
 	type clipAccum struct {
-		clip       TimelineClip
-		timelines  []string
+		clip          TimelineClip
+		timelines     []string
 		seenTimelines map[string]bool
 	}
 	byPath := make(map[string]*clipAccum, len(clips))
