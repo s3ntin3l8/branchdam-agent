@@ -402,11 +402,12 @@ func missingRequiredFields(cfg config.Config) []string {
 // for the handshake → config path-mapping sync, used by both runTrayCmd and
 // reload. Server wins when client has none; local mappings are never overwritten.
 //
-// Trust boundary note: this is intentional trust-of-server. The mapping
-// payload is HMAC-authenticated so only the legitimate server (holding the
-// shared secret) can inject values. The agent previously had sole authority
-// over its local path roots; now the server can push WorkstationPrefix
-// values. The slog.Info line below lists applied prefixes for audit.
+// Trust boundary note: this is intentional trust-of-server, matching the
+// agent's existing trust model for NamingTemplate and other server-pushed
+// config. The client signs outgoing requests (HMAC on X-Timestamp/X-Nonce)
+// but does not verify server response signatures — the server is the source
+// of truth wholesale. The slog.Info line below lists applied prefixes for
+// operator audit.
 func applyServerPathMappings(cfg *config.Config, hs branchdam.HandshakeResponse, configPath string) {
 	if len(hs.PathMappings) == 0 || len(cfg.PathMappings) > 0 {
 		return
@@ -658,11 +659,12 @@ func (s *configSettings) reload() error {
 	missingFields := missingRequiredFields(newCfg)
 	configIncomplete := len(missingFields) > 0
 
-	// Create the branchdam client. When config is incomplete (no valid
-	// server URL), use a dummy client that will fail on any real request
-	// but allows the tray to continue in "not configured" state.
+	// Create the branchdam client. When config is incomplete (missing
+	// required fields like server URL or API key), use a dummy client
+	// that will fail on any real request but allows the tray to continue
+	// in "not configured" state.
 	var client *branchdam.Client
-	if newCfg.Server.BaseURL != "" {
+	if !configIncomplete {
 		client = branchdam.New(newCfg.Server.BaseURL, newCfg.Server.APIKey)
 	} else {
 		client = branchdam.New("http://localhost:1", "")

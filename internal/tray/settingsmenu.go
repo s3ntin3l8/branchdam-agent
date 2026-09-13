@@ -20,6 +20,7 @@ type settingsMenu struct {
 	parent   *systray.MenuItem
 	settings Settings
 	actionCh chan<- menuAction
+	runner   *Runner
 
 	// lastErr is set by Run's select loop from settingsDoneCh and
 	// rendered into the parent item's title on the next sync -- the only
@@ -57,11 +58,11 @@ type settingsMenu struct {
 // menu (systray.AddMenuItem must already have a menu started -- this is
 // only ever called from within Run's onReady) and starts the goroutine
 // that turns its items' clicks into actions on actionCh.
-func newSettingsMenu(settings Settings, actionCh chan<- menuAction) *settingsMenu {
+func newSettingsMenu(settings Settings, actionCh chan<- menuAction, runner *Runner) *settingsMenu {
 	parent := systray.AddMenuItem("Settings", "Tray and ingest settings")
 	sv := settings.Snapshot()
 
-	sm := &settingsMenu{parent: parent, settings: settings, actionCh: actionCh}
+	sm := &settingsMenu{parent: parent, settings: settings, actionCh: actionCh, runner: runner}
 
 	sm.startOnLogin = parent.AddSubMenuItemCheckbox("Start at login", "Register this tray as a per-user login item", sv.StartOnLogin)
 	sm.confirmDestructive = parent.AddSubMenuItemCheckbox("Confirm destructive actions", "Show a confirmation dialog before prune, drain, update, or rollback", sv.ConfirmDestructive)
@@ -124,7 +125,10 @@ func (sm *settingsMenu) dispatch() {
 			sm.send(func() error { return sm.settings.SetBool("tray.startOnLogin", v) })
 		case <-sm.confirmDestructive.ClickedCh:
 			v := !sm.confirmDestructive.Checked()
-			sm.send(func() error { return sm.settings.SetBool("tray.confirmDestructive", v) })
+			sm.send(func() error {
+				sm.runner.SetConfirmDestructive(v)
+				return sm.settings.SetBool("tray.confirmDestructive", v)
+			})
 		case <-sm.selfUpdateEnabled.ClickedCh:
 			v := !sm.selfUpdateEnabled.Checked()
 			sm.send(func() error { return sm.settings.SetBool("selfUpdate.enabled", v) })

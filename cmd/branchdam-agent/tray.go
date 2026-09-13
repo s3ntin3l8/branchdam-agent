@@ -372,11 +372,12 @@ func runTrayCmd(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Create the branchdam client. When config is incomplete (no valid
-	// server URL), use a dummy client that will fail on any real request
-	// but allows the tray to start and show the "not configured" state.
+	// Create the branchdam client. When config is incomplete (missing
+	// required fields like server URL or API key), use a dummy client
+	// that will fail on any real request but allows the tray to start
+	// and show the "not configured" state.
 	var client *branchdam.Client
-	if cfg.Server.BaseURL != "" {
+	if !configIncomplete {
 		client = branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
 	} else {
 		// Dummy client for incomplete config -- the tray starts in

@@ -149,6 +149,7 @@ func Run(
 ) (Outcome, error) {
 	errCh := make(chan error, 1)
 	var outcome Outcome
+	r.SetConfirmDestructive(confirmDestructive)
 
 	onReady := func() {
 		systray.SetIcon(buildTrayIcon())
@@ -212,7 +213,7 @@ func Run(
 		hm := newHooksMenu()
 		systray.AddSeparator()
 
-		sm := newSettingsMenu(settings, menuActionCh)
+		sm := newSettingsMenu(settings, menuActionCh, r)
 		restartNowItem := sm.parent.AddSubMenuItem("Restart now", "Apply a change that needs a restart (status address)")
 		restartNowItem.Hide()
 		systray.AddSeparator()
@@ -590,7 +591,7 @@ func Run(
 				// didn't realize was ready would surprise them. The
 				// default in title/body matches the issue's exact
 				// wording.
-				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+				if !confirmDestructiveAction(ctx, confirm, r.ConfirmDestructive(),
 					"Confirm drain queue",
 					"Drain the offline queue now? This will POST all pending node_created events to branchDAM. Cancel to defer.") {
 					continue
@@ -613,7 +614,7 @@ func Run(
 				// data loss" the issue was filed to fix -- AGENTS.md
 				// invariant #9 (prune safety) names this exact
 				// scenario.
-				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+				if !confirmDestructiveAction(ctx, confirm, r.ConfirmDestructive(),
 					"Confirm prune",
 					"Delete verified local files matching LocalEditRoot? This is destructive and cannot be undone. Cancel to keep them.") {
 					continue
@@ -677,7 +678,7 @@ func Run(
 				// for the status page and any in-flight menu actions) and
 				// is irreversible except by `Roll back`. The default
 				// in title/body matches the issue's exact wording.
-				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+				if !confirmDestructiveAction(ctx, confirm, r.ConfirmDestructive(),
 					"Confirm install and restart",
 					"Apply the downloaded update and restart the tray? The tray will be unavailable for ~5 seconds.") {
 					continue
@@ -749,7 +750,7 @@ func Run(
 				// carrying an extra closure variable through every
 				// case in this select.
 				currentVersion := up.Status().CurrentVersion
-				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+				if !confirmDestructiveAction(ctx, confirm, r.ConfirmDestructive(),
 					"Confirm roll back",
 					fmt.Sprintf("Roll back to the previous version? Current version: %s.", currentVersion)) {
 					continue

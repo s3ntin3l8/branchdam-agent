@@ -380,6 +380,12 @@ type Runner struct {
 	// the icon/menu show a "not configured" state.
 	configIncomplete bool
 	missingFields    []string
+
+	// confirmDestructive controls whether destructive menu actions
+	// (drain, prune, install-and-restart, rollback) show a confirmation
+	// dialog. Updated live via SetConfirmDestructive when the operator
+	// toggles the Settings checkbox.
+	confirmDestructive bool
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -434,6 +440,23 @@ func (r *Runner) SetConfigIncomplete(incomplete bool, missing []string) {
 	defer r.mu.Unlock()
 	r.configIncomplete = incomplete
 	r.missingFields = append([]string(nil), missing...)
+}
+
+// SetConfirmDestructive updates the live confirmDestructive flag so the
+// operator's Settings toggle takes effect without a tray restart.
+func (r *Runner) SetConfirmDestructive(v bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.confirmDestructive = v
+}
+
+// ConfirmDestructive returns whether destructive menu actions require
+// confirmation. Read fresh at each gate site so the Settings toggle
+// takes effect immediately.
+func (r *Runner) ConfirmDestructive() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.confirmDestructive
 }
 
 // SetArchiveRoot updates the archive destination directory (ingest.archiveRoot)
