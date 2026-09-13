@@ -98,12 +98,6 @@ func (s *Syncer) logger() *slog.Logger {
 // In non-dry-run mode, evidence JSON is logged as structured slog output.
 // v2 will emit EVENT_EDGE_ATTACHED events via s.Client.
 func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
-	// Warm the connection before the main query — with SetMaxOpenConns(1),
-	// an idle-reaped connection fails on the first query, not at Open time.
-	if err := s.DB.db.PingContext(ctx); err != nil {
-		return Stats{}, fmt.Errorf("resolve: ping database: %w", err)
-	}
-
 	query := s.Query
 	if query == "" {
 		query = DefaultTimelineQuery

@@ -415,11 +415,12 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 
 	stats, err := syncer.Sync(ctx)
 	summary := tray.SyncSummary{
-		DryRun:     s.dryRun,
-		PairsFound: stats.ClipsFound,
-		Emitted:    stats.Emitted,
-		Skipped:    stats.Unresolved + stats.NoRewrite,
-		Errors:     stats.Errors,
+		DryRun:       s.dryRun,
+		PairsFound:   stats.ClipsFound,
+		Emitted:      stats.Emitted,
+		Skipped:      stats.Unresolved + stats.NoRewrite,
+		Errors:       stats.Errors,
+		EvidenceOnly: stats.EvidenceOnly,
 	}
 	return summary, err
 }

@@ -1,6 +1,8 @@
 // Package resolve reads DaVinci Resolve's project database (PostgreSQL
 // Project Server or local SQLite disk database) to recover timeline→clip
-// relationships and emits them to branchDAM as EVENT_EDGE_ATTACHED events.
+// relationships and logs evidence metadata. v2 will emit
+// EVENT_EDGE_ATTACHED events once proper PROJECT_SIDECAR edges
+// (media → virtual project node) are supported (issue #184).
 //
 // The schema was reverse-engineered from a live DaVinci Resolve 19 Project
 // Server instance (PostgreSQL 13, using the Resolve 19 Project Server defaults;
@@ -48,13 +50,13 @@ func Open(ctx context.Context, databaseURL string) (*DB, error) {
 
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("resolve: open %s: %w", databaseURL, err)
+		return nil, fmt.Errorf("resolve: open %s: %w", stripCredentials(databaseURL), err)
 	}
 	db.SetMaxOpenConns(1)
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("resolve: ping %s: %w", databaseURL, err)
+		return nil, fmt.Errorf("resolve: ping %s: %w", stripCredentials(databaseURL), err)
 	}
 	return &DB{db: db}, nil
 }
@@ -74,7 +76,7 @@ func parseURL(databaseURL string) (driver, dsn string, err error) {
 		// responsibility (same convention as internal/luminar.Open).
 		return "sqlite", databaseURL, nil
 	default:
-		return "", "", fmt.Errorf("resolve: unsupported database URL scheme: %s (expected postgres://... or file:...)", databaseURL)
+		return "", "", fmt.Errorf("resolve: unsupported database URL scheme: %s (expected postgres://... or file:...)", stripCredentials(databaseURL))
 	}
 }
 
