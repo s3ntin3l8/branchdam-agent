@@ -70,8 +70,10 @@ type evidence struct {
 	TimelineID    string `json:"timelineId"`
 }
 
-// Syncer reads a Resolve project database and emits EVENT_EDGE_ATTACHED
-// for each unique file path referenced by a timeline.
+// Syncer reads a Resolve project database and logs evidence metadata for
+// each unique file path referenced by a timeline. v2 will emit
+// EVENT_EDGE_ATTACHED events once proper PROJECT_SIDECAR edges (media →
+// virtual project node) are supported (issue #184).
 type Syncer struct {
 	DB           *DB
 	Index        nodeindex.Resolver
@@ -92,8 +94,9 @@ func (s *Syncer) logger() *slog.Logger {
 }
 
 // Sync reads timeline clips from s.DB, rewrites Windows paths via
-// s.PathRewrites, resolves each via s.Index, and emits an
-// EVENT_EDGE_ATTACHED for each resolved path.
+// s.PathRewrites, resolves each via s.Index, and logs evidence metadata.
+// In non-dry-run mode, evidence JSON is logged as structured slog output.
+// v2 will emit EVENT_EDGE_ATTACHED events via s.Client.
 func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	// Warm the connection before the main query — with SetMaxOpenConns(1),
 	// an idle-reaped connection fails on the first query, not at Open time.
@@ -142,11 +145,7 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	stats.ClipsFound = len(order)
 
 	// Strip credentials from DatabaseURL before stamping into evidence.
-	dbURL := s.DatabaseURL
-	if u, err := url.Parse(dbURL); err == nil && u.User != nil {
-		u.User = nil
-		dbURL = u.String()
-	}
+	dbURL := stripCredentials(s.DatabaseURL)
 
 	for _, path := range order {
 		acc := byPath[path]
@@ -217,6 +216,18 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	}
 
 	return stats, nil
+}
+
+// stripCredentials removes userinfo from a database URL so it can be safely
+// included in evidence JSON persisted server-side. Returns the original
+// string if parsing fails or no credentials are present.
+func stripCredentials(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.User == nil {
+		return rawURL
+	}
+	u.User = nil
+	return u.String()
 }
 
 // rewritePath applies the longest-prefix match from rewrites to windowsPath.

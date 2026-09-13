@@ -295,53 +295,27 @@ func TestSyncerEvidenceOnly(t *testing.T) {
 	}
 }
 
-func TestSyncerEvidenceStripsCredentials(t *testing.T) {
-	db, err := Open(context.Background(), "file::memory:")
-	if err != nil {
-		t.Fatalf("Open: %v", err)
+func TestStripCredentials(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"postgres with creds", "postgres://admin:p@ssw0rd@localhost:5432/resolve", "postgres://localhost:5432/resolve"},
+		{"postgres no creds", "postgres://localhost:5432/resolve", "postgres://localhost:5432/resolve"},
+		{"postgresql with creds", "postgresql://user:pass@host/db", "postgresql://host/db"},
+		{"file URI", "file:/path/to/db?mode=ro", "file:/path/to/db?mode=ro"},
+		{"empty", "", ""},
+		{"unparseable", "not-a-url", "not-a-url"},
 	}
-	defer func() { _ = db.Close() }()
-
-	if _, err := db.db.ExecContext(context.Background(), resolveSchema); err != nil {
-		t.Fatalf("create schema: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripCredentials(tc.in)
+			if got != tc.want {
+				t.Errorf("stripCredentials(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
-	insertClip(t, db, "t1", "Master", "seq1", "tr1", "i1", "PXL_001.mp4", `D:\Videos\Norway\PXL_001.mp4`, "262", "96319", "33")
-
-	index := &fakeIndex{entries: map[string]string{
-		"/storage/archive/videos/Norway/PXL_001.mp4": "node-uuid-001",
-	}}
-
-	// Capture structured log output.
-	var logEntry struct {
-		Evidence string `json:"evidence"`
-	}
-	// We verify credential stripping by checking the evidence JSON in the
-	// log. The syncer logs evidence.evidence which contains databaseUrl.
-	// Since we can't easily hook slog, we verify the behavior by checking
-	// that the evidence.DatabaseURL field is set correctly.
-	_ = logEntry
-
-	syncer := &Syncer{
-		DB:          db,
-		Index:       index,
-		AgentID:     "test-agent",
-		DatabaseURL: "postgres://admin:p@ssw0rd@localhost:5432/resolve",
-		DryRun:      false,
-		PathRewrites: []PathRewrite{
-			{From: "D:\\Videos\\", To: "/storage/archive/videos/"},
-		},
-	}
-
-	stats, err := syncer.Sync(context.Background())
-	if err != nil {
-		t.Fatalf("Sync: %v", err)
-	}
-	if stats.EvidenceOnly != 1 {
-		t.Errorf("EvidenceOnly = %d, want 1", stats.EvidenceOnly)
-	}
-	// The evidence.DatabaseURL should NOT contain credentials.
-	// We can't easily intercept the slog output here, but the test
-	// proves the code path runs without error.
 }
 
 func TestSyncerEvidenceCollectsMultipleTimelines(t *testing.T) {
