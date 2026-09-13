@@ -68,15 +68,15 @@ type evidence struct {
 // Syncer reads a Resolve project database and emits EVENT_EDGE_ATTACHED
 // for each unique file path referenced by a timeline.
 type Syncer struct {
-	DB            *DB
-	Index         nodeindex.Resolver
-	Client        EdgeAttacher
-	AgentID       string
-	DatabaseURL   string
-	Query         string // defaults to DefaultTimelineQuery if empty
-	DryRun        bool
-	PathRewrites  []PathRewrite
-	Logger        *slog.Logger
+	DB           *DB
+	Index        nodeindex.Resolver
+	Client       EdgeAttacher
+	AgentID      string
+	DatabaseURL  string
+	Query        string // defaults to DefaultTimelineQuery if empty
+	DryRun       bool
+	PathRewrites []PathRewrite
+	Logger       *slog.Logger
 }
 
 func (s *Syncer) logger() *slog.Logger {

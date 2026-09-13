@@ -17,10 +17,10 @@ func TestRewritePath(t *testing.T) {
 	}
 
 	cases := []struct {
-		name    string
-		input   string
-		want    string
-		wantOK  bool
+		name   string
+		input  string
+		want   string
+		wantOK bool
 	}{
 		{
 			"matching prefix",
@@ -266,11 +266,11 @@ func TestSyncerDryRun(t *testing.T) {
 	}}
 
 	syncer := &Syncer{
-		DB:     db,
-		Index:  index,
-		AgentID: "test-agent",
+		DB:          db,
+		Index:       index,
+		AgentID:     "test-agent",
 		DatabaseURL: "file::memory:",
-		DryRun: true,
+		DryRun:      true,
 		PathRewrites: []PathRewrite{
 			{From: "D:\\Videos\\", To: "/storage/archive/videos/"},
 		},
@@ -361,12 +361,12 @@ func TestSyncerLiveEmitsToServer(t *testing.T) {
 
 	client := branchdam.New(srv.URL, "0123456789abcdef0123456789abcdef")
 	syncer := &Syncer{
-		DB:     db,
-		Index:  index,
-		Client: client,
-		AgentID: "test-agent",
+		DB:          db,
+		Index:       index,
+		Client:      client,
+		AgentID:     "test-agent",
 		DatabaseURL: "file::memory:",
-		DryRun: false,
+		DryRun:      false,
 		PathRewrites: []PathRewrite{
 			{From: "D:\\Videos\\", To: "/storage/archive/videos/"},
 		},
@@ -462,11 +462,11 @@ func TestSyncerUnresolvedPath(t *testing.T) {
 	index := &fakeIndex{entries: map[string]string{}}
 
 	syncer := &Syncer{
-		DB:     db,
-		Index:  index,
-		AgentID: "test-agent",
+		DB:          db,
+		Index:       index,
+		AgentID:     "test-agent",
 		DatabaseURL: "file::memory:",
-		DryRun: true,
+		DryRun:      true,
 		PathRewrites: []PathRewrite{
 			{From: "D:\\Videos\\", To: "/storage/archive/videos/"},
 		},
@@ -531,11 +531,11 @@ func TestSyncerNoRewriteMatch(t *testing.T) {
 	index := &fakeIndex{entries: map[string]string{}}
 
 	syncer := &Syncer{
-		DB:     db,
-		Index:  index,
-		AgentID: "test-agent",
+		DB:          db,
+		Index:       index,
+		AgentID:     "test-agent",
 		DatabaseURL: "file::memory:",
-		DryRun: true,
+		DryRun:      true,
 		PathRewrites: []PathRewrite{
 			{From: "D:\\Videos\\", To: "/storage/archive/videos/"},
 		},
@@ -601,11 +601,11 @@ func TestSyncerDeduplicatesByPathAndTimeline(t *testing.T) {
 	}}
 
 	syncer := &Syncer{
-		DB:     db,
-		Index:  index,
-		AgentID: "test-agent",
+		DB:          db,
+		Index:       index,
+		AgentID:     "test-agent",
 		DatabaseURL: "file::memory:",
-		DryRun: true,
+		DryRun:      true,
 		PathRewrites: []PathRewrite{
 			{From: "D:\\Videos\\", To: "/storage/archive/"},
 		},
