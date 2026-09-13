@@ -1610,6 +1610,9 @@ func (fakeSettings) PromptAndSet(_ SettingsField) (bool, error) { return false, 
 func (fakeSettings) PromptAndSetIntegrationPath(_ IntegrationID) (bool, error) {
 	return false, nil
 }
+func (fakeSettings) PromptAndSetIntegrationRewrites(_ IntegrationID) (bool, error) {
+	return false, nil
+}
 func (fakeSettings) Reload() error             { return nil }
 func (fakeSettings) OpenConfigFile() error     { return nil }
 func (fakeSettings) RevealConfigFolder() error { return nil }

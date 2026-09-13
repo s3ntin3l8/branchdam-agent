@@ -109,6 +109,12 @@ type IntegrationView struct {
 	// verbatim: 0 means unset (defaults to 60 elsewhere), negative means
 	// "manual only" -- same convention as SettingsView.SelfUpdateCheckIntervalHrs.
 	SyncIntervalMinutes int
+	// TimeoutSecs bounds one sync pass. 0 means default (30s).
+	TimeoutSecs int
+	// PathRewrites is the formatted "from:to, from:to" string for the
+	// integration's path rewrite rules. Empty when no rules are configured.
+	PathRewrites    string
+	PathRewritesSet bool
 }
 
 // Integration looks up v's entry for id by ID, never by slice position --
@@ -155,6 +161,11 @@ type Settings interface {
 	// plus one method beats N near-identical ones. Same ok/err contract as
 	// PromptAndSet.
 	PromptAndSetIntegrationPath(id IntegrationID) (ok bool, err error)
+
+	// PromptAndSetIntegrationRewrites prompts for path rewrite rules
+	// (from:to pairs) for the given integration. Only meaningful for
+	// integrations that have a pathRewrites config field (Resolve).
+	PromptAndSetIntegrationRewrites(id IntegrationID) (ok bool, err error)
 
 	// Reload re-reads config.yaml from disk and reconfigures the running
 	// tray -- the same path a hand-edit followed by "Reload config" takes,
