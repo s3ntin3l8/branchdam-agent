@@ -3,7 +3,8 @@
 // relationships and emits them to branchDAM as EVENT_EDGE_ATTACHED events.
 //
 // The schema was reverse-engineered from a live DaVinci Resolve 19 Project
-// Server instance (PostgreSQL 13, default credentials postgres/DaVinci). The
+// Server instance (PostgreSQL 13, using the Resolve 19 Project Server defaults;
+// rotate before exposing to a network). The
 // key relationship chain is:
 //
 //	SM_Project → Sm2Timeline → Sm2Sequence → Sm2TiTrack → Sm2TiItem

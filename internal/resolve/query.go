@@ -20,6 +20,10 @@ import (
 // "D:\Videos\Norway 2025\Pixel\PXL_001.mp4") that need path rewriting
 // to map to branchDAM storage tiers.
 //
+// Identifiers are double-quoted ("Name", "MediaFilePath", etc.) because
+// Resolve's schema uses mixed-case identifiers that would be folded to
+// lowercase by PostgreSQL's default identifier folding.
+//
 // Column shape TimelineClips requires, in order (8 columns):
 //   - timeline_name:  Sm2Timeline.Name
 //   - clip_name:      Sm2TiItem.Name

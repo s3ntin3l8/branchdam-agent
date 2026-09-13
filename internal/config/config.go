@@ -388,7 +388,8 @@ type ResolveDBConfig struct {
 	TimeoutSecs int `yaml:"timeoutSecs"`
 	// PathRewrites maps Windows path prefixes (as stored in
 	// Sm2TiItem.MediaFilePath) to NAS/container paths. Longest-prefix
-	// matching is used.
+	// matching is used. This field is YAML-only — there is no tray menu
+	// item to edit it; see internal/resolve/sync.go's rewritePath.
 	PathRewrites []ResolvePathRewrite `yaml:"pathRewrites"`
 }
 
@@ -588,7 +589,8 @@ func defaultConfig() Config {
 		// per integration, once they've read the dry-run log. See
 		// CatalogSyncConfig.DryRun's own doc comment.
 		Integrations: IntegrationsConfig{
-			Luminar: CatalogSyncConfig{DryRun: true},
+			Luminar:   CatalogSyncConfig{DryRun: true},
+			ResolveDB: ResolveDBConfig{DryRun: true},
 		},
 		// ConfirmDestructive ON by default (issue #108 / E3 #S2-14): a
 		// destructive click -- "Prune now" against the wrong mount, a
@@ -903,6 +905,27 @@ func (c Config) Validate() []Problem {
 
 	if c.Integrations.ResolveDB.TimeoutSecs < 0 {
 		problems = append(problems, Problem{Field: "integrations.resolvedb.timeoutSecs", Message: "must not be negative"})
+	}
+	// Scheme-aware ?/# check: file: URIs use ? as a query-parameter delimiter
+	// (e.g. ?mode=ro), so a ? in the path would be misread. postgres:// URIs
+	// legitimately use ? for connection options, so only reject # (URL fragment).
+	if dbURL := c.Integrations.ResolveDB.DatabaseURL; dbURL != "" {
+		switch {
+		case strings.HasPrefix(dbURL, "file:"):
+			if strings.ContainsAny(dbURL, "?#") {
+				problems = append(problems, Problem{
+					Field:   "integrations.resolvedb.databaseUrl",
+					Message: "file: URI must not contain '?' or '#' -- would be misread as query parameters",
+				})
+			}
+		case strings.HasPrefix(dbURL, "postgres://") || strings.HasPrefix(dbURL, "postgresql://"):
+			if strings.Contains(dbURL, "#") {
+				problems = append(problems, Problem{
+					Field:   "integrations.resolvedb.databaseUrl",
+					Message: "postgres:// URI must not contain '#'",
+				})
+			}
+		}
 	}
 
 	return problems

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -29,7 +30,10 @@ const (
 )
 
 // EdgeAttacher is the subset of *branchdam.Client's surface Syncer needs, so
-// tests can substitute a fake without a real HTTP server.
+// tests can substitute a fake without a real HTTP server. Currently unused —
+// Sync logs evidence instead of emitting edges (server rejects self-edges via
+// CHECK constraint). Will be used when proper PROJECT_SIDECAR edges
+// (media → virtual project node) land in v2 (issue #184).
 type EdgeAttacher interface {
 	PostEdgeAttached(ctx context.Context, agentID string, payload branchdam.EdgeAttachedPayload) (*branchdam.EventResponse, error)
 }
@@ -43,11 +47,12 @@ type PathRewrite struct {
 
 // Stats summarizes one Sync run.
 type Stats struct {
-	ClipsFound int // unique file paths found in timelines
-	Emitted    int // edges actually posted (or, in a dry run, that would have been)
-	Unresolved int // clips whose rewritten path had no node-index entry
-	NoRewrite  int // clips whose Windows path matched no PathRewrite rule
-	Errors     int // PostEdgeAttached calls that returned an error
+	ClipsFound  int // unique file paths found in timelines
+	Emitted     int // edges actually posted (or, in a dry run, that would have been)
+	Unresolved  int // clips whose rewritten path had no node-index entry
+	NoRewrite   int // clips whose Windows path matched no PathRewrite rule
+	Errors      int // PostEdgeAttached calls that returned an error
+	EvidenceOnly int // clips whose evidence was logged but no edge emitted (virtual project node not yet supported)
 }
 
 // evidence is the evidenceJson object stamped onto every emitted edge.
@@ -90,6 +95,12 @@ func (s *Syncer) logger() *slog.Logger {
 // s.PathRewrites, resolves each via s.Index, and emits an
 // EVENT_EDGE_ATTACHED for each resolved path.
 func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
+	// Warm the connection before the main query — with SetMaxOpenConns(1),
+	// an idle-reaped connection fails on the first query, not at Open time.
+	if err := s.DB.db.PingContext(ctx); err != nil {
+		return Stats{}, fmt.Errorf("resolve: ping database: %w", err)
+	}
+
 	query := s.Query
 	if query == "" {
 		query = DefaultTimelineQuery
@@ -102,26 +113,45 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 
 	// Deduplicate by MediaFilePath — the same file may appear in multiple
 	// timelines or multiple times in the same timeline. We only need one
-	// edge per unique file path.
-	type clipKey struct {
-		mediaFilePath string
-		timelineName  string
+	// edge per unique file path; evidence.TimelineNames collects all
+	// timelines that reference the file.
+	type clipAccum struct {
+		clip       TimelineClip
+		timelines  []string
+		seenTimelines map[string]bool
 	}
-	seen := make(map[clipKey]bool, len(clips))
-	var unique []TimelineClip
+	byPath := make(map[string]*clipAccum, len(clips))
+	var order []string // preserve first-seen order
 	for _, clip := range clips {
-		k := clipKey{mediaFilePath: clip.MediaFilePath, timelineName: clip.TimelineName}
-		if seen[k] {
-			continue
+		acc, ok := byPath[clip.MediaFilePath]
+		if !ok {
+			acc = &clipAccum{
+				clip:          clip,
+				seenTimelines: make(map[string]bool),
+			}
+			byPath[clip.MediaFilePath] = acc
+			order = append(order, clip.MediaFilePath)
 		}
-		seen[k] = true
-		unique = append(unique, clip)
+		if !acc.seenTimelines[clip.TimelineName] {
+			acc.seenTimelines[clip.TimelineName] = true
+			acc.timelines = append(acc.timelines, clip.TimelineName)
+		}
 	}
 
 	var stats Stats
-	stats.ClipsFound = len(unique)
+	stats.ClipsFound = len(order)
 
-	for _, clip := range unique {
+	// Strip credentials from DatabaseURL before stamping into evidence.
+	dbURL := s.DatabaseURL
+	if u, err := url.Parse(dbURL); err == nil && u.User != nil {
+		u.User = nil
+		dbURL = u.String()
+	}
+
+	for _, path := range order {
+		acc := byPath[path]
+		clip := acc.clip
+
 		rewrittenPath, ok := rewritePath(s.PathRewrites, clip.MediaFilePath)
 		if !ok {
 			stats.NoRewrite++
@@ -132,7 +162,10 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 
 		nodeUUID, nodeOK, err := s.Index.Resolve(rewrittenPath)
 		if err != nil {
-			return stats, fmt.Errorf("resolve: resolve path %q: %w", rewrittenPath, err)
+			stats.Errors++
+			s.logger().Error("resolve-sync: resolve path failed, skipping",
+				"rewrittenPath", rewrittenPath, "err", err)
+			continue
 		}
 		if !nodeOK {
 			stats.Unresolved++
@@ -142,10 +175,11 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 			continue
 		}
 
+		// Build evidence with all timelines that reference this file.
 		ev := evidence{
 			SchemaMapping: SchemaMappingVersion,
-			DatabaseURL:   s.DatabaseURL,
-			TimelineName:  clip.TimelineName,
+			DatabaseURL:   dbURL,
+			TimelineName:  strings.Join(acc.timelines, ", "),
 			ClipName:      clip.ClipName,
 			MediaFilePath: clip.MediaFilePath,
 			RewrittenPath: rewrittenPath,
@@ -160,22 +194,6 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 			return stats, fmt.Errorf("resolve: marshal evidence for %q: %w", clip.MediaFilePath, err)
 		}
 
-		// Source = the ingested media file; Target = the same node.
-		// The server skips self-edges (targetNodeID == child.ID), so
-		// this becomes a metadata-only pass. The evidence JSON is the
-		// real value — it records which Resolve timelines reference this
-		// file and at which in/out points. Proper PROJECT_SIDECAR edges
-		// (media → virtual project node) are a v2 enhancement.
-		payload := branchdam.EdgeAttachedPayload{
-			SourceNodeUUID:   nodeUUID,
-			TargetNodeUUID:   nodeUUID,
-			RelationshipType: RelationshipType,
-			Confidence:       Confidence,
-			Tier:             Tier,
-			Resolver:         ResolverName,
-			EvidenceJSON:     evJSON,
-		}
-
 		if s.DryRun {
 			s.logger().Info("resolve-sync: (dry run) would emit edge",
 				"nodeUuid", nodeUUID, "mediaFilePath", clip.MediaFilePath,
@@ -184,16 +202,18 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 			continue
 		}
 
-		if _, err := s.Client.PostEdgeAttached(ctx, s.AgentID, payload); err != nil {
-			stats.Errors++
-			s.logger().Error("resolve-sync: PostEdgeAttached failed",
-				"nodeUuid", nodeUUID, "mediaFilePath", clip.MediaFilePath, "err", err)
-			continue
-		}
-		stats.Emitted++
-		s.logger().Info("resolve-sync: emitted edge",
+		// Emit a self-edge (source == target) to attach Resolve metadata.
+		// The server has CHECK (source_node_id <> target_node_id) which
+		// rejects self-edges, so we log the evidence as structured output
+		// instead. The evidence JSON records which Resolve timelines
+		// reference this file and at which in/out points — the real value
+		// of this integration. Proper PROJECT_SIDECAR edges (media →
+		// virtual project node) are a v2 enhancement (issue #184).
+		stats.EvidenceOnly++
+		s.logger().Info("resolve-sync: resolve evidence",
 			"nodeUuid", nodeUUID, "mediaFilePath", clip.MediaFilePath,
-			"rewrittenPath", rewrittenPath, "timeline", clip.TimelineName)
+			"rewrittenPath", rewrittenPath, "timelines", strings.Join(acc.timelines, ", "),
+			"evidence", string(evJSON))
 	}
 
 	return stats, nil
@@ -203,6 +223,11 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 // Returns the rewritten path and true on match, or empty string and false
 // when no prefix matches. Backslashes in the input are normalized to forward
 // slashes in the output (matching nodeindex.Resolver's verbatim convention).
+//
+// Note: rw.From is also normalized at every call. If the operator's YAML
+// contains a literal "D:\Videos\" (with a trailing backslash that JSON/YAML
+// parses), the length difference will misalign prefix matching. Use a
+// trailing forward slash in YAML: "D:\\Videos\\".
 func rewritePath(rewrites []PathRewrite, windowsPath string) (string, bool) {
 	// Normalize backslashes to forward slashes (Windows paths use backslashes,
 	// but nodeindex and branchdam use forward slashes).
