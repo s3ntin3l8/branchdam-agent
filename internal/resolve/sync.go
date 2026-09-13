@@ -138,8 +138,9 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	var stats Stats
 	stats.ClipsFound = len(order)
 
-	// Strip credentials from DatabaseURL before stamping into evidence.
-	dbURL := stripCredentials(s.DatabaseURL)
+	// Use only the scheme for evidence — host:port is implicit in the
+	// mediaFilePath/rewrittenPath fields the operator can correlate.
+	dbURL := schemeOnly(s.DatabaseURL)
 
 	for _, path := range order {
 		acc := byPath[path]
@@ -222,6 +223,17 @@ func stripCredentials(rawURL string) string {
 	}
 	u.User = nil
 	return u.String()
+}
+
+// schemeOnly returns just the scheme portion of a database URL
+// (e.g. "postgres", "file") for minimal evidence stamping.
+// Returns the original string if parsing fails.
+func schemeOnly(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return u.Scheme
 }
 
 // rewritePath applies the longest-prefix match from rewrites to windowsPath.

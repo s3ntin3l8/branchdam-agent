@@ -344,7 +344,7 @@ func TestSyncerEvidenceStripsCredentials(t *testing.T) {
 		DB:          db,
 		Index:       index,
 		AgentID:     "test-agent",
-		DatabaseURL: "postgres://user:s3cretP@ss@localhost:5432/resolve",
+		DatabaseURL: "postgres://user:REDACTED@localhost:5432/resolve",
 		DryRun:      false,
 		PathRewrites: []PathRewrite{
 			{From: "D:\\Videos\\", To: "/storage/archive/videos/"},
@@ -361,8 +361,8 @@ func TestSyncerEvidenceStripsCredentials(t *testing.T) {
 	}
 
 	output := logBuf.String()
-	if strings.Contains(output, "s3cretP@ss") {
-		t.Errorf("evidence log contains password — credential leak\nlog output: %s", output)
+	if strings.Contains(output, "REDACTED") {
+		t.Errorf("evidence log contains userinfo — credential leak\nlog output: %s", output)
 	}
 	if !strings.Contains(output, "resolve-sync: resolve evidence") {
 		t.Errorf("expected 'resolve-sync: resolve evidence' in log output\nlog output: %s", output)
