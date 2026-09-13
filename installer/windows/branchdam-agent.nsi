@@ -21,11 +21,9 @@ Unicode True
 
 ; --- Interface ---
 !define MUI_ABORTWARNING
-!define MUI_ICON "..\..\resources\icons\icon.ico"
-!define MUI_UNICON "..\..\resources\icons\icon.ico"
-!define MUI_HEADERIMAGE
-!define MUI_HEADERIMAGE_BITMAP "..\..\resources\icons\installer-header.bmp"
-!define MUI_WELCOMEFINISHPAGE_BITMAP "..\..\resources\icons\installer-sidebar.bmp"
+; MUI_ICON/MUI_UNICON/MUI_HEADERIMAGE_BITMAP/MUI_WELCOMEFINISHPAGE_BITMAP
+; use MUI2 bundled defaults. Custom assets go in resources/icons/ and
+; will be wired in once the icon generation pipeline is in place.
 !define MUI_FINISHPAGE_RUN "$INSTDIR\branchdam-agent-tray.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Launch branchDAM Agent"
 
@@ -103,7 +101,8 @@ Section "Install"
     WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "NoModify" 1
     WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "NoRepair" 1
 
-    ; Get installed size
+    ; Get installed size ($0/$1 deliberately reused here — $1 held the
+    ; computer name from .onInit but is dead after FileClose on line 85).
     ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
     IntFmt $0 "0x%08X" $0
     WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "EstimatedSize" "$0"

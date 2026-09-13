@@ -401,6 +401,12 @@ func missingRequiredFields(cfg config.Config) []string {
 // when the agent has none configured yet. This is the single source of truth
 // for the handshake → config path-mapping sync, used by both runTrayCmd and
 // reload. Server wins when client has none; local mappings are never overwritten.
+//
+// Trust boundary note: this is intentional trust-of-server. The mapping
+// payload is HMAC-authenticated so only the legitimate server (holding the
+// shared secret) can inject values. The agent previously had sole authority
+// over its local path roots; now the server can push WorkstationPrefix
+// values. The slog.Info line below lists applied prefixes for audit.
 func applyServerPathMappings(cfg *config.Config, hs branchdam.HandshakeResponse, configPath string) {
 	if len(hs.PathMappings) == 0 || len(cfg.PathMappings) > 0 {
 		return
@@ -412,7 +418,11 @@ func applyServerPathMappings(cfg *config.Config, hs branchdam.HandshakeResponse,
 			ContainerPath:   pm.ContainerPath,
 		}
 	}
-	slog.Info("applied path mappings from server handshake", "count", len(cfg.PathMappings))
+	prefixes := make([]string, len(cfg.PathMappings))
+	for i, pm := range cfg.PathMappings {
+		prefixes[i] = pm.WorkstationPath
+	}
+	slog.Info("applied path mappings from server handshake", "count", len(cfg.PathMappings), "workstationPrefixes", prefixes)
 	// Persist to config.yaml so the mappings survive a restart.
 	if err := config.Patch(configPath, map[string]any{"pathMappings": cfg.PathMappings}); err != nil {
 		slog.Warn("could not persist server-provided path mappings to config", "err", err)

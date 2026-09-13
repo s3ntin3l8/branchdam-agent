@@ -33,6 +33,10 @@ import (
 // `ingest`/`ingest --watch` path, just no tray icon.
 var ErrUnsupported = errors.New("tray: unsupported on this platform (windows and darwin only); use `branchdam-agent ingest` instead")
 
+// ErrConfigIncomplete is returned by triggerIngest when required config
+// fields are missing and the agent cannot safely ingest.
+var ErrConfigIncomplete = errors.New("tray: config incomplete — cannot ingest until all required fields are set")
+
 // IngestGate decides whether to proceed with ingesting a detected card volume (issue #79).
 // Confirm returns proceed=true to proceed with ingest, or proceed=false/error to skip.
 type IngestGate interface {
@@ -422,8 +426,9 @@ func (r *Runner) SetOnPauseChange(fn func(paused bool)) {
 }
 
 // SetConfigIncomplete marks the tray as running with an incomplete config.
-// The tray starts in "setup mode" -- ingest is blocked, and the icon/menu
-// show a "not configured" state until all required fields are set.
+// The tray starts in "setup mode" — triggerIngest, drain, and prune are
+// all gated, and the icon/menu show a "not configured" state until all
+// required fields are set.
 func (r *Runner) SetConfigIncomplete(incomplete bool, missing []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -496,6 +501,10 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 	if r.paused.Load() {
 		slog.Info("tray: ingest paused, skipping", "path", cardPath)
 		return IngestSummary{CardPath: cardPath}
+	}
+	if r.configIncomplete {
+		slog.Info("tray: config incomplete, skipping ingest", "path", cardPath)
+		return IngestSummary{CardPath: cardPath, Err: ErrConfigIncomplete}
 	}
 	if isDetection {
 		r.mu.Lock()

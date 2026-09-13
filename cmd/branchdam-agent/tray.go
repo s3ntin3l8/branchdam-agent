@@ -323,11 +323,7 @@ func runTrayCmd(args []string) int {
 	}
 
 	// First-run: if no config file exists, write a starter config so
-	// the tray can start and the user can configure via the Settings
-	// menu. The old bootstrap wizard (5 zenity dialogs) is replaced by
-	// an installer-driven flow: the installer writes a starter config
-	// with agentId set, then launches the tray. The tray starts in
-	// "not configured" mode and guides the user through Settings.
+	// the tray can start and the user can configure via Settings.
 	if _, statErr := os.Stat(resolvedPath); errors.Is(statErr, os.ErrNotExist) {
 		slog.Info("no config found, writing starter config", "path", resolvedPath)
 		if err := writeStarterConfig(resolvedPath); err != nil {
