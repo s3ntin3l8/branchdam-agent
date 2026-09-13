@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image/color"
 	"log/slog"
 	"os/exec"
 	"runtime"
@@ -817,6 +818,12 @@ func Run(
 	default:
 	}
 	return outcome, nil
+}
+
+// buildUnconfiguredTrayIcon renders branchDAM's b-node monogram in gray,
+// indicating the tray is running with an incomplete config ("not configured").
+func buildUnconfiguredTrayIcon() []byte {
+	return buildIconColor(false, color.RGBA{R: 0x80, G: 0x80, B: 0x80, A: 0xff}) // gray
 }
 
 func summarize(st Status) string {

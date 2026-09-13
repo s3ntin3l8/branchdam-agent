@@ -157,12 +157,6 @@ func buildIcon(paused bool) []byte {
 	return buildIconColor(paused, color.RGBA{R: 0x2b, G: 0xa6, B: 0x9a, A: 0xff}) // branchDAM teal
 }
 
-// buildUnconfiguredTrayIcon renders branchDAM's b-node monogram in gray,
-// indicating the tray is running with an incomplete config ("not configured").
-func buildUnconfiguredTrayIcon() []byte {
-	return buildIconColor(false, color.RGBA{R: 0x80, G: 0x80, B: 0x80, A: 0xff}) // gray
-}
-
 func buildIconColor(paused bool, fg color.RGBA) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, trayIconSize, trayIconSize))
 	badgeBg := color.RGBA{R: 0xe6, G: 0x95, B: 0x00, A: 0xff} // amber pause badge
