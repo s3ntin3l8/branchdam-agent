@@ -20,6 +20,7 @@ type settingsMenu struct {
 	parent   *systray.MenuItem
 	settings Settings
 	actionCh chan<- menuAction
+	runner   *Runner
 
 	// lastErr is set by Run's select loop from settingsDoneCh and
 	// rendered into the parent item's title on the next sync -- the only
@@ -30,6 +31,7 @@ type settingsMenu struct {
 	lastErr error
 
 	startOnLogin         *systray.MenuItem
+	confirmDestructive   *systray.MenuItem
 	selfUpdateEnabled    *systray.MenuItem
 	interval1h           *systray.MenuItem
 	interval24h          *systray.MenuItem
@@ -45,6 +47,8 @@ type settingsMenu struct {
 	archiveRoot          *systray.MenuItem
 	localEditRoot        *systray.MenuItem
 	namingTemplate       *systray.MenuItem
+	agentID              *systray.MenuItem
+	pathMappings         *systray.MenuItem
 	reloadConfig         *systray.MenuItem
 	openConfig           *systray.MenuItem
 	revealConfig         *systray.MenuItem
@@ -54,13 +58,14 @@ type settingsMenu struct {
 // menu (systray.AddMenuItem must already have a menu started -- this is
 // only ever called from within Run's onReady) and starts the goroutine
 // that turns its items' clicks into actions on actionCh.
-func newSettingsMenu(settings Settings, actionCh chan<- menuAction) *settingsMenu {
+func newSettingsMenu(settings Settings, actionCh chan<- menuAction, runner *Runner) *settingsMenu {
 	parent := systray.AddMenuItem("Settings", "Tray and ingest settings")
 	sv := settings.Snapshot()
 
-	sm := &settingsMenu{parent: parent, settings: settings, actionCh: actionCh}
+	sm := &settingsMenu{parent: parent, settings: settings, actionCh: actionCh, runner: runner}
 
 	sm.startOnLogin = parent.AddSubMenuItemCheckbox("Start at login", "Register this tray as a per-user login item", sv.StartOnLogin)
+	sm.confirmDestructive = parent.AddSubMenuItemCheckbox("Confirm destructive actions", "Show a confirmation dialog before prune, drain, update, or rollback", sv.ConfirmDestructive)
 	sm.selfUpdateEnabled = parent.AddSubMenuItemCheckbox("Check for updates", "Periodically check GitHub for a newer release (read-only)", sv.SelfUpdateEnabled)
 
 	intervalParent := parent.AddSubMenuItem("Check every", "How often to re-check after the initial startup check")
@@ -77,10 +82,12 @@ func newSettingsMenu(settings Settings, actionCh chan<- menuAction) *settingsMen
 
 	sm.serverURL = parent.AddSubMenuItem("Server URL…", "branchDAM server URL")
 	sm.apiKey = parent.AddSubMenuItem(apiKeyTitle(sv.ServerAPIKeySet), "Agent API key")
+	sm.agentID = parent.AddSubMenuItem("Agent ID…", "Self-asserted identity for this workstation")
 	sm.cardRoots = parent.AddSubMenuItem("Watch folders…", "Directories polled for mounted cards")
 	sm.allowedExtensions = parent.AddSubMenuItem("Allowed extensions…", "File extensions to ingest (comma-separated, empty for all)")
 	sm.archiveRoot = parent.AddSubMenuItem("Archive root…", "Workstation path backing the Tier-3 archive destination")
 	sm.localEditRoot = parent.AddSubMenuItem("Local edit root…", "Workstation path for the local edit (scratch) copy")
+	sm.pathMappings = parent.AddSubMenuItem("Path mappings…", "Workstation-to-container path rewrite rules")
 	sm.namingTemplate = parent.AddSubMenuItem("Naming template…", "Destination path template")
 
 	parent.AddSeparator()
@@ -116,6 +123,12 @@ func (sm *settingsMenu) dispatch() {
 		case <-sm.startOnLogin.ClickedCh:
 			v := !sm.startOnLogin.Checked()
 			sm.send(func() error { return sm.settings.SetBool("tray.startOnLogin", v) })
+		case <-sm.confirmDestructive.ClickedCh:
+			v := !sm.confirmDestructive.Checked()
+			sm.send(func() error {
+				sm.runner.SetConfirmDestructive(v)
+				return sm.settings.SetBool("tray.confirmDestructive", v)
+			})
 		case <-sm.selfUpdateEnabled.ClickedCh:
 			v := !sm.selfUpdateEnabled.Checked()
 			sm.send(func() error { return sm.settings.SetBool("selfUpdate.enabled", v) })
@@ -141,6 +154,8 @@ func (sm *settingsMenu) dispatch() {
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldServerBaseURL); return err })
 		case <-sm.apiKey.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldServerAPIKey); return err })
+		case <-sm.agentID.ClickedCh:
+			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldAgentID); return err })
 		case <-sm.cardRoots.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldCardRoots); return err })
 		case <-sm.allowedExtensions.ClickedCh:
@@ -149,6 +164,8 @@ func (sm *settingsMenu) dispatch() {
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldArchiveRoot); return err })
 		case <-sm.localEditRoot.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldLocalEditRoot); return err })
+		case <-sm.pathMappings.ClickedCh:
+			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldPathMappings); return err })
 		case <-sm.namingTemplate.ClickedCh:
 			sm.send(func() error { _, err := sm.settings.PromptAndSet(FieldNamingTemplate); return err })
 		case <-sm.reloadConfig.ClickedCh:
@@ -167,6 +184,7 @@ func (sm *settingsMenu) dispatch() {
 // what several others should show.
 func (sm *settingsMenu) sync(sv SettingsView) {
 	setChecked(sm.startOnLogin, sv.StartOnLogin)
+	setChecked(sm.confirmDestructive, sv.ConfirmDestructive)
 	setChecked(sm.selfUpdateEnabled, sv.SelfUpdateEnabled)
 	setChecked(sm.interval1h, sv.SelfUpdateCheckIntervalHrs == 1)
 	setChecked(sm.interval24h, sv.SelfUpdateCheckIntervalHrs == 0 || sv.SelfUpdateCheckIntervalHrs == 24)

@@ -322,19 +322,12 @@ func runTrayCmd(args []string) int {
 		return fail("resolve config path: %v", err)
 	}
 
-	// First-run bootstrap (issue #30): a missing config is no longer a
-	// hard failure. writeStarterConfig plus a short setup wizard (server
-	// URL, API key, the two ingest roots) via zenity, applied with
-	// config.Patch -- see bootstrap.go. The starter config it wrote stays
-	// on disk even if the wizard is canceled or a dialog fails partway,
-	// so there is always something to hand-edit afterward.
+	// First-run: if no config file exists, write a starter config so
+	// the tray can start and the user can configure via Settings.
 	if _, statErr := os.Stat(resolvedPath); errors.Is(statErr, os.ErrNotExist) {
-		slog.Info("no config found, starting first-run setup", "path", resolvedPath)
-		if err := bootstrapConfigInteractive(dialog, resolvedPath); err != nil {
-			if errors.Is(err, errBootstrapCanceled) {
-				return fail("first-run setup canceled -- a starter config was written to %s; edit it by hand and relaunch", resolvedPath)
-			}
-			return fail("first-run setup failed: %v -- a starter config was written to %s; edit it by hand and relaunch", err, resolvedPath)
+		slog.Info("no config found, writing starter config", "path", resolvedPath)
+		if err := writeStarterConfig(resolvedPath); err != nil {
+			return fail("write starter config: %v", err)
 		}
 	}
 
@@ -343,10 +336,10 @@ func runTrayCmd(args []string) int {
 		return fail("load config %q: %v", resolvedPath, err)
 	}
 	// Catches the unexpanded-${VAR}-placeholder footgun (see
-	// config.Validate's doc comment) for the tray the same way PR1 wired
-	// it into preflight: a server.*-prefixed problem is fatal (it would
-	// otherwise surface as a confusing auth failure once ingest actually
-	// tries to talk to the server), anything else is advisory.
+	// config.Validate's doc comment): a server.*-prefixed problem is
+	// fatal (it would otherwise surface as a confusing auth failure
+	// once ingest actually tries to talk to the server), anything else
+	// is advisory.
 	for _, p := range cfg.Validate() {
 		if p.Advisory() {
 			slog.Warn("config problem", "field", p.Field, "message", p.Message)
@@ -357,42 +350,24 @@ func runTrayCmd(args []string) int {
 		}
 		slog.Warn("config problem", "field", p.Field, "message", p.Message)
 	}
-	if cfg.Server.APIKey == "" {
-		return fail("server.apiKey is empty in config")
-	}
-	if cfg.Ingest.ArchiveRoot == "" || cfg.Ingest.LocalEditRoot == "" {
-		return fail("ingest.archiveRoot and ingest.localEditRoot must both be set in config")
-	}
 	if cfg.Offline.QueueDBPath != "" && cfg.Offline.Tier0ContainerRoot == "" {
 		return fail("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")
-	}
-	// preflight only WARNs on an empty pathMappings (an operator running
-	// it hasn't necessarily configured ingest yet); the tray is about to
-	// actually ingest, where a missing mapping fails downstream with a
-	// confusing ErrNoPathMapping on the first real card -- fatal here.
-	// This only checks non-emptiness, not that some entry actually covers
-	// ingest.archiveRoot -- the wizard always writes a covering entry, but
-	// a hand-authored config with an unrelated mapping still slips past
-	// this to the same downstream error; hence "at least one entry" below,
-	// not a coverage claim.
-	if len(cfg.PathMappings) == 0 {
-		return fail("pathMappings must have at least one entry -- without one covering ingest.archiveRoot, the first real card ingest will fail")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	client := branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
-
-	// Synchronize naming template from server handshake if available (issue #86).
-	// Handshake failure must not block tray startup -- continue with config-file template.
-	hsCtx, hsCancel := context.WithTimeout(ctx, 5*time.Second)
-	if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: cfg.AgentID}); err != nil {
-		slog.Warn("could not sync naming template from server handshake; using config value", "err", err)
-	} else if hs.NamingTemplate != "" {
-		cfg.Ingest.PathTemplate = hs.NamingTemplate
+	// Create the client, handshake if the server side is configured (issue
+	// #86), and compute which required fields are still missing -- in
+	// that order, so a fresh install's server-provided pathMappings are
+	// reflected in missingFields below rather than deadlocking the
+	// handshake behind a flag the handshake itself was meant to clear.
+	// See resolveServerConfig's doc comment for the full rationale.
+	client, missingFields := resolveServerConfig(ctx, &cfg, resolvedPath, 5*time.Second, "")
+	configIncomplete := len(missingFields) > 0
+	if configIncomplete {
+		slog.Info("config incomplete, tray will start in setup mode", "missing", missingFields)
 	}
-	hsCancel()
 
 	engine := ingest.NewEngine(client, cfg.AgentID, cfg.Ingest, cfg.PathMappings)
 	// Closes whichever engine is current when the tray process exits. A
@@ -404,6 +379,7 @@ func runTrayCmd(args []string) int {
 	// cycles before the process actually exits.
 	defer engine.Exiftool.Close()
 	runner := tray.NewRunner(engine, cfg.Ingest.CardRoots, cfg.Ingest.LocalEditRoot)
+	runner.SetConfigIncomplete(configIncomplete, missingFields)
 	runner.SetArchiveRoot(cfg.Ingest.ArchiveRoot)
 	runner.SetArchiveProber(func(pctx context.Context, root string) bool {
 		return probeArchive(pctx, root, client, cfg.Ingest.UploadStream)
@@ -497,6 +473,13 @@ func runTrayCmd(args []string) int {
 			// all. TriggerDrain/TriggerPrune's own locking (drainMu /
 			// Runner.gate via TryLockIdle) is what keeps a timer tick and
 			// a menu click from ever racing each other into a double pass.
+			// Started unconditionally, same rationale as the integration
+			// syncers above: config can go from incomplete to complete at
+			// any time the tray is running (via the Settings menu), and a
+			// timer goroutine started only at startup would never notice.
+			// TriggerDrain/TriggerPrune each check Runner.ConfigIncomplete
+			// themselves and no-op (ran=false) while it's true -- see their
+			// own doc comments -- so this never dials the dummy client.
 			drainInterval := time.Duration(cfg.Offline.DrainIntervalSecsOrDefault()) * time.Second
 			go startPeriodic(ctx, drainInterval, periodicPassTimeout, func(pctx context.Context) {
 				runner.TriggerDrain(pctx)

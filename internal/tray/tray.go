@@ -33,6 +33,10 @@ import (
 // `ingest`/`ingest --watch` path, just no tray icon.
 var ErrUnsupported = errors.New("tray: unsupported on this platform (windows and darwin only); use `branchdam-agent ingest` instead")
 
+// ErrConfigIncomplete is returned by triggerIngest when required config
+// fields are missing and the agent cannot safely ingest.
+var ErrConfigIncomplete = errors.New("tray: config incomplete — cannot ingest until all required fields are set")
+
 // IngestGate decides whether to proceed with ingesting a detected card volume (issue #79).
 // Confirm returns proceed=true to proceed with ingest, or proceed=false/error to skip.
 type IngestGate interface {
@@ -212,6 +216,12 @@ type Status struct {
 	// isn't in Integrations()'s own registry (see HookID's own doc
 	// comment). Ordered by the compile-time Hooks() registry.
 	Hooks []HookStatus `json:"hooks,omitempty"`
+	// ConfigIncomplete is true when required config fields are missing
+	// (server.apiKey, server.baseUrl, ingest.archiveRoot, etc.). The
+	// tray starts anyway -- it shows a "not configured" icon and menu
+	// state, and the user configures through the Settings menu.
+	ConfigIncomplete bool     `json:"configIncomplete"`
+	MissingFields    []string `json:"missingFields,omitempty"`
 }
 
 // Runner owns the state a tray-resident process needs: the ingest engine
@@ -364,6 +374,18 @@ type Runner struct {
 	// autoEject gates OS-level safe eject after verified ingest (issue #87).
 	autoEject bool
 	ejectFn   func(mountPath string) error
+
+	// configIncomplete tracks whether required config fields are missing.
+	// The tray starts anyway in "setup mode" -- ingest is blocked, and
+	// the icon/menu show a "not configured" state.
+	configIncomplete bool
+	missingFields    []string
+
+	// confirmDestructive controls whether destructive menu actions
+	// (drain, prune, install-and-restart, rollback) show a confirmation
+	// dialog. Updated live via SetConfirmDestructive when the operator
+	// toggles the Settings checkbox.
+	confirmDestructive bool
 }
 
 // NewRunner builds a Runner over ingester, describing watchDirs (typically
@@ -407,6 +429,46 @@ func (r *Runner) SetOnPauseChange(fn func(paused bool)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onPauseChange = fn
+}
+
+// SetConfigIncomplete marks the tray as running with an incomplete config.
+// The tray starts in "setup mode" — triggerIngest, drain, and prune are
+// all gated, and the icon/menu show a "not configured" state until all
+// required fields are set.
+func (r *Runner) SetConfigIncomplete(incomplete bool, missing []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.configIncomplete = incomplete
+	r.missingFields = append([]string(nil), missing...)
+}
+
+// ConfigIncomplete reports whether the tray is currently running with a
+// config missing required fields. Mirrors ConfirmDestructive's pattern of
+// a locked getter over the field it guards -- triggerIngest, TriggerDrain,
+// and TriggerPrune all call this instead of reading r.configIncomplete
+// directly, since SetConfigIncomplete can be called concurrently from the
+// settings-reload goroutine while any of the three run on their own.
+func (r *Runner) ConfigIncomplete() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.configIncomplete
+}
+
+// SetConfirmDestructive updates the live confirmDestructive flag so the
+// operator's Settings toggle takes effect without a tray restart.
+func (r *Runner) SetConfirmDestructive(v bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.confirmDestructive = v
+}
+
+// ConfirmDestructive returns whether destructive menu actions require
+// confirmation. Read fresh at each gate site so the Settings toggle
+// takes effect immediately.
+func (r *Runner) ConfirmDestructive() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.confirmDestructive
 }
 
 // SetArchiveRoot updates the archive destination directory (ingest.archiveRoot)
@@ -474,6 +536,10 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 	if r.paused.Load() {
 		slog.Info("tray: ingest paused, skipping", "path", cardPath)
 		return IngestSummary{CardPath: cardPath}
+	}
+	if r.ConfigIncomplete() {
+		slog.Info("tray: config incomplete, skipping ingest", "path", cardPath)
+		return IngestSummary{CardPath: cardPath, Err: ErrConfigIncomplete}
 	}
 	if isDetection {
 		r.mu.Lock()
@@ -796,12 +862,16 @@ func (r *Runner) SetIsMeteredFunc(fn func() (bool, error)) {
 // next-attempt timestamps in queue.db are the real backoff), so skipping a
 // tick outright when a previous pass is still running -- rather than
 // queuing behind it -- is always safe and is what keeps concurrent passes
-// from ever piling up. ran=false covers both "not configured", "already
-// running", and "ingest paused"; the caller (a timer tick or a menu click)
-// treats all three the same way: nothing to show beyond what Status()
-// already reports.
+// from ever piling up. ran=false covers "not configured", "already
+// running", "ingest paused", and "config incomplete" (the dummy client
+// used while required fields are missing -- see ConfigIncomplete); the
+// caller (a timer tick or a menu click) treats all four the same way:
+// nothing to show beyond what Status() already reports.
 func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bool) {
 	if r.paused.Load() {
+		return DrainSummary{}, false
+	}
+	if r.ConfigIncomplete() {
 		return DrainSummary{}, false
 	}
 	if !r.drainMu.TryLock() {
@@ -921,6 +991,9 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 // a busy tick is safe at prune's own (much longer) cadence.
 func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bool) {
 	if r.paused.Load() {
+		return PruneSummary{}, false
+	}
+	if r.ConfigIncomplete() {
 		return PruneSummary{}, false
 	}
 	release, ok := r.TryLockIdle()
@@ -1432,6 +1505,8 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	lastPrune := r.lastPrune
 	inFlightDrain := r.inFlightDrain
 	inFlightPrune := r.inFlightPrune
+	configIncomplete := r.configIncomplete
+	missingFields := append([]string(nil), r.missingFields...)
 
 	// Built entirely under r.mu, not after unlocking: r.syncers/r.lastSync
 	// are read map entries here, not copied whole-map references, so a
@@ -1497,22 +1572,24 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	}
 
 	return Status{
-		WatchDirs:       watchDirs,
-		ScratchNote:     scratchNote,
-		QueueStatus:     qs,
-		LastIngest:      last,
-		SelfUpdate:      selfUpdate,
-		Paused:          r.paused.Load(),
-		Busy:            busy,
-		BusyCard:        busyCard,
-		BusySince:       busySince,
-		IngestProgress:  prog,
-		HandshakeOK:     lastDrain != nil && lastDrain.HandshakeOK,
-		LastHandshakeAt: lastHandshakeAt,
-		HasDrained:      lastDrain != nil,
-		InFlightDrain:   inFlightDrain,
-		InFlightPrune:   inFlightPrune,
-		Integrations:    integrations,
-		Hooks:           hooks,
+		WatchDirs:        watchDirs,
+		ScratchNote:      scratchNote,
+		QueueStatus:      qs,
+		LastIngest:       last,
+		SelfUpdate:       selfUpdate,
+		Paused:           r.paused.Load(),
+		Busy:             busy,
+		BusyCard:         busyCard,
+		BusySince:        busySince,
+		IngestProgress:   prog,
+		HandshakeOK:      lastDrain != nil && lastDrain.HandshakeOK,
+		LastHandshakeAt:  lastHandshakeAt,
+		HasDrained:       lastDrain != nil,
+		InFlightDrain:    inFlightDrain,
+		InFlightPrune:    inFlightPrune,
+		Integrations:     integrations,
+		Hooks:            hooks,
+		ConfigIncomplete: configIncomplete,
+		MissingFields:    missingFields,
 	}
 }

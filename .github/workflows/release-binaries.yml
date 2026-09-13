@@ -104,6 +104,13 @@ jobs:
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
             -ldflags="-s -w -H windowsgui -X main.version=${{ env.RELEASE_VERSION }}" \
             -o dist/branchdam-agent-tray.exe ./cmd/branchdam-agent
+      - name: Install NSIS
+        run: sudo apt-get update && sudo apt-get install -y nsis
+      - name: Build installer
+        run: |
+          cd installer/windows
+          makensis -DVERSION="${{ env.RELEASE_VERSION }}" branchdam-agent.nsi
+          mv branchdam-agent-setup.exe ../../dist/
       - name: Package
         run: |
           cd dist
@@ -111,7 +118,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: windows-amd64
-          path: branchdam-agent-windows-amd64.zip
+          path: |
+            dist/branchdam-agent-windows-amd64.zip
+            dist/branchdam-agent-setup.exe
           retention-days: 1
 
   # darwin/arm64: requires a real macOS host, same as ci-cd.yml's
@@ -202,6 +211,7 @@ jobs:
           gh release upload "${{ inputs.release-tag }}" \
             dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz \
             dist/windows-amd64/branchdam-agent-windows-amd64.zip \
+            dist/windows-amd64/branchdam-agent-setup.exe \
             dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz \
             SHA256SUMS.txt \
             --repo "${{ github.repository }}" --clobber
@@ -230,6 +240,7 @@ jobs:
           assets=(
             "dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz"
             "dist/windows-amd64/branchdam-agent-windows-amd64.zip"
+            "dist/windows-amd64/branchdam-agent-setup.exe"
             "dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz"
             "SHA256SUMS.txt"
           )
@@ -247,6 +258,8 @@ jobs:
             dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz.cert \
             dist/windows-amd64/branchdam-agent-windows-amd64.zip.sig \
             dist/windows-amd64/branchdam-agent-windows-amd64.zip.cert \
+            dist/windows-amd64/branchdam-agent-setup.exe.sig \
+            dist/windows-amd64/branchdam-agent-setup.exe.cert \
             dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz.sig \
             dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz.cert \
             SHA256SUMS.txt.sig \

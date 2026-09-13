@@ -379,6 +379,27 @@ func TestTriggerDrainSkipsWhenNotConfigured(t *testing.T) {
 	}
 }
 
+// TestTriggerDrainSkipsWhenConfigIncomplete verifies the gate added
+// alongside triggerIngest's own ErrConfigIncomplete check: a Drainer can
+// be fully wired and idle, but a drain pass must still no-op while
+// required config fields are missing -- the dummy client used in that
+// state (cmd/branchdam-agent's resolveServerConfig) must never be dialed
+// by a timer tick or a menu click.
+func TestTriggerDrainSkipsWhenConfigIncomplete(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 2}}
+	r.SetQueueDeps(nil, fd, nil)
+	r.SetConfigIncomplete(true, []string{"server.apiKey"})
+
+	_, ran := r.TriggerDrain(context.Background())
+	if ran {
+		t.Error("expected TriggerDrain to report ran=false while config is incomplete")
+	}
+	if fd.calls != 0 {
+		t.Errorf("expected Drain to never be called while config is incomplete, got %d calls", fd.calls)
+	}
+}
+
 func TestTriggerDrainSkipsConcurrentPass(t *testing.T) {
 	fd := &fakeDrainer{started: make(chan struct{}), release: make(chan struct{})}
 	r := NewRunner(&fakeIngester{}, nil, "")
@@ -461,6 +482,23 @@ func TestTriggerPruneSkipsWhenNotConfigured(t *testing.T) {
 	}
 	if r.Status(UpdateStatus{}).QueueStatus.PruneEnabled {
 		t.Error("expected PruneEnabled=false when no Pruner is wired")
+	}
+}
+
+// TestTriggerPruneSkipsWhenConfigIncomplete mirrors
+// TestTriggerDrainSkipsWhenConfigIncomplete for TriggerPrune.
+func TestTriggerPruneSkipsWhenConfigIncomplete(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fp := &fakePruner{summary: PruneSummary{Pruned: 4}}
+	r.SetQueueDeps(nil, nil, fp)
+	r.SetConfigIncomplete(true, []string{"ingest.archiveRoot"})
+
+	_, ran := r.TriggerPrune(context.Background())
+	if ran {
+		t.Error("expected TriggerPrune to report ran=false while config is incomplete")
+	}
+	if fp.calls != 0 {
+		t.Errorf("expected Prune to never be called while config is incomplete, got %d calls", fp.calls)
 	}
 }
 
@@ -2853,4 +2891,60 @@ func TestAutoEjectDisabledByDefault(t *testing.T) {
 	if notifMsg != "1 photo imported from CARD" {
 		t.Errorf("expected standard import notification, got %q", notifMsg)
 	}
+}
+
+// TestConfigIncompleteConcurrentAccess exercises SetConfigIncomplete
+// racing against TriggerIngest and Status on separate goroutines --
+// exactly the shape the settings-reload goroutine (cmd/branchdam-agent's
+// configSettings.reload, invoked from a menu click) produces against the
+// tray's own detector/menu-refresh goroutines calling TriggerIngest/
+// Status concurrently. Before ConfigIncomplete() existed, triggerIngest
+// read r.configIncomplete without r.mu, which `go test -race` had nothing
+// to catch because no test exercised the two together; this test gives
+// -race a genuine concurrent read/write pair to verify against.
+func TestConfigIncompleteConcurrentAccess(t *testing.T) {
+	fi := &fakeIngester{result: ingest.CardResult{}}
+	r := NewRunner(fi, nil, "")
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				r.SetConfigIncomplete(i%2 == 0, []string{"server.apiKey"})
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				r.TriggerIngest(context.Background(), "/media/CARD")
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = r.Status(UpdateStatus{})
+			}
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }

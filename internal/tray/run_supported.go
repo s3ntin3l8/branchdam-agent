@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image/color"
 	"log/slog"
 	"os/exec"
 	"runtime"
@@ -148,6 +149,7 @@ func Run(
 ) (Outcome, error) {
 	errCh := make(chan error, 1)
 	var outcome Outcome
+	r.SetConfirmDestructive(confirmDestructive)
 
 	onReady := func() {
 		systray.SetIcon(buildTrayIcon())
@@ -211,7 +213,7 @@ func Run(
 		hm := newHooksMenu()
 		systray.AddSeparator()
 
-		sm := newSettingsMenu(settings, menuActionCh)
+		sm := newSettingsMenu(settings, menuActionCh, r)
 		restartNowItem := sm.parent.AddSubMenuItem("Restart now", "Apply a change that needs a restart (status address)")
 		restartNowItem.Hide()
 		systray.AddSeparator()
@@ -234,25 +236,42 @@ func Run(
 			statusItem.SetTitle("Status: " + summarize(st))
 			updateItem.SetTitle("Self-update: " + us.Note())
 
+			// pauseItem's title/check/tooltip track st.Paused unconditionally --
+			// independent of whether config is complete, since an operator can
+			// toggle pause (a session-only, in-memory gate) at any time,
+			// including mid-setup. Only the tray icon and its own tooltip are
+			// chosen three-way below: ConfigIncomplete takes priority over
+			// Paused for the icon because "not configured" is the more
+			// actionable state to surface at a glance.
 			if st.Paused {
 				pauseItem.Check()
 				pauseItem.SetTitle("▶ Resume ingest")
 				pauseItem.SetTooltip("Resume automatic card detection and queue draining")
-				systray.SetIcon(buildPausedTrayIcon())
-				systray.SetTooltip("branchDAM agent (ingest paused)")
 			} else {
 				pauseItem.Uncheck()
 				pauseItem.SetTitle("⏸ Pause ingest")
 				pauseItem.SetTooltip("Temporarily suspend automatic card detection and queue draining")
-				systray.SetIcon(buildTrayIcon())
+			}
 
+			switch {
+			case st.ConfigIncomplete:
+				systray.SetIcon(buildUnconfiguredTrayIcon())
+				systray.SetTooltip("branchDAM agent — not configured")
+			case st.Paused:
+				systray.SetIcon(buildPausedTrayIcon())
+				systray.SetTooltip("branchDAM agent (ingest paused)")
+			default:
+				systray.SetIcon(buildTrayIcon())
 				systray.SetTooltip(FormatTooltip(st))
 			}
 
 			// Watch dirs can change out from under this menu now that
 			// Reconfigure exists (issue #31's settings menu) -- re-render
 			// on every tick rather than only at startup.
-			if len(st.WatchDirs) == 0 {
+			if st.ConfigIncomplete {
+				watchItem.SetTitle("Watch directories: not configured")
+				ingestNow.Disable()
+			} else if len(st.WatchDirs) == 0 {
 				watchItem.SetTitle("Watch directories: none configured")
 				ingestNow.Disable()
 			} else {
@@ -262,6 +281,9 @@ func Run(
 
 			qs := st.QueueStatus
 			switch {
+			case st.ConfigIncomplete:
+				queueItem.SetTitle("Queue: not configured")
+				drainNow.Disable()
 			case !qs.Configured:
 				queueItem.SetTitle("Queue: not configured")
 				drainNow.Disable()
@@ -272,7 +294,7 @@ func Run(
 				queueItem.SetTitle(fmt.Sprintf("Queue: %d pending, %d failed", qs.Counts.Pending(), qs.Counts.Failed))
 				drainNow.Enable()
 			}
-			if qs.Configured && qs.PruneEnabled {
+			if !st.ConfigIncomplete && qs.Configured && qs.PruneEnabled {
 				pruneNow.Enable()
 			} else {
 				pruneNow.Disable()
@@ -583,7 +605,7 @@ func Run(
 				// didn't realize was ready would surprise them. The
 				// default in title/body matches the issue's exact
 				// wording.
-				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+				if !confirmDestructiveAction(ctx, confirm, r.ConfirmDestructive(),
 					"Confirm drain queue",
 					"Drain the offline queue now? This will POST all pending node_created events to branchDAM. Cancel to defer.") {
 					continue
@@ -606,7 +628,7 @@ func Run(
 				// data loss" the issue was filed to fix -- AGENTS.md
 				// invariant #9 (prune safety) names this exact
 				// scenario.
-				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+				if !confirmDestructiveAction(ctx, confirm, r.ConfirmDestructive(),
 					"Confirm prune",
 					"Delete verified local files matching LocalEditRoot? This is destructive and cannot be undone. Cancel to keep them.") {
 					continue
@@ -670,7 +692,7 @@ func Run(
 				// for the status page and any in-flight menu actions) and
 				// is irreversible except by `Roll back`. The default
 				// in title/body matches the issue's exact wording.
-				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+				if !confirmDestructiveAction(ctx, confirm, r.ConfirmDestructive(),
 					"Confirm install and restart",
 					"Apply the downloaded update and restart the tray? The tray will be unavailable for ~5 seconds.") {
 					continue
@@ -742,7 +764,7 @@ func Run(
 				// carrying an extra closure variable through every
 				// case in this select.
 				currentVersion := up.Status().CurrentVersion
-				if !confirmDestructiveAction(ctx, confirm, confirmDestructive,
+				if !confirmDestructiveAction(ctx, confirm, r.ConfirmDestructive(),
 					"Confirm roll back",
 					fmt.Sprintf("Roll back to the previous version? Current version: %s.", currentVersion)) {
 					continue
@@ -813,7 +835,16 @@ func Run(
 	return outcome, nil
 }
 
+// buildUnconfiguredTrayIcon renders branchDAM's b-node monogram in gray,
+// indicating the tray is running with an incomplete config ("not configured").
+func buildUnconfiguredTrayIcon() []byte {
+	return buildIconColor(false, color.RGBA{R: 0x80, G: 0x80, B: 0x80, A: 0xff}) // gray
+}
+
 func summarize(st Status) string {
+	if st.ConfigIncomplete {
+		return "not configured — open Settings to set up"
+	}
 	if st.Paused {
 		return "ingest paused by user"
 	}

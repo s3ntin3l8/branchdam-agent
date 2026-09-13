@@ -154,8 +154,17 @@ func encodeIco(img *image.RGBA) []byte {
 }
 
 func buildIcon(paused bool) []byte {
+	return buildIconColor(paused, color.RGBA{R: 0x2b, G: 0xa6, B: 0x9a, A: 0xff}) // branchDAM teal
+}
+
+// buildIconColor renders the branchDAM b-node monogram in the given
+// foreground color. All color.RGBA values passed here must satisfy the
+// premultiplied-alpha invariant R,G,B <= A — image.RGBA.Store interprets
+// RGBA as pre-multiplied, so a color with R > A produces visual artifacts
+// (round-capped strokes from PR #51). The gray badge color (0x80, 0x80,
+// 0x80, 0xff) satisfies this: 0x80 <= 0xff.
+func buildIconColor(paused bool, fg color.RGBA) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, trayIconSize, trayIconSize))
-	fg := color.RGBA{R: 0x2b, G: 0xa6, B: 0x9a, A: 0xff}      // branchDAM teal
 	badgeBg := color.RGBA{R: 0xe6, G: 0x95, B: 0x00, A: 0xff} // amber pause badge
 	badgeFg := color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff} // white pause bars
 

@@ -146,6 +146,7 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 	return tray.SettingsView{
 		ConfigPath:                 s.path,
 		StartOnLogin:               cfg.Tray.StartOnLogin,
+		ConfirmDestructive:         cfg.Tray.ConfirmDestructive,
 		SelfUpdateEnabled:          cfg.SelfUpdate.Enabled,
 		SelfUpdateCheckIntervalHrs: cfg.SelfUpdate.CheckIntervalHours,
 		RequireUnbuffered:          cfg.Ingest.RequireUnbuffered,
@@ -154,9 +155,11 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		AutoEject:                  cfg.Ingest.AutoEject,
 		ServerBaseURL:              cfg.Server.BaseURL,
 		ServerAPIKeySet:            cfg.Server.APIKey != "",
+		AgentID:                    cfg.AgentID,
 		ArchiveRoot:                cfg.Ingest.ArchiveRoot,
 		LocalEditRoot:              cfg.Ingest.LocalEditRoot,
 		NamingTemplate:             cfg.Ingest.PathTemplate,
+		PathMappings:               formatPathMappings(cfg.PathMappings),
 		AllowedExtensions:          cfg.Ingest.AllowedExtensions,
 		RestartRequired:            s.restartRequired,
 		NodeIndexPath:              cfg.Integrations.NodeIndexPath,
@@ -228,6 +231,8 @@ func (s *configSettings) validateBoolChange(key string, v bool) error {
 	switch key {
 	case "tray.startOnLogin":
 		cfg.Tray.StartOnLogin = v
+	case "tray.confirmDestructive":
+		cfg.Tray.ConfirmDestructive = v
 	case "selfUpdate.enabled":
 		cfg.SelfUpdate.Enabled = v
 	case "ingest.requireUnbuffered":
@@ -285,6 +290,12 @@ func (s *configSettings) validateStringChange(key, v string) error {
 		cfg.Server.BaseURL = v
 	case "server.apiKey":
 		cfg.Server.APIKey = v
+	case "agentId":
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return fmt.Errorf("agentId must not be empty")
+		}
+		cfg.AgentID = v
 	case "ingest.archiveRoot":
 		cfg.Ingest.ArchiveRoot = v
 	case "ingest.localEditRoot":
@@ -299,6 +310,12 @@ func (s *configSettings) validateStringChange(key, v string) error {
 		cfg.Ingest.AllowedExtensions = exts
 	case "ingest.pathTemplate":
 		cfg.Ingest.PathTemplate = v
+	case "pathMappings":
+		mappings, err := parsePathMappings(v)
+		if err != nil {
+			return err
+		}
+		cfg.PathMappings = mappings
 	case "integrations.nodeIndexPath":
 		// Shared across every catalog integration (see
 		// config.IntegrationsConfig.NodeIndexPath's own doc comment) --
@@ -357,6 +374,116 @@ func firstBlockingProblem(cfg config.Config) *config.Problem {
 		}
 	}
 	return nil
+}
+
+// missingRequiredFields returns the list of required config fields that
+// are empty. Used by both runTrayCmd and reload to compute the
+// configIncomplete flag consistently, AFTER the server handshake (if any)
+// has had a chance to run -- see resolveServerConfig. pathMappings is
+// included here because by the time this runs, applyServerPathMappings has
+// already had its opportunity to fill it in from the handshake; an empty
+// slice at this point means neither the operator nor the server has
+// supplied one, so ingest genuinely can't proceed.
+func missingRequiredFields(cfg config.Config) []string {
+	var missing []string
+	if cfg.Server.APIKey == "" {
+		missing = append(missing, "server.apiKey")
+	}
+	if cfg.Server.BaseURL == "" {
+		missing = append(missing, "server.baseUrl")
+	}
+	if cfg.Ingest.ArchiveRoot == "" {
+		missing = append(missing, "ingest.archiveRoot")
+	}
+	if cfg.Ingest.LocalEditRoot == "" {
+		missing = append(missing, "ingest.localEditRoot")
+	}
+	if len(cfg.PathMappings) == 0 {
+		missing = append(missing, "pathMappings")
+	}
+	return missing
+}
+
+// serverConfigured reports whether cfg has enough server-side information
+// to attempt a real handshake. Both fields are required -- an API key
+// alone can't authenticate without a URL to send it to, and a URL alone
+// can't authenticate without a key (resolved thread PRRT_kwDOUALcu86h3ibx:
+// a missing API key must route to the dummy client even when baseUrl is
+// set, rather than attempting -- and silently failing -- a real dial).
+func serverConfigured(cfg config.Config) bool {
+	return cfg.Server.BaseURL != "" && cfg.Server.APIKey != ""
+}
+
+// resolveServerConfig is the single source of truth for the
+// "construct a client, maybe handshake, compute what's still missing"
+// sequence shared by runTrayCmd (startup) and reload() (Settings menu).
+// It deliberately runs the handshake -- and therefore
+// applyServerPathMappings -- BEFORE computing missingFields: a fresh
+// install's config.yaml has baseUrl/apiKey/archiveRoot/localEditRoot set
+// but an empty pathMappings, and the server handshake is the only way
+// that gap gets filled. Computing missingFields first (the pre-#185-fix
+// order) made configIncomplete true before the handshake ever had a
+// chance to run, which in turn skipped the handshake entirely (it's
+// gated on !configIncomplete) -- a chicken-and-egg deadlock that made
+// applyServerPathMappings unreachable on the only path that needs it.
+//
+// hsTimeout bounds the handshake call; warnPrefix distinguishes the
+// startup vs. reload log lines without duplicating the surrounding code.
+func resolveServerConfig(ctx context.Context, cfg *config.Config, configPath string, hsTimeout time.Duration, warnPrefix string) (client *branchdam.Client, missingFields []string) {
+	if serverConfigured(*cfg) {
+		client = branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
+
+		hsCtx, hsCancel := context.WithTimeout(ctx, hsTimeout)
+		if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: cfg.AgentID}); err != nil {
+			slog.Warn("could not sync naming template from server handshake"+warnPrefix+"; using config value", "err", err)
+		} else {
+			if hs.NamingTemplate != "" {
+				cfg.Ingest.PathTemplate = hs.NamingTemplate
+			}
+			applyServerPathMappings(cfg, *hs, configPath)
+		}
+		hsCancel()
+	} else {
+		// Dummy client -- the tray starts (or continues) in "not
+		// configured" mode and ingest/drain/prune are blocked via
+		// missingFields below.
+		client = branchdam.New("http://localhost:1", "")
+	}
+
+	return client, missingRequiredFields(*cfg)
+}
+
+// applyServerPathMappings applies server-provided path mappings to the config
+// when the agent has none configured yet. This is the single source of truth
+// for the handshake → config path-mapping sync, used by both runTrayCmd and
+// reload. Server wins when client has none; local mappings are never overwritten.
+//
+// Trust boundary note: this is intentional trust-of-server, matching the
+// agent's existing trust model for NamingTemplate and other server-pushed
+// config. The client signs outgoing requests (HMAC on X-Timestamp/X-Nonce)
+// but does not verify server response signatures — the server is the source
+// of truth wholesale. The slog.Info line below lists applied prefixes for
+// operator audit.
+func applyServerPathMappings(cfg *config.Config, hs branchdam.HandshakeResponse, configPath string) {
+	if len(hs.PathMappings) == 0 || len(cfg.PathMappings) > 0 {
+		return
+	}
+	cfg.PathMappings = make([]config.PathMapping, len(hs.PathMappings))
+	for i, pm := range hs.PathMappings {
+		cfg.PathMappings[i] = config.PathMapping{
+			WorkstationPath: pm.WorkstationPrefix,
+			ContainerPath:   pm.ContainerPath,
+		}
+	}
+	prefixes := make([]string, len(cfg.PathMappings))
+	for i, pm := range cfg.PathMappings {
+		prefixes[i] = pm.WorkstationPath
+	}
+	slog.Info("applied path mappings from server handshake", "count", len(cfg.PathMappings), "workstationPrefixes", prefixes)
+	// Persist to config.yaml so the mappings survive a restart.
+	if err := config.Patch(configPath, map[string]any{"pathMappings": cfg.PathMappings}); err != nil {
+		slog.Warn("could not persist server-provided path mappings to config", "err", err)
+	}
 }
 
 // settingsPrompt describes one PromptAndSet field's dialog.
@@ -423,6 +550,18 @@ func settingsPromptFor(field tray.SettingsField) (settingsPrompt, error) {
 			patterns:     []string{"*.json"},
 			defaultValue: func(cfg config.Config) string { return cfg.Integrations.NodeIndexPath },
 		}, nil
+	case tray.FieldAgentID:
+		return settingsPrompt{
+			key: "agentId", kind: "entry", title: "Agent ID",
+			message:      "Self-asserted identity for this workstation:",
+			defaultValue: func(cfg config.Config) string { return cfg.AgentID },
+		}, nil
+	case tray.FieldPathMappings:
+		return settingsPrompt{
+			key: "pathMappings", kind: "entry", title: "Path Mappings",
+			message:      "Workstation-to-container path mappings (comma-separated, e.g. /mnt/nas:/storage/archive):",
+			defaultValue: func(cfg config.Config) string { return formatPathMappings(cfg.PathMappings) },
+		}, nil
 	default:
 		return settingsPrompt{}, fmt.Errorf("settings: unknown field %v", field)
 	}
@@ -473,6 +612,9 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 	case "ingest.allowedExtensions":
 		exts, _ := splitCommaExtensions(value)
 		patchVal = exts
+	case "pathMappings":
+		mappings, _ := parsePathMappings(value)
+		patchVal = mappings
 	}
 	if err := config.Patch(s.path, map[string]any{prompt.key: patchVal}); err != nil {
 		return false, fmt.Errorf("save %s: %w", prompt.key, err)
@@ -567,17 +709,14 @@ func (s *configSettings) reload() error {
 		return fmt.Errorf("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")
 	}
 
-	client := branchdam.New(newCfg.Server.BaseURL, newCfg.Server.APIKey)
-
-	// Synchronize naming template from server handshake if available (issue #86).
-	// Handshake failure must not block settings reload -- continue with config-file template.
-	hsCtx, hsCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: newCfg.AgentID}); err != nil {
-		slog.Warn("could not sync naming template from server handshake on reload; using config value", "err", err)
-	} else if hs.NamingTemplate != "" {
-		newCfg.Ingest.PathTemplate = hs.NamingTemplate
-	}
-	hsCancel()
+	// Create the client, handshake if the server side is configured (issue
+	// #86), and compute which required fields are still missing -- in
+	// that order, so a handshake that supplies pathMappings is reflected
+	// in missingFields below. See resolveServerConfig's doc comment for
+	// why the order matters. Handshake failure must not block settings
+	// reload -- continue with config-file values.
+	client, missingFields := resolveServerConfig(context.Background(), &newCfg, s.path, 5*time.Second, " on reload")
+	configIncomplete := len(missingFields) > 0
 
 	engine := ingest.NewEngine(client, newCfg.AgentID, newCfg.Ingest, newCfg.PathMappings)
 
@@ -602,6 +741,7 @@ func (s *configSettings) reload() error {
 	s.runner.SetDetectorRequireDCIM(newCfg.Ingest.RequireDCIM)
 	s.runner.SetPauseUploadOnMetered(newCfg.Ingest.PauseUploadOnMetered)
 	s.runner.SetAutoEject(newCfg.Ingest.AutoEject)
+	s.runner.SetConfigIncomplete(configIncomplete, missingFields)
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
 
 	// Rebuild every integration syncer against the freshly reloaded
@@ -706,6 +846,43 @@ func splitCommaExtensions(s string) ([]string, error) {
 			return nil, fmt.Errorf("extension %q must start with a leading dot (e.g. %q)", ext, "."+strings.TrimPrefix(ext, "."))
 		}
 		out = append(out, ext)
+	}
+	return out, nil
+}
+
+// formatPathMappings renders a PathMapping slice as a comma-separated
+// "workstationPath:containerPath" string for the Settings menu display.
+func formatPathMappings(mappings []config.PathMapping) string {
+	var parts []string
+	for _, m := range mappings {
+		parts = append(parts, m.WorkstationPath+":"+m.ContainerPath)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// parsePathMappings parses a comma-separated "workstationPath:containerPath"
+// string into a PathMapping slice. Each pair must contain exactly one colon.
+func parsePathMappings(s string) ([]config.PathMapping, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var out []config.PathMapping
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		// Use LastIndex to handle Windows drive letters (C:\path:/container).
+		// The last colon separates workstation path from container path.
+		idx := strings.LastIndex(part, ":")
+		if idx <= 0 || idx == len(part)-1 {
+			return nil, fmt.Errorf("path mapping %q must be in format workstationPath:containerPath", part)
+		}
+		out = append(out, config.PathMapping{
+			WorkstationPath: strings.TrimSpace(part[:idx]),
+			ContainerPath:   strings.TrimSpace(part[idx+1:]),
+		})
 	}
 	return out, nil
 }

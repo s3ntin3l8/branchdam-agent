@@ -21,8 +21,8 @@ func TestRunInitCmdWritesStarterConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load written config: %v", err)
 	}
-	if cfg.Server.BaseURL == "" {
-		t.Error("expected a non-empty default server.baseUrl in the starter config")
+	if cfg.Server.BaseURL != "" {
+		t.Error("expected empty server.baseUrl in the starter config (configured via tray Settings)")
 	}
 	if problem := firstBlockingProblem(cfg); problem != nil {
 		t.Errorf("starter config should have no blocking Validate() problems, got %s", problem)
