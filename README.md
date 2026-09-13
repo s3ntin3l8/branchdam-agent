@@ -120,7 +120,7 @@ The NSIS installer provides a one-click setup experience:
 
 The installer does not collect any configuration at install time (except the default agent ID) - all settings are configured through the tray's Settings menu after installation.
 
-> **Note:** Uninstalling via Add/Remove Programs removes `%APPDATA%\branchdam-agent\config.yaml`, including a fully-configured setup. The installer preserves config on *upgrade*, but uninstall-then-reinstall requires reconfiguration. Back up `config.yaml` before uninstalling if you want to restore your settings after reinstalling.
+> **Note:** Uninstalling via Add/Remove Programs preserves `%APPDATA%\branchdam-agent\config.yaml`. The installer also preserves it on upgrade (`IfFileExists` guard). Uninstall-then-reinstall keeps your settings.
 
 ### Manual Installation
 
