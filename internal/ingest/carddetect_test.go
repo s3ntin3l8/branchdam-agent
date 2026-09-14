@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
@@ -60,12 +61,12 @@ func TestListVolumesUnderIgnoresMissingRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := ListVolumesUnder([]string{dir + "/media", dir + "/nonexistent-root"}, false)
+	got, err := ListVolumesUnder([]string{filepath.Join(dir, "media"), filepath.Join(dir, "nonexistent-root")}, false)
 	if err != nil {
 		t.Fatalf("ListVolumesUnder: %v", err)
 	}
 	sort.Strings(got)
-	want := []string{dir + "/media/card1", dir + "/media/card2"}
+	want := []string{filepath.Join(dir, "media", "card1"), filepath.Join(dir, "media", "card2")}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ListVolumesUnder = %v, want %v", got, want)
 	}
@@ -78,28 +79,28 @@ func TestListVolumesUnderRequireDCIM(t *testing.T) {
 	if err := mkdirs(dir, "media/card1/DCIM", "media/card2", "media/card3"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(dir+"/media/card3/DCIM", []byte("not a dir"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "media", "card3", "DCIM"), []byte("not a dir"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Without requireDCIM: all 3 volumes are returned
-	gotNoDCIM, err := ListVolumesUnder([]string{dir + "/media"}, false)
+	gotNoDCIM, err := ListVolumesUnder([]string{filepath.Join(dir, "media")}, false)
 	if err != nil {
 		t.Fatalf("ListVolumesUnder(false): %v", err)
 	}
 	sort.Strings(gotNoDCIM)
-	wantNoDCIM := []string{dir + "/media/card1", dir + "/media/card2", dir + "/media/card3"}
+	wantNoDCIM := []string{filepath.Join(dir, "media", "card1"), filepath.Join(dir, "media", "card2"), filepath.Join(dir, "media", "card3")}
 	if !reflect.DeepEqual(gotNoDCIM, wantNoDCIM) {
 		t.Errorf("ListVolumesUnder(false) = %v, want %v", gotNoDCIM, wantNoDCIM)
 	}
 
 	// With requireDCIM: only card1 is returned
-	gotDCIM, err := ListVolumesUnder([]string{dir + "/media"}, true)
+	gotDCIM, err := ListVolumesUnder([]string{filepath.Join(dir, "media")}, true)
 	if err != nil {
 		t.Fatalf("ListVolumesUnder(true): %v", err)
 	}
 	sort.Strings(gotDCIM)
-	wantDCIM := []string{dir + "/media/card1"}
+	wantDCIM := []string{filepath.Join(dir, "media", "card1")}
 	if !reflect.DeepEqual(gotDCIM, wantDCIM) {
 		t.Errorf("ListVolumesUnder(true) = %v, want %v", gotDCIM, wantDCIM)
 	}
@@ -111,19 +112,19 @@ func TestNewDetectorWithRequireDCIM(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d := NewDetector([]string{dir + "/media"}, 0, true)
+	d := NewDetector([]string{filepath.Join(dir, "media")}, 0, true)
 	got, err := d.List()
 	if err != nil {
 		t.Fatalf("d.List(): %v", err)
 	}
-	if !reflect.DeepEqual(got, []string{dir + "/media/card1"}) {
+	if !reflect.DeepEqual(got, []string{filepath.Join(dir, "media", "card1")}) {
 		t.Errorf("d.List() = %v, want [%s/media/card1]", got, dir)
 	}
 }
 
 func mkdirs(base string, dirs ...string) error {
 	for _, d := range dirs {
-		if err := os.MkdirAll(base+"/"+d, 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(base, filepath.FromSlash(d)), 0o755); err != nil {
 			return err
 		}
 	}

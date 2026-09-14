@@ -105,12 +105,13 @@ func (s *Syncer) logger() *slog.Logger {
 }
 
 // VirtualNodeUUID generates a deterministic UUID for a virtual project node
-// from the agent ID, timeline name, and database URL. The same inputs always
-// produce the same UUID, so re-syncs are idempotent — the server's "already
-// exists" check makes re-sends safe. agentID is included to avoid collisions
-// when multiple workstations edit timelines with the same name.
-func VirtualNodeUUID(agentID, timelineName, databaseURL string) string {
-	h := sha256.Sum256([]byte(agentID + "\x00" + timelineName + "\x00" + databaseURL))
+// from the agent ID, stable database timeline ID, and credential-free database
+// identity. Agent scope is required because branchDAM enforces live paths
+// globally: two workstations syncing the same shared Resolve database must not
+// claim the same virtual node. Password rotation therefore cannot create a
+// second node, while separate agents and same-named timelines remain distinct.
+func VirtualNodeUUID(agentID, timelineID, databaseURL string) string {
+	h := sha256.Sum256([]byte(agentID + "\x00" + timelineID + "\x00" + databaseIdentity(databaseURL)))
 	// UUID v4 from first 16 bytes of SHA-256, set version and variant bits.
 	u := h[:16]
 	u[6] = (u[6] & 0x0f) | 0x40 // version 4
@@ -119,51 +120,9 @@ func VirtualNodeUUID(agentID, timelineName, databaseURL string) string {
 		u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
 }
 
-// sanitizePathComponent makes a string safe for use as a single path
-// segment. Rejects path separators, dot-only names, and dotdot sequences
-// that could escape the parent directory. Shared by timeline names and
-// agent IDs.
-func sanitizePathComponent(name string) string {
-	name = strings.ReplaceAll(name, "/", "-")
-	name = strings.ReplaceAll(name, "\\", "-")
-	name = strings.ReplaceAll(name, "..", "_")
-	name = strings.Trim(name, ".")
-	if name == "" || name == "." || name == ".." {
-		name = "unnamed"
-	}
-	return name
-}
-
-// sanitizeTimelineName makes a timeline name safe for use as a path component.
-// Resolve timeline names are untrusted DB text -- a name like ".." would escape
-// the virtual root, and "/" would build arbitrary nested paths. This function
-// replaces path separators and dot-only names with safe alternatives.
-func sanitizeTimelineName(name string) string {
-	return sanitizePathComponent(name)
-}
-
-// uniqueTimelineSegment returns a sanitized timeline segment that is unique
-// per raw input. Two raw names that sanitize to the same string (e.g. "A/B"
-// and "A-B" -> "A-B") get distinct hash-suffixed segments so the server's
-// file_path UNIQUE constraint cannot collide. The 8-char hash suffix is the
-// first 8 hex chars of sha256(raw name) -- deterministic and short enough to
-// keep path lengths manageable.
-func uniqueTimelineSegment(rawName string) string {
-	safe := sanitizeTimelineName(rawName)
-	h := sha256.Sum256([]byte(rawName))
-	suffix := fmt.Sprintf("%08x", h[:4])
-	return safe + "-" + suffix
-}
-
-// virtualFilePath returns the virtual path for a timeline's project node.
-// The path is scoped per agent to avoid ux_media_nodes_live_path collisions
-// across workstations. agentID is sanitized as a single path component so
-// operator-set values like "../.." cannot escape the virtual root. The
-// timeline segment derives its sanitized name and uniqueness hash from the
-// raw timeline name so distinct raw names with the same sanitized form
-// (e.g. "A/B" vs "A-B") never collide on the server's file_path UNIQUE.
-func virtualFilePath(virtualRoot, agentID, rawTimelineName string) string {
-	return path.Clean(virtualRoot + "/" + sanitizePathComponent(agentID) + "/" + uniqueTimelineSegment(rawTimelineName))
+// virtualFilePath returns a collision-free virtual path for a project node.
+func virtualFilePath(virtualRoot, nodeUUID string) string {
+	return path.Clean(virtualRoot + "/" + nodeUUID)
 }
 
 // virtualDisplayName returns a human-readable label for a virtual project node.
@@ -171,23 +130,10 @@ func virtualDisplayName(timelineName string) string {
 	return "Resolve: " + timelineName
 }
 
-// Sync reads timeline clips from s.DB, rewrites Windows paths via
-// s.PathRewrites, resolves each via s.Index, and emits virtual project nodes
-// and PROJECT_SIDECAR edges. In dry-run mode, it logs what would be emitted
-// without calling the server.
-
-// resolveAgentID returns a stable per-install identifier for the resolve
-// integration. Order of preference:
-//  1. Operator-set cfg.AgentID (caller-provided, unique by operator
-//     responsibility).
-//  2. /etc/machine-id (Linux standard; provisioned by systemd at OS
-//     install — unique per VM/container snapshot).
-//  3. A generated UUIDv4 persisted in the given path. Created lazily on
-//     first use; survives hostname renames and DHCP changes.
-//
-// os.Hostname() is intentionally NOT used as a fallback: cloned VMs and
-// containers can share a hostname, recreating the cross-workstation UUID
-// collision this integration was built to prevent.
+// resolveAgentID returns a stable per-install identifier for the Resolve
+// integration. It prefers the configured ID, then the OS machine ID, then a
+// generated UUID persisted below the user's config directory. Hostnames are
+// deliberately excluded because cloned machines can share them.
 func resolveAgentID(cfgAgentID, machineIDPath, persistentIDPath string, logger *slog.Logger) (string, error) {
 	if cfgAgentID != "" {
 		return cfgAgentID, nil
@@ -212,23 +158,21 @@ func resolveAgentID(cfgAgentID, machineIDPath, persistentIDPath string, logger *
 		return "", fmt.Errorf("resolve: write persistent-id file: %w", err)
 	}
 	if logger != nil {
-		logger.Warn("resolve: cfg.AgentID empty; minted per-install ID. Set cfg.AgentID explicitly in config.yaml for shared-workstation deployments.",
+		logger.Warn("resolve: agentId empty; minted per-install ID; set agentId explicitly for shared-workstation deployments",
 			"persistentIDPath", persistentIDPath)
 	}
 	return newID, nil
 }
 
+// Sync reads timeline clips from s.DB, rewrites Windows paths via
+// s.PathRewrites, resolves each via s.Index, and emits virtual project nodes
+// and PROJECT_SIDECAR edges. In dry-run mode, it logs what would be emitted
+// without calling the server.
 func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	query := s.Query
 	if query == "" {
 		query = DefaultTimelineQuery
 	}
-
-	// Resolve an AgentID before touching DB or path construction. The
-	// pre-conditions are (1) operator-provided, (2) OS machine-id, or
-	// (3) a generated+persisted UUIDv4 -- never os.Hostname(), which
-	// collides across cloned VMs / containers and would misattribute
-	// nodes via the server's ownership-reuse path.
 	if s.AgentID == "" {
 		configDir, err := os.UserConfigDir()
 		if err != nil {
@@ -247,59 +191,43 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 		return Stats{}, fmt.Errorf("resolve: read timeline clips: %w", err)
 	}
 
-	// Deduplicate by MediaFilePath — the same file may appear in multiple
-	// timelines or multiple times in the same timeline. We only need one
-	// edge per unique file path; evidence.TimelineNames collects all
-	// timelines that reference the file.
-	type clipAccum struct {
-		clip          TimelineClip
-		timelines     []string
-		seenTimelines map[string]bool
+	// Deduplicate repeated uses within one timeline, but retain a membership
+	// for every distinct (media path, timeline ID) pair. One source clip used
+	// in two timelines must produce two PROJECT_SIDECAR edges.
+	type membershipKey struct {
+		mediaPath  string
+		timelineID string
 	}
-	byPath := make(map[string]*clipAccum, len(clips))
-	var order []string // preserve first-seen order
-	for _, clip := range clips {
-		acc, ok := byPath[clip.MediaFilePath]
-		if !ok {
-			acc = &clipAccum{
-				clip:          clip,
-				seenTimelines: make(map[string]bool),
-			}
-			byPath[clip.MediaFilePath] = acc
-			order = append(order, clip.MediaFilePath)
-		}
-		if !acc.seenTimelines[clip.TimelineName] {
-			acc.seenTimelines[clip.TimelineName] = true
-			acc.timelines = append(acc.timelines, clip.TimelineName)
-		}
-	}
+	memberships := make(map[membershipKey]TimelineClip, len(clips))
+	var membershipOrder []membershipKey
+	uniquePaths := make(map[string]struct{}, len(clips))
 
-	// Collect unique timelines seen across all clips. We need one virtual
-	// project node per timeline. Timeline names from the Resolve DB are
-	// untrusted — sanitize for safe use as path components.
+	// Collect unique timelines by their stable database ID, never display
+	// name (Resolve permits multiple timelines with the same name).
 	type timelineInfo struct {
 		name string
 		id   string
 	}
 	timelineSeen := make(map[string]bool)
 	var timelines []timelineInfo
-	for _, path := range order {
-		for _, tl := range byPath[path].timelines {
-			if !timelineSeen[tl] {
-				timelineSeen[tl] = true
-				// Find the timeline_id for this timeline name from the clips.
-				for _, clip := range clips {
-					if clip.TimelineName == tl {
-						timelines = append(timelines, timelineInfo{name: tl, id: clip.TimelineID})
-						break
-					}
-				}
-			}
+	for _, clip := range clips {
+		if strings.TrimSpace(clip.TimelineID) == "" {
+			return Stats{}, fmt.Errorf("resolve: timeline clip %q has empty timeline ID", clip.ClipName)
+		}
+		uniquePaths[clip.MediaFilePath] = struct{}{}
+		key := membershipKey{mediaPath: clip.MediaFilePath, timelineID: clip.TimelineID}
+		if _, ok := memberships[key]; !ok {
+			memberships[key] = clip
+			membershipOrder = append(membershipOrder, key)
+		}
+		if !timelineSeen[clip.TimelineID] {
+			timelineSeen[clip.TimelineID] = true
+			timelines = append(timelines, timelineInfo{name: clip.TimelineName, id: clip.TimelineID})
 		}
 	}
 
 	var stats Stats
-	stats.ClipsFound = len(order)
+	stats.ClipsFound = len(uniquePaths)
 
 	virtualRoot := s.VirtualRoot
 	if virtualRoot == "" {
@@ -309,17 +237,17 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	dbURL := schemeOnly(s.DatabaseURL)
 
 	// Create virtual project nodes for each unique timeline.
-	timelineUUIDs := make(map[string]string) // raw timelineName → virtual node UUID
+	timelineUUIDs := make(map[string]string) // timeline ID → virtual node UUID
 	for _, tl := range timelines {
-		nodeUUID := VirtualNodeUUID(s.AgentID, tl.name, s.DatabaseURL)
+		nodeUUID := VirtualNodeUUID(s.AgentID, tl.id, s.DatabaseURL)
 
-		fp := virtualFilePath(virtualRoot, s.AgentID, tl.name)
+		fp := virtualFilePath(virtualRoot, nodeUUID)
 		displayName := virtualDisplayName(tl.name)
 
 		if s.DryRun {
+			timelineUUIDs[tl.id] = nodeUUID
 			s.logger().Info("resolve-sync: (dry run) would create virtual node",
 				"nodeUuid", nodeUUID, "filePath", fp, "timeline", tl.name)
-			timelineUUIDs[tl.name] = nodeUUID
 			stats.VirtualNodes++
 			continue
 		}
@@ -336,7 +264,7 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 			DisplayName: displayName,
 			ProjectType: "resolve_project",
 			EvidenceJSON: func() json.RawMessage {
-				tlEvidence := struct {
+				timelineEvidence := struct {
 					SchemaMapping string `json:"schemaMapping"`
 					DatabaseURL   string `json:"databaseUrl"`
 					TimelineName  string `json:"timelineName"`
@@ -345,7 +273,7 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 					DatabaseURL:   dbURL,
 					TimelineName:  tl.name,
 				}
-				b, _ := json.Marshal(tlEvidence)
+				b, _ := json.Marshal(timelineEvidence)
 				return b
 			}(),
 		})
@@ -355,19 +283,15 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 				"timeline", tl.name, "nodeUuid", nodeUUID, "err", err)
 			continue
 		}
-		// Register UUID only after successful creation — the edge loop
-		// skips timelines with no UUID, so a failed create means no
-		// dangling PROJECT_SIDECAR edges targeting an absent node.
-		timelineUUIDs[tl.name] = nodeUUID
 		stats.VirtualNodes++
+		timelineUUIDs[tl.id] = nodeUUID
 		s.logger().Info("resolve-sync: created virtual node",
 			"nodeUuid", nodeUUID, "filePath", fp, "timeline", tl.name)
 	}
 
 	// Emit PROJECT_SIDECAR edges from each clip to its timeline's virtual node.
-	for _, path := range order {
-		acc := byPath[path]
-		clip := acc.clip
+	for _, key := range membershipOrder {
+		clip := memberships[key]
 
 		rewrittenPath, ok := rewritePath(s.PathRewrites, clip.MediaFilePath)
 		if !ok {
@@ -392,11 +316,11 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 			continue
 		}
 
-		// Build evidence with all timelines that reference this file.
+		// Build evidence for this particular timeline membership.
 		ev := evidence{
 			SchemaMapping: SchemaMappingVersion,
 			DatabaseURL:   dbURL,
-			TimelineName:  strings.Join(acc.timelines, ", "),
+			TimelineName:  clip.TimelineName,
 			ClipName:      clip.ClipName,
 			MediaFilePath: clip.MediaFilePath,
 			RewrittenPath: rewrittenPath,
@@ -411,7 +335,7 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 			return stats, fmt.Errorf("resolve: marshal evidence for %q: %w", clip.MediaFilePath, err)
 		}
 
-		targetUUID := timelineUUIDs[clip.TimelineName]
+		targetUUID := timelineUUIDs[clip.TimelineID]
 		if targetUUID == "" {
 			stats.Errors++
 			s.logger().Error("resolve-sync: no virtual node UUID for timeline",
@@ -448,6 +372,7 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 				"sourceUuid", nodeUUID, "targetUuid", targetUUID, "err", err)
 			continue
 		}
+		stats.Emitted++
 		stats.EdgesAttached++
 		s.logger().Info("resolve-sync: emitted edge",
 			"sourceUuid", nodeUUID, "targetUuid", targetUUID,
@@ -455,6 +380,21 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	}
 
 	return stats, nil
+}
+
+// databaseIdentity removes credentials and connection-only query parameters
+// from a DSN before it participates in persistent virtual-node identity.
+// Host/path (or a file URL's opaque path) still distinguish databases.
+func databaseIdentity(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return u.String()
 }
 
 // stripCredentials removes userinfo from a database URL so it can be safely

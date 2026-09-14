@@ -12,8 +12,7 @@ import (
 
 // dialogExitCanceled is returned by `dialog` when the user dismissed a
 // prompt (Cancel, window close) rather than the dialog failing to render
-// at all -- callers re-exec'ing this subcommand (runTrayCmd's startup-error
-// notification, the first-run setup wizard) need to tell "the operator
+// at all -- callers re-exec'ing this subcommand need to tell "the operator
 // said no" apart from "nothing showed up at all" (dialogExitFailed).
 const (
 	dialogExitOK          = 0
@@ -123,8 +122,7 @@ var realDialogFuncs = dialogFuncs{
 
 // runDialogCmd implements the hidden `branchdam-agent dialog` subcommand --
 // deliberately omitted from usage()'s printed subcommand list, since it
-// exists only to be re-exec'd by this same binary (runTrayCmd's
-// startup-error notification, and the first-run setup wizard in init.go),
+// exists only to be re-exec'd by this same binary (startup errors and tray settings),
 // never invoked directly by an operator. Re-exec'ing into a fresh process
 // per dialog, rather than calling zenity in-process from the tray, sidesteps
 // two platform-specific unknowns neither of which can be verified from this

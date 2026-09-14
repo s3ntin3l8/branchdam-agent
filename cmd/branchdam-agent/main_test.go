@@ -5,8 +5,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
+
+// yamlQuote returns a JSON string literal, which is also a valid YAML quoted
+// scalar. Unlike hand-built quotes it escapes Windows path backslashes.
+func yamlQuote(s string) string { return strconv.Quote(s) }
 
 func TestRunUnknownSubcommand(t *testing.T) {
 	if got := run([]string{"bogus"}); got != 2 {
@@ -17,6 +22,38 @@ func TestRunUnknownSubcommand(t *testing.T) {
 func TestRunNoArgs(t *testing.T) {
 	if got := run(nil); got != 2 {
 		t.Errorf("run(nil) = %d, want 2", got)
+	}
+}
+
+func TestEffectiveLaunchArgs(t *testing.T) {
+	tests := []struct {
+		name       string
+		goos       string
+		executable string
+		args       []string
+		want       []string
+	}{
+		{name: "windows tray", goos: "windows", executable: `C:\\Program Files\\branchDAM\\branchdam-agent-tray.exe`, want: []string{"tray"}},
+		{name: "windows tray case insensitive", goos: "windows", executable: `C:\\branchdam-agent-TRAY.EXE`, want: []string{"tray"}},
+		{name: "windows console", goos: "windows", executable: `C:\\branchdam-agent.exe`},
+		{name: "mac bundle", goos: "darwin", executable: "/Applications/branchdam-agent.app/Contents/MacOS/branchdam-agent", want: []string{"tray"}},
+		{name: "mac console", goos: "darwin", executable: "/usr/local/bin/branchdam-agent"},
+		{name: "linux", goos: "linux", executable: "/usr/local/bin/branchdam-agent"},
+		{name: "explicit args win", goos: "windows", executable: `C:\\branchdam-agent-tray.exe`, args: []string{"version"}, want: []string{"version"}},
+		{name: "explicit args mac", goos: "darwin", executable: "/Applications/branchdam-agent.app/Contents/MacOS/branchdam-agent", args: []string{"preflight"}, want: []string{"preflight"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := effectiveLaunchArgs(tt.goos, tt.executable, tt.args)
+			if len(got) != len(tt.want) {
+				t.Fatalf("effectiveLaunchArgs() = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("effectiveLaunchArgs() = %v, want %v", got, tt.want)
+				}
+			}
+		})
 	}
 }
 

@@ -39,6 +39,10 @@ func checkGolden(t *testing.T, name string, got []byte) {
 	if err != nil {
 		t.Fatalf("read golden %s: %v (run with -update to create it)", path, err)
 	}
+	// Git's Windows checkout may materialize text fixtures with CRLF while
+	// encoding/json consistently emits LF. Compare the JSON contract, not the
+	// checkout's line-ending policy.
+	want = bytes.ReplaceAll(want, []byte("\r\n"), []byte("\n"))
 	if !bytes.Equal(got, want) {
 		t.Errorf("golden mismatch for %s:\n--- got ---\n%s\n--- want ---\n%s", name, got, want)
 	}

@@ -18,6 +18,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -29,7 +32,32 @@ import (
 var version = "dev"
 
 func main() {
-	os.Exit(run(os.Args[1:]))
+	executable, _ := os.Executable()
+	os.Exit(run(effectiveLaunchArgs(runtime.GOOS, executable, os.Args[1:])))
+}
+
+// effectiveLaunchArgs gives desktop packages the subcommand their native
+// launchers cannot supply. A bare console binary deliberately keeps the CLI's
+// no-argument usage error; only the dedicated Windows GUI binary and a binary
+// inside a macOS application bundle default to the tray.
+func effectiveLaunchArgs(goos, executable string, args []string) []string {
+	if len(args) != 0 {
+		return args
+	}
+
+	normalized := strings.ReplaceAll(executable, `\`, "/")
+	base := path.Base(normalized)
+	switch goos {
+	case "windows":
+		if strings.EqualFold(base, "branchdam-agent-tray.exe") {
+			return []string{"tray"}
+		}
+	case "darwin":
+		if base == "branchdam-agent" && strings.HasSuffix(path.Dir(normalized), ".app/Contents/MacOS") {
+			return []string{"tray"}
+		}
+	}
+	return args
 }
 
 func run(args []string) int {

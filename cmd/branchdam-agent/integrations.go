@@ -51,6 +51,10 @@ type IntegrationBuilder struct {
 	// versions, and a picker that can't select an unexpected extension is
 	// worse than an unfiltered one.
 	CatalogFilePatterns []string
+	// DatabaseURL marks a credential-bearing database connection string.
+	// Its settings dialog is a hidden text entry with no argv-visible
+	// default, rather than a filesystem picker.
+	DatabaseURL bool
 
 	// Ready reports whether cfg has everything this integration needs to
 	// actually run -- an integration that is disabled, or enabled but
@@ -171,7 +175,7 @@ var integrationBuilders = []IntegrationBuilder{
 			cfg.Integrations.ResolveDB.SyncIntervalMinutes = c.SyncIntervalMinutes
 			cfg.Integrations.ResolveDB.TimeoutSecs = c.TimeoutSecs
 		},
-		CatalogFilePatterns: []string{"*.db", "*"},
+		DatabaseURL: true,
 		Ready: func(cfg config.Config) bool {
 			r := cfg.Integrations.ResolveDB
 			if !r.Enabled || r.DatabaseURL == "" {

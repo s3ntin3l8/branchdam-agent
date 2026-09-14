@@ -9,6 +9,23 @@ import (
 	"testing"
 )
 
+func setTestLogRoot(t *testing.T, root string) string {
+	t.Helper()
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("LOCALAPPDATA", root)
+	case "darwin":
+		t.Setenv("HOME", root)
+	default:
+		t.Setenv("XDG_STATE_HOME", root)
+	}
+	path, err := Path()
+	if err != nil {
+		t.Fatalf("Path: %v", err)
+	}
+	return path
+}
+
 func TestPathForGOOSWindows(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", `C:\Users\alice\AppData\Local`)
 	got, err := pathForGOOS("windows")
@@ -72,7 +89,7 @@ func TestPathForGOOSLinuxFallsBackToHome(t *testing.T) {
 // importantly, any other package's tests running in the same binary).
 func TestSetupWritesToFileAndStderrAndCreatesDir(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "xdg-state"))
+	wantPath := setTestLogRoot(t, filepath.Join(dir, "state-root"))
 
 	origDefault := slog.Default()
 	defer slog.SetDefault(origDefault)
@@ -83,7 +100,6 @@ func TestSetupWritesToFileAndStderrAndCreatesDir(t *testing.T) {
 	}
 	defer func() { _ = closeFn() }()
 
-	wantPath := filepath.Join(dir, "xdg-state", "branchdam-agent", "agent.log")
 	if path != wantPath {
 		t.Errorf("got path %q, want %q", path, wantPath)
 	}
@@ -104,24 +120,16 @@ func TestSetupWritesToFileAndStderrAndCreatesDir(t *testing.T) {
 }
 
 func TestSetupFallsBackToStderrOnPathError(t *testing.T) {
-	t.Setenv("LOCALAPPDATA", "")
-
 	origDefault := slog.Default()
 	defer slog.SetDefault(origDefault)
 
-	// pathForGOOS("windows") always fails without LOCALAPPDATA -- Setup
-	// itself always uses runtime.GOOS, so on a non-Windows test runner
-	// this exercises the success path instead. Directly test the fallback
-	// behavior Setup implements when Path() fails by calling the same
-	// code Setup would on an error, via a controlled failure: an
-	// unwritable directory achieves the same "can't open the log file"
-	// branch on any OS.
+	// Put the platform's log root at a regular file so MkdirAll must fail.
 	dir := t.TempDir()
 	unwritable := filepath.Join(dir, "no-such-parent")
 	if err := os.WriteFile(unwritable, []byte("occupied by a file, not a directory"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("XDG_STATE_HOME", unwritable)
+	_ = setTestLogRoot(t, unwritable)
 
 	path, closeFn, err := Setup()
 	if err == nil {
@@ -173,7 +181,7 @@ func TestRotateIfLargeLeavesSmallFileAlone(t *testing.T) {
 
 func TestSlogBridgePrintAndPrintf(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", dir)
+	_ = setTestLogRoot(t, dir)
 
 	origDefault := slog.Default()
 	defer slog.SetDefault(origDefault)
@@ -214,7 +222,7 @@ func TestSetupLogFileModeIsOwnerOnly(t *testing.T) {
 		t.Skip("POSIX mode bits don't apply on Windows; agentlog uses ACLs there")
 	}
 	dir := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", dir)
+	_ = setTestLogRoot(t, dir)
 
 	origDefault := slog.Default()
 	defer slog.SetDefault(origDefault)
@@ -249,11 +257,10 @@ func TestAgentLogChmodsExistingFileOnOpen(t *testing.T) {
 		t.Skip("POSIX mode bits don't apply on Windows; agentlog uses ACLs there")
 	}
 	dir := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "xdg-state"))
+	path := setTestLogRoot(t, filepath.Join(dir, "state-root"))
 
 	// Pre-create an agent.log in the world-readable mode a pre-#95 build
 	// would have left behind, simulating an upgrade-in-place scenario.
-	path := filepath.Join(dir, "xdg-state", "branchdam-agent", "agent.log")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}

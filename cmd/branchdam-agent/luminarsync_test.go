@@ -197,9 +197,9 @@ func TestRunLuminarSyncCatalogAndNodeIndexFallBackToConfig(t *testing.T) {
 
 	cfgPath := filepath.Join(dir, "config.yaml")
 	cfgContent := "integrations:\n" +
-		"  nodeIndexPath: \"" + nodeIndexPath + "\"\n" +
+		"  nodeIndexPath: " + yamlQuote(nodeIndexPath) + "\n" +
 		"  luminar:\n" +
-		"    catalogPath: \"" + catalogPath + "\"\n"
+		"    catalogPath: " + yamlQuote(catalogPath) + "\n"
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o644); err != nil {
 		t.Fatal(err)
 	}

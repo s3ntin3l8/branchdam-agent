@@ -3,6 +3,7 @@ package appbundle
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -65,7 +66,7 @@ func TestWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inner binary not written: %v", err)
 	}
-	if info.Mode().Perm()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
 		t.Errorf("inner binary not executable: mode %v", info.Mode())
 	}
 

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -720,8 +721,9 @@ func findCHtimesWarn(t *testing.T, buf *bytes.Buffer, destination string) map[st
 func TestIngestCardChtimesFailureIsLogged(t *testing.T) {
 	origChtimes := cHtimesFn
 	t.Cleanup(func() { cHtimesFn = origChtimes })
+	chtimesErr := errors.New("simulated chtimes failure")
 	cHtimesFn = func(path string, atime, mtime time.Time) error {
-		return &os.PathError{Op: "chtimes", Path: path, Err: syscall.ENOENT}
+		return &os.PathError{Op: "chtimes", Path: path, Err: chtimesErr}
 	}
 
 	logBuf := captureSlog(t)
@@ -770,8 +772,8 @@ func TestIngestCardChtimesFailureIsLogged(t *testing.T) {
 		t.Errorf("archive warn source = %v", archiveWarn["source"])
 	}
 	errMsg, ok := archiveWarn["err"].(string)
-	if !ok || !strings.Contains(errMsg, "no such file") {
-		t.Errorf("archive warn err = %v, want something containing 'no such file'", archiveWarn["err"])
+	if !ok || !strings.Contains(errMsg, chtimesErr.Error()) {
+		t.Errorf("archive warn err = %v, want something containing %q", archiveWarn["err"], chtimesErr)
 	}
 
 	localWarn := findCHtimesWarn(t, logBuf, filepath.Join(dir, "local", "IMG_0001.jpg"))

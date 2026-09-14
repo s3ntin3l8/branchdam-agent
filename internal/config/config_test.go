@@ -448,6 +448,9 @@ func TestLoadPruneConfigDefaultsDisabled(t *testing.T) {
 // not a refusal, so an existing deployment that just noticed the gap
 // keeps starting while the operator fixes it.
 func TestLoadWorldReadableConfigWithAPIKeyWarns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows exposes ACLs rather than POSIX group/world mode bits")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := `
@@ -532,6 +535,9 @@ func TestLoadWorldReadableConfigWithoutAPIKeyIsSilent(t *testing.T) {
 // The remediation suggestion must mention the YAML toggle, since the
 // YAML value is the source of the strict setting in this test.
 func TestLoadStrictModeRefusesWorldReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows exposes ACLs rather than POSIX group/world mode bits")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := `
@@ -569,6 +575,9 @@ strictConfigPermissions: true
 // toggle -- a "set strictConfigPermissions: false" suggestion is a
 // no-op when the env is the trigger (Hermes review on #126).
 func TestLoadStrictModeRefusesWhenEnvForcesIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows exposes ACLs rather than POSIX group/world mode bits")
+	}
 	t.Setenv(StrictConfigPermissionsEnv, "1")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -602,6 +611,9 @@ strictConfigPermissions: false
 // explicitly sets the flag to false can still be hard-failed by the
 // env, and vice versa).
 func TestLoadStrictModeViaEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows exposes ACLs rather than POSIX group/world mode bits")
+	}
 	t.Run("env-true-overrides-yaml-false", func(t *testing.T) {
 		t.Setenv(StrictConfigPermissionsEnv, "1")
 		dir := t.TempDir()
@@ -709,6 +721,9 @@ server:
 // the mask actually checks. A 0o640 file with a real apiKey trips the
 // same warning as 0o644.
 func TestLoadGroupOnlyReadableConfigStillWarns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows exposes ACLs rather than POSIX group/world mode bits")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	content := `

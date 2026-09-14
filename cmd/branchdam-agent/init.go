@@ -11,7 +11,7 @@ import (
 )
 
 // starterConfigYAML is written by both `init` and the tray's first-run
-// setup wizard (tray.go). Deliberately not config.example.yaml -- that
+// bootstrap (tray.go). Deliberately not config.example.yaml -- that
 // file's ${VAR} placeholders would immediately trip config.Validate's
 // unexpanded-placeholder check, which exists to catch a real
 // misconfiguration, not a freshly bootstrapped one.
@@ -21,8 +21,8 @@ var starterConfigYAML []byte
 
 // runInitCmd implements `branchdam-agent init`: the headless half of
 // issue #30's "works out of the box" -- writes a starter config.yaml so an
-// operator (or a script, or an SSH session with no display for the tray's
-// zenity wizard) has something to edit instead of hand-authoring one from
+// operator (or a script, or an SSH session with no display) has something
+// to edit instead of hand-authoring one from
 // scratch or copying config.example.yaml and fighting its ${VAR}
 // placeholders. Resolves the same way every other subcommand's -config
 // flag does (config.ResolvePath), so running `init` with no flags in an

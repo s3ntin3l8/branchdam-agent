@@ -43,6 +43,11 @@ var trayDialogSetup = func() (run dialogRunner, selfExe string, err error) {
 	return selfDialogRunner(selfExe), selfExe, err
 }
 
+// trayRun is an indirection so command wiring tests can exercise startup on
+// native Windows/macOS runners without entering the process-global GUI event
+// loop. Production always uses tray.Run.
+var trayRun = tray.Run
+
 // trayConfirm builds the destructive-action confirmation callback the
 // tray's select loop (internal/tray/run_supported.go) hands each of the
 // four gated click handlers. It re-execs `dialog -kind question
@@ -563,7 +568,7 @@ func runTrayCmd(args []string) int {
 	// anything but a clean OK" behavior, so the disabled-dialog case
 	// can't accidentally turn into a silent proceed.
 	confirmDestructive := cfg.Tray.ConfirmDestructive
-	outcome, trayErr = tray.Run(ctx, runner, statusSrv.StatusURL(), updater, settings, trayConfirm(dialog), confirmDestructive, trayPickDirectory(dialog), trayNotifyOS(dialog))
+	outcome, trayErr = trayRun(ctx, runner, statusSrv.StatusURL(), updater, settings, trayConfirm(dialog), confirmDestructive, trayPickDirectory(dialog), trayNotifyOS(dialog))
 	stop() // make sure the status server's ctx.Done() fires even if tray.Run returned on its own (e.g. Quit clicked)
 	wg.Wait()
 

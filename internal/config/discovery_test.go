@@ -242,6 +242,32 @@ func TestValidateCatalogPathRejectsQueryAndFragmentChars(t *testing.T) {
 	}
 }
 
+func TestValidateResolveDatabaseURL(t *testing.T) {
+	for _, good := range []string{
+		"file:/path/to/project.db?mode=ro",
+		"postgres://localhost:5432/resolve?sslmode=require",
+		"postgresql://localhost/resolve",
+	} {
+		cfg := Config{Integrations: IntegrationsConfig{ResolveDB: ResolveDBConfig{DatabaseURL: good}}}
+		if problems := cfg.Validate(); len(problems) != 0 {
+			t.Errorf("expected no problems for databaseUrl %q, got %v", good, problems)
+		}
+	}
+
+	for _, bad := range []string{"/plain/path.db", "mysql://localhost/resolve", "file:/project.db#fragment"} {
+		cfg := Config{Integrations: IntegrationsConfig{ResolveDB: ResolveDBConfig{DatabaseURL: bad}}}
+		found := false
+		for _, problem := range cfg.Validate() {
+			if problem.Field == "integrations.resolvedb.databaseUrl" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected a databaseUrl problem for %q", bad)
+		}
+	}
+}
+
 // TestValidateIntegrationsEnabledWithoutCatalogPathIsNotAProblem pins the
 // deliberate absence of a cross-field completeness rule: reload() rejects
 // on ANY Validate() problem and runs after every settings action, so

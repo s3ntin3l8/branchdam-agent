@@ -17,10 +17,11 @@ import (
 // directly into run_supported.go's own select loop via each submenu's
 // syncNow item, not a Settings mutation routed through actionCh.
 type integrationSubmenu struct {
-	id     IntegrationID
-	title  string
-	parent *systray.MenuItem
-	status *systray.MenuItem
+	id          IntegrationID
+	title       string
+	configLabel string
+	parent      *systray.MenuItem
+	status      *systray.MenuItem
 
 	enabled     *systray.MenuItem
 	dryRun      *systray.MenuItem
@@ -56,14 +57,14 @@ type integrationSubmenu struct {
 // the status line and titles are correct before the first refresh tick.
 func newIntegrationSubmenu(d IntegrationDescriptor, iv IntegrationView) *integrationSubmenu {
 	parent := systray.AddMenuItem(d.Title, d.Title+" catalog sync")
-	sub := &integrationSubmenu{id: d.ID, title: d.Title, parent: parent}
+	sub := &integrationSubmenu{id: d.ID, title: d.Title, configLabel: d.ConfigLabel, parent: parent}
 
 	sub.status = parent.AddSubMenuItem("", "Last sync result")
 	sub.status.Disable()
 
 	sub.enabled = parent.AddSubMenuItemCheckbox("Enabled", "Run this integration's sync, on its own timer and via \"Sync now\"", iv.Enabled)
 	sub.dryRun = parent.AddSubMenuItemCheckbox("Dry run (log only, emit nothing)", "Resolve and log what a sync would emit without contacting the server", iv.DryRun)
-	sub.catalogPath = parent.AddSubMenuItem(catalogPathTitle(iv.CatalogPathSet), "Catalog file this integration reads")
+	sub.catalogPath = parent.AddSubMenuItem(configPathTitle(d.ConfigLabel, iv.CatalogPathSet), d.ConfigLabel+" this integration reads")
 
 	sub.intervalParent = parent.AddSubMenuItem("Sync every", "How often the tray runs this integration's sync on its own timer")
 	sub.interval15 = sub.intervalParent.AddSubMenuItemCheckbox("15 minutes", "", iv.SyncIntervalMinutes == 15)
@@ -198,11 +199,11 @@ func (sub *integrationSubmenu) sync(iv IntegrationView, status IntegrationStatus
 		sub.timeoutParent.SetTitle("Sync timeout")
 	}
 
-	sub.catalogPath.SetTitle(catalogPathTitle(iv.CatalogPathSet))
+	sub.catalogPath.SetTitle(configPathTitle(sub.configLabel, iv.CatalogPathSet))
 	if sub.pathRewrites != nil {
 		sub.pathRewrites.SetTitle(pathRewritesTitle(iv.PathRewritesSet))
 	}
-	sub.status.SetTitle(integrationStatusLine(sub.title, iv, status))
+	sub.status.SetTitle(integrationStatusLine(sub.id, sub.title, iv, status))
 
 	if sub.lastErr != nil {
 		sub.parent.SetTitle(fmt.Sprintf("%s (last change failed: %v)", sub.title, sub.lastErr))
@@ -230,12 +231,16 @@ func (sub *integrationSubmenu) sync(iv IntegrationView, status IntegrationStatus
 // what a dry-run pass WOULD have posted, not what it actually posted (see
 // SyncSummary's own doc comment). An operator must never be able to
 // mistake a dry-run count for a real emission.
-func integrationStatusLine(title string, iv IntegrationView, status IntegrationStatus) string {
+func integrationStatusLine(id IntegrationID, title string, iv IntegrationView, status IntegrationStatus) string {
+	configName := "catalog path"
+	if id == IntegrationResolveDB {
+		configName = "database URL"
+	}
 	switch {
 	case !iv.Enabled:
 		return title + ": disabled"
 	case !status.Registered:
-		return title + ": enabled, but not fully configured (set the catalog path" + nodeIndexClause(iv) + ")"
+		return title + ": enabled, but not fully configured (set the " + configName + nodeIndexClause(iv) + ")"
 	case status.LastSync == nil:
 		if iv.DryRun {
 			return title + ": ready (dry run), no sync yet"
@@ -268,7 +273,7 @@ func integrationStatusLine(title string, iv IntegrationView, status IntegrationS
 
 // nodeIndexClause extends the "not fully configured" line with a mention
 // of the node index specifically when DryRun is false (a live sync needs
-// it to resolve either endpoint; a dry run doesn't -- see
+// it to resolve either endpoint; a dry run does not -- see
 // buildIntegrationDeps' own Ready check in cmd/branchdam-agent).
 func nodeIndexClause(iv IntegrationView) string {
 	if iv.DryRun {
@@ -358,11 +363,11 @@ func (im *integrationsMenu) sync(sv SettingsView, st Status) {
 	}
 }
 
-func catalogPathTitle(set bool) string {
+func configPathTitle(label string, set bool) string {
 	if set {
-		return "Catalog… (configured)"
+		return label + "… (configured)"
 	}
-	return "Catalog… (not set)"
+	return label + "… (not set)"
 }
 
 func pathRewritesTitle(set bool) string {

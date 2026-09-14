@@ -35,6 +35,11 @@ pathMappings:
 # pathMappings above so the agent can translate a written file's path into
 # the container form NodeCreatedPayload.FilePath requires.
 ingest:
+  # false: stream once to both local and mounted archive storage. true:
+  # stream to local storage and branchDAM's HTTP upload endpoint; archiveRoot
+  # and pathMappings are then not required for tray readiness unless an
+  # offline queue is configured (that fallback still writes an archive copy).
+  uploadStream: false
   archiveRoot: "D:\\Photos\\Archive"
   localEditRoot: "D:\\Photos\\Edit"
   # {yyyy}/{mm}/{dd}/{camera_model}/{original_name} placeholders. Both
@@ -63,6 +68,9 @@ ingest:
   # Automatically unmount and eject the camera card volume after a successful
   # verified ingest. Default false (opt-in).
   autoEject: false
+  # The desktop environment's PATH may not include Homebrew on macOS. Set an
+  # absolute path there, commonly /opt/homebrew/bin/exiftool.
+  # exiftoolPath: "/opt/homebrew/bin/exiftool"
 
 # M2's offline queue (branchdam-agent ingest --offline / queue-drain) -- see
 # docs/offline-queue.md for the full state machine this backs. Both keys are
@@ -176,3 +184,21 @@ integrations:
     # Empty means "use the per-OS candidate list" -- see
     # internal/resolvehook.CandidateDirs.
     scriptsDir: ""
+
+  # Read-only Resolve Project Server/local database integration. A live pass
+  # creates a virtual project node per timeline and PROJECT_SIDECAR edges from
+  # indexed media to those nodes. Keep dryRun on until its mappings are checked.
+  resolvedb:
+    enabled: false
+    # PostgreSQL may use ${RESOLVE_DATABASE_URL} once that environment
+    # variable is available to the tray process. SQLite accepts a read-only
+    # URI such as file:/path/to/project.db?mode=ro; percent-encode literal
+    # '?' or '#' characters in the filesystem path so they are not parsed as
+    # URI syntax.
+    databaseUrl: ""
+    dryRun: true
+    syncIntervalMinutes: -1
+    timeoutSecs: 30
+    pathRewrites:
+      - from: 'D:\Videos\'
+        to: "/storage/archive/videos/"

@@ -143,6 +143,14 @@ func runIngestOffline(ctx context.Context, engine *ingest.Engine, cfg config.Con
 		fmt.Fprintln(os.Stderr, "branchdam-agent ingest -offline: offline.tier0ContainerRoot must be set in config")
 		return 1
 	}
+	if cfg.Ingest.ArchiveRoot == "" {
+		fmt.Fprintln(os.Stderr, "branchdam-agent ingest -offline: ingest.archiveRoot must be set in config")
+		return 1
+	}
+	if len(cfg.PathMappings) == 0 {
+		fmt.Fprintln(os.Stderr, "branchdam-agent ingest -offline: pathMappings must be set in config")
+		return 1
+	}
 
 	store, err := queue.Open(cfg.Offline.QueueDBPath)
 	if err != nil {

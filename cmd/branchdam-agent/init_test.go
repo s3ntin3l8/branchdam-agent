@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
@@ -32,7 +33,7 @@ func TestRunInitCmdWritesStarterConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 		t.Errorf("expected mode 0600 (an operator may hand-edit a real secret into this file), got %o", perm)
 	}
 }

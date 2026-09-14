@@ -6,6 +6,7 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"math/bits"
 	"os"
 	"testing"
 )
@@ -204,8 +205,12 @@ func TestPerceptualHashGoldenVectors(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PerceptualHash: %v", err)
 			}
-			if got != c.want {
-				t.Errorf("PerceptualHash(%s) = %d, want %d", c.file, got, c.want)
+			// The dependency's floating-point DCT can differ by a couple of
+			// median-boundary bits across amd64/arm64. pHash consumers compare
+			// Hamming distance, so bind that semantic result while still
+			// catching material decode or algorithm drift.
+			if distance := bits.OnesCount64(uint64(got) ^ uint64(c.want)); distance > 2 {
+				t.Errorf("PerceptualHash(%s) = %d, want within 2 bits of %d (distance %d)", c.file, got, c.want, distance)
 			}
 		})
 	}

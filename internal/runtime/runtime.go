@@ -97,7 +97,7 @@ func pathForGOOS(goos string) (string, error) {
 		}
 		return filepath.Join(base, "branchDAM", "runtime.json"), nil
 	case "darwin":
-		home, err := os.UserHomeDir()
+		home, err := unixHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("runtime: resolve home directory: %w", err)
 		}
@@ -116,7 +116,7 @@ func pathForGOOS(goos string) (string, error) {
 		if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
 			return filepath.Join(xdg, "branchdam-agent", "runtime.json"), nil
 		}
-		home, err := os.UserHomeDir()
+		home, err := unixHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("runtime: resolve home directory: %w", err)
 		}
@@ -124,6 +124,17 @@ func pathForGOOS(goos string) (string, error) {
 	default:
 		return "", fmt.Errorf("runtime: unsupported GOOS %q", goos)
 	}
+}
+
+// unixHomeDir mirrors os.UserHomeDir on Unix while remaining testable when a
+// non-Unix runner exercises pathForGOOS("darwin") or pathForGOOS("linux").
+// os.UserHomeDir consults USERPROFILE on Windows regardless of the requested
+// target, which would otherwise produce a mixed Windows/Unix path.
+func unixHomeDir() (string, error) {
+	if home := os.Getenv("HOME"); home != "" {
+		return home, nil
+	}
+	return "", fmt.Errorf("HOME is not set")
 }
 
 // Load reads the runtime state file at path. A missing or empty file
