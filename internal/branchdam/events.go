@@ -102,9 +102,11 @@ func (c *Client) PostPathRebased(ctx context.Context, agentID string, payload Pa
 }
 
 // PostVirtualNodeCreated sends EVENT_VIRTUAL_NODE_CREATED with the given
-// payload. The nodeUUID is deterministic (SHA256 of projectName+databaseURL)
-// so retries of the same project produce the same event — the server's
-// idempotent "already exists" check makes this safe to re-send.
+// payload. The nodeUUID is deterministic (SHA256 of agentID + projectName +
+// databaseURL; the agentID prefix prevents cross-workstation UUID collisions
+// when two machines edit timelines with the same name) so retries of the same
+// project produce the same event — the server's idempotent "already exists"
+// check makes this safe to re-send.
 func (c *Client) PostVirtualNodeCreated(ctx context.Context, agentID string, payload VirtualNodeCreated) (*EventResponse, error) {
 	return c.postEvent(ctx, agentID, EventVirtualNodeCreated, payload, "")
 }
