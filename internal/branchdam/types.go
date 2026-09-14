@@ -140,8 +140,11 @@ type PathRebasedPayload struct {
 // Unlike NodeCreatedPayload, it carries no file metadata — the node
 // represents an integration project (Resolve timeline, Premiere sequence,
 // FCPXML bundle), not a physical file on disk. The FilePath uses a
-// conventional absolute prefix (e.g. "/virtual/resolve/<agentID>/My%20Documentary")
+// conventional absolute prefix (e.g. "/virtual/resolve/<agentID>/My%20Documentary-<hash>")
 // that the Guard resolves lexically via an is_virtual storage location.
+// The hash suffix is appended via uniqueTimelineSegment so distinct raw
+// timeline names that sanitize to the same form (e.g. "A/B" vs "A-B")
+// never collide on the server's file_path UNIQUE constraint.
 type VirtualNodeCreated struct {
 	NodeUUID     string          `json:"nodeUuid"`
 	FilePath     string          `json:"filePath"`
