@@ -313,8 +313,8 @@ func TestSyncerEvidenceOnly(t *testing.T) {
 	if call.payload.NodeUUID == "" {
 		t.Error("virtual node UUID must not be empty")
 	}
-	if call.payload.FilePath != "/virtual/resolve/test-agent/Master" {
-		t.Errorf("virtual node FilePath = %q, want %q", call.payload.FilePath, "/virtual/resolve/test-agent/Master")
+	if !strings.HasPrefix(call.payload.FilePath, "/virtual/resolve/test-agent/Master-") {
+		t.Errorf("virtual node FilePath = %q, want prefix /virtual/resolve/test-agent/Master-", call.payload.FilePath)
 	}
 	if call.payload.DisplayName != "Resolve: Master" {
 		t.Errorf("virtual node DisplayName = %q, want %q", call.payload.DisplayName, "Resolve: Master")
@@ -698,23 +698,35 @@ func TestVirtualNodeUUID_Format(t *testing.T) {
 
 func TestVirtualFilePath(t *testing.T) {
 	got := virtualFilePath("/virtual/resolve", "agent-01", "Master")
-	want := "/virtual/resolve/agent-01/Master"
-	if got != want {
-		t.Errorf("virtualFilePath = %q, want %q", got, want)
+	// Path embeds a hash of the raw name so distinct names with the same
+	// sanitized form produce distinct paths. Just verify structure + hash suffix.
+	if !strings.HasPrefix(got, "/virtual/resolve/agent-01/Master-") {
+		t.Errorf("virtualFilePath = %q, want prefix /virtual/resolve/agent-01/Master-", got)
+	}
+	if strings.Contains(got, "..") {
+		t.Errorf("virtualFilePath = %q, contains '..'", got)
+	}
+}
+
+func TestVirtualFilePath_UniquePerRawName(t *testing.T) {
+	// "A/B" and "A-B" sanitize to the same form but must produce distinct paths.
+	a := virtualFilePath("/virtual/resolve", "agent-01", "A/B")
+	b := virtualFilePath("/virtual/resolve", "agent-01", "A-B")
+	if a == b {
+		t.Errorf("virtualFilePath: A/B and A-B produced same path %q", a)
 	}
 }
 
 func TestVirtualFilePath_SanitizesAgentID(t *testing.T) {
 	cases := []struct {
-		name     string
-		agentID  string
-		wantLast string
+		name    string
+		agentID string
 	}{
-		{"parent escape", "../../etc", "?-etc"},
-		{"slash inserted", "workstation/evil", "workstation-evil"},
-		{"backslash", `workstation\evil`, `workstation-evil`},
-		{"only dots", "..", "unnamed"},
-		{"empty", "", "unnamed"},
+		{"parent escape", "../../etc"},
+		{"slash inserted", "workstation/evil"},
+		{"backslash", `workstation\evil`},
+		{"only dots", ".."},
+		{"empty", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/nodeindex"
 )
@@ -140,13 +141,28 @@ func sanitizeTimelineName(name string) string {
 	return sanitizePathComponent(name)
 }
 
+// uniqueTimelineSegment returns a sanitized timeline segment that is unique
+// per raw input. Two raw names that sanitize to the same string (e.g. "A/B"
+// and "A-B" -> "A-B") get distinct hash-suffixed segments so the server's
+// file_path UNIQUE constraint cannot collide. The 8-char hash suffix is the
+// first 8 hex chars of sha256(raw name) -- deterministic and short enough to
+// keep path lengths manageable.
+func uniqueTimelineSegment(rawName string) string {
+	safe := sanitizeTimelineName(rawName)
+	h := sha256.Sum256([]byte(rawName))
+	suffix := fmt.Sprintf("%08x", h[:4])
+	return safe + "-" + suffix
+}
+
 // virtualFilePath returns the virtual path for a timeline's project node.
 // The path is scoped per agent to avoid ux_media_nodes_live_path collisions
-// across workstations. Both agentID and timelineName are sanitized as single
-// path components so operator-set values like "../.." cannot escape the
-// virtual root.
-func virtualFilePath(virtualRoot, agentID, timelineName string) string {
-	return path.Clean(virtualRoot + "/" + sanitizePathComponent(agentID) + "/" + sanitizePathComponent(timelineName))
+// across workstations. agentID is sanitized as a single path component so
+// operator-set values like "../.." cannot escape the virtual root. The
+// timeline segment derives its sanitized name and uniqueness hash from the
+// raw timeline name so distinct raw names with the same sanitized form
+// (e.g. "A/B" vs "A-B") never collide on the server's file_path UNIQUE.
+func virtualFilePath(virtualRoot, agentID, rawTimelineName string) string {
+	return path.Clean(virtualRoot + "/" + sanitizePathComponent(agentID) + "/" + uniqueTimelineSegment(rawTimelineName))
 }
 
 // virtualDisplayName returns a human-readable label for a virtual project node.
@@ -158,21 +174,70 @@ func virtualDisplayName(timelineName string) string {
 // s.PathRewrites, resolves each via s.Index, and emits virtual project nodes
 // and PROJECT_SIDECAR edges. In dry-run mode, it logs what would be emitted
 // without calling the server.
+// resolveAgentID returns a stable per-install identifier for the resolve
+// integration. Order of preference:
+//  1. Operator-set cfg.AgentID (caller-provided, unique by operator
+//     responsibility).
+//  2. /etc/machine-id (Linux standard; provisioned by systemd at OS
+//     install — unique per VM/container snapshot).
+//  3. A generated UUIDv4 persisted in the given path. Created lazily on
+//     first use; survives hostname renames and DHCP changes.
+//
+// os.Hostname() is intentionally NOT used as a fallback: cloned VMs and
+// containers can share a hostname, recreating the cross-workstation UUID
+// collision this integration was built to prevent.
+func resolveAgentID(cfgAgentID, machineIDPath, persistentIDPath string, logger *slog.Logger) (string, error) {
+	if cfgAgentID != "" {
+		return cfgAgentID, nil
+	}
+	if b, err := os.ReadFile(machineIDPath); err == nil {
+		id := strings.TrimSpace(string(b))
+		if id != "" {
+			return id, nil
+		}
+	}
+	if b, err := os.ReadFile(persistentIDPath); err == nil {
+		id := strings.TrimSpace(string(b))
+		if id != "" {
+			return id, nil
+		}
+	}
+	newID := uuid.New().String()
+	if err := os.MkdirAll(filepath.Dir(persistentIDPath), 0o755); err != nil {
+		return "", fmt.Errorf("resolve: create persistent-id dir: %w", err)
+	}
+	if err := os.WriteFile(persistentIDPath, []byte(newID+"\n"), 0o644); err != nil {
+		return "", fmt.Errorf("resolve: write persistent-id file: %w", err)
+	}
+	if logger != nil {
+		logger.Warn("resolve: cfg.AgentID empty; minted per-install ID. Set cfg.AgentID explicitly in config.yaml for shared-workstation deployments.",
+			"persistentIDPath", persistentIDPath)
+	}
+	return newID, nil
+}
+
 func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	query := s.Query
 	if query == "" {
 		query = DefaultTimelineQuery
 	}
 
-	// Default AgentID to hostname if empty. Without this, UUID seeds and
-	// virtual file paths collapse to a global form, reintroducing
-	// cross-workstation ux_media_nodes_live_path collisions.
+	// Resolve an AgentID before touching DB or path construction. The
+	// pre-conditions are (1) operator-provided, (2) OS machine-id, or
+	// (3) a generated+persisted UUIDv4 -- never os.Hostname(), which
+	// collides across cloned VMs / containers and would misattribute
+	// nodes via the server's ownership-reuse path.
 	if s.AgentID == "" {
-		hostname, err := os.Hostname()
+		configDir, err := os.UserConfigDir()
 		if err != nil {
-			return Stats{}, fmt.Errorf("resolve: hostname unavailable and agentId not configured: %w", err)
+			return Stats{}, fmt.Errorf("resolve: config dir unavailable and agentId not configured: %w", err)
 		}
-		s.AgentID = hostname
+		persistentIDPath := filepath.Join(configDir, "branchdam-agent", "resolve-install-id")
+		id, err := resolveAgentID("", "/etc/machine-id", persistentIDPath, s.logger())
+		if err != nil {
+			return Stats{}, err
+		}
+		s.AgentID = id
 	}
 
 	clips, err := s.DB.TimelineClips(ctx, query)
@@ -246,9 +311,8 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	for _, tl := range timelines {
 		nodeUUID := VirtualNodeUUID(s.AgentID, tl.name, s.DatabaseURL)
 
-		safe := sanitizeTimelineName(tl.name)
-		fp := virtualFilePath(virtualRoot, s.AgentID, safe)
-		displayName := virtualDisplayName(safe)
+		fp := virtualFilePath(virtualRoot, s.AgentID, tl.name)
+		displayName := virtualDisplayName(tl.name)
 
 		if s.DryRun {
 			s.logger().Info("resolve-sync: (dry run) would create virtual node",
@@ -269,6 +333,19 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 			FilePath:    fp,
 			DisplayName: displayName,
 			ProjectType: "resolve_project",
+			EvidenceJSON: func() json.RawMessage {
+				tlEvidence := struct {
+					SchemaMapping string `json:"schemaMapping"`
+					DatabaseURL   string `json:"databaseUrl"`
+					TimelineName  string `json:"timelineName"`
+				}{
+					SchemaMapping: SchemaMappingVersion,
+					DatabaseURL:   dbURL,
+					TimelineName:  tl.name,
+				}
+				b, _ := json.Marshal(tlEvidence)
+				return b
+			}(),
 		})
 		if err != nil {
 			stats.Errors++
