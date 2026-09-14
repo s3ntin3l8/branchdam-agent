@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -153,6 +154,17 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 		query = DefaultTimelineQuery
 	}
 
+	// Default AgentID to hostname if empty. Without this, UUID seeds and
+	// virtual file paths collapse to a global form, reintroducing
+	// cross-workstation ux_media_nodes_live_path collisions.
+	if s.AgentID == "" {
+		hostname, err := os.Hostname()
+		if err != nil {
+			return Stats{}, fmt.Errorf("resolve: hostname unavailable and agentId not configured: %w", err)
+		}
+		s.AgentID = hostname
+	}
+
 	clips, err := s.DB.TimelineClips(ctx, query)
 	if err != nil {
 		return Stats{}, fmt.Errorf("resolve: read timeline clips: %w", err)
@@ -196,13 +208,12 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	var timelines []timelineInfo
 	for _, path := range order {
 		for _, tl := range byPath[path].timelines {
-			safe := sanitizeTimelineName(tl)
-			if !timelineSeen[safe] {
-				timelineSeen[safe] = true
+			if !timelineSeen[tl] {
+				timelineSeen[tl] = true
 				// Find the timeline_id for this timeline name from the clips.
 				for _, clip := range clips {
 					if clip.TimelineName == tl {
-						timelines = append(timelines, timelineInfo{name: safe, id: clip.TimelineID})
+						timelines = append(timelines, timelineInfo{name: tl, id: clip.TimelineID})
 						break
 					}
 				}
@@ -221,12 +232,13 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	dbURL := schemeOnly(s.DatabaseURL)
 
 	// Create virtual project nodes for each unique timeline.
-	timelineUUIDs := make(map[string]string) // timelineName → virtual node UUID
+	timelineUUIDs := make(map[string]string) // raw timelineName → virtual node UUID
 	for _, tl := range timelines {
 		nodeUUID := VirtualNodeUUID(s.AgentID, tl.name, s.DatabaseURL)
 
-		fp := virtualFilePath(virtualRoot, s.AgentID, tl.name)
-		displayName := virtualDisplayName(tl.name)
+		safe := sanitizeTimelineName(tl.name)
+		fp := virtualFilePath(virtualRoot, s.AgentID, safe)
+		displayName := virtualDisplayName(safe)
 
 		if s.DryRun {
 			s.logger().Info("resolve-sync: (dry run) would create virtual node",
@@ -310,7 +322,7 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 			return stats, fmt.Errorf("resolve: marshal evidence for %q: %w", clip.MediaFilePath, err)
 		}
 
-		targetUUID := timelineUUIDs[sanitizeTimelineName(clip.TimelineName)]
+		targetUUID := timelineUUIDs[clip.TimelineName]
 		if targetUUID == "" {
 			stats.Errors++
 			s.logger().Error("resolve-sync: no virtual node UUID for timeline",
