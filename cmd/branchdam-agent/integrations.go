@@ -185,21 +185,25 @@ var integrationBuilders = []IntegrationBuilder{
 		New: func(cfg config.Config, client *branchdam.Client) tray.IntegrationSyncer {
 			r := cfg.Integrations.ResolveDB
 			var edgeClient resolve.EdgeAttacher
+			var vEmitter resolve.VirtualNodeEmitter
 			if !r.DryRun {
 				edgeClient = client
+				vEmitter = client
 			}
 			rewrites := make([]resolve.PathRewrite, len(r.PathRewrites))
 			for i, rw := range r.PathRewrites {
 				rewrites[i] = resolve.PathRewrite{From: rw.From, To: rw.To}
 			}
 			return &resolveDBSyncer{
-				client:        edgeClient,
-				agentID:       cfg.AgentID,
-				databaseURL:   r.DatabaseURL,
-				nodeIndexPath: cfg.Integrations.NodeIndexPath,
-				dryRun:        r.DryRun,
-				pathRewrites:  rewrites,
-				timeout:       time.Duration(r.TimeoutSecsOrDefault()) * time.Second,
+				client:         edgeClient,
+				virtualEmitter: vEmitter,
+				agentID:        cfg.AgentID,
+				databaseURL:    r.DatabaseURL,
+				nodeIndexPath:  cfg.Integrations.NodeIndexPath,
+				dryRun:         r.DryRun,
+				pathRewrites:   rewrites,
+				virtualRoot:    "/virtual/resolve",
+				timeout:        time.Duration(r.TimeoutSecsOrDefault()) * time.Second,
 			}
 		},
 		Interval: func(cfg config.Config) time.Duration {
@@ -399,13 +403,15 @@ func (emptyNodeIndex) Resolve(_ string) (string, bool, error) { return "", false
 // restart. client is nil in dry-run mode, mirroring luminarSyncer's own
 // treatment.
 type resolveDBSyncer struct {
-	client        resolve.EdgeAttacher
-	agentID       string
-	databaseURL   string
-	nodeIndexPath string
-	dryRun        bool
-	pathRewrites  []resolve.PathRewrite
-	timeout       time.Duration
+	client         resolve.EdgeAttacher
+	virtualEmitter resolve.VirtualNodeEmitter
+	agentID        string
+	databaseURL    string
+	nodeIndexPath  string
+	dryRun         bool
+	pathRewrites   []resolve.PathRewrite
+	virtualRoot    string
+	timeout        time.Duration
 }
 
 func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
@@ -432,23 +438,26 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 	}
 
 	syncer := &resolve.Syncer{
-		DB:           db,
-		Index:        index,
-		Client:       s.client,
-		AgentID:      s.agentID,
-		DatabaseURL:  s.databaseURL,
-		DryRun:       s.dryRun,
-		PathRewrites: s.pathRewrites,
+		DB:             db,
+		Index:          index,
+		Client:         s.client,
+		VirtualEmitter: s.virtualEmitter,
+		AgentID:        s.agentID,
+		DatabaseURL:    s.databaseURL,
+		DryRun:         s.dryRun,
+		PathRewrites:   s.pathRewrites,
+		VirtualRoot:    s.virtualRoot,
 	}
 
 	stats, err := syncer.Sync(ctx)
 	summary := tray.SyncSummary{
-		DryRun:       s.dryRun,
-		PairsFound:   stats.ClipsFound,
-		Emitted:      stats.Emitted,
-		Skipped:      stats.Unresolved + stats.NoRewrite,
-		Errors:       stats.Errors,
-		EvidenceOnly: stats.EvidenceOnly,
+		DryRun:        s.dryRun,
+		PairsFound:    stats.ClipsFound,
+		Emitted:       stats.Emitted,
+		Skipped:       stats.Unresolved + stats.NoRewrite,
+		Errors:        stats.Errors,
+		VirtualNodes:  stats.VirtualNodes,
+		EdgesAttached: stats.EdgesAttached,
 	}
 	return summary, err
 }

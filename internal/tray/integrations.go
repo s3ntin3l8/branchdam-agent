@@ -54,14 +54,16 @@ func Integrations() []IntegrationDescriptor {
 // implementation, so it always reflects when the tray actually ran the
 // pass, not when the underlying Sync call happened to return.
 type SyncSummary struct {
-	At           time.Time
-	DryRun       bool
-	PairsFound   int
-	Emitted      int // posted, or -- in a dry run -- that WOULD have been posted
-	Skipped      int // candidates skipped because an endpoint had no node-index entry
-	Errors       int // per-edge POST failures; the pass itself still completed
-	EvidenceOnly int // clips whose evidence was logged but no edge emitted (v2 scaffolding)
-	Err          error
+	At            time.Time
+	DryRun        bool
+	PairsFound    int
+	Emitted       int // posted, or -- in a dry run -- that WOULD have been posted
+	Skipped       int // candidates skipped because an endpoint had no node-index entry
+	Errors        int // per-edge POST failures; the pass itself still completed
+	VirtualNodes  int // virtual project nodes created (or, in a dry run, that would have been)
+	EdgesAttached int // PROJECT_SIDECAR edges emitted (or, in a dry run, that would have been)
+	EvidenceOnly  int // clips whose evidence was logged but no edge emitted (deprecated, kept for compat)
+	Err           error
 }
 
 // IntegrationSyncer is the subset of one catalog integration's behavior the

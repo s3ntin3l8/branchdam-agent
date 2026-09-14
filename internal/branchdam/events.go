@@ -100,3 +100,11 @@ func (c *Client) PostNodeDeleted(ctx context.Context, agentID string, payload No
 func (c *Client) PostPathRebased(ctx context.Context, agentID string, payload PathRebasedPayload) (*EventResponse, error) {
 	return c.postEvent(ctx, agentID, EventPathRebased, payload, "")
 }
+
+// PostVirtualNodeCreated sends EVENT_VIRTUAL_NODE_CREATED with the given
+// payload. The nodeUUID is deterministic (SHA256 of projectName+databaseURL)
+// so retries of the same project produce the same event — the server's
+// idempotent "already exists" check makes this safe to re-send.
+func (c *Client) PostVirtualNodeCreated(ctx context.Context, agentID string, payload VirtualNodeCreated) (*EventResponse, error) {
+	return c.postEvent(ctx, agentID, EventVirtualNodeCreated, payload, "")
+}

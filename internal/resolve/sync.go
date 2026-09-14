@@ -2,10 +2,12 @@ package resolve
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -30,12 +32,15 @@ const (
 )
 
 // EdgeAttacher is the subset of *branchdam.Client's surface Syncer needs, so
-// tests can substitute a fake without a real HTTP server. Currently unused —
-// Sync logs evidence instead of emitting edges (server rejects self-edges via
-// CHECK constraint). Will be used when proper PROJECT_SIDECAR edges
-// (media → virtual project node) land in v2 (issue #184).
+// tests can substitute a fake without a real HTTP server.
 type EdgeAttacher interface {
 	PostEdgeAttached(ctx context.Context, agentID string, payload branchdam.EdgeAttachedPayload) (*branchdam.EventResponse, error)
+}
+
+// VirtualNodeEmitter is the subset of *branchdam.Client's surface needed to
+// create virtual project nodes for integration timelines.
+type VirtualNodeEmitter interface {
+	PostVirtualNodeCreated(ctx context.Context, agentID string, payload branchdam.VirtualNodeCreated) (*branchdam.EventResponse, error)
 }
 
 // PathRewrite maps a Windows path prefix to a NAS/container path prefix.
@@ -47,12 +52,14 @@ type PathRewrite struct {
 
 // Stats summarizes one Sync run.
 type Stats struct {
-	ClipsFound   int // unique file paths found in timelines
-	Emitted      int // edges actually posted (or, in a dry run, that would have been)
-	Unresolved   int // clips whose rewritten path had no node-index entry
-	NoRewrite    int // clips whose Windows path matched no PathRewrite rule
-	Errors       int // PostEdgeAttached calls that returned an error
-	EvidenceOnly int // clips whose evidence was logged but no edge emitted (virtual project node not yet supported)
+	ClipsFound    int // unique file paths found in timelines
+	Emitted       int // edges actually posted (or, in a dry run, that would have been)
+	Unresolved    int // clips whose rewritten path had no node-index entry
+	NoRewrite     int // clips whose Windows path matched no PathRewrite rule
+	Errors        int // PostEdgeAttached calls that returned an error
+	VirtualNodes  int // virtual project nodes created
+	EdgesAttached int // PROJECT_SIDECAR edges emitted
+	EvidenceOnly  int // clips whose evidence was logged but no edge emitted (dry run mode)
 }
 
 // evidence is the evidenceJson object stamped onto every emitted edge.
@@ -70,20 +77,21 @@ type evidence struct {
 	TimelineID    string `json:"timelineId"`
 }
 
-// Syncer reads a Resolve project database and logs evidence metadata for
-// each unique file path referenced by a timeline. v2 will emit
-// EVENT_EDGE_ATTACHED events once proper PROJECT_SIDECAR edges (media →
-// virtual project node) are supported (issue #184).
+// Syncer reads a Resolve project database and emits EVENT_VIRTUAL_NODE_CREATED
+// events for each unique timeline, then EVENT_EDGE_ATTACHED events
+// (PROJECT_SIDECAR) linking media clips to their virtual project nodes.
 type Syncer struct {
-	DB           *DB
-	Index        nodeindex.Resolver
-	Client       EdgeAttacher
-	AgentID      string
-	DatabaseURL  string
-	Query        string // defaults to DefaultTimelineQuery if empty
-	DryRun       bool
-	PathRewrites []PathRewrite
-	Logger       *slog.Logger
+	DB             *DB
+	Index          nodeindex.Resolver
+	Client         EdgeAttacher
+	VirtualEmitter VirtualNodeEmitter
+	AgentID        string
+	DatabaseURL    string
+	Query          string // defaults to DefaultTimelineQuery if empty
+	DryRun         bool
+	PathRewrites   []PathRewrite
+	VirtualRoot    string // root prefix for virtual paths, e.g. "/virtual/resolve"
+	Logger         *slog.Logger
 }
 
 func (s *Syncer) logger() *slog.Logger {
@@ -93,10 +101,34 @@ func (s *Syncer) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// VirtualNodeUUID generates a deterministic UUID for a virtual project node
+// from its timeline name and the database URL. The same inputs always produce
+// the same UUID, so re-syncs are idempotent — the server's "already exists"
+// check makes re-sends safe.
+func VirtualNodeUUID(timelineName, databaseURL string) string {
+	h := sha256.Sum256([]byte(timelineName + "\x00" + databaseURL))
+	// UUID v4 from first 16 bytes of SHA-256, set version and variant bits.
+	u := h[:16]
+	u[6] = (u[6] & 0x0f) | 0x40 // version 4
+	u[8] = (u[8] & 0x3f) | 0x80 // variant RFC 4122
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
+}
+
+// virtualFilePath returns the virtual path for a timeline's project node.
+func virtualFilePath(virtualRoot, timelineName string) string {
+	return path.Clean(virtualRoot + "/" + timelineName)
+}
+
+// virtualDisplayName returns a human-readable label for a virtual project node.
+func virtualDisplayName(timelineName string) string {
+	return "Resolve: " + timelineName
+}
+
 // Sync reads timeline clips from s.DB, rewrites Windows paths via
-// s.PathRewrites, resolves each via s.Index, and logs evidence metadata.
-// In non-dry-run mode, evidence JSON is logged as structured slog output.
-// v2 will emit EVENT_EDGE_ATTACHED events via s.Client.
+// s.PathRewrites, resolves each via s.Index, and emits virtual project nodes
+// and PROJECT_SIDECAR edges. In dry-run mode, it logs what would be emitted
+// without calling the server.
 func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	query := s.Query
 	if query == "" {
@@ -135,13 +167,79 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 		}
 	}
 
+	// Collect unique timelines seen across all clips. We need one virtual
+	// project node per timeline.
+	type timelineInfo struct {
+		name string
+		id   string
+	}
+	timelineSeen := make(map[string]bool)
+	var timelines []timelineInfo
+	for _, path := range order {
+		for _, tl := range byPath[path].timelines {
+			if !timelineSeen[tl] {
+				timelineSeen[tl] = true
+				// Find the timeline_id for this timeline name from the clips.
+				for _, clip := range clips {
+					if clip.TimelineName == tl {
+						timelines = append(timelines, timelineInfo{name: tl, id: clip.TimelineID})
+						break
+					}
+				}
+			}
+		}
+	}
+
 	var stats Stats
 	stats.ClipsFound = len(order)
 
-	// Use only the scheme for evidence — host:port is implicit in the
-	// mediaFilePath/rewrittenPath fields the operator can correlate.
+	virtualRoot := s.VirtualRoot
+	if virtualRoot == "" {
+		virtualRoot = "/virtual/resolve"
+	}
+
 	dbURL := schemeOnly(s.DatabaseURL)
 
+	// Create virtual project nodes for each unique timeline.
+	timelineUUIDs := make(map[string]string) // timelineName → virtual node UUID
+	for _, tl := range timelines {
+		nodeUUID := VirtualNodeUUID(tl.name, s.DatabaseURL)
+		timelineUUIDs[tl.name] = nodeUUID
+
+		fp := virtualFilePath(virtualRoot, tl.name)
+		displayName := virtualDisplayName(tl.name)
+
+		if s.DryRun {
+			s.logger().Info("resolve-sync: (dry run) would create virtual node",
+				"nodeUuid", nodeUUID, "filePath", fp, "timeline", tl.name)
+			stats.VirtualNodes++
+			continue
+		}
+
+		if s.VirtualEmitter == nil {
+			s.logger().Warn("resolve-sync: no virtual emitter, skipping virtual node creation",
+				"timeline", tl.name)
+			continue
+		}
+
+		_, err := s.VirtualEmitter.PostVirtualNodeCreated(ctx, s.AgentID, branchdam.VirtualNodeCreated{
+			NodeUUID:    nodeUUID,
+			FilePath:    fp,
+			DisplayName: displayName,
+			ProjectType: "resolve_project",
+		})
+		if err != nil {
+			stats.Errors++
+			s.logger().Error("resolve-sync: failed to create virtual node",
+				"timeline", tl.name, "nodeUuid", nodeUUID, "err", err)
+			continue
+		}
+		stats.VirtualNodes++
+		s.logger().Info("resolve-sync: created virtual node",
+			"nodeUuid", nodeUUID, "filePath", fp, "timeline", tl.name)
+	}
+
+	// Emit PROJECT_SIDECAR edges from each clip to its timeline's virtual node.
 	for _, path := range order {
 		acc := byPath[path]
 		clip := acc.clip
@@ -188,26 +286,47 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 			return stats, fmt.Errorf("resolve: marshal evidence for %q: %w", clip.MediaFilePath, err)
 		}
 
+		targetUUID := timelineUUIDs[clip.TimelineName]
+		if targetUUID == "" {
+			stats.Errors++
+			s.logger().Error("resolve-sync: no virtual node UUID for timeline",
+				"timeline", clip.TimelineName)
+			continue
+		}
+
 		if s.DryRun {
 			s.logger().Info("resolve-sync: (dry run) would emit edge",
-				"nodeUuid", nodeUUID, "mediaFilePath", clip.MediaFilePath,
-				"rewrittenPath", rewrittenPath, "timeline", clip.TimelineName)
+				"sourceUuid", nodeUUID, "targetUuid", targetUUID,
+				"mediaFilePath", clip.MediaFilePath, "timeline", clip.TimelineName)
 			stats.Emitted++
 			continue
 		}
 
-		// Emit a self-edge (source == target) to attach Resolve metadata.
-		// The server has CHECK (source_node_id <> target_node_id) which
-		// rejects self-edges, so we log the evidence as structured output
-		// instead. The evidence JSON records which Resolve timelines
-		// reference this file and at which in/out points — the real value
-		// of this integration. Proper PROJECT_SIDECAR edges (media →
-		// virtual project node) are a v2 enhancement (issue #184).
-		stats.EvidenceOnly++
-		s.logger().Info("resolve-sync: resolve evidence",
-			"nodeUuid", nodeUUID, "mediaFilePath", clip.MediaFilePath,
-			"rewrittenPath", rewrittenPath, "timelines", strings.Join(acc.timelines, ", "),
-			"evidence", string(evJSON))
+		if s.Client == nil {
+			s.logger().Warn("resolve-sync: no edge emitter, skipping edge",
+				"timeline", clip.TimelineName)
+			continue
+		}
+
+		_, err = s.Client.PostEdgeAttached(ctx, s.AgentID, branchdam.EdgeAttachedPayload{
+			SourceNodeUUID:   nodeUUID,
+			TargetNodeUUID:   targetUUID,
+			RelationshipType: RelationshipType,
+			Confidence:       Confidence,
+			Tier:             Tier,
+			Resolver:         ResolverName,
+			EvidenceJSON:     evJSON,
+		})
+		if err != nil {
+			stats.Errors++
+			s.logger().Error("resolve-sync: failed to emit edge",
+				"sourceUuid", nodeUUID, "targetUuid", targetUUID, "err", err)
+			continue
+		}
+		stats.EdgesAttached++
+		s.logger().Info("resolve-sync: emitted edge",
+			"sourceUuid", nodeUUID, "targetUuid", targetUUID,
+			"mediaFilePath", clip.MediaFilePath, "timeline", clip.TimelineName)
 	}
 
 	return stats, nil

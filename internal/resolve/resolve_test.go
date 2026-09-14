@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 )
 
 const resolveSchema = `
@@ -244,8 +246,11 @@ func TestSyncerDryRun(t *testing.T) {
 	if stats.ClipsFound != 1 {
 		t.Errorf("ClipsFound = %d, want 1", stats.ClipsFound)
 	}
+	if stats.VirtualNodes != 1 {
+		t.Errorf("VirtualNodes = %d, want 1 (dry run counts would-be virtual nodes)", stats.VirtualNodes)
+	}
 	if stats.Emitted != 1 {
-		t.Errorf("Emitted = %d, want 1 (dry run counts would-be emissions)", stats.Emitted)
+		t.Errorf("Emitted = %d, want 1 (dry run counts would-be edges)", stats.Emitted)
 	}
 	if stats.Unresolved != 0 {
 		t.Errorf("Unresolved = %d, want 0", stats.Unresolved)
@@ -271,12 +276,17 @@ func TestSyncerEvidenceOnly(t *testing.T) {
 		"/storage/archive/videos/Norway/PXL_001.mp4": "node-uuid-001",
 	}}
 
+	fakeEmitter := &fakeVirtualEmitter{}
+	fakeAttacher := &fakeEdgeAttacher{}
+
 	syncer := &Syncer{
-		DB:          db,
-		Index:       index,
-		AgentID:     "test-agent",
-		DatabaseURL: "postgres://user:secret@localhost:5432/resolve",
-		DryRun:      false,
+		DB:             db,
+		Index:          index,
+		AgentID:        "test-agent",
+		DatabaseURL:    "postgres://user:secret@localhost:5432/resolve",
+		DryRun:         false,
+		VirtualEmitter: fakeEmitter,
+		Client:         fakeAttacher,
 		PathRewrites: []PathRewrite{
 			{From: "D:\\Videos\\", To: "/storage/archive/videos/"},
 		},
@@ -286,14 +296,48 @@ func TestSyncerEvidenceOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	if stats.EvidenceOnly != 1 {
-		t.Errorf("EvidenceOnly = %d, want 1", stats.EvidenceOnly)
+	if stats.VirtualNodes != 1 {
+		t.Errorf("VirtualNodes = %d, want 1", stats.VirtualNodes)
 	}
-	if stats.Emitted != 0 {
-		t.Errorf("Emitted = %d, want 0 (self-edges not emitted)", stats.Emitted)
+	if stats.EdgesAttached != 1 {
+		t.Errorf("EdgesAttached = %d, want 1", stats.EdgesAttached)
 	}
 	if stats.Errors != 0 {
 		t.Errorf("Errors = %d, want 0", stats.Errors)
+	}
+	// Verify the virtual node payload.
+	if len(fakeEmitter.calls) != 1 {
+		t.Fatalf("virtual emitter calls = %d, want 1", len(fakeEmitter.calls))
+	}
+	call := fakeEmitter.calls[0]
+	if call.payload.NodeUUID == "" {
+		t.Error("virtual node UUID must not be empty")
+	}
+	if call.payload.FilePath != "/virtual/resolve/Master" {
+		t.Errorf("virtual node FilePath = %q, want %q", call.payload.FilePath, "/virtual/resolve/Master")
+	}
+	if call.payload.DisplayName != "Resolve: Master" {
+		t.Errorf("virtual node DisplayName = %q, want %q", call.payload.DisplayName, "Resolve: Master")
+	}
+	if call.payload.ProjectType != "resolve_project" {
+		t.Errorf("virtual node ProjectType = %q, want %q", call.payload.ProjectType, "resolve_project")
+	}
+	// Verify the edge payload.
+	if len(fakeAttacher.calls) != 1 {
+		t.Fatalf("edge attacher calls = %d, want 1", len(fakeAttacher.calls))
+	}
+	edge := fakeAttacher.calls[0]
+	if edge.payload.RelationshipType != "PROJECT_SIDECAR" {
+		t.Errorf("edge RelationshipType = %q, want %q", edge.payload.RelationshipType, "PROJECT_SIDECAR")
+	}
+	if edge.payload.Confidence != 1.00 {
+		t.Errorf("edge Confidence = %f, want 1.00", edge.payload.Confidence)
+	}
+	if edge.payload.Tier != 1 {
+		t.Errorf("edge Tier = %d, want 1", edge.payload.Tier)
+	}
+	if edge.payload.Resolver != "resolve_project_db" {
+		t.Errorf("edge Resolver = %q, want %q", edge.payload.Resolver, "resolve_project_db")
 	}
 }
 
@@ -340,12 +384,17 @@ func TestSyncerEvidenceStripsCredentials(t *testing.T) {
 	var logBuf strings.Builder
 	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
 
+	fakeEmitter := &fakeVirtualEmitter{}
+	fakeAttacher := &fakeEdgeAttacher{}
+
 	syncer := &Syncer{
-		DB:          db,
-		Index:       index,
-		AgentID:     "test-agent",
-		DatabaseURL: "postgres://user:REDACTED@localhost:5432/resolve",
-		DryRun:      false,
+		DB:             db,
+		Index:          index,
+		AgentID:        "test-agent",
+		DatabaseURL:    "postgres://user:REDACTED@localhost:5432/resolve",
+		DryRun:         false,
+		VirtualEmitter: fakeEmitter,
+		Client:         fakeAttacher,
 		PathRewrites: []PathRewrite{
 			{From: "D:\\Videos\\", To: "/storage/archive/videos/"},
 		},
@@ -356,16 +405,19 @@ func TestSyncerEvidenceStripsCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	if stats.EvidenceOnly != 1 {
-		t.Fatalf("EvidenceOnly = %d, want 1", stats.EvidenceOnly)
+	if stats.VirtualNodes != 1 {
+		t.Fatalf("VirtualNodes = %d, want 1", stats.VirtualNodes)
+	}
+	if stats.EdgesAttached != 1 {
+		t.Fatalf("EdgesAttached = %d, want 1", stats.EdgesAttached)
 	}
 
 	output := logBuf.String()
 	if strings.Contains(output, "REDACTED") {
 		t.Errorf("evidence log contains userinfo — credential leak\nlog output: %s", output)
 	}
-	if !strings.Contains(output, "resolve-sync: resolve evidence") {
-		t.Errorf("expected 'resolve-sync: resolve evidence' in log output\nlog output: %s", output)
+	if !strings.Contains(output, "resolve-sync: emitted edge") {
+		t.Errorf("expected 'resolve-sync: emitted edge' in log output\nlog output: %s", output)
 	}
 }
 
@@ -428,6 +480,11 @@ func TestSyncerEvidenceCollectsMultipleTimelines(t *testing.T) {
 	if stats.ClipsFound != 1 {
 		t.Errorf("ClipsFound = %d, want 1 (deduped by path)", stats.ClipsFound)
 	}
+	// Two unique timelines = 2 virtual nodes.
+	if stats.VirtualNodes != 2 {
+		t.Errorf("VirtualNodes = %d, want 2 (one per timeline)", stats.VirtualNodes)
+	}
+	// One edge per unique file path (deduplicated).
 	if stats.Emitted != 1 {
 		t.Errorf("Emitted = %d, want 1", stats.Emitted)
 	}
@@ -568,4 +625,84 @@ type fakeIndex struct {
 func (f *fakeIndex) Resolve(path string) (string, bool, error) {
 	uuid, ok := f.entries[path]
 	return uuid, ok, nil
+}
+
+// fakeVirtualEmitter captures PostVirtualNodeCreated calls for test assertions.
+type fakeVirtualEmitter struct {
+	calls []virtualNodeCall
+}
+
+type virtualNodeCall struct {
+	agentID string
+	payload branchdam.VirtualNodeCreated
+}
+
+func (f *fakeVirtualEmitter) PostVirtualNodeCreated(ctx context.Context, agentID string, payload branchdam.VirtualNodeCreated) (*branchdam.EventResponse, error) {
+	f.calls = append(f.calls, virtualNodeCall{agentID: agentID, payload: payload})
+	return &branchdam.EventResponse{EventID: "test-event-id"}, nil
+}
+
+// fakeEdgeAttacher captures PostEdgeAttached calls for test assertions.
+type fakeEdgeAttacher struct {
+	calls []edgeCall
+}
+
+type edgeCall struct {
+	agentID string
+	payload branchdam.EdgeAttachedPayload
+}
+
+func (f *fakeEdgeAttacher) PostEdgeAttached(ctx context.Context, agentID string, payload branchdam.EdgeAttachedPayload) (*branchdam.EventResponse, error) {
+	f.calls = append(f.calls, edgeCall{agentID: agentID, payload: payload})
+	return &branchdam.EventResponse{EventID: "test-event-id"}, nil
+}
+
+func TestVirtualNodeUUID_Deterministic(t *testing.T) {
+	// Same inputs always produce the same UUID.
+	uuid1 := VirtualNodeUUID("Master", "postgres://localhost:5432/resolve")
+	uuid2 := VirtualNodeUUID("Master", "postgres://localhost:5432/resolve")
+	if uuid1 != uuid2 {
+		t.Errorf("VirtualNodeUUID not deterministic: %q != %q", uuid1, uuid2)
+	}
+	// Different timeline names produce different UUIDs.
+	uuid3 := VirtualNodeUUID("YouTube", "postgres://localhost:5432/resolve")
+	if uuid1 == uuid3 {
+		t.Errorf("VirtualNodeUUID should differ for different timelines: %q == %q", uuid1, uuid3)
+	}
+	// Different database URLs produce different UUIDs.
+	uuid4 := VirtualNodeUUID("Master", "postgres://localhost:5433/resolve")
+	if uuid1 == uuid4 {
+		t.Errorf("VirtualNodeUUID should differ for different databases: %q == %q", uuid1, uuid4)
+	}
+}
+
+func TestVirtualNodeUUID_Format(t *testing.T) {
+	uuid := VirtualNodeUUID("test", "file::memory:")
+	// UUID v4 format: 8-4-4-4-12 hex digits.
+	if len(uuid) != 36 {
+		t.Errorf("UUID length = %d, want 36", len(uuid))
+	}
+	if uuid[8] != '-' || uuid[13] != '-' || uuid[18] != '-' || uuid[23] != '-' {
+		t.Errorf("UUID format wrong: %q", uuid)
+	}
+	// Version nibble should be 4.
+	if uuid[14] != '4' {
+		t.Errorf("UUID version = %c, want '4': %q", uuid[14], uuid)
+	}
+}
+
+func TestVirtualFilePath(t *testing.T) {
+	got := virtualFilePath("/virtual/resolve", "Master")
+	want := "/virtual/resolve/Master"
+	if got != want {
+		t.Errorf("virtualFilePath = %q, want %q", got, want)
+	}
+}
+
+func TestVirtualDisplayName(t *testing.T) {
+	got := virtualDisplayName("Master")
+	want := "Resolve: Master"
+	if got != want {
+		t.Errorf("virtualDisplayName = %q, want %q", got, want)
+	}
 }
