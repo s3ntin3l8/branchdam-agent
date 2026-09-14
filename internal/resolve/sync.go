@@ -175,6 +175,7 @@ func virtualDisplayName(timelineName string) string {
 // s.PathRewrites, resolves each via s.Index, and emits virtual project nodes
 // and PROJECT_SIDECAR edges. In dry-run mode, it logs what would be emitted
 // without calling the server.
+
 // resolveAgentID returns a stable per-install identifier for the resolve
 // integration. Order of preference:
 //  1. Operator-set cfg.AgentID (caller-provided, unique by operator
