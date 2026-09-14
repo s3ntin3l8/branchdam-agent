@@ -1,0 +1,11 @@
+{
+  "nodeUuid": "018f3a9b-8d76-7890-a123-456789abcdef",
+  "filePath": "/virtual/resolve/workstation-01/My%20Documentary-a2bb3478",
+  "displayName": "Resolve: My Documentary",
+  "projectType": "resolve_project",
+  "evidenceJson": {
+    "schemaMapping": "resolve-projectdb-1",
+    "databaseUrl": "postgresql://localhost/projectdb",
+    "timelineName": "My Documentary"
+  }
+}

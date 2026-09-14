@@ -20,7 +20,7 @@ import "encoding/json"
 // branchdam's internal/agent/types.go or internal/httpapi/routes.go's agent
 // DTOs change; conformance_test.go asserts it matches the committed golden
 // fixture.
-const ContractVersion = "branchdam@66f9d3c"
+const ContractVersion = "branchdam@854f008"
 
 // Event type constants, matching the event_queue.event_type CHECK
 // constraint (internal/agent/types.go in branchdam).
@@ -140,13 +140,17 @@ type PathRebasedPayload struct {
 // Unlike NodeCreatedPayload, it carries no file metadata — the node
 // represents an integration project (Resolve timeline, Premiere sequence,
 // FCPXML bundle), not a physical file on disk. The FilePath uses a
-// conventional absolute prefix (e.g. "/virtual/resolve/My%20Documentary")
+// conventional absolute prefix (e.g. "/virtual/resolve/<agentID>/My%20Documentary-<hash>")
 // that the Guard resolves lexically via an is_virtual storage location.
+// The hash suffix is appended via uniqueTimelineSegment so distinct raw
+// timeline names that sanitize to the same form (e.g. "A/B" vs "A-B")
+// never collide on the server's file_path UNIQUE constraint.
 type VirtualNodeCreated struct {
-	NodeUUID    string `json:"nodeUuid"`
-	FilePath    string `json:"filePath"`
-	DisplayName string `json:"displayName"`
-	ProjectType string `json:"projectType"`
+	NodeUUID     string          `json:"nodeUuid"`
+	FilePath     string          `json:"filePath"`
+	DisplayName  string          `json:"displayName"`
+	ProjectType  string          `json:"projectType"`
+	EvidenceJSON json.RawMessage `json:"evidenceJson,omitempty"`
 }
 
 // EventEnvelope is the request body for POST /api/v1/agent/events

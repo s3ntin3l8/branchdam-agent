@@ -120,6 +120,26 @@ func TestConformanceEdgeAttachedPayload(t *testing.T) {
 	checkGolden(t, "edge_attached_payload.golden.json", marshalIndent(t, p))
 }
 
+// TestConformanceVirtualNodeCreated pins the VirtualNodeCreated payload
+// shape for EVENT_VIRTUAL_NODE_CREATED -- the integration-project node
+// emitter (Resolve timelines, Premiere sequences, FCPXML bundles). The
+// FilePath uses the conventional agent-scoped virtual prefix with a
+// per-raw-name hash suffix (see resolve.uniqueTimelineSegment in the
+// branchdam-agent repo). EvidenceJSON is an inline JSON object, mirroring
+// EdgeAttachedPayload's encoding.
+func TestConformanceVirtualNodeCreated(t *testing.T) {
+	p := VirtualNodeCreated{
+		NodeUUID:    "018f3a9b-8d76-7890-a123-456789abcdef",
+		FilePath:    "/virtual/resolve/workstation-01/My%20Documentary-a2bb3478",
+		DisplayName: "Resolve: My Documentary",
+		ProjectType: "resolve_project",
+		EvidenceJSON: json.RawMessage(
+			`{"schemaMapping":"resolve-projectdb-1","databaseUrl":"postgresql://localhost/projectdb","timelineName":"My Documentary"}`,
+		),
+	}
+	checkGolden(t, "virtual_node_created_payload.golden.json", marshalIndent(t, p))
+}
+
 // TestConformanceEventEnvelopeDoubleEncoding pins the full request body for
 // POST /api/v1/agent/events when sending an EVENT_EDGE_ATTACHED: the
 // envelope's own "payload" field is a JSON *string* containing the
