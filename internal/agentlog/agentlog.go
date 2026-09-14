@@ -53,7 +53,7 @@ func pathForGOOS(goos string) (string, error) {
 		}
 		return filepath.Join(base, "branchDAM", "logs", "agent.log"), nil
 	case "darwin":
-		home, err := os.UserHomeDir()
+		home, err := unixHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("agentlog: resolve home directory: %w", err)
 		}
@@ -62,12 +62,19 @@ func pathForGOOS(goos string) (string, error) {
 		if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
 			return filepath.Join(xdg, "branchdam-agent", "agent.log"), nil
 		}
-		home, err := os.UserHomeDir()
+		home, err := unixHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("agentlog: resolve home directory: %w", err)
 		}
 		return filepath.Join(home, ".local", "state", "branchdam-agent", "agent.log"), nil
 	}
+}
+
+func unixHomeDir() (string, error) {
+	if home := os.Getenv("HOME"); home != "" {
+		return home, nil
+	}
+	return "", fmt.Errorf("HOME is not set")
 }
 
 // Setup opens the platform log file (creating its parent directory, and

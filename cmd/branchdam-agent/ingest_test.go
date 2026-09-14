@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,7 +10,19 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 )
+
+func TestRunIngestOfflineRequiresArchiveContractInUploadMode(t *testing.T) {
+	cfg := config.Config{
+		Ingest:  config.IngestConfig{UploadStream: true, LocalEditRoot: "/edit"},
+		Offline: config.OfflineConfig{QueueDBPath: "/state/queue.db", Tier0ContainerRoot: "/staging"},
+	}
+	if got := runIngestOffline(context.Background(), nil, cfg, "/media/card"); got != 1 {
+		t.Fatalf("runIngestOffline() = %d, want 1 before copying without an archive contract", got)
+	}
+}
 
 // TestRunIngestAllowedExtensionsFlag pins issue #159: the
 // `-allowed-extensions` CLI flag on `branchdam-agent ingest` must
@@ -64,11 +77,11 @@ func TestRunIngestAllowedExtensionsFlag(t *testing.T) {
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"pathMappings:\n" +
-		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"  - workstationPath: " + yamlQuote(archiveRoot) + "\n" +
 		"    containerPath: \"/storage/archive\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + archiveRoot + "\"\n" +
-		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  archiveRoot: " + yamlQuote(archiveRoot) + "\n" +
+		"  localEditRoot: " + yamlQuote(localRoot) + "\n" +
 		"  pathTemplate: \"{original_name}\"\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -164,11 +177,11 @@ func TestRunIngestAllowedExtensionsFlagNotSet(t *testing.T) {
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"pathMappings:\n" +
-		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"  - workstationPath: " + yamlQuote(archiveRoot) + "\n" +
 		"    containerPath: \"/storage/archive\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + archiveRoot + "\"\n" +
-		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  archiveRoot: " + yamlQuote(archiveRoot) + "\n" +
+		"  localEditRoot: " + yamlQuote(localRoot) + "\n" +
 		"  pathTemplate: \"{original_name}\"\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -232,11 +245,11 @@ func TestRunIngestAgainstRealHTTPServer(t *testing.T) {
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"pathMappings:\n" +
-		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"  - workstationPath: " + yamlQuote(archiveRoot) + "\n" +
 		"    containerPath: \"/storage/archive\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + archiveRoot + "\"\n" +
-		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  archiveRoot: " + yamlQuote(archiveRoot) + "\n" +
+		"  localEditRoot: " + yamlQuote(localRoot) + "\n" +
 		"  pathTemplate: \"{original_name}\"\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -329,11 +342,11 @@ func TestRunIngestCollisionMultiSubdir(t *testing.T) {
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"pathMappings:\n" +
-		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"  - workstationPath: " + yamlQuote(archiveRoot) + "\n" +
 		"    containerPath: \"/storage/archive\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + archiveRoot + "\"\n" +
-		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  archiveRoot: " + yamlQuote(archiveRoot) + "\n" +
+		"  localEditRoot: " + yamlQuote(localRoot) + "\n" +
 		"  pathTemplate: \"{original_name}\"\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -405,7 +418,7 @@ func TestRunIngestUploadStreaming(t *testing.T) {
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"ingest:\n" +
-		"  localEditRoot: \"" + localRoot + "\"\n"
+		"  localEditRoot: " + yamlQuote(localRoot) + "\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

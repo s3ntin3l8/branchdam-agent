@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,10 +44,10 @@ func settingsTestFixture(t *testing.T) (path string, cfg config.Config, runner *
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
-		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"  archiveRoot: " + yamlQuote(filepath.Join(dir, "archive")) + "\n" +
+		"  localEditRoot: " + yamlQuote(filepath.Join(dir, "local")) + "\n" +
 		"  cardRoots:\n" +
-		"    - \"" + filepath.Join(dir, "cards") + "\"\n" +
+		"    - " + yamlQuote(filepath.Join(dir, "cards")) + "\n" +
 		"tray:\n" +
 		"  statusAddr: \"127.0.0.1:38080\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -445,6 +446,43 @@ func TestConfigSettingsPromptAndSetIntegrationPathHappyPath(t *testing.T) {
 	}
 }
 
+func TestConfigSettingsPromptAndSetResolveDatabaseURLIsSecretSafe(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	authValue := "fixture-value"
+	databaseURL := "postgres://user:" + authValue + "@localhost:5432/resolve"
+	var gotArgs []string
+	dialog := func(_ context.Context, args ...string) (string, int, error) {
+		gotArgs = append([]string(nil), args...)
+		return databaseURL, dialogExitOK, nil
+	}
+	s := newConfigSettings(path, cfg, runner, dialog)
+
+	ok, err := s.PromptAndSetIntegrationPath(tray.IntegrationResolveDB)
+	if err != nil {
+		t.Fatalf("PromptAndSetIntegrationPath: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if !slices.Contains(gotArgs, "password") {
+		t.Fatalf("dialog args = %v, want a hidden password entry", gotArgs)
+	}
+	if slices.Contains(gotArgs, "-default") || slices.Contains(gotArgs, databaseURL) {
+		t.Fatalf("database credentials leaked into dialog argv: %v", gotArgs)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.Integrations.ResolveDB.DatabaseURL; got != databaseURL {
+		t.Fatalf("databaseUrl = %q, want %q", got, databaseURL)
+	}
+	iv, _ := s.Snapshot().Integration(tray.IntegrationResolveDB)
+	if strings.Contains(iv.CatalogPath, authValue) || iv.CatalogPath != "postgres:…" {
+		t.Fatalf("status display leaked or incorrectly rendered database URL: %q", iv.CatalogPath)
+	}
+}
+
 func TestConfigSettingsPromptAndSetIntegrationPathCanceled(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := func(_ context.Context, args ...string) (string, int, error) {
@@ -506,7 +544,7 @@ func TestConfigSettingsReloadCardRootsDoesNotRequireRestart(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner, nil)
 
-	editConfigFile(t, path, "cardRoots:\n    - \""+cfg.Ingest.CardRoots[0]+"\"", "cardRoots:\n    - \"/a-different-path\"")
+	editConfigFile(t, path, "cardRoots:\n    - "+yamlQuote(cfg.Ingest.CardRoots[0]), "cardRoots:\n    - \"/a-different-path\"")
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
@@ -632,7 +670,7 @@ func TestConfigSettingsReloadRefusesNonServerPlaceholder(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner, nil)
 
-	editConfigFile(t, path, cfg.Ingest.ArchiveRoot, "${TEST_UNSET_ARCHIVE_ROOT}")
+	editConfigFile(t, path, yamlQuote(cfg.Ingest.ArchiveRoot), yamlQuote("${TEST_UNSET_ARCHIVE_ROOT}"))
 
 	if err := s.Reload(); err == nil {
 		t.Fatal("expected Reload to refuse an unexpanded ${VAR} placeholder in ingest.archiveRoot, a non-server.* field")
@@ -740,11 +778,11 @@ func TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange(t *testing
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"pathMappings:\n" +
-		"  - workstationPath: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"  - workstationPath: " + yamlQuote(filepath.Join(dir, "local")) + "\n" +
 		"    containerPath: \"/container/local\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
-		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n"
+		"  archiveRoot: " + yamlQuote(filepath.Join(dir, "archive")) + "\n" +
+		"  localEditRoot: " + yamlQuote(filepath.Join(dir, "local")) + "\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -912,8 +950,8 @@ func TestConfigSettingsReloadSyncsNamingTemplateFromServer(t *testing.T) {
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
-		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"  archiveRoot: " + yamlQuote(filepath.Join(dir, "archive")) + "\n" +
+		"  localEditRoot: " + yamlQuote(filepath.Join(dir, "local")) + "\n" +
 		"  pathTemplate: \"{original_name}\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -982,8 +1020,8 @@ func TestConfigSettingsReloadAppliesServerPathMappingsAndClearsConfigIncomplete(
 		"agentId: \"test-agent\"\n" +
 		"pathMappings: []\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
-		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n"
+		"  archiveRoot: " + yamlQuote(filepath.Join(dir, "archive")) + "\n" +
+		"  localEditRoot: " + yamlQuote(filepath.Join(dir, "local")) + "\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1014,6 +1052,96 @@ func TestConfigSettingsReloadAppliesServerPathMappingsAndClearsConfigIncomplete(
 	}
 }
 
+func TestMissingRequiredFieldsByIngestMode(t *testing.T) {
+	base := config.Config{
+		Server:  config.ServerConfig{BaseURL: "https://branchdam.example", APIKey: "0123456789abcdef0123456789abcdef"},
+		AgentID: "workstation-01",
+		Ingest:  config.IngestConfig{LocalEditRoot: "/edit"},
+	}
+
+	t.Run("dual write requires archive and mapping", func(t *testing.T) {
+		got := missingRequiredFields(base)
+		want := []string{"ingest.archiveRoot", "pathMappings"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("missingRequiredFields() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("direct upload does not require archive or mapping", func(t *testing.T) {
+		cfg := base
+		cfg.Ingest.UploadStream = true
+		if got := missingRequiredFields(cfg); len(got) != 0 {
+			t.Fatalf("missingRequiredFields() = %v, want none", got)
+		}
+	})
+
+	t.Run("direct upload with offline queue requires archive and mapping", func(t *testing.T) {
+		cfg := base
+		cfg.Ingest.UploadStream = true
+		cfg.Offline.QueueDBPath = "/state/queue.db"
+		got := missingRequiredFields(cfg)
+		want := []string{"ingest.archiveRoot", "pathMappings"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("missingRequiredFields() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("agent id is required and whitespace is empty", func(t *testing.T) {
+		cfg := base
+		cfg.Ingest.UploadStream = true
+		cfg.AgentID = "  "
+		if got := missingRequiredFields(cfg); !slices.Contains(got, "agentId") {
+			t.Fatalf("missingRequiredFields() = %v, want agentId", got)
+		}
+		if serverConfigured(cfg) {
+			t.Fatal("serverConfigured() = true with an empty agentId")
+		}
+	})
+}
+
+func TestDirectUploadQueueOutageStopsBeforeOfflineIngestWithoutArchiveConfig(t *testing.T) {
+	cfg := config.Config{
+		Server:  config.ServerConfig{BaseURL: "https://branchdam.example", APIKey: "0123456789abcdef0123456789abcdef"},
+		AgentID: "workstation-01",
+		Ingest:  config.IngestConfig{LocalEditRoot: "/edit", UploadStream: true},
+		Offline: config.OfflineConfig{QueueDBPath: "/state/queue.db"},
+	}
+	missing := missingRequiredFields(cfg)
+	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
+	runner.SetConfigIncomplete(len(missing) > 0, missing)
+	runner.SetArchiveProber(func(context.Context, string) bool { return false })
+
+	summary := runner.TriggerIngest(context.Background(), "/media/card")
+	if !errors.Is(summary.Err, tray.ErrConfigIncomplete) {
+		t.Fatalf("TriggerIngest error = %v, want ErrConfigIncomplete", summary.Err)
+	}
+}
+
+func TestResolveServerConfigDoesNotHandshakeWithoutAgentID(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			BaseURL: srv.URL,
+			APIKey:  "0123456789abcdef0123456789abcdef",
+		},
+		Ingest: config.IngestConfig{LocalEditRoot: "/edit", UploadStream: true},
+	}
+	_, missing := resolveServerConfig(context.Background(), &cfg, "", time.Second, "")
+	if calls.Load() != 0 {
+		t.Fatalf("handshake calls = %d, want 0", calls.Load())
+	}
+	if !slices.Contains(missing, "agentId") {
+		t.Fatalf("missing fields = %v, want agentId", missing)
+	}
+}
+
 func TestConfigSettingsReloadHandshakeUnreachablePreservesConfigTemplate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -1023,8 +1151,8 @@ func TestConfigSettingsReloadHandshakeUnreachablePreservesConfigTemplate(t *test
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
-		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"  archiveRoot: " + yamlQuote(filepath.Join(dir, "archive")) + "\n" +
+		"  localEditRoot: " + yamlQuote(filepath.Join(dir, "local")) + "\n" +
 		"  pathTemplate: \"{original_name}\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -1065,8 +1193,8 @@ func TestConfigSettingsPromptAndSetReSyncsNamingTemplate(t *testing.T) {
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
-		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"  archiveRoot: " + yamlQuote(filepath.Join(dir, "archive")) + "\n" +
+		"  localEditRoot: " + yamlQuote(filepath.Join(dir, "local")) + "\n" +
 		"  pathTemplate: \"{original_name}\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -1136,11 +1264,11 @@ func TestConfigSettingsReloadRefreshesHookStateOnScriptsDirChange(t *testing.T) 
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
-		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"  archiveRoot: " + yamlQuote(filepath.Join(dir, "archive")) + "\n" +
+		"  localEditRoot: " + yamlQuote(filepath.Join(dir, "local")) + "\n" +
 		"integrations:\n" +
 		"  resolve:\n" +
-		"    scriptsDir: \"" + oldDir + "\"\n"
+		"    scriptsDir: " + yamlQuote(oldDir) + "\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1180,7 +1308,7 @@ func TestConfigSettingsReloadRefreshesHookStateOnScriptsDirChange(t *testing.T) 
 	}
 
 	// Hand-edit the config file to point scriptsDir at /new.
-	editConfigFile(t, path, "scriptsDir: \""+oldDir+"\"", "scriptsDir: \""+newDir+"\"")
+	editConfigFile(t, path, "scriptsDir: "+yamlQuote(oldDir), "scriptsDir: "+yamlQuote(newDir))
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)

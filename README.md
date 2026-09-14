@@ -114,7 +114,7 @@ The NSIS installer provides a one-click setup experience:
    - Add the agent to Add/Remove Programs
 3. On finish, check "Launch branchDAM Agent" to start the tray
 4. The tray starts in **"not configured" mode** (gray icon) - configure through the Settings menu:
-   - Set your server URL and API key
+   - Set your server URL, API key, and agent ID
    - Configure path mappings (archive root, edit root, container paths)
    - Set card detection roots and other preferences
 
@@ -140,6 +140,10 @@ see [`docs/platform-support.md`](docs/platform-support.md#self-update).
 Binaries are unsigned -- see "Releases" below. See
 [`docs/platform-support.md`](docs/platform-support.md) for the full support matrix, including
 why Windows ships two `.exe`s and what's not yet implemented per platform.
+
+On Apple Silicon, GUI launches do not reliably inherit Homebrew's `/opt/homebrew/bin` PATH. Set
+`ingest.exiftoolPath: "/opt/homebrew/bin/exiftool"` when ExifTool is installed there; ingestion
+continues without it, but EXIF metadata and RAW-preview perceptual hashing are reduced.
 
 ## Quick Start
 
@@ -266,7 +270,7 @@ the same passes on demand. The status page and menu show a real backlog count an
 failed count from `queue.db`, never a fabricated number when the queue isn't configured or can't be
 read.
 
-**Integrations.** Each catalog integration -- Luminar Neo today -- gets its own **top-level** tray
+**Integrations.** Luminar Neo and the DaVinci Resolve database sync each get a **top-level** tray
 menu item (e.g. "Luminar Neo"), not nested under Settings: an Enabled checkbox, a Dry run checkbox
 (defaults **on** -- resolves and logs what a pass would emit without contacting the server, until an
 operator turns it off explicitly), a catalog file picker, a "Sync every" submenu (15 min / 60 min
@@ -276,6 +280,11 @@ The tray also runs each enabled integration's sync on its own background timer
 (`integrations.luminar.syncIntervalMinutes`), independent of the ingest/drain/prune timers so a sync
 pass never blocks a card ingest and vice versa -- see `config.example.yaml`'s `integrations:` block
 for every field. Every menu-driven change applies immediately, no restart required.
+
+Resolve database sync reads a configured `file:` or PostgreSQL database, creates deterministic
+virtual project nodes for timelines, and emits `PROJECT_SIDECAR` edges from indexed media to those
+nodes. Its database URL is entered through a hidden, non-prefilled prompt so embedded credentials
+do not appear in process arguments or the status page.
 
 **DaVinci Resolve render hook.** An installer, not a sync integration, since the hook itself runs
 inside Resolve's own Python interpreter and takes no config beyond an optional
@@ -307,8 +316,8 @@ platform`) -- the tray is scoped to Windows/macOS; a Linux workstation still has
 headless `ingest` path.
 
 **First run.** If no config exists yet, the tray no longer just exits: it writes a starter config
-(same one `init` writes) and, where a dialog backend is available, walks a short setup wizard
-(server URL, API key, the two ingest roots) before continuing. Every startup failure -- a broken
+(same one `init` writes) and continues in gray **not configured** mode. Use Settings to provide the
+server URL, API key, agent ID, and ingest destinations. Every startup failure -- a broken
 config, a bind conflict, an update that failed to restart -- is both logged to a durable per-OS log
 file (`%LOCALAPPDATA%\branchDAM\logs\agent.log` on Windows, `~/Library/Logs/branchDAM/agent.log` on
 macOS) and, best-effort, shown as a dialog naming that log path -- see issue #30 and

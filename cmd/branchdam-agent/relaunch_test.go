@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -12,18 +13,28 @@ import (
 )
 
 func TestRelaunchSelfPlainBinary(t *testing.T) {
-	dir := t.TempDir()
-	self := filepath.Join(dir, "fake-branchdam-agent")
-	if err := os.WriteFile(self, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
+	self := filepath.Join(t.TempDir(), "fake-branchdam-agent")
+	origStart := startRelaunchCmd
+	t.Cleanup(func() { startRelaunchCmd = origStart })
+	var started *exec.Cmd
+	startRelaunchCmd = func(cmd *exec.Cmd) error {
+		started = cmd
+		return nil
 	}
 
-	if err := relaunchSelf(self, []string{"tray", "-config", "config.yaml"}); err != nil {
+	args := []string{"tray", "-config", "config.yaml"}
+	if err := relaunchSelf(self, args); err != nil {
 		t.Errorf("relaunchSelf: %v", err)
+	}
+	if started == nil || started.Path != self || !slices.Equal(started.Args[1:], args) {
+		t.Errorf("started command = %#v, want path %q args %v", started, self, args)
 	}
 }
 
 func TestEnableStartOnLoginResolvesRelativeConfigPath(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("this test pins the unsupported-platform return; native autostart is covered by its platform package")
+	}
 	dir := t.TempDir()
 	cwd, err := os.Getwd()
 	if err != nil {

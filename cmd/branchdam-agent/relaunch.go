@@ -35,7 +35,7 @@ func relaunchSelf(selfExe string, args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
-	if err := cmd.Start(); err != nil {
+	if err := startRelaunchCmd(cmd); err != nil {
 		return fmt.Errorf("relaunch %s: %w", selfExe, err)
 	}
 	return nil

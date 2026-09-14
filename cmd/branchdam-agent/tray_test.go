@@ -6,21 +6,23 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
+	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
+var stubTrayRunCalls atomic.Int32
+
 // stubTrayDialog overrides trayDialogSetup for the duration of a test, so
-// runTrayCmd's dialog-driven paths (the startup-error notification, the
-// first-run setup wizard) never re-exec the actual `go test` binary as
+// runTrayCmd's startup-error notification never re-execs the actual `go test` binary as
 // `dialog ...` -- see trayDialogSetup's own doc comment for why that would
 // be a problem. run defaults to one that fails every call (matching
-// "no display available," the common CI case) when nil; pass a custom run
-// to drive the first-run wizard through specific answers.
+// "no display available," the common CI case) when nil.
 //
 // Also redirects every env var agentlog.Path consults (XDG_STATE_HOME,
 // HOME, LOCALAPPDATA) into this test's own t.TempDir(), since runTrayCmd
@@ -39,25 +41,42 @@ func stubTrayDialog(t *testing.T, run dialogRunner) {
 	}
 	t.Cleanup(func() { trayDialogSetup = orig })
 
+	origTrayRun := trayRun
+	stubTrayRunCalls.Store(0)
+	trayRun = func(
+		context.Context,
+		*tray.Runner,
+		string,
+		tray.SelfUpdater,
+		tray.Settings,
+		func(context.Context, string, string) bool,
+		bool,
+		func(context.Context, string) (string, error),
+		func(context.Context, string, string),
+	) (tray.Outcome, error) {
+		stubTrayRunCalls.Add(1)
+		return tray.Outcome{}, tray.ErrUnsupported
+	}
+	t.Cleanup(func() { trayRun = origTrayRun })
+
 	logDir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", filepath.Join(logDir, "xdg-state"))
 	t.Setenv("HOME", filepath.Join(logDir, "home"))
 	t.Setenv("LOCALAPPDATA", filepath.Join(logDir, "localappdata"))
 }
 
-// TestRunTrayUnsupportedOnLinux exercises the full wiring path (config
+// TestRunTrayCommandWiringCrossPlatform exercises the full wiring path (config
 // load, branchdam.New, ingest.Engine, tray.NewRunner, the status server
-// starting) against a fixture config, on whatever platform `go test` runs
-// on. On Linux -- the only platform CI actually tests, per
-// .github/workflows/ci-cd.yml -- tray.Run returns tray.ErrUnsupported
-// immediately, so this also proves runTrayCmd doesn't hang or leak the
-// status server's goroutine waiting for it. selfUpdate.enabled is
+// starting) against a fixture config on every native CI platform. trayRun is
+// stubbed to return tray.ErrUnsupported before the process-global GUI loop,
+// so this also proves runTrayCmd doesn't hang or leak the status server's
+// goroutine waiting for it. selfUpdate.enabled is
 // explicitly false: selfUpdate.enabled now defaults to true (see
 // internal/config.defaultConfig), and newSelfUpdateAgent's Run goroutine
 // is fire-and-forget (joined via ctx cancellation, not a WaitGroup) -- a
 // fixture that left it enabled would make this unit test perform a real
 // network call to GitHub on every run.
-func TestRunTrayUnsupportedOnLinux(t *testing.T) {
+func TestRunTrayCommandWiringCrossPlatform(t *testing.T) {
 	stubTrayDialog(t, nil)
 
 	dir := t.TempDir()
@@ -71,10 +90,10 @@ func TestRunTrayUnsupportedOnLinux(t *testing.T) {
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + archiveRoot + "\"\n" +
-		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  archiveRoot: " + strconv.Quote(archiveRoot) + "\n" +
+		"  localEditRoot: " + strconv.Quote(localRoot) + "\n" +
 		"pathMappings:\n" +
-		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"  - workstationPath: " + strconv.Quote(archiveRoot) + "\n" +
 		"    containerPath: \"/storage/archive\"\n" +
 		"tray:\n" +
 		"  statusAddr: \"127.0.0.1:0\"\n" +
@@ -87,6 +106,9 @@ func TestRunTrayUnsupportedOnLinux(t *testing.T) {
 	got := run([]string{"tray", "-config", cfgPath})
 	if got != 1 {
 		t.Errorf("run([tray]) = %d, want 1 (tray.ErrUnsupported on this platform)", got)
+	}
+	if stubTrayRunCalls.Load() != 1 {
+		t.Fatalf("trayRun calls = %d, want 1; startup failed before reaching tray wiring", stubTrayRunCalls.Load())
 	}
 }
 
@@ -130,7 +152,7 @@ func TestRunTrayMissingPathMappings(t *testing.T) {
 	localRoot := filepath.Join(dir, "local")
 	cfgPath := filepath.Join(dir, "config.yaml")
 	content := "server:\n  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
-		"ingest:\n  archiveRoot: \"" + archiveRoot + "\"\n  localEditRoot: \"" + localRoot + "\"\n"
+		"ingest:\n  archiveRoot: " + strconv.Quote(archiveRoot) + "\n  localEditRoot: " + strconv.Quote(localRoot) + "\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -244,11 +266,11 @@ func TestRunTraySyncsNamingTemplateAtStartup(t *testing.T) {
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + archiveRoot + "\"\n" +
-		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  archiveRoot: " + strconv.Quote(archiveRoot) + "\n" +
+		"  localEditRoot: " + strconv.Quote(localRoot) + "\n" +
 		"  pathTemplate: \"{original_name}\"\n" +
 		"pathMappings:\n" +
-		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"  - workstationPath: " + strconv.Quote(archiveRoot) + "\n" +
 		"    containerPath: \"/storage/archive\"\n" +
 		"tray:\n" +
 		"  statusAddr: \"127.0.0.1:0\"\n" +
@@ -311,8 +333,8 @@ func TestRunTrayAppliesServerPathMappingsAtFreshInstallStartup(t *testing.T) {
 		"agentId: \"test-agent\"\n" +
 		"pathMappings: []\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + archiveRoot + "\"\n" +
-		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  archiveRoot: " + strconv.Quote(archiveRoot) + "\n" +
+		"  localEditRoot: " + strconv.Quote(localRoot) + "\n" +
 		"tray:\n" +
 		"  statusAddr: \"127.0.0.1:0\"\n" +
 		"selfUpdate:\n" +
@@ -350,11 +372,11 @@ func TestRunTrayHandshakeUnreachableContinuesStartup(t *testing.T) {
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: \"test-agent\"\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + archiveRoot + "\"\n" +
-		"  localEditRoot: \"" + localRoot + "\"\n" +
+		"  archiveRoot: " + strconv.Quote(archiveRoot) + "\n" +
+		"  localEditRoot: " + strconv.Quote(localRoot) + "\n" +
 		"  pathTemplate: \"{original_name}\"\n" +
 		"pathMappings:\n" +
-		"  - workstationPath: \"" + archiveRoot + "\"\n" +
+		"  - workstationPath: " + strconv.Quote(archiveRoot) + "\n" +
 		"    containerPath: \"/storage/archive\"\n" +
 		"tray:\n" +
 		"  statusAddr: \"127.0.0.1:0\"\n" +
@@ -388,13 +410,13 @@ func TestRunTrayMissingOfflineTier0ContainerRoot(t *testing.T) {
 		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
 		"agentId: test-agent\n" +
 		"ingest:\n" +
-		"  archiveRoot: \"" + filepath.Join(dir, "archive") + "\"\n" +
-		"  localEditRoot: \"" + filepath.Join(dir, "local") + "\"\n" +
+		"  archiveRoot: " + strconv.Quote(filepath.Join(dir, "archive")) + "\n" +
+		"  localEditRoot: " + strconv.Quote(filepath.Join(dir, "local")) + "\n" +
 		"  cardRoots: [\"/media/card\"]\n" +
 		"offline:\n" +
-		"  queueDbPath: \"" + filepath.Join(dir, "queue.db") + "\"\n" +
+		"  queueDbPath: " + strconv.Quote(filepath.Join(dir, "queue.db")) + "\n" +
 		"pathMappings:\n" +
-		"  - workstationPath: \"" + filepath.Join(dir, "archive") + "\"\n" +
+		"  - workstationPath: " + strconv.Quote(filepath.Join(dir, "archive")) + "\n" +
 		"    containerPath: /storage/archive\n" +
 		"tray:\n" +
 		"  statusAddr: \"127.0.0.1:0\"\n" +

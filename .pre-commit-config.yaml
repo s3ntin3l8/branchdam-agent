@@ -11,6 +11,10 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+        # This generated, embedded trust-root snapshot is intentionally a
+        # single byte-for-byte JSON line. Reformatting it creates a noisy
+        # whole-file diff and is unrelated to source hygiene.
+        exclude: ^internal/selfupdate/trusted_root_public_good\.json$
       - id: check-yaml
       - id: check-json
       - id: check-merge-conflict
@@ -56,11 +60,11 @@ repos:
 
       - id: govulncheck
         name: govulncheck
-        # Install to a repo-local GOBIN rather than `which govulncheck ||
-        # echo skipping` -- the old form silently no-ops (exit 0) on any
-        # machine that has never had it installed, which is every fresh
-        # clone.
-        entry: bash -c 'GOBIN="$(git rev-parse --show-toplevel)/.bin" go install golang.org/x/vuln/cmd/govulncheck@latest && "$(git rev-parse --show-toplevel)/.bin/govulncheck" ./...'
+        # Reuse Makefile's pinned scanner and VULNCHECK_IGNORE handling so
+        # pre-push and `make check` enforce the same reviewed policy. Calling
+        # govulncheck directly here used to reject GO-2026-5932 even though
+        # the repository and CI explicitly allowlist that no-fix advisory.
+        entry: make vulncheck
         language: system
         types: [go]
         pass_filenames: false

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -18,8 +19,12 @@ func TestDetectLayoutPlain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if layout.Primary != bin {
-		t.Errorf("Primary = %q, want %q", layout.Primary, bin)
+	wantPrimary, err := filepath.EvalSymlinks(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layout.Primary != wantPrimary {
+		t.Errorf("Primary = %q, want %q", layout.Primary, wantPrimary)
 	}
 	if len(layout.Siblings) != 0 {
 		t.Errorf("Siblings = %v, want none", layout.Siblings)
@@ -44,7 +49,11 @@ func TestDetectLayoutMacBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(dir, "branchdam-agent.app", "Contents", "Info.plist")
+	resolvedBin, err := filepath.EvalSymlinks(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(BundlePath(resolvedBin), "Contents", "Info.plist")
 	if layout.InfoPlist != want {
 		t.Errorf("InfoPlist = %q, want %q", layout.InfoPlist, want)
 	}
@@ -91,6 +100,9 @@ func TestCheckWritable(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(roDir, 0o755) })
 
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits do not make a directory read-only on Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: permission bits don't apply")
 	}

@@ -21,16 +21,13 @@ on:
         description: "Tag of the GitHub Release to attach binaries to."
         required: true
         type: string
-  # Manual invocation for two purposes: (1) a build-only smoke test of the
-  # cross-compile steps (leave release-tag empty -- the upload job stays
-  # gated on it being non-empty, so a smoke-test dispatch never tries to
-  # attach assets to a release that may not exist for this ref), or (2)
-  # backfilling assets onto an existing release whose run predates this
-  # workflow (pass release-tag).
+  # Manual invocation for two purposes: (1) a signed candidate build (leave
+  # release-tag empty -- attest still runs but upload stays gated), or (2)
+  # publishing assets for the exact tag ref selected in the dispatch UI.
   workflow_dispatch:
     inputs:
       release-tag:
-        description: "Existing release tag to backfill assets onto. Leave empty for a build-only smoke test."
+        description: "Matching tag to publish (dispatch that exact tag ref). Leave empty for a signed candidate artifact."
         required: false
         type: string
         default: ""
@@ -114,7 +111,7 @@ jobs:
       - name: Package
         run: |
           cd dist
-          zip -j ../branchdam-agent-windows-amd64.zip branchdam-agent.exe branchdam-agent-tray.exe
+          zip -j branchdam-agent-windows-amd64.zip branchdam-agent.exe branchdam-agent-tray.exe
       - uses: actions/upload-artifact@v7
         with:
           name: windows-amd64
@@ -168,100 +165,96 @@ jobs:
           path: branchdam-agent-darwin-arm64.tar.gz
           retention-days: 1
 
-  # Collects the three platform artifacts and attaches them (plus a combined
-  # checksum file) to the GitHub Release release-please already created --
-  # no separate tag/release creation here, only asset upload. Gated on
-  # release-tag being non-empty, not on the trigger event: inside a
-  # workflow_call the event is the CALLER's event (push), so a
-  # github.event_name check would silently skip forever here.
-  upload:
-    name: attach to release
-    if: inputs.release-tag != ''
+  # Builds one complete, verified release set before anything is published.
+  # This job also runs for a tag-less manual dispatch so hardware candidates
+  # exercise the exact checksum/signing path used by a real release.
+  attest:
+    name: checksum and attest
     needs: [build-linux, build-windows, build-darwin]
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      # id-token: write is required for `cosign sign-blob --yes` in keyless
-      # (OIDC) mode -- cosign mints a short-lived certificate bound to this
-      # job's OIDC token and submits it to Fulcio. Without this permission
-      # the step fails with "failed to get OIDC token: permission denied".
+      contents: read
       id-token: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           path: dist
-      # Written to ../SHA256SUMS.txt (outside dist/, before the traversal
-      # rather than after) and sorted, so the file doesn't include its own
-      # SHA-256 line and its line order is reproducible. A prior version
-      # of this step wrote into dist/ before traversing it, which produced
-      # a bogus "e3b0c442... ./SHA256SUMS.txt" line (the hash of the empty
-      # file) -- harmless to go-selfupdate's ChecksumValidator, which
-      # skips non-matching lines, but it broke the `sha256sum -c` command
-      # this repo's README tells operators to run.
-      - name: Checksums
+      - name: Assemble release set and checksums
         run: |
-          cd dist
-          find . -mindepth 2 -maxdepth 2 -type f -printf '%p\n' | sort \
-            | xargs sha256sum | sed 's#\./[^/]*/##' > ../SHA256SUMS.txt
-          cat ../SHA256SUMS.txt
-      - name: Upload release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${{ inputs.release-tag }}" \
-            dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz \
-            dist/windows-amd64/branchdam-agent-windows-amd64.zip \
-            dist/windows-amd64/branchdam-agent-setup.exe \
-            dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz \
-            SHA256SUMS.txt \
-            --repo "${{ github.repository }}" --clobber
-
-      # Keyless Sigstore attestation of every release asset (plus the
-      # combined SHA256SUMS.txt). Each artifact gets a paired .sig + .cert
-      # uploaded alongside it; an operator (or a future branchDAM client
-      # verifier -- see issue #111 C-3 for the server-side follow-up) can
-      # then `cosign verify-blob --certificate <cert> --signature <sig>
-      # --certificate-identity-regexp ... --certificate-oidc-issuer
-      # https://token.actions.githubusercontent.com <artifact>` against
-      # the public Sigstore transparency log without any certificate
-      # purchase or managed-key ceremony.
-      #
-      # `cosign sign-blob --yes` is used (not `sign`/`sign-image`) because
-      # these are loose files, not OCI images. The Fulcio-signed
-      # certificate's SubjectAlternativeName is the workflow's OIDC
-      # identity (repo + ref + job), and the OIDC issuer is pinned to
-      # `https://token.actions.githubusercontent.com` to keep verification
-      # deterministic across signers.
+          mkdir release-assets
+          cp dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz release-assets/
+          cp dist/windows-amd64/branchdam-agent-windows-amd64.zip release-assets/
+          cp dist/windows-amd64/branchdam-agent-setup.exe release-assets/
+          cp dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz release-assets/
+          cd release-assets
+          sha256sum branchdam-agent-* | sort -k2 > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # v3 defaults to bundle output and ignores the detached .sig/.cert
+          # flags consumed by internal/selfupdate. Keep that wire contract
+          # stable until the updater intentionally migrates to bundles.
+          cosign-release: v2.6.1
       - name: Sign release assets (Sigstore keyless)
         run: |
           set -euo pipefail
-          assets=(
-            "dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz"
-            "dist/windows-amd64/branchdam-agent-windows-amd64.zip"
-            "dist/windows-amd64/branchdam-agent-setup.exe"
-            "dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz"
-            "SHA256SUMS.txt"
-          )
-          for asset in "${assets[@]}"; do
+          for asset in release-assets/branchdam-agent-* release-assets/SHA256SUMS.txt; do
             cosign sign-blob --yes "$asset" \
               --output-signature "${asset}.sig" \
               --output-certificate "${asset}.cert"
+            test -s "${asset}.sig"
+            test -s "${asset}.cert"
+            cosign verify-blob "$asset" \
+              --signature "${asset}.sig" \
+              --certificate "${asset}.cert" \
+              --certificate-identity-regexp '^https://github\.com/s3ntin3l8/branchdam-agent/\.github/workflows/release-binaries\.yml@' \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
           done
-      - name: Upload signatures and certificates
+      - name: Store complete release set
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Publishing is a separate final step. It cannot begin unless attest
+  # produced the complete release-assets artifact above.
+  upload:
+    name: attach to release
+    if: inputs.release-tag != ''
+    needs: attest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: release-assets
+      - name: Validate complete release set
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum -c SHA256SUMS.txt
+          for asset in branchdam-agent-* SHA256SUMS.txt; do
+            case "$asset" in *.sig|*.cert) continue ;; esac
+            test -s "${asset}.sig"
+            test -s "${asset}.cert"
+          done
+      - name: Refuse mismatched manual release source
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG" || {
+            echo "manual release upload requires ref refs/tags/$RELEASE_TAG, got $GITHUB_REF" >&2
+            exit 1
+          }
+      - name: Upload complete release set
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ inputs.release-tag }}" \
-            dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz.sig \
-            dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz.cert \
-            dist/windows-amd64/branchdam-agent-windows-amd64.zip.sig \
-            dist/windows-amd64/branchdam-agent-windows-amd64.zip.cert \
-            dist/windows-amd64/branchdam-agent-setup.exe.sig \
-            dist/windows-amd64/branchdam-agent-setup.exe.cert \
-            dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz.sig \
-            dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz.cert \
-            SHA256SUMS.txt.sig \
-            SHA256SUMS.txt.cert \
+          gh release upload "${{ inputs.release-tag }}" release-assets/* \
             --repo "${{ github.repository }}" --clobber

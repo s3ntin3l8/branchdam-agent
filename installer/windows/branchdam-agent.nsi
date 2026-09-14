@@ -25,6 +25,7 @@ Unicode True
 ; use MUI2 bundled defaults. Custom assets go in resources/icons/ and
 ; will be wired in once the icon generation pipeline is in place.
 !define MUI_FINISHPAGE_RUN "$INSTDIR\branchdam-agent-tray.exe"
+!define MUI_FINISHPAGE_RUN_PARAMETERS "tray"
 !define MUI_FINISHPAGE_RUN_TEXT "Launch branchDAM Agent"
 
 ; --- Pages ---
@@ -93,7 +94,7 @@ Section "Install"
 
     ; Start Menu shortcuts
     CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\branchdam-agent-tray.exe"
+    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\branchdam-agent-tray.exe" "tray"
     CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\uninstall.exe"
 
     ; Add/Remove Programs entry
@@ -112,11 +113,6 @@ Section "Install"
     ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
     IntFmt $0 "0x%08X" $0
     WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "EstimatedSize" "$0"
-SectionEnd
-
-Section "Start at login"
-    ; Write Run registry key for auto-start
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "BranchDAMAgent" '"$INSTDIR\branchdam-agent-tray.exe"'
 SectionEnd
 
 ; --- Uninstaller ---

@@ -367,6 +367,10 @@ func (f *fakeWriteCloser) Write(p []byte) (int, error) {
 
 func (f *fakeWriteCloser) Close() error {
 	if f.closeErr != nil {
+		// A real os.File close may report a deferred I/O error after the OS
+		// has released the handle. Release this real backing handle too so
+		// Windows can remove the temp file during cleanup.
+		_ = f.File.Close()
 		return f.closeErr
 	}
 	return f.File.Close()

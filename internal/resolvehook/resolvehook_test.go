@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -160,6 +161,9 @@ func TestInstallCreatesMissingDirectory(t *testing.T) {
 }
 
 func TestInstallFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows file modes are synthesized from ACLs")
+	}
 	dir := t.TempDir()
 	if _, err := Install(dir, testFileName, []byte("x")); err != nil {
 		t.Fatal(err)

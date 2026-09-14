@@ -3,12 +3,12 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -725,8 +725,9 @@ func TestIngestCardOfflineAllowedExtensionsFilter(t *testing.T) {
 func TestIngestCardOfflineChtimesFailureIsLogged(t *testing.T) {
 	origChtimes := cHtimesFn
 	t.Cleanup(func() { cHtimesFn = origChtimes })
+	chtimesErr := errors.New("simulated chtimes failure")
 	cHtimesFn = func(path string, atime, mtime time.Time) error {
-		return &os.PathError{Op: "chtimes", Path: path, Err: syscall.ENOENT}
+		return &os.PathError{Op: "chtimes", Path: path, Err: chtimesErr}
 	}
 
 	logBuf := captureSlog(t)
@@ -776,8 +777,8 @@ func TestIngestCardOfflineChtimesFailureIsLogged(t *testing.T) {
 		t.Errorf("warn source = %v", warn["source"])
 	}
 	errMsg, ok := warn["err"].(string)
-	if !ok || !strings.Contains(errMsg, "no such file") {
-		t.Errorf("warn err = %v, want something containing 'no such file'", warn["err"])
+	if !ok || !strings.Contains(errMsg, chtimesErr.Error()) {
+		t.Errorf("warn err = %v, want something containing %q", warn["err"], chtimesErr)
 	}
 }
 

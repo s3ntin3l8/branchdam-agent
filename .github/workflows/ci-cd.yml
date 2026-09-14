@@ -73,6 +73,22 @@ jobs:
       - run: makensis -DVERSION=ci-check branchdam-agent.nsi
         working-directory: installer/windows
 
+  # Native Windows tests exercise the build-tagged registry, eject,
+  # autostart, and desktop-launch paths that Linux cross-compilation can only
+  # type-check.
+  test-windows:
+    name: test (windows/amd64, native)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+
   # darwin/arm64 build-only check, EXCLUDING internal/tray and
   # cmd/branchdam-agent (which imports it). Verified locally: Go's linker
   # cross-compiles a pure-Go GOOS=darwin GOARCH=arm64 binary with
@@ -114,4 +130,5 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      - run: go test ./...
       - run: go build ./...

@@ -363,9 +363,8 @@ type ResolveHookConfig struct {
 }
 
 // ResolveDBConfig configures the DaVinci Resolve Project Server database
-// watcher (internal/resolve). The watcher polls the Resolve database for
-// timeline changes and posts EVENT_EDGE_ATTACHED events to the branchDAM
-// server.
+// integration (internal/resolve). It polls the database, creates virtual
+// timeline nodes, and attaches PROJECT_SIDECAR lineage edges in live mode.
 type ResolveDBConfig struct {
 	// Enabled gates whether the tray registers a syncer for this
 	// integration at all -- false (the default) means it never runs.
@@ -375,9 +374,9 @@ type ResolveDBConfig struct {
 	// SQLite:     "file:/path/to/project.db?mode=ro"
 	// Must not contain unexpanded ${VAR} placeholders.
 	DatabaseURL string `yaml:"databaseUrl"`
-	// DryRun, when true, resolves and logs what a sync pass would emit
-	// without contacting the server at all. Defaults to true (see
-	// defaultConfig()).
+	// DryRun, when true, resolves and logs what a sync would emit without
+	// contacting the server. False creates virtual nodes and lineage edges.
+	// Defaults true.
 	DryRun bool `yaml:"dryRun"`
 	// SyncIntervalMinutes is how often the tray runs a sync pass on its
 	// own timer once this integration is enabled. Zero means the default
@@ -388,8 +387,8 @@ type ResolveDBConfig struct {
 	TimeoutSecs int `yaml:"timeoutSecs"`
 	// PathRewrites maps Windows path prefixes (as stored in
 	// Sm2TiItem.MediaFilePath) to NAS/container paths. Longest-prefix
-	// matching is used. This field is YAML-only — there is no tray menu
-	// item to edit it; see internal/resolve/sync.go's rewritePath.
+	// matching is used. It is editable from the tray and YAML; see
+	// internal/resolve/sync.go's rewritePath.
 	PathRewrites []ResolvePathRewrite `yaml:"pathRewrites"`
 }
 
@@ -906,25 +905,15 @@ func (c Config) Validate() []Problem {
 	if c.Integrations.ResolveDB.TimeoutSecs < 0 {
 		problems = append(problems, Problem{Field: "integrations.resolvedb.timeoutSecs", Message: "must not be negative"})
 	}
-	// Scheme-aware ?/# check: file: URIs use ? as a query-parameter delimiter
-	// (e.g. ?mode=ro), so a ? in the path would be misread. postgres:// URIs
-	// legitimately use ? for connection options, so only reject # (URL fragment).
+	// Validate the same URL schemes internal/resolve.Open supports. Queries are
+	// valid for both SQLite (for example ?mode=ro) and PostgreSQL; fragments are
+	// never meaningful connection options.
 	if dbURL := c.Integrations.ResolveDB.DatabaseURL; dbURL != "" {
-		switch {
-		case strings.HasPrefix(dbURL, "file:"):
-			if strings.ContainsAny(dbURL, "?#") {
-				problems = append(problems, Problem{
-					Field:   "integrations.resolvedb.databaseUrl",
-					Message: "file: URI must not contain '?' or '#' -- would be misread as query parameters",
-				})
-			}
-		case strings.HasPrefix(dbURL, "postgres://") || strings.HasPrefix(dbURL, "postgresql://"):
-			if strings.Contains(dbURL, "#") {
-				problems = append(problems, Problem{
-					Field:   "integrations.resolvedb.databaseUrl",
-					Message: "postgres:// URI must not contain '#'",
-				})
-			}
+		u, err := url.Parse(dbURL)
+		if err != nil || (u.Scheme != "file" && u.Scheme != "postgres" && u.Scheme != "postgresql") {
+			problems = append(problems, Problem{Field: "integrations.resolvedb.databaseUrl", Message: "must use file:, postgres://, or postgresql://"})
+		} else if u.Fragment != "" {
+			problems = append(problems, Problem{Field: "integrations.resolvedb.databaseUrl", Message: "must not contain a URL fragment"})
 		}
 	}
 

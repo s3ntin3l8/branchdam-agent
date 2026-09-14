@@ -101,12 +101,20 @@ ingested and on the status page under the same busy-card header. See
 ## Integrations menu
 
 A separate top-level menu, not nested under Settings: one item per catalog integration
-(`internal/tray.Integrations()`'s compile-time registry -- Luminar Neo today), plus a shared "Node
-index…" item. Each integration's own submenu -- Enabled, Dry run, Catalog…, "Sync every" (its own
+(`internal/tray.Integrations()`'s compile-time registry -- Luminar Neo and the Resolve database
+sync today), plus a shared "Node index…" item. Each integration's own submenu -- Enabled, Dry
+run, its catalog/database location, "Sync every" (its own
 nested submenu: 15 min / 60 min default / manual-only), "Sync now" -- keeps every leaf at depth 3
 (`Luminar Neo ▸ Sync every ▸ 15 minutes`), matching the deepest tree this repo has actually shipped
 (`Settings ▸ Check every ▸ 1 hour`) rather than nesting a fourth level under a wrapper "Integrations"
 item.
+
+The DaVinci Resolve database entry reads timeline membership and, in live mode, creates
+deterministic virtual project nodes and `PROJECT_SIDECAR` lineage edges from indexed media to those
+nodes. Its database URL prompt is hidden and never prefilled so embedded credentials cannot appear
+in process arguments or on the status page. `file:`, `postgres://`, and `postgresql://` URLs are
+supported; path rewrites can be edited in its submenu or YAML. Dry-run mode logs the virtual nodes
+and edges it would create without contacting the server.
 
 **Different mechanism from Settings.** Settings changes apply through `Runner.Reconfigure`;
 integration changes apply through the separate `Runner.SetIntegrationSyncers` (rebuilt on every
@@ -130,10 +138,9 @@ below: the catalog/node-index file picker (`-kind file` in the `dialog` subcomma
 rendered on a real Win32 message pump or via `osascript`, and the four-registry-entry-worth of new
 systray items (one top-level item, three checkboxes, one file prompt, one nested "Sync every"
 submenu, one action, per integration) have never been clicked through on either target platform.
-`make build-windows` is the only CI-reachable compile check that includes this file at all --
-`make build-darwin` explicitly excludes both `internal/tray` and `cmd/branchdam-agent`
-(`Makefile:47`), so darwin compilation of the menu is unverified anywhere in this repo's own
-tooling.
+native Windows and macOS CI jobs compile and test this code, while `make build-darwin` explicitly
+excludes both `internal/tray` and `cmd/branchdam-agent` (`Makefile:47`). Rendering and clicks remain
+real-hardware checks.
 
 ## Status page (issue #61)
 
@@ -197,9 +204,8 @@ The disabled status line's wording is deliberately identical to the status page'
 Resolve section (`hookStatusLine` in `hooksmenu.go`), so the menu and the status page never disagree
 about what a given `HookState` means.
 
-**Unverified on real hardware**, same caveat as the Integrations menu above: `make build-windows` is
-the only CI-reachable compile check that includes this file at all, and the menu items themselves
-have never been clicked through on either target platform.
+**Unverified on real hardware**, same caveat as the Integrations menu above: native Windows/macOS
+CI executes the Go tests, but hosted runners cannot validate actual tray/menu rendering.
 
 ## Startup diagnostics and first-run setup
 
@@ -222,12 +228,12 @@ independent fixes, deliberately not one:
   process-state assumptions a macOS `.app` launched by launchd carries. **Unverified on real
   hardware** -- see Known gaps below.
 
-The same first-run path also covers a *missing* config, not just a broken one: `tray` no longer
-exits on a missing `config.yaml`. It writes a starter config (also available headlessly via
-`branchdam-agent init`) and, if a dialog backend is available, walks a short setup wizard (server
-URL, API key, the two ingest roots) before proceeding. The starter config is left on disk even if
-the wizard is canceled or a dialog fails partway, so there is always something to hand-edit
-afterward.
+The same first-run path also covers a *missing* config, not just a broken one: `tray` writes a
+starter config (also available headlessly via `branchdam-agent init`) and continues in gray
+**not configured** mode. The operator completes server URL, API key, agent ID, and ingest storage
+through Settings. Direct-upload mode does not require an archive root or path mappings unless
+offline queueing is enabled; that outage fallback still writes the archive copy. Filesystem
+dual-write mode always requires both. The starter file is always available for hand editing.
 
 ## Login-item registration
 
@@ -359,13 +365,17 @@ the cost. See Known gaps.
 ### Sigstore attestation
 
 The release workflow (`.github/workflows/release-binaries.yml`) signs every published asset
-with `cosign sign-blob --yes` (keyless OIDC mode, pinned to
+with Cosign v2.6.1 `cosign sign-blob --yes` (keyless OIDC mode, pinned to
 `https://token.actions.githubusercontent.com` as the OIDC issuer and to this repo's workflow
 URL as the certificate SAN). `internal/selfupdate.Apply` runs the matching keyless
 verification in-process via `github.com/sigstore/sigstore-go` before
 `go-selfupdate`'s `ChecksumValidator` checks the SHA-256. The verify proves the release was
 built by this repo's signed release workflow; a release page write by anyone without the
 workflow identity cannot produce a signature that passes.
+
+The historical v1.5.0 workflow uploaded raw assets before its Cosign step failed and therefore
+has no `.sig`/`.cert` sidecars. Upgrade from it manually if self-update reports a missing
+attestation. v1.6 and later publish only after the complete signed artifact set verifies.
 
 `Apply` runs a `sigstorePreflight` step once per call (between the `GreaterThan` check and
 the sidecar-write) that downloads the `.sig` + `.cert` next to the release archive on
@@ -479,17 +489,16 @@ A live-refresh via TUF is the proper long-term answer but is out of scope here.
 
 Everything above marked "unverified on real hardware" needs a real Windows 11 machine and a real
 macOS (Apple Silicon) machine to check off -- nothing in this list can be exercised from this
-repo's Linux-only development/CI environment. Run through this after any change to
+hosted CI environment. Run through this after any change to
 `internal/tray`, `internal/selfupdate`, or `internal/appbundle`; check off what passes, and file
 an issue (with what actually happened) for what doesn't, rather than silently updating this list
 to say "verified."
 
 **Windows:**
 
-1. First-run bootstrap: delete `%AppData%\branchdam-agent\config.yaml`, launch
-   `branchdam-agent-tray.exe` directly (not via a console) -- confirm the setup wizard's dialogs
-   (server URL, API key, archive/local roots, path mapping) render as native Win32 dialogs, not a
-   silent failure, and that a starter config is left on disk if you cancel partway.
+1. First-run bootstrap: delete `%AppData%\branchdam-agent\config.yaml`, launch from the installer
+   finish page and Start Menu -- confirm the tray remains running in gray "not configured" mode,
+   a starter config is created, and Settings can supply server URL, API key, agent ID, and roots.
 2. Startup-error dialog: hand-edit `config.yaml` to something `Validate()` rejects (e.g. an
    unexpanded `${VAR}` in `server.apiKey`), launch `branchdam-agent-tray.exe` -- confirm an error
    dialog appears (before systray's own message pump has started) naming the log path at

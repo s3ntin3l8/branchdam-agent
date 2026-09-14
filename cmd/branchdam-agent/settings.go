@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -133,6 +134,10 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 	integrations := make([]tray.IntegrationView, 0, len(integrationBuilders))
 	for _, b := range integrationBuilders {
 		c := b.Current(cfg)
+		displayPath := c.CatalogPath
+		if b.DatabaseURL && displayPath != "" {
+			displayPath = databaseURLDisplay(displayPath)
+		}
 		var pathRewrites string
 		pathRewritesSet := b.CurrentRewrites != nil
 		if pathRewritesSet {
@@ -143,7 +148,7 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 			ID:                  b.ID,
 			Enabled:             c.Enabled,
 			DryRun:              c.DryRun,
-			CatalogPath:         c.CatalogPath,
+			CatalogPath:         displayPath,
 			CatalogPathSet:      c.CatalogPath != "",
 			SyncIntervalMinutes: c.SyncIntervalMinutes,
 			TimeoutSecs:         c.TimeoutSecs,
@@ -175,6 +180,17 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		NodeIndexPathSet:           cfg.Integrations.NodeIndexPath != "",
 		Integrations:               integrations,
 	}
+}
+
+// databaseURLDisplay never exposes userinfo, hosts, database names, or query
+// parameters on the loopback status page. The full URL remains only in the
+// mode-0600 config file and the in-memory syncer.
+func databaseURLDisplay(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" {
+		return "configured (details hidden)"
+	}
+	return u.Scheme + ":…"
 }
 
 func (s *configSettings) SetBool(key string, v bool) error {
@@ -388,39 +404,45 @@ func firstBlockingProblem(cfg config.Config) *config.Problem {
 // missingRequiredFields returns the list of required config fields that
 // are empty. Used by both runTrayCmd and reload to compute the
 // configIncomplete flag consistently, AFTER the server handshake (if any)
-// has had a chance to run -- see resolveServerConfig. pathMappings is
-// included here because by the time this runs, applyServerPathMappings has
-// already had its opportunity to fill it in from the handshake; an empty
-// slice at this point means neither the operator nor the server has
-// supplied one, so ingest genuinely can't proceed.
+// has had a chance to run -- see resolveServerConfig. Filesystem dual-write
+// needs archiveRoot/pathMappings. Direct HTTP upload does not use either
+// unless offline queueing is configured: its outage fallback is the existing
+// archive-backed queue path and therefore still needs both.
 func missingRequiredFields(cfg config.Config) []string {
 	var missing []string
-	if cfg.Server.APIKey == "" {
+	if strings.TrimSpace(cfg.Server.APIKey) == "" {
 		missing = append(missing, "server.apiKey")
 	}
-	if cfg.Server.BaseURL == "" {
+	if strings.TrimSpace(cfg.Server.BaseURL) == "" {
 		missing = append(missing, "server.baseUrl")
 	}
-	if cfg.Ingest.ArchiveRoot == "" {
-		missing = append(missing, "ingest.archiveRoot")
+	if strings.TrimSpace(cfg.AgentID) == "" {
+		missing = append(missing, "agentId")
 	}
-	if cfg.Ingest.LocalEditRoot == "" {
+	if strings.TrimSpace(cfg.Ingest.LocalEditRoot) == "" {
 		missing = append(missing, "ingest.localEditRoot")
 	}
-	if len(cfg.PathMappings) == 0 {
-		missing = append(missing, "pathMappings")
+	if !cfg.Ingest.UploadStream || strings.TrimSpace(cfg.Offline.QueueDBPath) != "" {
+		if strings.TrimSpace(cfg.Ingest.ArchiveRoot) == "" {
+			missing = append(missing, "ingest.archiveRoot")
+		}
+		if len(cfg.PathMappings) == 0 {
+			missing = append(missing, "pathMappings")
+		}
 	}
 	return missing
 }
 
 // serverConfigured reports whether cfg has enough server-side information
-// to attempt a real handshake. Both fields are required -- an API key
-// alone can't authenticate without a URL to send it to, and a URL alone
-// can't authenticate without a key (resolved thread PRRT_kwDOUALcu86h3ibx:
+// to attempt a real handshake. URL, API key, and agent ID are all required;
+// sending a blank workstation identity would make the handshake ambiguous
+// even if authentication succeeds (resolved thread PRRT_kwDOUALcu86h3ibx:
 // a missing API key must route to the dummy client even when baseUrl is
 // set, rather than attempting -- and silently failing -- a real dial).
 func serverConfigured(cfg config.Config) bool {
-	return cfg.Server.BaseURL != "" && cfg.Server.APIKey != ""
+	return strings.TrimSpace(cfg.Server.BaseURL) != "" &&
+		strings.TrimSpace(cfg.Server.APIKey) != "" &&
+		strings.TrimSpace(cfg.AgentID) != ""
 }
 
 // resolveServerConfig is the single source of truth for the
@@ -428,7 +450,7 @@ func serverConfigured(cfg config.Config) bool {
 // sequence shared by runTrayCmd (startup) and reload() (Settings menu).
 // It deliberately runs the handshake -- and therefore
 // applyServerPathMappings -- BEFORE computing missingFields: a fresh
-// install's config.yaml has baseUrl/apiKey/archiveRoot/localEditRoot set
+// install's config.yaml has baseUrl/apiKey/agentId/archiveRoot/localEditRoot set
 // but an empty pathMappings, and the server handshake is the only way
 // that gap gets filled. Computing missingFields first (the pre-#185-fix
 // order) made configIncomplete true before the handshake ever had a
@@ -649,11 +671,19 @@ func (s *configSettings) PromptAndSetIntegrationPath(id tray.IntegrationID) (boo
 	s.mu.Unlock()
 
 	args := []string{"-kind", "file", "-title", "Select the " + b.Title + " catalog file"}
-	if def := b.Current(cfg).CatalogPath; def != "" {
-		args = append(args, "-default", def)
-	}
-	if len(b.CatalogFilePatterns) > 0 {
-		args = append(args, "-patterns", strings.Join(b.CatalogFilePatterns, ","))
+	if b.DatabaseURL {
+		args = []string{
+			"-kind", "password",
+			"-title", b.Title + " database URL",
+			"-message", "Read-only database URL (file:, postgres://, or postgresql://):",
+		}
+	} else {
+		if def := b.Current(cfg).CatalogPath; def != "" {
+			args = append(args, "-default", def)
+		}
+		if len(b.CatalogFilePatterns) > 0 {
+			args = append(args, "-patterns", strings.Join(b.CatalogFilePatterns, ","))
+		}
 	}
 
 	value, exitCode, err := s.dialog(context.Background(), args...)

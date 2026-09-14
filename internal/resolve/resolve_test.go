@@ -260,6 +260,25 @@ func TestSyncerDryRun(t *testing.T) {
 	}
 }
 
+func TestSyncerRejectsEmptyTimelineID(t *testing.T) {
+	db, err := Open(context.Background(), "file::memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.db.ExecContext(context.Background(), resolveSchema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	insertClip(t, db, "", "Master", "seq1", "tr1", "i1", "PXL_001.mp4", `D:\Videos\Norway\PXL_001.mp4`, "262", "96319", "33")
+
+	syncer := &Syncer{DB: db, Index: &fakeIndex{}, DryRun: true}
+	_, err = syncer.Sync(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "empty timeline ID") {
+		t.Fatalf("Sync error = %v, want empty timeline ID rejection", err)
+	}
+}
+
 func TestSyncerEvidenceOnly(t *testing.T) {
 	db, err := Open(context.Background(), "file::memory:")
 	if err != nil {
@@ -302,6 +321,9 @@ func TestSyncerEvidenceOnly(t *testing.T) {
 	if stats.EdgesAttached != 1 {
 		t.Errorf("EdgesAttached = %d, want 1", stats.EdgesAttached)
 	}
+	if stats.Emitted != 1 {
+		t.Errorf("Emitted = %d, want 1", stats.Emitted)
+	}
 	if stats.Errors != 0 {
 		t.Errorf("Errors = %d, want 0", stats.Errors)
 	}
@@ -313,8 +335,9 @@ func TestSyncerEvidenceOnly(t *testing.T) {
 	if call.payload.NodeUUID == "" {
 		t.Error("virtual node UUID must not be empty")
 	}
-	if !strings.HasPrefix(call.payload.FilePath, "/virtual/resolve/test-agent/Master-") {
-		t.Errorf("virtual node FilePath = %q, want prefix /virtual/resolve/test-agent/Master-", call.payload.FilePath)
+	wantVirtualPath := "/virtual/resolve/" + VirtualNodeUUID(syncer.AgentID, "t1", syncer.DatabaseURL)
+	if call.payload.FilePath != wantVirtualPath {
+		t.Errorf("virtual node FilePath = %q, want %q", call.payload.FilePath, wantVirtualPath)
 	}
 	if call.payload.DisplayName != "Resolve: Master" {
 		t.Errorf("virtual node DisplayName = %q, want %q", call.payload.DisplayName, "Resolve: Master")
@@ -444,7 +467,9 @@ func TestSyncerEvidenceCollectsMultipleTimelines(t *testing.T) {
 	if _, err := db.db.ExecContext(context.Background(), `INSERT INTO "Sm2TiItem" VALUES ('i1', 'PXL_001.mp4', 'D:\Videos\PXL_001.mp4', '100', '0', '30', 'tr1')`); err != nil {
 		t.Fatalf("insert item: %v", err)
 	}
-	if _, err := db.db.ExecContext(context.Background(), `INSERT INTO "Sm2Timeline" VALUES ('t2', 'YouTube')`); err != nil {
+	// Resolve permits duplicate display names; stable timeline IDs must keep
+	// these as two distinct virtual nodes and memberships.
+	if _, err := db.db.ExecContext(context.Background(), `INSERT INTO "Sm2Timeline" VALUES ('t2', 'Master')`); err != nil {
 		t.Fatalf("insert timeline 2: %v", err)
 	}
 	if _, err := db.db.ExecContext(context.Background(), `INSERT INTO "Sm2Sequence" VALUES ('seq2', 't2')`); err != nil {
@@ -460,13 +485,16 @@ func TestSyncerEvidenceCollectsMultipleTimelines(t *testing.T) {
 	index := &fakeIndex{entries: map[string]string{
 		"/storage/archive/PXL_001.mp4": "node-uuid-001",
 	}}
+	fakeEmitter := &fakeVirtualEmitter{}
+	fakeAttacher := &fakeEdgeAttacher{}
 
 	syncer := &Syncer{
-		DB:          db,
-		Index:       index,
-		AgentID:     "test-agent",
-		DatabaseURL: "file::memory:",
-		DryRun:      true,
+		DB:             db,
+		Index:          index,
+		Client:         fakeAttacher,
+		VirtualEmitter: fakeEmitter,
+		AgentID:        "test-agent",
+		DatabaseURL:    "file::memory:",
 		PathRewrites: []PathRewrite{
 			{From: "D:\\Videos\\", To: "/storage/archive/"},
 		},
@@ -484,9 +512,15 @@ func TestSyncerEvidenceCollectsMultipleTimelines(t *testing.T) {
 	if stats.VirtualNodes != 2 {
 		t.Errorf("VirtualNodes = %d, want 2 (one per timeline)", stats.VirtualNodes)
 	}
-	// One edge per unique file path (deduplicated).
-	if stats.Emitted != 1 {
-		t.Errorf("Emitted = %d, want 1", stats.Emitted)
+	// One edge per unique file/timeline membership.
+	if stats.Emitted != 2 {
+		t.Errorf("Emitted = %d, want 2", stats.Emitted)
+	}
+	if stats.EdgesAttached != 2 || len(fakeAttacher.calls) != 2 {
+		t.Fatalf("EdgesAttached = %d, calls = %d, want 2 and 2", stats.EdgesAttached, len(fakeAttacher.calls))
+	}
+	if fakeAttacher.calls[0].payload.TargetNodeUUID == fakeAttacher.calls[1].payload.TargetNodeUUID {
+		t.Error("two timeline memberships emitted to the same virtual node")
 	}
 }
 
@@ -659,30 +693,32 @@ func (f *fakeEdgeAttacher) PostEdgeAttached(ctx context.Context, agentID string,
 
 func TestVirtualNodeUUID_Deterministic(t *testing.T) {
 	// Same inputs always produce the same UUID.
-	uuid1 := VirtualNodeUUID("agent-01", "Master", "postgres://localhost:5432/resolve")
-	uuid2 := VirtualNodeUUID("agent-01", "Master", "postgres://localhost:5432/resolve")
+	uuid1 := VirtualNodeUUID("agent-1", "timeline-1", "postgres://alice:old-secret@localhost:5432/resolve?sslmode=require")
+	uuid2 := VirtualNodeUUID("agent-1", "timeline-1", "postgres://bob:new-secret@localhost:5432/resolve?sslmode=verify-full")
 	if uuid1 != uuid2 {
-		t.Errorf("VirtualNodeUUID not deterministic: %q != %q", uuid1, uuid2)
+		t.Errorf("VirtualNodeUUID changed with credentials/connection options: %q != %q", uuid1, uuid2)
 	}
-	// Different timeline names produce different UUIDs.
-	uuid3 := VirtualNodeUUID("agent-01", "YouTube", "postgres://localhost:5432/resolve")
+	// Different stable timeline IDs produce different UUIDs, even when their
+	// display names happen to be identical (names are not UUID inputs).
+	uuid3 := VirtualNodeUUID("agent-1", "timeline-2", "postgres://localhost:5432/resolve")
 	if uuid1 == uuid3 {
 		t.Errorf("VirtualNodeUUID should differ for different timelines: %q == %q", uuid1, uuid3)
 	}
 	// Different database URLs produce different UUIDs.
-	uuid4 := VirtualNodeUUID("agent-01", "Master", "postgres://localhost:5433/resolve")
+	uuid4 := VirtualNodeUUID("agent-1", "timeline-1", "postgres://localhost:5433/resolve")
 	if uuid1 == uuid4 {
 		t.Errorf("VirtualNodeUUID should differ for different databases: %q == %q", uuid1, uuid4)
 	}
-	// Different agent IDs produce different UUIDs.
-	uuid5 := VirtualNodeUUID("agent-02", "Master", "postgres://localhost:5432/resolve")
+	// branchDAM's live-path uniqueness is global, so distinct agents syncing
+	// the same shared database must emit distinct virtual nodes.
+	uuid5 := VirtualNodeUUID("agent-2", "timeline-1", "postgres://localhost:5432/resolve")
 	if uuid1 == uuid5 {
 		t.Errorf("VirtualNodeUUID should differ for different agents: %q == %q", uuid1, uuid5)
 	}
 }
 
 func TestVirtualNodeUUID_Format(t *testing.T) {
-	uuid := VirtualNodeUUID("agent-01", "test", "file::memory:")
+	uuid := VirtualNodeUUID("agent-1", "test", "file::memory:")
 	// UUID v4 format: 8-4-4-4-12 hex digits.
 	if len(uuid) != 36 {
 		t.Errorf("UUID length = %d, want 36", len(uuid))
@@ -697,81 +733,10 @@ func TestVirtualNodeUUID_Format(t *testing.T) {
 }
 
 func TestVirtualFilePath(t *testing.T) {
-	got := virtualFilePath("/virtual/resolve", "agent-01", "Master")
-	// Path embeds a hash of the raw name so distinct names with the same
-	// sanitized form produce distinct paths. Just verify structure + hash suffix.
-	if !strings.HasPrefix(got, "/virtual/resolve/agent-01/Master-") {
-		t.Errorf("virtualFilePath = %q, want prefix /virtual/resolve/agent-01/Master-", got)
-	}
-	if strings.Contains(got, "..") {
-		t.Errorf("virtualFilePath = %q, contains '..'", got)
-	}
-}
-
-func TestVirtualFilePath_UniquePerRawName(t *testing.T) {
-	// "A/B" and "A-B" sanitize to the same form but must produce distinct paths.
-	a := virtualFilePath("/virtual/resolve", "agent-01", "A/B")
-	b := virtualFilePath("/virtual/resolve", "agent-01", "A-B")
-	if a == b {
-		t.Errorf("virtualFilePath: A/B and A-B produced same path %q", a)
-	}
-}
-
-func TestVirtualFilePath_SanitizesAgentID(t *testing.T) {
-	cases := []struct {
-		name    string
-		agentID string
-	}{
-		{"parent escape", "../../etc"},
-		{"slash inserted", "workstation/evil"},
-		{"backslash", `workstation\evil`},
-		{"only dots", ".."},
-		{"empty", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := virtualFilePath("/virtual/resolve", tc.agentID, "Master")
-			// Must stay under /virtual/resolve/ — no escape upward.
-			if !strings.HasPrefix(got, "/virtual/resolve/") {
-				t.Errorf("virtualFilePath(agentID=%q) = %q, escaped virtual root",
-					tc.agentID, got)
-			}
-			// Must not contain "..".
-			if strings.Contains(got, "..") {
-				t.Errorf("virtualFilePath(agentID=%q) = %q, contains '..'",
-					tc.agentID, got)
-			}
-		})
-	}
-}
-
-func TestSanitizeTimelineName(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"normal", "Master", "Master"},
-		{"with slash", "Act 1/Scene 1", "Act 1-Scene 1"},
-		{"with backslash", `Act 1\Scene 1`, "Act 1-Scene 1"},
-		{"dotdot escape", "..", "_"},
-		{"leading dotdot", "../etc/passwd", "_-etc-passwd"},
-		{"trailing dots", "timeline...", "timeline_"},
-		{"empty", "", "unnamed"},
-		{"only dots", "...", "_"},
-		{"embedded dotdot", "foo..bar", "foo_bar"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := sanitizeTimelineName(tc.in)
-			if got != tc.want {
-				t.Errorf("sanitizeTimelineName(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-			// Critical: sanitized names must never contain path traversal.
-			if strings.Contains(got, "..") {
-				t.Errorf("sanitized name %q still contains path traversal", got)
-			}
-		})
+	got := virtualFilePath("/virtual/resolve", "1f14bcea-fb5e-4b9f-9b20-447c8cf29167")
+	want := "/virtual/resolve/1f14bcea-fb5e-4b9f-9b20-447c8cf29167"
+	if got != want {
+		t.Errorf("virtualFilePath = %q, want %q", got, want)
 	}
 }
 

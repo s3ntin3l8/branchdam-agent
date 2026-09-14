@@ -31,8 +31,16 @@ func TestFindSRTSidecarLowercaseExt(t *testing.T) {
 	if !ok {
 		t.Fatal("expected sidecar to be found")
 	}
-	if got != srt {
-		t.Errorf("got %q, want %q", got, srt)
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantInfo, err := os.Stat(srt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		t.Errorf("got %q, want the same file as %q", got, srt)
 	}
 }
 
@@ -47,8 +55,16 @@ func TestFindSRTSidecarUppercaseExt(t *testing.T) {
 	if !ok {
 		t.Fatal("expected sidecar to be found")
 	}
-	if got != srt {
-		t.Errorf("got %q, want %q", got, srt)
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantInfo, err := os.Stat(srt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		t.Errorf("got %q, want the same file as %q", got, srt)
 	}
 }
 

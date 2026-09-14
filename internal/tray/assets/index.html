@@ -139,7 +139,7 @@
         {{else}}
         {{if $cfg.Enabled}}enabled{{else}}disabled{{end}},
         {{if $cfg.DryRun}}dry run{{else}}live{{end}},
-        catalog {{if $cfg.CatalogPathSet}}<code>{{$cfg.CatalogPath}}</code>{{else}}<span class="stub">not set</span>{{end}}
+        {{if eq .ID "resolvedb"}}database URL{{else}}catalog{{end}} {{if $cfg.CatalogPathSet}}<code>{{$cfg.CatalogPath}}</code>{{else}}<span class="stub">not set</span>{{end}}
         {{end}}
         {{with .LastSync}}
         <br>
@@ -147,7 +147,7 @@
         {{if .Err}}
         <span class="fail">failed: {{.Err}}</span>
         {{else}}
-        {{.PairsFound}} pairs found, {{.Emitted}} emitted{{if .DryRun}} <em>(dry run &mdash; nothing was emitted)</em>{{end}}, {{.Skipped}} skipped{{if gt .Errors 0}}, <span class="fail">{{.Errors}} errors</span>{{end}}
+        {{.PairsFound}} pairs found, {{.Emitted}} emitted{{if .DryRun}} <em>(dry run &mdash; nothing was emitted)</em>{{end}}{{if gt .EvidenceOnly 0}}, {{.EvidenceOnly}} evidence-only{{end}}, {{.Skipped}} skipped{{if gt .Errors 0}}, <span class="fail">{{.Errors}} errors</span>{{end}}
         {{end}}
         {{end}}
       </li>
