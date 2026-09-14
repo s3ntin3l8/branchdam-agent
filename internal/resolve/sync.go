@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/nodeindex"
 )
