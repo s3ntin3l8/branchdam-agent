@@ -140,13 +140,14 @@ type PathRebasedPayload struct {
 // Unlike NodeCreatedPayload, it carries no file metadata — the node
 // represents an integration project (Resolve timeline, Premiere sequence,
 // FCPXML bundle), not a physical file on disk. The FilePath uses a
-// conventional absolute prefix (e.g. "/virtual/resolve/My%20Documentary")
+// conventional absolute prefix (e.g. "/virtual/resolve/<agentID>/My%20Documentary")
 // that the Guard resolves lexically via an is_virtual storage location.
 type VirtualNodeCreated struct {
-	NodeUUID    string `json:"nodeUuid"`
-	FilePath    string `json:"filePath"`
-	DisplayName string `json:"displayName"`
-	ProjectType string `json:"projectType"`
+	NodeUUID     string          `json:"nodeUuid"`
+	FilePath     string          `json:"filePath"`
+	DisplayName  string          `json:"displayName"`
+	ProjectType  string          `json:"projectType"`
+	EvidenceJSON json.RawMessage `json:"evidenceJson,omitempty"`
 }
 
 // EventEnvelope is the request body for POST /api/v1/agent/events

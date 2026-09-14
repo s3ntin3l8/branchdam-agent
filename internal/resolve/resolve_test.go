@@ -313,8 +313,8 @@ func TestSyncerEvidenceOnly(t *testing.T) {
 	if call.payload.NodeUUID == "" {
 		t.Error("virtual node UUID must not be empty")
 	}
-	if call.payload.FilePath != "/virtual/resolve/Master" {
-		t.Errorf("virtual node FilePath = %q, want %q", call.payload.FilePath, "/virtual/resolve/Master")
+	if call.payload.FilePath != "/virtual/resolve/test-agent/Master" {
+		t.Errorf("virtual node FilePath = %q, want %q", call.payload.FilePath, "/virtual/resolve/test-agent/Master")
 	}
 	if call.payload.DisplayName != "Resolve: Master" {
 		t.Errorf("virtual node DisplayName = %q, want %q", call.payload.DisplayName, "Resolve: Master")
@@ -659,25 +659,30 @@ func (f *fakeEdgeAttacher) PostEdgeAttached(ctx context.Context, agentID string,
 
 func TestVirtualNodeUUID_Deterministic(t *testing.T) {
 	// Same inputs always produce the same UUID.
-	uuid1 := VirtualNodeUUID("Master", "postgres://localhost:5432/resolve")
-	uuid2 := VirtualNodeUUID("Master", "postgres://localhost:5432/resolve")
+	uuid1 := VirtualNodeUUID("agent-01", "Master", "postgres://localhost:5432/resolve")
+	uuid2 := VirtualNodeUUID("agent-01", "Master", "postgres://localhost:5432/resolve")
 	if uuid1 != uuid2 {
 		t.Errorf("VirtualNodeUUID not deterministic: %q != %q", uuid1, uuid2)
 	}
 	// Different timeline names produce different UUIDs.
-	uuid3 := VirtualNodeUUID("YouTube", "postgres://localhost:5432/resolve")
+	uuid3 := VirtualNodeUUID("agent-01", "YouTube", "postgres://localhost:5432/resolve")
 	if uuid1 == uuid3 {
 		t.Errorf("VirtualNodeUUID should differ for different timelines: %q == %q", uuid1, uuid3)
 	}
 	// Different database URLs produce different UUIDs.
-	uuid4 := VirtualNodeUUID("Master", "postgres://localhost:5433/resolve")
+	uuid4 := VirtualNodeUUID("agent-01", "Master", "postgres://localhost:5433/resolve")
 	if uuid1 == uuid4 {
 		t.Errorf("VirtualNodeUUID should differ for different databases: %q == %q", uuid1, uuid4)
+	}
+	// Different agent IDs produce different UUIDs.
+	uuid5 := VirtualNodeUUID("agent-02", "Master", "postgres://localhost:5432/resolve")
+	if uuid1 == uuid5 {
+		t.Errorf("VirtualNodeUUID should differ for different agents: %q == %q", uuid1, uuid5)
 	}
 }
 
 func TestVirtualNodeUUID_Format(t *testing.T) {
-	uuid := VirtualNodeUUID("test", "file::memory:")
+	uuid := VirtualNodeUUID("agent-01", "test", "file::memory:")
 	// UUID v4 format: 8-4-4-4-12 hex digits.
 	if len(uuid) != 36 {
 		t.Errorf("UUID length = %d, want 36", len(uuid))
@@ -692,10 +697,40 @@ func TestVirtualNodeUUID_Format(t *testing.T) {
 }
 
 func TestVirtualFilePath(t *testing.T) {
-	got := virtualFilePath("/virtual/resolve", "Master")
-	want := "/virtual/resolve/Master"
+	got := virtualFilePath("/virtual/resolve", "agent-01", "Master")
+	want := "/virtual/resolve/agent-01/Master"
 	if got != want {
 		t.Errorf("virtualFilePath = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeTimelineName(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"normal", "Master", "Master"},
+		{"with slash", "Act 1/Scene 1", "Act 1-Scene 1"},
+		{"with backslash", `Act 1\Scene 1`, "Act 1-Scene 1"},
+		{"dotdot escape", "..", "_"},
+		{"leading dotdot", "../etc/passwd", "_-etc-passwd"},
+		{"trailing dots", "timeline...", "timeline_"},
+		{"empty", "", "unnamed-timeline"},
+		{"only dots", "...", "_"},
+		{"embedded dotdot", "foo..bar", "foo_bar"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeTimelineName(tc.in)
+			if got != tc.want {
+				t.Errorf("sanitizeTimelineName(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			// Critical: sanitized names must never contain path traversal.
+			if strings.Contains(got, "..") {
+				t.Errorf("sanitized name %q still contains path traversal", got)
+			}
+		})
 	}
 }
 

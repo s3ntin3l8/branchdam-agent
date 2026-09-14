@@ -102,11 +102,12 @@ func (s *Syncer) logger() *slog.Logger {
 }
 
 // VirtualNodeUUID generates a deterministic UUID for a virtual project node
-// from its timeline name and the database URL. The same inputs always produce
-// the same UUID, so re-syncs are idempotent — the server's "already exists"
-// check makes re-sends safe.
-func VirtualNodeUUID(timelineName, databaseURL string) string {
-	h := sha256.Sum256([]byte(timelineName + "\x00" + databaseURL))
+// from the agent ID, timeline name, and database URL. The same inputs always
+// produce the same UUID, so re-syncs are idempotent — the server's "already
+// exists" check makes re-sends safe. agentID is included to avoid collisions
+// when multiple workstations edit timelines with the same name.
+func VirtualNodeUUID(agentID, timelineName, databaseURL string) string {
+	h := sha256.Sum256([]byte(agentID + "\x00" + timelineName + "\x00" + databaseURL))
 	// UUID v4 from first 16 bytes of SHA-256, set version and variant bits.
 	u := h[:16]
 	u[6] = (u[6] & 0x0f) | 0x40 // version 4
@@ -115,9 +116,26 @@ func VirtualNodeUUID(timelineName, databaseURL string) string {
 		u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
 }
 
+// sanitizeTimelineName makes a timeline name safe for use as a path component.
+// Resolve timeline names are untrusted DB text — a name like ".." would escape
+// the virtual root, and "/" would build arbitrary nested paths. This function
+// replaces path separators and dot-only names with safe alternatives.
+func sanitizeTimelineName(name string) string {
+	name = strings.ReplaceAll(name, "/", "-")
+	name = strings.ReplaceAll(name, "\\", "-")
+	name = strings.ReplaceAll(name, "..", "_")
+	name = strings.Trim(name, ".")
+	if name == "" || name == "." || name == ".." {
+		name = "unnamed-timeline"
+	}
+	return name
+}
+
 // virtualFilePath returns the virtual path for a timeline's project node.
-func virtualFilePath(virtualRoot, timelineName string) string {
-	return path.Clean(virtualRoot + "/" + timelineName)
+// The path is scoped per agent to avoid ux_media_nodes_live_path collisions
+// across workstations.
+func virtualFilePath(virtualRoot, agentID, timelineName string) string {
+	return path.Clean(virtualRoot + "/" + agentID + "/" + timelineName)
 }
 
 // virtualDisplayName returns a human-readable label for a virtual project node.
@@ -168,7 +186,8 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	}
 
 	// Collect unique timelines seen across all clips. We need one virtual
-	// project node per timeline.
+	// project node per timeline. Timeline names from the Resolve DB are
+	// untrusted — sanitize for safe use as path components.
 	type timelineInfo struct {
 		name string
 		id   string
@@ -177,12 +196,13 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	var timelines []timelineInfo
 	for _, path := range order {
 		for _, tl := range byPath[path].timelines {
-			if !timelineSeen[tl] {
-				timelineSeen[tl] = true
+			safe := sanitizeTimelineName(tl)
+			if !timelineSeen[safe] {
+				timelineSeen[safe] = true
 				// Find the timeline_id for this timeline name from the clips.
 				for _, clip := range clips {
 					if clip.TimelineName == tl {
-						timelines = append(timelines, timelineInfo{name: tl, id: clip.TimelineID})
+						timelines = append(timelines, timelineInfo{name: safe, id: clip.TimelineID})
 						break
 					}
 				}
@@ -203,15 +223,15 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	// Create virtual project nodes for each unique timeline.
 	timelineUUIDs := make(map[string]string) // timelineName → virtual node UUID
 	for _, tl := range timelines {
-		nodeUUID := VirtualNodeUUID(tl.name, s.DatabaseURL)
-		timelineUUIDs[tl.name] = nodeUUID
+		nodeUUID := VirtualNodeUUID(s.AgentID, tl.name, s.DatabaseURL)
 
-		fp := virtualFilePath(virtualRoot, tl.name)
+		fp := virtualFilePath(virtualRoot, s.AgentID, tl.name)
 		displayName := virtualDisplayName(tl.name)
 
 		if s.DryRun {
 			s.logger().Info("resolve-sync: (dry run) would create virtual node",
 				"nodeUuid", nodeUUID, "filePath", fp, "timeline", tl.name)
+			timelineUUIDs[tl.name] = nodeUUID
 			stats.VirtualNodes++
 			continue
 		}
@@ -234,6 +254,10 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 				"timeline", tl.name, "nodeUuid", nodeUUID, "err", err)
 			continue
 		}
+		// Register UUID only after successful creation — the edge loop
+		// skips timelines with no UUID, so a failed create means no
+		// dangling PROJECT_SIDECAR edges targeting an absent node.
+		timelineUUIDs[tl.name] = nodeUUID
 		stats.VirtualNodes++
 		s.logger().Info("resolve-sync: created virtual node",
 			"nodeUuid", nodeUUID, "filePath", fp, "timeline", tl.name)
@@ -286,7 +310,7 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 			return stats, fmt.Errorf("resolve: marshal evidence for %q: %w", clip.MediaFilePath, err)
 		}
 
-		targetUUID := timelineUUIDs[clip.TimelineName]
+		targetUUID := timelineUUIDs[sanitizeTimelineName(clip.TimelineName)]
 		if targetUUID == "" {
 			stats.Errors++
 			s.logger().Error("resolve-sync: no virtual node UUID for timeline",
