@@ -20,7 +20,7 @@ import "encoding/json"
 // branchdam's internal/agent/types.go or internal/httpapi/routes.go's agent
 // DTOs change; conformance_test.go asserts it matches the committed golden
 // fixture.
-const ContractVersion = "branchdam@66f9d3c"
+const ContractVersion = "branchdam@854f008"
 
 // Event type constants, matching the event_queue.event_type CHECK
 // constraint (internal/agent/types.go in branchdam).
