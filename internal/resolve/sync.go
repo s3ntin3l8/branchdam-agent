@@ -117,26 +117,36 @@ func VirtualNodeUUID(agentID, timelineName, databaseURL string) string {
 		u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
 }
 
-// sanitizeTimelineName makes a timeline name safe for use as a path component.
-// Resolve timeline names are untrusted DB text — a name like ".." would escape
-// the virtual root, and "/" would build arbitrary nested paths. This function
-// replaces path separators and dot-only names with safe alternatives.
-func sanitizeTimelineName(name string) string {
+// sanitizePathComponent makes a string safe for use as a single path
+// segment. Rejects path separators, dot-only names, and dotdot sequences
+// that could escape the parent directory. Shared by timeline names and
+// agent IDs.
+func sanitizePathComponent(name string) string {
 	name = strings.ReplaceAll(name, "/", "-")
 	name = strings.ReplaceAll(name, "\\", "-")
 	name = strings.ReplaceAll(name, "..", "_")
 	name = strings.Trim(name, ".")
 	if name == "" || name == "." || name == ".." {
-		name = "unnamed-timeline"
+		name = "unnamed"
 	}
 	return name
 }
 
+// sanitizeTimelineName makes a timeline name safe for use as a path component.
+// Resolve timeline names are untrusted DB text -- a name like ".." would escape
+// the virtual root, and "/" would build arbitrary nested paths. This function
+// replaces path separators and dot-only names with safe alternatives.
+func sanitizeTimelineName(name string) string {
+	return sanitizePathComponent(name)
+}
+
 // virtualFilePath returns the virtual path for a timeline's project node.
 // The path is scoped per agent to avoid ux_media_nodes_live_path collisions
-// across workstations.
+// across workstations. Both agentID and timelineName are sanitized as single
+// path components so operator-set values like "../.." cannot escape the
+// virtual root.
 func virtualFilePath(virtualRoot, agentID, timelineName string) string {
-	return path.Clean(virtualRoot + "/" + agentID + "/" + timelineName)
+	return path.Clean(virtualRoot + "/" + sanitizePathComponent(agentID) + "/" + sanitizePathComponent(timelineName))
 }
 
 // virtualDisplayName returns a human-readable label for a virtual project node.

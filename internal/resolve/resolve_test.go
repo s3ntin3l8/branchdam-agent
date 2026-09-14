@@ -704,6 +704,35 @@ func TestVirtualFilePath(t *testing.T) {
 	}
 }
 
+func TestVirtualFilePath_SanitizesAgentID(t *testing.T) {
+	cases := []struct {
+		name     string
+		agentID  string
+		wantLast string
+	}{
+		{"parent escape", "../../etc", "?-etc"},
+		{"slash inserted", "workstation/evil", "workstation-evil"},
+		{"backslash", `workstation\evil`, `workstation-evil`},
+		{"only dots", "..", "unnamed"},
+		{"empty", "", "unnamed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := virtualFilePath("/virtual/resolve", tc.agentID, "Master")
+			// Must stay under /virtual/resolve/ — no escape upward.
+			if !strings.HasPrefix(got, "/virtual/resolve/") {
+				t.Errorf("virtualFilePath(agentID=%q) = %q, escaped virtual root",
+					tc.agentID, got)
+			}
+			// Must not contain "..".
+			if strings.Contains(got, "..") {
+				t.Errorf("virtualFilePath(agentID=%q) = %q, contains '..'",
+					tc.agentID, got)
+			}
+		})
+	}
+}
+
 func TestSanitizeTimelineName(t *testing.T) {
 	cases := []struct {
 		name string
@@ -716,7 +745,7 @@ func TestSanitizeTimelineName(t *testing.T) {
 		{"dotdot escape", "..", "_"},
 		{"leading dotdot", "../etc/passwd", "_-etc-passwd"},
 		{"trailing dots", "timeline...", "timeline_"},
-		{"empty", "", "unnamed-timeline"},
+		{"empty", "", "unnamed"},
 		{"only dots", "...", "_"},
 		{"embedded dotdot", "foo..bar", "foo_bar"},
 	}
