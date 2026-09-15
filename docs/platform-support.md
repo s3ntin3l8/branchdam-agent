@@ -236,8 +236,10 @@ tray over the loopback `/api/*` surface above instead of sharing a process with 
 sections, plus a Settings section (Track 3d) that reads `GET /api/settings` once at load and writes
 through `App.SetSetting`/`SetIntegrationPath`/`SetIntegrationRewrites` -- see those methods' own doc
 comments in `app.go`. The settings form deliberately does **not** re-poll on the 5-second status
-timer: re-rendering every field on every tick would overwrite whatever an operator is mid-typing, so
-a field only re-renders itself, from the fresh snapshot its own save call already returns. Two native
+timer: re-rendering every field on every tick would overwrite whatever an operator is mid-typing, and
+no field re-fetches on save either -- a text field keeps what was typed on a rejected save so it can
+be corrected and resubmitted, while a checkbox or `<select>` (no "keep editing" state) reverts to its
+pre-change value instead of staying visibly flipped until the window reloads. Two native
 folder/file pickers (`App.PickDirectory`/`PickFile`, wrapping Wails' `runtime.OpenDirectoryDialog`/
 `OpenFileDialog`) back the archive root, local edit root, and node-index path fields -- these are only
 reachable from Go code running inside this process's own window context, which is why they are bound

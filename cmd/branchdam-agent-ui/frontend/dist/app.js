@@ -262,9 +262,12 @@ setInterval(poll, POLL_INTERVAL_MS);
 //
 // Loaded once at startup, not on the 5s status poll: re-rendering the
 // whole form on every poll tick would blow away whatever an operator is
-// mid-typing. A field re-renders only after ITS OWN save completes, using
-// the fresh snapshot SetSetting/SetIntegrationPath/SetIntegrationRewrites
-// already returns -- never a blanket re-fetch of every field at once.
+// mid-typing. No field re-fetches from the agent on save -- a text field
+// keeps whatever was typed either way, so a rejected save can be corrected
+// and resubmitted without retyping; a checkbox or <select>, which has no
+// "keep editing" state, instead reverts to its pre-change value on a
+// failed save (renderCheckboxField/renderSelectField) rather than staying
+// visibly flipped until the window reloads.
 
 // FREE_TEXT_FIELDS mirrors internal/tray/settingsmenu.go's own free-text
 // items exactly, one row per PromptAndSet(FieldX) call there. `list: true`
@@ -325,15 +328,21 @@ function setFieldStatus(el, text, kind) {
 
 // saveSetting drives the common "save one key, re-render nothing but this
 // field's own status" path every plain (non-integration) field uses.
+// saveSetting returns whether the save actually succeeded -- callers that
+// need to react differently on failure (clearing a password field only on
+// success, reverting a checkbox/select to its prior value on failure)
+// check this instead of assuming the call always "took."
 async function saveSetting(key, value, statusEl) {
   const app = getApp();
-  if (!app) return;
+  if (!app) return false;
   setFieldStatus(statusEl, "Saving…");
   try {
     await app.SetSetting(key, value);
     setFieldStatus(statusEl, "Saved", "saved");
+    return true;
   } catch (err) {
     setFieldStatus(statusEl, String(err), "error");
+    return false;
   }
 }
 
@@ -381,8 +390,11 @@ function renderTextField(f, sv) {
   input.addEventListener("change", () => {
     if (f.password && input.value === "") return; // blank means "leave unchanged"
     const value = f.list ? splitCommaList(input.value) : input.value;
-    saveSetting(f.key, value, status).then(() => {
-      if (f.password) input.value = "";
+    saveSetting(f.key, value, status).then((ok) => {
+      // Only clear a typed secret once it's actually saved -- a rejected
+      // save must leave it in the field, or retrying means retyping the
+      // whole key from scratch (Hermes review finding on this PR).
+      if (f.password && ok) input.value = "";
     });
   });
 
@@ -404,8 +416,14 @@ function renderCheckboxField(f, sv) {
   const status = document.createElement("span");
   status.className = "field-status";
 
-  input.addEventListener("change", () => {
-    saveSetting(f.key, input.checked, status);
+  input.addEventListener("change", async () => {
+    // A checkbox has no "keep editing" state the way a text field does --
+    // a failed save must revert the visible toggle, or it stays flipped
+    // and misrepresents the real config until the window reloads (Hermes
+    // review finding on this PR).
+    const previous = !input.checked;
+    const ok = await saveSetting(f.key, input.checked, status);
+    if (!ok) input.checked = previous;
   });
 
   row.appendChild(input);
@@ -423,18 +441,38 @@ function renderSelectField(label, options, current, onChange) {
   row.appendChild(labelEl);
 
   const select = document.createElement("select");
-  for (const [val, text] of options) {
+  const currentStr = String(current);
+  // A hand-edited config.yaml can set a value none of the fixed options
+  // represent (e.g. syncIntervalMinutes: 30) -- setting select.value to a
+  // non-matching string leaves nothing truly selected, but the control
+  // still visibly displays the first option, misrepresenting the real
+  // value (Hermes review finding on this PR). A synthetic leading option
+  // carrying the raw value makes that state visible instead of hidden.
+  const knownValues = options.map(([v]) => v);
+  const optionList = knownValues.includes(currentStr) ? options : [[currentStr, `Current: ${current} (hand-configured)`], ...options];
+  for (const [val, text] of optionList) {
     const opt = document.createElement("option");
     opt.value = val;
     opt.textContent = text;
     select.appendChild(opt);
   }
-  select.value = String(current);
+  select.value = currentStr;
   row.appendChild(select);
 
   const status = document.createElement("span");
   status.className = "field-status";
-  select.addEventListener("change", () => onChange(select.value, status));
+  let lastGood = select.value;
+  select.addEventListener("change", async () => {
+    // A select has no "keep editing" state -- a failed save must revert
+    // the visible choice, the same reasoning as renderCheckboxField's own
+    // revert-on-failure (Hermes review finding on this PR).
+    const ok = await onChange(select.value, status);
+    if (ok) {
+      lastGood = select.value;
+    } else {
+      select.value = lastGood;
+    }
+  });
   row.appendChild(status);
 
   return row;
@@ -603,7 +641,15 @@ async function loadSettings() {
     byId("settings-error").textContent = "";
     renderSettingsForm(sv);
   } catch (err) {
+    // Retry at the same cadence as the status poll rather than leaving a
+    // dead error: the agent may not be running yet when this window
+    // opens, or may still be restarting -- both normal cases (see
+    // app.go's StatusJSON doc comment), and the status section already
+    // self-heals the same way. Once a load succeeds, this stops
+    // rescheduling itself -- the settings form is still loaded once, not
+    // on a timer, so an in-progress edit is never overwritten.
     byId("settings-error").textContent = String(err);
+    setTimeout(loadSettings, POLL_INTERVAL_MS);
   }
 }
 
