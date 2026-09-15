@@ -79,7 +79,7 @@ func TestBuildIntegrationDepsLuminarReadiness(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			deps := buildIntegrationDeps(config.Config{Integrations: tc.cfg}, client)
+			deps, _ := buildIntegrationDeps(config.Config{Integrations: tc.cfg}, client)
 			_, got := deps[tray.IntegrationLuminar]
 			if got != tc.want {
 				t.Errorf("registered = %v, want %v", got, tc.want)

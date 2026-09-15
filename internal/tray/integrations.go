@@ -64,7 +64,34 @@ type SyncSummary struct {
 	VirtualNodes  int // virtual project nodes created (or, in a dry run, that would have been)
 	EdgesAttached int // PROJECT_SIDECAR edges emitted (or, in a dry run, that would have been)
 	EvidenceOnly  int // clips whose evidence was logged but no edge emitted (deprecated, kept for compat)
+	Removed       int // memberships in previous pass but not current (clip removed from timeline)
+	FileMissing   int // clips in current query whose rewritten path doesn't exist on disk
 	Err           error
+}
+
+// SyncMembershipEntry is one (media path, timeline ID) pair from a Resolve
+// sync pass. Stored in Runner's in-memory carry-forward and persisted to
+// runtime.json for delta detection across sync passes. The agent cannot
+// query which edges exist on the server, so this local snapshot is the
+// only way to detect removals.
+//
+// Structural duplicate of resolve.MembershipEntry (internal/resolve/sync.go)
+// and runtime.MembershipEntry (internal/runtime/runtime.go). All three are
+// kept identical by convention -- the trayToResolveMemberships /
+// resolveToTrayMemberships converters in cmd/bridge the tray and resolve
+// sides; runtime.MembershipEntry matches the on-disk JSON shape so it can
+// round-trip through runtime.json without a separate adapter.
+//
+// Consolidation would require a fourth package (e.g. internal/membership)
+// that all three could import, but that's a structural refactor that
+// touches every reference site for a single struct of two strings. The
+// duplication cost is bounded: three definitions, two converters, and a
+// rule that adding/removing a field updates all three. The structural
+// cost of a shared package is unbounded: a new dependency every resolve/
+// runtime/tray consumer takes on forever.
+type SyncMembershipEntry struct {
+	MediaPath  string `json:"mp"`
+	TimelineID string `json:"tl"`
 }
 
 // IntegrationSyncer is the subset of one catalog integration's behavior the

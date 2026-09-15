@@ -314,14 +314,23 @@ func applyIntegrationStringChange(cfg *config.Config, key, v string) (handled bo
 // rebuild-on-reload contract (see reload()'s doc comment): omitting the
 // reload() call site would leave a syncer POSTing with a stale client
 // after a server.apiKey rotation.
-func buildIntegrationDeps(cfg config.Config, client *branchdam.Client) map[tray.IntegrationID]tray.IntegrationSyncer {
+//
+// The returned *resolveDBSyncer (if non-nil) is the concrete wiring
+// target for delta-detection callbacks -- callers set prevMemberships
+// and onSaveMemberships after construction.
+func buildIntegrationDeps(cfg config.Config, client *branchdam.Client) (map[tray.IntegrationID]tray.IntegrationSyncer, *resolveDBSyncer) {
 	deps := make(map[tray.IntegrationID]tray.IntegrationSyncer, len(integrationBuilders))
+	var resolveSyncer *resolveDBSyncer
 	for _, b := range integrationBuilders {
 		if b.Ready(cfg) {
-			deps[b.ID] = b.New(cfg, client)
+			s := b.New(cfg, client)
+			deps[b.ID] = s
+			if rs, ok := s.(*resolveDBSyncer); ok {
+				resolveSyncer = rs
+			}
 		}
 	}
-	return deps
+	return deps, resolveSyncer
 }
 
 // luminarSyncer implements tray.IntegrationSyncer over internal/luminar --
@@ -416,6 +425,13 @@ type resolveDBSyncer struct {
 	pathRewrites   []resolve.PathRewrite
 	virtualRoot    string
 	timeout        time.Duration
+	// prevMemberships is the set from the previous successful sync pass,
+	// loaded from runtime.json and advanced in-place by the
+	// OnSaveMemberships bridge after each pass. Enables delta detection.
+	prevMemberships []tray.SyncMembershipEntry
+	// onSaveMemberships persists the current pass's emitted membership
+	// set to runtime.json. Nil means no persistence (test).
+	onSaveMemberships func(entries []tray.SyncMembershipEntry) error
 }
 
 func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
@@ -442,15 +458,31 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 	}
 
 	syncer := &resolve.Syncer{
-		DB:             db,
-		Index:          index,
-		Client:         s.client,
-		VirtualEmitter: s.virtualEmitter,
-		AgentID:        s.agentID,
-		DatabaseURL:    s.databaseURL,
-		DryRun:         s.dryRun,
-		PathRewrites:   s.pathRewrites,
-		VirtualRoot:    s.virtualRoot,
+		DB:              db,
+		Index:           index,
+		Client:          s.client,
+		VirtualEmitter:  s.virtualEmitter,
+		AgentID:         s.agentID,
+		DatabaseURL:     s.databaseURL,
+		DryRun:          s.dryRun,
+		PathRewrites:    s.pathRewrites,
+		VirtualRoot:     s.virtualRoot,
+		PrevMemberships: trayToResolveMemberships(s.prevMemberships),
+		OnSaveMemberships: func(entries []resolve.MembershipEntry) error {
+			// Bridge: advance the in-session baseline, then persist to
+			// runtime.json. Order matters: s.prevMemberships must be
+			// set BEFORE the next call to Sync() reads it, otherwise
+			// every pass in a long-running session would compare
+			// against the same startup snapshot -- a clip added mid-
+			// session would be re-emitted as a duplicate edge, and a
+			// removed clip would be re-logged as removed forever.
+			trayEntries := resolveToTrayMemberships(entries)
+			s.prevMemberships = trayEntries
+			if s.onSaveMemberships != nil {
+				return s.onSaveMemberships(trayEntries)
+			}
+			return nil
+		},
 	}
 
 	stats, err := syncer.Sync(ctx)
@@ -462,6 +494,8 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 		Errors:        stats.Errors,
 		VirtualNodes:  stats.VirtualNodes,
 		EdgesAttached: stats.EdgesAttached,
+		Removed:       stats.Removed,
+		FileMissing:   stats.FileMissing,
 	}
 	return summary, err
 }
@@ -536,6 +570,32 @@ const integrationSyncCheckInterval = 30 * time.Second
 // runs at most once an hour by default -- there is no cost to a more
 // generous ceiling.
 const integrationSyncTimeout = 10 * time.Minute
+
+// trayToResolveMemberships converts tray.SyncMembershipEntry slice to
+// resolve.MembershipEntry slice for wiring into resolve.Syncer.
+func trayToResolveMemberships(in []tray.SyncMembershipEntry) []resolve.MembershipEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]resolve.MembershipEntry, len(in))
+	for i, e := range in {
+		out[i] = resolve.MembershipEntry{MediaPath: e.MediaPath, TimelineID: e.TimelineID}
+	}
+	return out
+}
+
+// resolveToTrayMemberships converts resolve.MembershipEntry slice to
+// tray.SyncMembershipEntry slice for the tray callback bridge.
+func resolveToTrayMemberships(in []resolve.MembershipEntry) []tray.SyncMembershipEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]tray.SyncMembershipEntry, len(in))
+	for i, e := range in {
+		out[i] = tray.SyncMembershipEntry{MediaPath: e.MediaPath, TimelineID: e.TimelineID}
+	}
+	return out
+}
 
 // formatResolvePathRewrites formats a PathRewrite slice as a
 // comma-separated "from:to" string for display in the tray menu.
