@@ -46,7 +46,49 @@ type State struct {
 	// the log file is unwritable" non-fatal policy: a bad runtime file
 	// must not block the tray from starting).
 	LastHandshakeAt time.Time `json:"lastHandshakeAt,omitempty"`
+
+	// ResolveLastChangeCursor is the maximum Sm2TiItem.LastChangedTime
+	// value observed in the most recent Resolve sync pass. A zero value
+	// means "never synced" -- the next pass runs a full query. Persisted
+	// for cross-restart continuity so the agent can resume incremental
+	// syncing after a tray restart instead of replaying a full scan.
+	ResolveLastChangeCursor uint64 `json:"resolveLastChangeCursor,omitempty"`
+
+	// ResolveEmittedMemberships is the set of (mediaPath, timelineID)
+	// pairs the agent emitted PROJECT_SIDECAR edges for in the most
+	// recent Resolve sync pass. Used to detect added/unchanged/removed
+	// memberships on the next pass without querying the server. The
+	// agent cannot query which edges exist on the server, so this local
+	// snapshot is the only way to detect removals.
+	//
+	// When the set exceeds ResolveMembershipCap, the agent falls back
+	// to full re-emission on every pass. See ResolveMembershipCap.
+	ResolveEmittedMemberships []MembershipEntry `json:"resolveEmittedMemberships,omitempty"`
+
+	// ResolveMembershipCapReached is set when the membership set was
+	// truncated to fingerprints because it exceeded ResolveMembershipCap.
+	// A full-resolution diff is no longer possible in this state -- the
+	// agent falls back to full re-emission on every pass.
+	ResolveMembershipCapReached bool `json:"resolveMembershipCapReached,omitempty"`
 }
+
+// MembershipEntry is one (media path, timeline ID) pair from a Resolve
+// sync pass. Stored in State.ResolveEmittedMemberships for delta
+// detection across sync passes.
+//
+// Duplicated in internal/resolve and internal/tray — kept in sync by
+// convention to avoid import cycles between the three packages.
+type MembershipEntry struct {
+	MediaPath  string `json:"mp"`
+	TimelineID string `json:"tl"`
+}
+
+// ResolveMembershipCap is the maximum number of full-resolution
+// MembershipEntry values kept in State.ResolveEmittedMemberships before
+// the agent falls back to full re-emission on every pass. 10,000 covers
+// large projects (hundreds of clips across dozens of timelines) while
+// keeping the runtime.json file under ~1 MB.
+const ResolveMembershipCap = 10_000
 
 // MarshalJSON drops the LastHandshakeAt field entirely when it is the
 // zero time.Time, so a never-set State round-trips as `{}` on disk.
@@ -57,9 +99,13 @@ type State struct {
 // time-tagged patch fields have dodged by not using omitempty; the
 // runtime state file is JSON-on-disk, not a YAML config, so a custom
 // MarshalJSON is the right knob (and the smallest one).
+//
+// With the addition of resolve fields, the zero-check now covers all
+// fields: a State where every field is zero/empty marshals to `{}`,
+// preventing a fresh install from writing a non-empty JSON object.
 func (s State) MarshalJSON() ([]byte, error) {
 	type stateAlias State // avoid infinite recursion on the custom MarshalJSON
-	if s.LastHandshakeAt.IsZero() {
+	if s.LastHandshakeAt.IsZero() && len(s.ResolveEmittedMemberships) == 0 && s.ResolveLastChangeCursor == 0 && !s.ResolveMembershipCapReached {
 		return []byte("{}"), nil
 	}
 	return json.Marshal(stateAlias(s))

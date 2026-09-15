@@ -573,3 +573,83 @@ func TestStateJSONRoundTripExplicit(t *testing.T) {
 		t.Errorf("unmarshaled State.LastHandshakeAt = %v, want zero time.Time{}", back.LastHandshakeAt)
 	}
 }
+
+func TestStateJSONResolveFieldsRoundTrip(t *testing.T) {
+	st := State{
+		LastHandshakeAt:        time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC),
+		ResolveLastChangeCursor: 12345,
+		ResolveEmittedMemberships: []MembershipEntry{
+			{MediaPath: "/storage/videos/clip1.mp4", TimelineID: "tl-001"},
+			{MediaPath: "/storage/videos/clip2.mp4", TimelineID: "tl-001"},
+		},
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back State
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.LastHandshakeAt != st.LastHandshakeAt {
+		t.Errorf("LastHandshakeAt = %v, want %v", back.LastHandshakeAt, st.LastHandshakeAt)
+	}
+	if back.ResolveLastChangeCursor != 12345 {
+		t.Errorf("ResolveLastChangeCursor = %d, want 12345", back.ResolveLastChangeCursor)
+	}
+	if len(back.ResolveEmittedMemberships) != 2 {
+		t.Fatalf("ResolveEmittedMemberships len = %d, want 2", len(back.ResolveEmittedMemberships))
+	}
+	if back.ResolveEmittedMemberships[0].MediaPath != "/storage/videos/clip1.mp4" {
+		t.Errorf("Memberships[0].MediaPath = %q, want %q", back.ResolveEmittedMemberships[0].MediaPath, "/storage/videos/clip1.mp4")
+	}
+}
+
+func TestStateJSONResolveFieldsEmptyOmit(t *testing.T) {
+	st := State{
+		LastHandshakeAt: time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC),
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Resolve fields should be omitted when empty.
+	if strings.Contains(string(b), "resolve") {
+		t.Errorf("zero resolve fields should be omitted, got: %s", b)
+	}
+}
+
+func TestStateJSONZeroMarshalIsEmptyObject(t *testing.T) {
+	st := State{}
+	b, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "{}" {
+		t.Errorf("zero State marshals to %q, want %q", b, "{}")
+	}
+}
+
+func TestStateJSONMembershipCapReached(t *testing.T) {
+	st := State{
+		ResolveLastChangeCursor:    999,
+		ResolveMembershipCapReached: true,
+		ResolveEmittedMemberships: []MembershipEntry{
+			{MediaPath: "/storage/clip.mp4", TimelineID: "tl-1"},
+		},
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "resolveMembershipCapReached") {
+		t.Errorf("CapReached field should be present, got: %s", b)
+	}
+	var back State
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !back.ResolveMembershipCapReached {
+		t.Error("ResolveMembershipCapReached should be true after round-trip")
+	}
+}
