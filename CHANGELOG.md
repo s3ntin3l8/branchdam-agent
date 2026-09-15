@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.6.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.5.0...v1.6.0) (2026-09-15)
+
+
+### Features
+
+* **agent:** wire Resolve auto-discovery and sync persistence ([#198](https://github.com/s3ntin3l8/branchdam-agent/issues/198)) ([068de8f](https://github.com/s3ntin3l8/branchdam-agent/commit/068de8fd2abc9dedcdd7513581555b819816d1cd))
+* DaVinci Resolve Project Server database watcher ([#187](https://github.com/s3ntin3l8/branchdam-agent/issues/187)) ([3245c42](https://github.com/s3ntin3l8/branchdam-agent/commit/3245c429b4e71942ac48e0196fb185ed6090f78f))
+* **resolve:** add change-aware polling with delta detection ([#196](https://github.com/s3ntin3l8/branchdam-agent/issues/196)) ([b2c3c28](https://github.com/s3ntin3l8/branchdam-agent/commit/b2c3c288e2b3e2e25206f1a8e823d784192c74c1))
+* **resolve:** add DaVinci Resolve database auto-discovery ([#194](https://github.com/s3ntin3l8/branchdam-agent/issues/194)) ([ee92454](https://github.com/s3ntin3l8/branchdam-agent/commit/ee92454760b837d9a78da657c5d3a0143b4a7f35))
+* **resolve:** emit virtual nodes and PROJECT_SIDECAR edges (v2) ([451ee20](https://github.com/s3ntin3l8/branchdam-agent/commit/451ee20ae9bea866e614a43f8ab218c65821b341))
+* **resolve:** emit virtual nodes and PROJECT_SIDECAR edges (v2) ([#190](https://github.com/s3ntin3l8/branchdam-agent/issues/190)) ([4610d26](https://github.com/s3ntin3l8/branchdam-agent/commit/4610d26f11c0cf45a2d1b899da8c39ee7ba4e437))
+* **runtime:** add Resolve membership fields to persisted state ([#195](https://github.com/s3ntin3l8/branchdam-agent/issues/195)) ([55bb837](https://github.com/s3ntin3l8/branchdam-agent/commit/55bb8371d6dc38e18b026f4f18a7319b4e50ed61))
+* **tray:** add sync save callback with data-race protection ([#197](https://github.com/s3ntin3l8/branchdam-agent/issues/197)) ([b6ed380](https://github.com/s3ntin3l8/branchdam-agent/commit/b6ed380540104e8cbecb3e7c462512903ef6863c))
+* **tray:** add timeout submenu and path rewrites editor to integration menus ([#188](https://github.com/s3ntin3l8/branchdam-agent/issues/188)) ([d1c1649](https://github.com/s3ntin3l8/branchdam-agent/commit/d1c164967d31b74e2ce0dfbad13f7ebaba81462f))
+* Windows NSIS installer and one-click tray setup ([#185](https://github.com/s3ntin3l8/branchdam-agent/issues/185)) ([215b299](https://github.com/s3ntin3l8/branchdam-agent/commit/215b299f25977e652da3e0f6faf4416d97bda0be))
+
+
+### Bug Fixes
+
+* make desktop releases deployable ([#189](https://github.com/s3ntin3l8/branchdam-agent/issues/189)) ([fee4fe6](https://github.com/s3ntin3l8/branchdam-agent/commit/fee4fe6d36f4703a5370096d97b1a0fd13f3148a))
+
 ## [1.5.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.4.0...v1.5.0) (2026-09-11)
 
 
