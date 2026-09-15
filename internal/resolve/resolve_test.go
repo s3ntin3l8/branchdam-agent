@@ -760,13 +760,13 @@ func TestSyncDeltaDetectionFirstPass(t *testing.T) {
 	})
 
 	syncer := &Syncer{
-		DB:    db,
-		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1", "/storage/videos/clip2.mp4": "node-2"}},
-		Client: &fakeEdgeAttacher{},
-		VirtualEmitter: &fakeVirtualEmitter{},
-		AgentID: "agent-1",
-		DatabaseURL: "file::memory:",
-		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		DB:              db,
+		Index:           &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1", "/storage/videos/clip2.mp4": "node-2"}},
+		Client:          &fakeEdgeAttacher{},
+		VirtualEmitter:  &fakeVirtualEmitter{},
+		AgentID:         "agent-1",
+		DatabaseURL:     "file::memory:",
+		PathRewrites:    []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
 		PrevMemberships: nil, // first pass
 	}
 
@@ -800,13 +800,13 @@ func TestSyncDeltaDetectionSecondPassNoChanges(t *testing.T) {
 	}
 
 	syncer := &Syncer{
-		DB:    db,
-		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
-		Client: &fakeEdgeAttacher{},
-		VirtualEmitter: &fakeVirtualEmitter{},
-		AgentID: "agent-1",
-		DatabaseURL: "file::memory:",
-		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		DB:              db,
+		Index:           &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
+		Client:          &fakeEdgeAttacher{},
+		VirtualEmitter:  &fakeVirtualEmitter{},
+		AgentID:         "agent-1",
+		DatabaseURL:     "file::memory:",
+		PathRewrites:    []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
 		PrevMemberships: prev,
 	}
 
@@ -841,13 +841,13 @@ func TestSyncDeltaDetectionRemovedClip(t *testing.T) {
 	}
 
 	syncer := &Syncer{
-		DB:    db,
-		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
-		Client: &fakeEdgeAttacher{},
-		VirtualEmitter: &fakeVirtualEmitter{},
-		AgentID: "agent-1",
-		DatabaseURL: "file::memory:",
-		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		DB:              db,
+		Index:           &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
+		Client:          &fakeEdgeAttacher{},
+		VirtualEmitter:  &fakeVirtualEmitter{},
+		AgentID:         "agent-1",
+		DatabaseURL:     "file::memory:",
+		PathRewrites:    []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
 		PrevMemberships: prev,
 	}
 
@@ -879,13 +879,13 @@ func TestSyncDeltaDetectionNewClipAdded(t *testing.T) {
 	}
 
 	syncer := &Syncer{
-		DB:    db,
-		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1", "/storage/videos/clip2.mp4": "node-2"}},
-		Client: &fakeEdgeAttacher{},
-		VirtualEmitter: &fakeVirtualEmitter{},
-		AgentID: "agent-1",
-		DatabaseURL: "file::memory:",
-		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		DB:              db,
+		Index:           &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1", "/storage/videos/clip2.mp4": "node-2"}},
+		Client:          &fakeEdgeAttacher{},
+		VirtualEmitter:  &fakeVirtualEmitter{},
+		AgentID:         "agent-1",
+		DatabaseURL:     "file::memory:",
+		PathRewrites:    []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
 		PrevMemberships: prev,
 	}
 
@@ -915,13 +915,13 @@ func TestSyncFileMissingDetection(t *testing.T) {
 	})
 
 	syncer := &Syncer{
-		DB:    db,
-		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
-		Client: &fakeEdgeAttacher{},
+		DB:             db,
+		Index:          &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
+		Client:         &fakeEdgeAttacher{},
 		VirtualEmitter: &fakeVirtualEmitter{},
-		AgentID: "agent-1",
-		DatabaseURL: "file::memory:",
-		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		AgentID:        "agent-1",
+		DatabaseURL:    "file::memory:",
+		PathRewrites:   []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
 	}
 
 	stats, err := syncer.Sync(context.Background())
@@ -946,13 +946,13 @@ func TestSyncOnSaveMembershipsCallback(t *testing.T) {
 
 	var savedEntries []MembershipEntry
 	syncer := &Syncer{
-		DB:    db,
-		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
-		Client: &fakeEdgeAttacher{},
+		DB:             db,
+		Index:          &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
+		Client:         &fakeEdgeAttacher{},
 		VirtualEmitter: &fakeVirtualEmitter{},
-		AgentID: "agent-1",
-		DatabaseURL: "file::memory:",
-		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		AgentID:        "agent-1",
+		DatabaseURL:    "file::memory:",
+		PathRewrites:   []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
 		OnSaveMemberships: func(entries []MembershipEntry) error {
 			savedEntries = entries
 			return nil
