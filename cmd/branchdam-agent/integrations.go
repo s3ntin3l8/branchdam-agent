@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -178,16 +179,40 @@ var integrationBuilders = []IntegrationBuilder{
 		DatabaseURL: true,
 		Ready: func(cfg config.Config) bool {
 			r := cfg.Integrations.ResolveDB
-			if !r.Enabled || r.DatabaseURL == "" {
+			if !r.Enabled {
 				return false
 			}
-			if !r.DryRun && cfg.Integrations.NodeIndexPath == "" {
+			// A real (non-dry-run) sync with an explicit DatabaseURL
+			// needs the node index to resolve paths at all — without
+			// it every candidate is unconditionally skipped. Auto-detect
+			// mode (empty DatabaseURL) handles missing node index
+			// gracefully via emptyNodeIndex{}, so we only gate on
+			// NodeIndexPath when the URL is explicitly configured.
+			if r.DatabaseURL != "" && !r.DryRun && cfg.Integrations.NodeIndexPath == "" {
 				return false
 			}
 			return true
 		},
 		New: func(cfg config.Config, client *branchdam.Client) tray.IntegrationSyncer {
 			r := cfg.Integrations.ResolveDB
+
+			// Auto-detect: when DatabaseURL is empty, probe
+			// platform-standard local Resolve database paths.
+			databaseURL := r.DatabaseURL
+			if databaseURL == "" {
+				discovered, derr := resolve.DiscoverDefaultDatabaseURL(context.Background())
+				if derr != nil {
+					slog.Warn("resolve: auto-detect failed", "err", derr)
+					return nil
+				}
+				if discovered == "" {
+					slog.Info("resolve: no local database found at standard paths; set integrations.resolvedb.databaseUrl to enable")
+					return nil
+				}
+				slog.Info("resolve: auto-detected local database", "url", resolve.StripCredentials(discovered))
+				databaseURL = discovered
+			}
+
 			var edgeClient resolve.EdgeAttacher
 			var vEmitter resolve.VirtualNodeEmitter
 			if !r.DryRun {
@@ -202,7 +227,7 @@ var integrationBuilders = []IntegrationBuilder{
 				client:         edgeClient,
 				virtualEmitter: vEmitter,
 				agentID:        cfg.AgentID,
-				databaseURL:    r.DatabaseURL,
+				databaseURL:    databaseURL,
 				nodeIndexPath:  cfg.Integrations.NodeIndexPath,
 				dryRun:         r.DryRun,
 				pathRewrites:   rewrites,

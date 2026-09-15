@@ -723,6 +723,15 @@ func wireRuntimeStateWithOps(runner *tray.Runner, ops runtimeStateOps) {
 	case !rt.LastHandshakeAt.IsZero():
 		runner.SeedLastHandshakeAt(rt.LastHandshakeAt)
 		slog.Info("seeded LastHandshakeAt from runtime state", "path", runtimePath, "at", rt.LastHandshakeAt)
+		// Seed resolve memberships from loaded state.
+		if len(rt.ResolveEmittedMemberships) > 0 {
+			entries := make([]tray.SyncMembershipEntry, len(rt.ResolveEmittedMemberships))
+			for i, e := range rt.ResolveEmittedMemberships {
+				entries[i] = tray.SyncMembershipEntry{MediaPath: e.MediaPath, TimelineID: e.TimelineID}
+			}
+			runner.SeedResolveMemberships(entries)
+			slog.Info("seeded Resolve membership set from runtime state", "path", runtimePath, "count", len(entries))
+		}
 		runner.SetOnSuccessfulHandshake(func(t time.Time) error {
 			return ops.Save(runtimePath, runtimeState.State{LastHandshakeAt: t})
 		})
