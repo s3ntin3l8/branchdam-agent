@@ -576,7 +576,7 @@ func TestStateJSONRoundTripExplicit(t *testing.T) {
 
 func TestStateJSONResolveFieldsRoundTrip(t *testing.T) {
 	st := State{
-		LastHandshakeAt:        time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC),
+		LastHandshakeAt:         time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC),
 		ResolveLastChangeCursor: 12345,
 		ResolveEmittedMemberships: []MembershipEntry{
 			{MediaPath: "/storage/videos/clip1.mp4", TimelineID: "tl-001"},
@@ -632,7 +632,7 @@ func TestStateJSONZeroMarshalIsEmptyObject(t *testing.T) {
 
 func TestStateJSONMembershipCapReached(t *testing.T) {
 	st := State{
-		ResolveLastChangeCursor:    999,
+		ResolveLastChangeCursor:     999,
 		ResolveMembershipCapReached: true,
 		ResolveEmittedMemberships: []MembershipEntry{
 			{MediaPath: "/storage/clip.mp4", TimelineID: "tl-1"},
