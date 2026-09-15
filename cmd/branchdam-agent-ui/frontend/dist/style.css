@@ -69,3 +69,55 @@ ul { margin: 4px 0; padding-left: 18px; }
 .pill.neutral { background: #eee; color: var(--muted); }
 
 .empty { color: var(--muted); font-style: italic; }
+
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+.field-row label {
+  color: var(--muted);
+  min-width: 160px;
+  flex-shrink: 0;
+}
+.field-row input[type="text"],
+.field-row input[type="password"],
+.field-row select {
+  flex: 1;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.field-row input[type="checkbox"] { margin: 0; }
+.field-row.checkbox-row label { min-width: 0; }
+.field-row button {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.field-row .field-status {
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 60px;
+}
+.field-row .field-status.saved { color: var(--ok); }
+.field-row .field-status.error { color: var(--bad); }
+
+.integration-block {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+  margin-top: 6px;
+}
+.integration-block h3 {
+  font-size: 12px;
+  margin: 0 0 4px;
+}

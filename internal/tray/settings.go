@@ -205,9 +205,6 @@ type Settings interface {
 	// When a field graduates, remove the matching entry below in the
 	// same PR so this comment and the inventory doc never disagree.
 	//
-	//   * ingest.cardRoots: pending M5 #78 (graduates once a tray-side
-	//     Detector restart lands; see the "cardRoots" line in
-	//     docs/tray-settings-inventory.md).
 	//   * ingest.pollIntervalSecs: low-frequency, restart-only knob;
 	//     not worth a menu slot. Operators adjust via OpenConfigFile.
 	//   * prune.* (enabled, minAgeHours, intervalMinutes): destructive

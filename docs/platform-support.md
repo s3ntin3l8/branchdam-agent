@@ -228,16 +228,28 @@ in `fyne.io/systray` -- a process with no tray menu has no business depending on
 
 ## Native app UI (`cmd/branchdam-agent-ui`, Track 3c)
 
-A second GUI binary, a plain status window built on Wails v2, sitting alongside the tray rather than
-inside it: on macOS both `fyne.io/systray` and Wails need to own the platform's `NSApplication` main
-run loop, and only one process can hold that loop, so the window talks to the tray over the loopback
-`/api/*` surface above instead of sharing a process with it. Today this window does exactly one
-thing -- poll `GET /api/status` every 5 seconds and render it -- read-only, at rough parity with the
-embedded status page's own sections. Settings/integrations editing (the plan's Track 3d/3e) and
-packaging this binary into the installers (`internal/selfupdate.InstallLayout`, NSIS, the macOS
-bundle -- Track 3f) are both explicitly out of scope for this PR; the tray's "Open status page" menu
-item is untouched for the same reason -- retitling it to launch this binary needs a packaged install
-layout to find the binary in, which doesn't exist yet.
+A second GUI binary, a status-and-settings window built on Wails v2, sitting alongside the tray
+rather than inside it: on macOS both `fyne.io/systray` and Wails need to own the platform's
+`NSApplication` main run loop, and only one process can hold that loop, so the window talks to the
+tray over the loopback `/api/*` surface above instead of sharing a process with it. The window polls
+`GET /api/status` every 5 seconds and renders it, at rough parity with the embedded status page's own
+sections, plus a Settings section (Track 3d) that reads `GET /api/settings` once at load and writes
+through `App.SetSetting`/`SetIntegrationPath`/`SetIntegrationRewrites` -- see those methods' own doc
+comments in `app.go`. The settings form deliberately does **not** re-poll on the 5-second status
+timer: re-rendering every field on every tick would overwrite whatever an operator is mid-typing, so
+a field only re-renders itself, from the fresh snapshot its own save call already returns. Two native
+folder/file pickers (`App.PickDirectory`/`PickFile`, wrapping Wails' `runtime.OpenDirectoryDialog`/
+`OpenFileDialog`) back the archive root, local edit root, and node-index path fields -- these are only
+reachable from Go code running inside this process's own window context, which is why they are bound
+methods rather than an HTML `<input type="file">`. Integrations/Resolve-hook views (the plan's Track
+3e) and packaging this binary into the installers (`internal/selfupdate.InstallLayout`, NSIS, the
+macOS bundle -- Track 3f) remain out of scope for this PR; the tray's "Open status page" menu item is
+untouched for the same reason -- retitling it to launch this binary needs a packaged install layout
+to find the binary in, which doesn't exist yet. The tray's own Settings/Integrations menus are also
+untouched here on purpose: this PR is additive only, so there is no window where a field is
+reachable from neither surface (see Track 3d's "backend, then window, then tray-slimming" sequencing
+note in the plan) -- the tray menu items this window now duplicates get removed in a follow-up PR
+once this window is confirmed working on real hardware.
 
 **No `wails` CLI, no npm, no bundler.** `wails build`/`wails dev` generate Go-side bindings by
 compiling and *running* a host binary, which fails cross-compiling from Linux to Windows. Wails
@@ -626,9 +638,12 @@ A live-refresh via TUF is the proper long-term answer but is out of scope here.
   convention (`_upscale`/`_panorama`), not read from the catalog. Use `--dump-schema` /
   `-query-file` to correct row extraction against a different version, and
   `-derivative-suffixes` to correct the pairing heuristic without a code change.
-- **The hardened `/api/*` surface (see Status page above) has one read-only consumer so far** --
-  `cmd/branchdam-agent-ui`'s status window (`GET /api/status` only). Settings/actions calls from a
-  real UI remain unexercised end-to-end. Known limitations, by design rather than oversight: `POST
+- **The hardened `/api/*` surface (see Status page above) has one consumer so far** --
+  `cmd/branchdam-agent-ui`. It now exercises `GET /api/status`, `GET`/`POST /api/settings`, and
+  `POST /api/settings/integration-{path,rewrites}` (the Settings section, Track 3d); the
+  `/api/actions/*` routes remain unexercised by any real UI, since this window has no action
+  buttons yet (Track 3e). None of it has run on real Windows/macOS hardware yet -- see the hardware
+  checklist. Known limitations, by design rather than oversight: `POST
   /api/actions/ingest` runs synchronously to completion with no server-side timeout (a real card
   ingest can take minutes; the caller should not assume a fast response); there is no rate limiting
   beyond the token check itself; and the only way to revoke a leaked token is a tray restart (no
@@ -714,6 +729,18 @@ to say "verified."
     bundled default or the generic Windows executable icon. Confirm both `branchdam-agent.exe`
     and `branchdam-agent-tray.exe` show the real icon in Explorer's icon view (not just the list
     view, which can mask a missing icon resource by falling back to the file-type default).
+13. Native app UI settings form (Track 3d): in the same window as item 11, confirm the Settings
+    section loads with every field pre-filled from the current config (except the API key, the
+    node-index path's own "not shown" fields, and watch folders, which are deliberately never
+    pre-filled -- see `app.js`'s `FREE_TEXT_FIELDS`). Edit a text field and tab away; confirm
+    "Saving…" then "Saved" appears next to it and the change actually lands in `config.yaml`.
+    Click "Browse…" on the archive root field and confirm a native folder picker opens (not a
+    frozen window -- this blocks on Wails' own dialog, which needs the window's message loop
+    still pumping). Toggle a checkbox and a select (e.g. self-update interval) and confirm each
+    saves independently. Submit an invalid value (e.g. clear Agent ID to blank) and confirm the
+    field's own status turns red with the agent's rejection reason, not a silent failure. Confirm
+    editing one field does not reset any other field's in-progress edit (the settings form must
+    never re-fetch on the 5-second status poll).
 
 **macOS (Apple Silicon):**
 
@@ -775,6 +802,8 @@ to say "verified."
     Dock tile/Cmd-Tab entry suppression issue of its own (it is a normal windowed app, not
     `LSUIElement=1` like the tray) and that it opens with `Wails`' Cocoa/WebKit backend without
     needing anything beyond what a stock macOS install already has.
+14. Native app UI settings form: same as Windows item 13 -- additionally confirm the "Browse…"
+    folder/file pickers open Cocoa's native `NSOpenPanel`, not a broken or blank dialog.
 
 ### M5 additions (epic #77, #78–#88)
 
