@@ -98,9 +98,10 @@ against the release's `SHA256SUMS.txt`:
 | Platform | Asset | Contains |
 |---|---|---|
 | Linux (amd64) | `branchdam-agent-linux-amd64.tar.gz` | `branchdam-agent` -- headless subcommands only, no tray |
-| Windows (amd64) | `branchdam-agent-setup.exe` | NSIS installer: extracts binaries, creates shortcuts, writes starter config, adds to Start Menu and Add/Remove Programs |
-| Windows (amd64) | `branchdam-agent-windows-amd64.zip` | `branchdam-agent.exe` (console, for CLI use) + `branchdam-agent-tray.exe` (no console, for the tray/login-item launch path) |
-| macOS (Apple Silicon) | `branchdam-agent-darwin-arm64.tar.gz` | `branchdam-agent.app` -- includes the tray; the CLI subcommands also work invoked directly at `branchdam-agent.app/Contents/MacOS/branchdam-agent` |
+| Windows (amd64) | `branchdam-agent-setup.exe` | **Recommended.** NSIS installer: extracts binaries, creates shortcuts, writes starter config, adds to Start Menu and Add/Remove Programs |
+| Windows (amd64) | `branchdam-agent-windows-amd64.zip` | Self-update's own download payload (and a manual-extract fallback): `branchdam-agent.exe` (console, for CLI use) + `branchdam-agent-tray.exe` (no console, for the tray/login-item launch path). Not the recommended way to install -- use the installer above. |
+| macOS (Apple Silicon) | `branchdam-agent-darwin-arm64.dmg` | **Recommended.** `branchdam-agent.app` (includes the tray) in a disk image with an `Applications` shortcut for drag-to-install -- see Manual Installation below |
+| macOS (Apple Silicon) | `branchdam-agent-darwin-arm64.tar.gz` | Self-update's own download payload. Not the recommended way to install -- use the `.dmg` above. |
 
 ### Windows Installer (Recommended)
 
@@ -122,6 +123,21 @@ The installer does not collect any configuration at install time (except the def
 
 > **Note:** Uninstalling via Add/Remove Programs preserves `%APPDATA%\branchdam-agent\config.yaml`. The installer also preserves it on upgrade (`IfFileExists` guard). Uninstall-then-reinstall keeps your settings.
 
+### macOS Installation (Recommended)
+
+1. Download `branchdam-agent-darwin-arm64.dmg` from the latest release and open it
+2. Drag `branchdam-agent.app` onto the `Applications` shortcut in the same window
+3. Eject the disk image, then launch branchDAM Agent from `/Applications`
+4. The bundle is ad-hoc signed (not notarized), so first launch shows macOS's ordinary
+   unidentified-developer warning, not a "damaged" error -- right-click the app and choose
+   **Open** to get past it. See
+   [`docs/platform-support.md`](docs/platform-support.md#ad-hoc-signing-not-notarization) for
+   what ad-hoc signing does and doesn't cover.
+
+Self-update needs a per-user install location to have write access
+(`~/Applications`, not `/Applications`) -- see
+[`docs/platform-support.md`](docs/platform-support.md#self-update).
+
 ### Manual Installation
 
 ```sh
@@ -129,15 +145,18 @@ tar -xzf branchdam-agent-<platform>.tar.gz    # linux/darwin/macOS
 sha256sum -c SHA256SUMS.txt                    # verify
 ```
 
-Extracting with `tar` in a terminal (rather than a browser download + Archive Utility) avoids
-macOS's quarantine attribute and the App Translocation it can trigger -- see
-[`docs/platform-support.md`](docs/platform-support.md#macos-app-bundle). **On macOS, move
+On Linux and for scripted/headless installs, extract the `.tar.gz` directly. On macOS, prefer
+the `.dmg` above -- the `.tar.gz` is what self-update itself downloads, not the recommended
+manual-install path. Extracting it with `tar` in a terminal (rather than a browser download +
+Archive Utility) avoids macOS's quarantine attribute and the App Translocation it can trigger --
+see [`docs/platform-support.md`](docs/platform-support.md#macos-app-bundle). **On macOS, move
 `branchdam-agent.app` to `/Applications` or `~/Applications`** before first launch; self-update
 additionally requires a per-user install location (`~/Applications`, or
 `%LOCALAPPDATA%\Programs\branchDAM\` on Windows) since it writes its own replacement binary --
 see [`docs/platform-support.md`](docs/platform-support.md#self-update).
 
-Binaries are unsigned -- see "Releases" below. See
+Binaries are unsigned on Windows and Linux, and only ad-hoc signed (not notarized) on macOS --
+see "Releases" below. See
 [`docs/platform-support.md`](docs/platform-support.md) for the full support matrix, including
 why Windows ships two `.exe`s and what's not yet implemented per platform.
 
@@ -380,8 +399,11 @@ When release-please creates a GitHub Release, a chained CI job
 per-platform archives plus a `SHA256SUMS.txt`, with no manual step. No Docker image is
 published -- this is a desktop CLI/tray binary, not a service.
 
-**Binaries are unsigned.** No code-signing certificate is purchased for either platform; expect
-a Gatekeeper/SmartScreen warning on first run.
+**No paid code-signing certificate is purchased for either platform.** Windows binaries are
+unsigned; expect a SmartScreen warning on first run. The macOS bundle is ad-hoc signed in CI (see
+[`docs/platform-support.md`](docs/platform-support.md#ad-hoc-signing-not-notarization)) but not
+notarized, so it still shows Gatekeeper's ordinary unidentified-developer warning -- right-click
+the app and choose **Open** to get past it.
 
 ## License
 

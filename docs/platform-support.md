@@ -248,32 +248,70 @@ tests that run on Linux; the platform-tagged write paths are proven by the
 
 `release-binaries.yml`'s `build-darwin` job assembles `branchdam-agent.app` around the built
 binary via `tools/mkbundle` (a thin CLI wrapper over `internal/appbundle`, the package that
-actually renders `Info.plist` and lays out `Contents/MacOS/branchdam-agent`) and tars only the
-bundle -- never the bare binary alongside it, since two archive entries with the same base name
-would leave go-selfupdate's archive-entry selection (see below) to pick whichever it reads
-first. `LSUIElement=1` is what's meant to keep the tray out of the Dock and Cmd-Tab switcher;
-**this is unverified on real hardware** -- no macOS host has been used interactively to confirm
-it. Verify before relying on the macOS tray for day-to-day use. No `.icns` is shipped: with
-`LSUIElement=1` there is no Dock tile to show one, and the tray icon itself is already rendered
-in Go at startup (`internal/tray/icon.go`) rather than committed as a binary asset.
+actually renders `Info.plist` and lays out `Contents/MacOS/branchdam-agent`), ad-hoc signs the
+bundle, then packages it two ways: `branchdam-agent-darwin-arm64.tar.gz` (the self-update
+payload -- see Self-update below for why it must stay a bare-bundle tarball) and
+`branchdam-agent-darwin-arm64.dmg` (the user-facing manual-install download, with an
+`/Applications` symlink alongside the app so drag-to-install is the obvious gesture -- see
+Gatekeeper/quarantine/translocation below for why this is the download the README points at).
+`LSUIElement=1` is what's meant to keep the tray out of the Dock and Cmd-Tab switcher; **this is
+unverified on real hardware** -- no macOS host has been used interactively to confirm it. Verify
+before relying on the macOS tray for day-to-day use.
 
-The bundle is **never code-signed**, deliberately -- see Self-update below for why signing it
-would break in-place self-update, and Gatekeeper/quarantine below for what that means for a
-first manual install.
+`internal/appicon` renders a `CFBundleIconFile` (`Contents/Resources/icon.icns`) the same way
+`internal/tray/icon.go` renders the tray glyph -- pure Go, no ImageMagick, no `iconutil`, no
+binary asset committed to the repo, just a bigger canvas and a hand-rolled `.icns` container
+(PNG-payload OSTypes, the same set a real `.iconset` + `iconutil` run would produce). Verified
+against Pillow's own ICNS decoder as an independent parser, not just this repo's own round-trip
+test. The geometry is hand-duplicated from `icon.go` rather than shared -- see that file's own
+comment for why (neither is a natural place to add a build-time codegen step); a monogram change
+in one needs mirroring in the other by hand.
+
+### Ad-hoc signing (not notarization)
+
+The bundle is ad-hoc signed in CI (`codesign --force --sign - dist/branchdam-agent.app`, gated
+on `codesign --verify --strict`) -- free, no Apple Developer account, no secret in CI. This is
+what turns a fresh download's Gatekeeper failure from **"is damaged and can't be opened"** (a
+dead end with no path forward) into the ordinary unidentified-developer prompt that
+right-click → Open clears. It is *not* notarization: macOS still shows a first-launch warning,
+and there is no Apple-issued ticket stapled to the bundle. Go's own darwin/arm64 linker already
+ad-hoc-signs the *inner Mach-O* automatically (confirmed via `LC_CODE_SIGNATURE`); the CI step
+signs the *bundle* on top of that, which is the layer that was actually missing.
+
+Because it's an ad-hoc signature rather than a Developer ID one, there is no stapled ticket for
+self-update's inner-binary swap to invalidate -- Apply mutating the bundle's inner binary after
+an ad-hoc `-` signature is unaffected by it, so this doesn't reopen the self-update conflict a
+real Developer ID signature would (see Self-update below). Developer ID + notarization would
+remove the warning prompt entirely, at the cost of a $99/yr account and a rework of macOS
+self-update to swap the whole `.app` rather than the inner binary -- deferred, tracked
+separately.
 
 ### Gatekeeper, quarantine, and translocation
 
 A browser download typically sets the `com.apple.quarantine` extended attribute on the
-downloaded archive's contents; launching an unsigned, un-notarized app from a quarantined,
-non-standard location (`~/Downloads` in particular) can trigger macOS's App Translocation,
-which runs the bundle from a randomized **read-only** mount
+downloaded archive's contents; launching an unsigned-or-ad-hoc-signed, un-notarized app from a
+quarantined, non-standard location (`~/Downloads` in particular) can trigger macOS's App
+Translocation, which runs the bundle from a randomized **read-only** mount
 (`/private/var/folders/.../AppTranslocation/...`). `internal/selfupdate.DetectLayout` refuses
 (`ErrTranslocated`) rather than silently fail or register a login item at a path that
-disappears on reboot. **Install by moving `branchdam-agent.app` to `/Applications` or
-`~/Applications` in Finder** -- this both clears the translocation and is required anyway for
-self-update to have write access to the install directory (see Self-update below). Downloading
-via `curl`/`tar` in a terminal instead of a browser avoids the quarantine attribute entirely, if
-preferred.
+disappears on reboot. **Install by dragging `branchdam-agent.app` from the `.dmg` window to the
+`Applications` symlink beside it** -- this both clears the translocation and is required anyway
+for self-update to have write access to the install directory (see Self-update below).
+Downloading via `curl`/`tar` in a terminal instead of a browser avoids the quarantine attribute
+entirely, if preferred.
+
+**Unverified, and specific to the `.dmg`:** launching `branchdam-agent.app` directly from the
+still-mounted disk image (rather than dragging it out first) is a new launch context the `.dmg`
+introduces -- a UDZO-format `.dmg` mounts read-only. `isTranslocated`'s path check is
+`/AppTranslocation/`-specific and would **not** match a `/Volumes/branchDAM Agent/...` path, so
+`DetectLayout` would build a plain layout rather than refuse with `ErrTranslocated`. The expected
+fallback is that `Apply`'s own `checkWritable` probe (`internal/selfupdate/install.go`) then
+fails naturally with `ErrTargetNotWritable` wrapping the OS's own "read-only file system" error --
+a different, but still actionable, message. Confirm this on hardware before relying on it; if the
+actual message turns out to be confusing rather than actionable, that's the fix to make, not a
+new `/Volumes/` path-pattern check -- this repo's target workstations routinely have real,
+writable secondary volumes mounted under `/Volumes/` (NAS mounts, external/Thunderbolt SSDs), so
+blanket-flagging that prefix would misclassify a legitimate non-boot-volume install.
 
 ## Self-update
 
@@ -309,8 +347,12 @@ regardless of its path inside the archive, so it extracts and replaces
 `branchdam-agent.app/Contents/MacOS/branchdam-agent` without ever touching the bundle itself;
 `Apply` rewrites `Info.plist` locally right after (via the same `internal/appbundle` renderer
 `tools/mkbundle` uses at build time) so `CFBundleVersion` doesn't go stale. This is why the
-bundle is never code-signed: signing binds the signature to the bundle's contents, and
-self-update mutating the inner binary afterward would make macOS refuse to launch the result.
+bundle only ever carries an **ad-hoc** signature (see the macOS `.app` bundle section above), not
+a real Developer ID one: a real signature binds a verifiable signature to the bundle's exact
+contents and would be invalidated by `Apply`'s later, unsigned rewrite of the inner binary and
+`Info.plist`; an ad-hoc signature has no such verification chain (and no stapled ticket) for that
+rewrite to invalidate. Moving to Developer ID signing would need self-update reworked to swap the
+whole `.app` atomically instead of mutating pieces of an already-signed one in place.
 
 `go-selfupdate` v1.6.0 imports `golang.org/x/crypto/openpgp` unconditionally from its top-level
 package, which `govulncheck` flags as `GO-2026-5932` (unfixed, no upgrade path -- v1.6.0 is the
