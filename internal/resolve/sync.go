@@ -514,10 +514,10 @@ func databaseIdentity(rawURL string) string {
 	return u.String()
 }
 
-// StripCredentials removes userinfo from a database URL so it can be safely
-// included in evidence JSON persisted server-side. Returns the original
-// string if parsing fails or no credentials are present.
-func StripCredentials(rawURL string) string {
+// stripCredentials removes userinfo from a database URL so it can be
+// safely included in evidence JSON persisted server-side. Returns the
+// original string if parsing fails or no credentials are present.
+func stripCredentials(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.User == nil {
 		return rawURL

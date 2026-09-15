@@ -50,13 +50,13 @@ func Open(ctx context.Context, databaseURL string) (*DB, error) {
 
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("resolve: open %s: %w", StripCredentials(databaseURL), err)
+		return nil, fmt.Errorf("resolve: open %s: %w", stripCredentials(databaseURL), err)
 	}
 	db.SetMaxOpenConns(1)
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("resolve: ping %s: %w", StripCredentials(databaseURL), err)
+		return nil, fmt.Errorf("resolve: ping %s: %w", stripCredentials(databaseURL), err)
 	}
 	return &DB{db: db}, nil
 }
@@ -76,7 +76,7 @@ func parseURL(databaseURL string) (driver, dsn string, err error) {
 		// responsibility (same convention as internal/luminar.Open).
 		return "sqlite", databaseURL, nil
 	default:
-		return "", "", fmt.Errorf("resolve: unsupported database URL scheme: %s (expected postgres://... or file:...)", StripCredentials(databaseURL))
+		return "", "", fmt.Errorf("resolve: unsupported database URL scheme: %s (expected postgres://... or file:...)", stripCredentials(databaseURL))
 	}
 }
 
