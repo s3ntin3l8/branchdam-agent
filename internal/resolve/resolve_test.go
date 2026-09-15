@@ -2,9 +2,12 @@ package resolve
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"strings"
 	"testing"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 )
@@ -379,9 +382,9 @@ func TestStripCredentials(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := stripCredentials(tc.in)
+			got := StripCredentials(tc.in)
 			if got != tc.want {
-				t.Errorf("stripCredentials(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("StripCredentials(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -746,4 +749,321 @@ func TestVirtualDisplayName(t *testing.T) {
 	if got != want {
 		t.Errorf("virtualDisplayName = %q, want %q", got, want)
 	}
+}
+
+func TestSyncDeltaDetectionFirstPass(t *testing.T) {
+	db := openTestDBForSyncWithClips(t, []struct {
+		timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string
+	}{
+		{"tl-1", "Master", "seq-1", "trk-1", "item-1", "clip1.mp4", "D:\\Videos\\clip1.mp4", "", "0", "100"},
+		{"tl-1", "Master", "seq-1", "trk-1", "item-2", "clip2.mp4", "D:\\Videos\\clip2.mp4", "", "100", "50"},
+	})
+
+	syncer := &Syncer{
+		DB:    db,
+		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1", "/storage/videos/clip2.mp4": "node-2"}},
+		Client: &fakeEdgeAttacher{},
+		VirtualEmitter: &fakeVirtualEmitter{},
+		AgentID: "agent-1",
+		DatabaseURL: "file::memory:",
+		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		PrevMemberships: nil, // first pass
+	}
+
+	stats, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Added != 2 {
+		t.Errorf("Added = %d, want 2 (first pass treats all as added)", stats.Added)
+	}
+	if stats.Unchanged != 0 {
+		t.Errorf("Unchanged = %d, want 0", stats.Unchanged)
+	}
+	if stats.Removed != 0 {
+		t.Errorf("Removed = %d, want 0", stats.Removed)
+	}
+	if stats.Emitted != 2 {
+		t.Errorf("Emitted = %d, want 2", stats.Emitted)
+	}
+}
+
+func TestSyncDeltaDetectionSecondPassNoChanges(t *testing.T) {
+	db := openTestDBForSyncWithClips(t, []struct {
+		timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string
+	}{
+		{"tl-1", "Master", "seq-1", "trk-1", "item-1", "clip1.mp4", "D:\\Videos\\clip1.mp4", "", "0", "100"},
+	})
+
+	prev := []MembershipEntry{
+		{MediaPath: "D:\\Videos\\clip1.mp4", TimelineID: "tl-1"},
+	}
+
+	syncer := &Syncer{
+		DB:    db,
+		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
+		Client: &fakeEdgeAttacher{},
+		VirtualEmitter: &fakeVirtualEmitter{},
+		AgentID: "agent-1",
+		DatabaseURL: "file::memory:",
+		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		PrevMemberships: prev,
+	}
+
+	stats, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Added != 0 {
+		t.Errorf("Added = %d, want 0 (no new memberships)", stats.Added)
+	}
+	if stats.Unchanged != 1 {
+		t.Errorf("Unchanged = %d, want 1", stats.Unchanged)
+	}
+	if stats.Removed != 0 {
+		t.Errorf("Removed = %d, want 0", stats.Removed)
+	}
+	if stats.Emitted != 0 {
+		t.Errorf("Emitted = %d, want 0 (unchanged memberships should not emit)", stats.Emitted)
+	}
+}
+
+func TestSyncDeltaDetectionRemovedClip(t *testing.T) {
+	db := openTestDBForSyncWithClips(t, []struct {
+		timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string
+	}{
+		{"tl-1", "Master", "seq-1", "trk-1", "item-1", "clip1.mp4", "D:\\Videos\\clip1.mp4", "", "0", "100"},
+	})
+
+	prev := []MembershipEntry{
+		{MediaPath: "D:\\Videos\\clip1.mp4", TimelineID: "tl-1"},
+		{MediaPath: "D:\\Videos\\clip2.mp4", TimelineID: "tl-1"}, // removed from DB
+	}
+
+	syncer := &Syncer{
+		DB:    db,
+		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
+		Client: &fakeEdgeAttacher{},
+		VirtualEmitter: &fakeVirtualEmitter{},
+		AgentID: "agent-1",
+		DatabaseURL: "file::memory:",
+		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		PrevMemberships: prev,
+	}
+
+	stats, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Added != 0 {
+		t.Errorf("Added = %d, want 0", stats.Added)
+	}
+	if stats.Unchanged != 1 {
+		t.Errorf("Unchanged = %d, want 1", stats.Unchanged)
+	}
+	if stats.Removed != 1 {
+		t.Errorf("Removed = %d, want 1 (clip2 disappeared from DB)", stats.Removed)
+	}
+}
+
+func TestSyncDeltaDetectionNewClipAdded(t *testing.T) {
+	db := openTestDBForSyncWithClips(t, []struct {
+		timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string
+	}{
+		{"tl-1", "Master", "seq-1", "trk-1", "item-1", "clip1.mp4", "D:\\Videos\\clip1.mp4", "", "0", "100"},
+		{"tl-1", "Master", "seq-1", "trk-1", "item-2", "clip2.mp4", "D:\\Videos\\clip2.mp4", "", "100", "50"},
+	})
+
+	prev := []MembershipEntry{
+		{MediaPath: "D:\\Videos\\clip1.mp4", TimelineID: "tl-1"}, // only clip1 existed
+	}
+
+	syncer := &Syncer{
+		DB:    db,
+		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1", "/storage/videos/clip2.mp4": "node-2"}},
+		Client: &fakeEdgeAttacher{},
+		VirtualEmitter: &fakeVirtualEmitter{},
+		AgentID: "agent-1",
+		DatabaseURL: "file::memory:",
+		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		PrevMemberships: prev,
+	}
+
+	stats, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Added != 1 {
+		t.Errorf("Added = %d, want 1 (clip2 is new)", stats.Added)
+	}
+	if stats.Unchanged != 1 {
+		t.Errorf("Unchanged = %d, want 1 (clip1 is unchanged)", stats.Unchanged)
+	}
+	if stats.Removed != 0 {
+		t.Errorf("Removed = %d, want 0", stats.Removed)
+	}
+	if stats.Emitted != 1 {
+		t.Errorf("Emitted = %d, want 1 (only new clip2 should emit)", stats.Emitted)
+	}
+}
+
+func TestSyncFileMissingDetection(t *testing.T) {
+	db := openTestDBForSyncWithClips(t, []struct {
+		timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string
+	}{
+		{"tl-1", "Master", "seq-1", "trk-1", "item-1", "clip1.mp4", "D:\\Videos\\clip1.mp4", "", "0", "100"},
+	})
+
+	syncer := &Syncer{
+		DB:    db,
+		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
+		Client: &fakeEdgeAttacher{},
+		VirtualEmitter: &fakeVirtualEmitter{},
+		AgentID: "agent-1",
+		DatabaseURL: "file::memory:",
+		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+	}
+
+	stats, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.FileMissing != 1 {
+		t.Errorf("FileMissing = %d, want 1 (rewritten path does not exist on disk)", stats.FileMissing)
+	}
+	// Edge should still be emitted even if file is missing (the DB is the source of truth).
+	if stats.Emitted != 1 {
+		t.Errorf("Emitted = %d, want 1", stats.Emitted)
+	}
+}
+
+func TestSyncOnSaveMembershipsCallback(t *testing.T) {
+	db := openTestDBForSyncWithClips(t, []struct {
+		timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string
+	}{
+		{"tl-1", "Master", "seq-1", "trk-1", "item-1", "clip1.mp4", "D:\\Videos\\clip1.mp4", "", "0", "100"},
+	})
+
+	var savedEntries []MembershipEntry
+	syncer := &Syncer{
+		DB:    db,
+		Index: &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
+		Client: &fakeEdgeAttacher{},
+		VirtualEmitter: &fakeVirtualEmitter{},
+		AgentID: "agent-1",
+		DatabaseURL: "file::memory:",
+		PathRewrites: []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		OnSaveMemberships: func(entries []MembershipEntry) error {
+			savedEntries = entries
+			return nil
+		},
+	}
+
+	_, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(savedEntries) != 1 {
+		t.Fatalf("OnSaveMemberships called with %d entries, want 1", len(savedEntries))
+	}
+	if savedEntries[0].MediaPath != "D:\\Videos\\clip1.mp4" {
+		t.Errorf("saved MediaPath = %q, want %q", savedEntries[0].MediaPath, "D:\\Videos\\clip1.mp4")
+	}
+	if savedEntries[0].TimelineID != "tl-1" {
+		t.Errorf("saved TimelineID = %q, want %q", savedEntries[0].TimelineID, "tl-1")
+	}
+}
+
+// openTestDBForSync creates a temp SQLite DB with the resolve schema for testing.
+func openTestDBForSync(t *testing.T) *DB {
+	t.Helper()
+	dbPath := t.TempDir() + "/test.db"
+	// Create the database file and schema using raw database/sql.
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS "Sm2Timeline" ("Sm2Timeline_id" TEXT PRIMARY KEY, "Name" TEXT)`,
+		`CREATE TABLE IF NOT EXISTS "Sm2Sequence" ("Sm2Sequence_id" TEXT PRIMARY KEY, "Sm2Timeline_id" TEXT)`,
+		`CREATE TABLE IF NOT EXISTS "Sm2TiTrack" ("Sm2TiTrack_id" TEXT PRIMARY KEY, "Type" INTEGER, "Sequence" TEXT)`,
+		`CREATE TABLE IF NOT EXISTS "Sm2TiItem" ("Sm2TiItem_id" TEXT PRIMARY KEY, "Name" TEXT, "MediaFilePath" TEXT, "In" TEXT, "Start" TEXT, "Duration" TEXT, "Sm2TiTrack_id" TEXT)`,
+	} {
+		if _, err := raw.ExecContext(context.Background(), stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("create schema: %v", err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+	// Reopen via resolve.Open in read-only mode for the syncer.
+	db, err := openTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("openTestDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// insertClipRaw inserts a clip using raw database/sql (for test setup
+// before switching to read-only mode). Uses INSERT OR IGNORE for parent
+// tables so multiple clips can share the same timeline/sequence/track.
+func insertClipRaw(t *testing.T, raw *sql.DB, timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string) {
+	t.Helper()
+	if _, err := raw.ExecContext(context.Background(), `INSERT OR IGNORE INTO "Sm2Timeline" VALUES (?, ?)`, timelineID, timelineName); err != nil {
+		t.Fatalf("insert timeline: %v", err)
+	}
+	if _, err := raw.ExecContext(context.Background(), `INSERT OR IGNORE INTO "Sm2Sequence" VALUES (?, ?)`, seqID, timelineID); err != nil {
+		t.Fatalf("insert sequence: %v", err)
+	}
+	if _, err := raw.ExecContext(context.Background(), `INSERT OR IGNORE INTO "Sm2TiTrack" VALUES (?, 0, ?)`, trackID, seqID); err != nil {
+		t.Fatalf("insert track: %v", err)
+	}
+	if _, err := raw.ExecContext(context.Background(), `INSERT INTO "Sm2TiItem" VALUES (?, ?, ?, ?, ?, ?, ?)`, itemID, name, mediaPath, inPoint, start, duration, trackID); err != nil {
+		t.Fatalf("insert item: %v", err)
+	}
+}
+
+// openTestDBForSyncWithClips creates a test DB, inserts clips, and returns
+// a read-only handle. This avoids the read-only write error when inserting
+// via the resolve.DB handle.
+func openTestDBForSyncWithClips(t *testing.T, clips []struct {
+	timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string
+}) *DB {
+	t.Helper()
+	dbPath := t.TempDir() + "/test.db"
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS "Sm2Timeline" ("Sm2Timeline_id" TEXT PRIMARY KEY, "Name" TEXT)`,
+		`CREATE TABLE IF NOT EXISTS "Sm2Sequence" ("Sm2Sequence_id" TEXT PRIMARY KEY, "Sm2Timeline_id" TEXT)`,
+		`CREATE TABLE IF NOT EXISTS "Sm2TiTrack" ("Sm2TiTrack_id" TEXT PRIMARY KEY, "Type" INTEGER, "Sequence" TEXT)`,
+		`CREATE TABLE IF NOT EXISTS "Sm2TiItem" ("Sm2TiItem_id" TEXT PRIMARY KEY, "Name" TEXT, "MediaFilePath" TEXT, "In" TEXT, "Start" TEXT, "Duration" TEXT, "Sm2TiTrack_id" TEXT)`,
+	} {
+		if _, err := raw.ExecContext(context.Background(), stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("create schema: %v", err)
+		}
+	}
+	for _, c := range clips {
+		insertClipRaw(t, raw, c.timelineID, c.timelineName, c.seqID, c.trackID, c.itemID, c.name, c.mediaPath, c.inPoint, c.start, c.duration)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+	db, err := openTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("openTestDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// insertClipForSync inserts a clip into the test DB for sync tests.
+func insertClipForSync(t *testing.T, db *DB, timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string) {
+	t.Helper()
+	insertClip(t, db, timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration)
 }
