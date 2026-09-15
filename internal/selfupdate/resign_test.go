@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -28,6 +29,83 @@ func TestDefaultResignAppBundleNoOpsOffDarwin(t *testing.T) {
 	// instead of returning nil.
 	if err := defaultResignAppBundle(filepath.Join(t.TempDir(), "branchdam-agent.app")); err != nil {
 		t.Errorf("defaultResignAppBundle on %s = %v, want nil (no-op off darwin)", runtime.GOOS, err)
+	}
+}
+
+// TestUpdateBundleInfoPlistWritesVersionAndResigns and
+// TestUpdateBundleInfoPlistNonFatalOnResignFailure test the shared helper
+// Apply and Rollback both call directly, rather than through either
+// caller's own machinery. This is the direct answer to a Hermes review
+// suggestion that Apply's call site had no test mirroring Rollback's three
+// (TestRollbackCallsResignAppBundleWithBundleDir,
+// TestRollbackSucceedsDespiteResignFailure,
+// TestRollbackSkipsResignWithoutInfoPlist below): after this refactor,
+// Apply's call site is exactly `updateBundleInfoPlist(layout.InfoPlist,
+// release.Version())` -- identical in shape to Rollback's own call, one
+// line, trivially reviewable -- so testing the shared function once here
+// covers both callers' behavior rather than duplicating a second
+// Rollback-shaped integration test under Apply's name. A true Apply
+// happy-path integration test remains out of proportion regardless: it
+// would need a fake go-selfupdate Source (see that package's Source
+// interface) plus faking this package's own fetchClient (sigstore.go) to
+// avoid real network calls for the Sigstore attestation preflight, before
+// ever reaching this code.
+func TestUpdateBundleInfoPlistWritesVersionAndResigns(t *testing.T) {
+	dir := t.TempDir()
+	bundleDir := filepath.Join(dir, "branchdam-agent.app")
+	plistPath := filepath.Join(bundleDir, "Contents", "Info.plist")
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plistPath, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotDir string
+	var calls int
+	withResignAppBundle(t, func(d string) error {
+		calls++
+		gotDir = d
+		return nil
+	})
+
+	if err := updateBundleInfoPlist(plistPath, "3.1.4"); err != nil {
+		t.Fatalf("updateBundleInfoPlist: %v", err)
+	}
+	got, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "3.1.4") {
+		t.Errorf("Info.plist = %q, want it to mention version 3.1.4", got)
+	}
+	if calls != 1 {
+		t.Errorf("resignAppBundle called %d times, want 1", calls)
+	}
+	if gotDir != bundleDir {
+		t.Errorf("resignAppBundle called with %q, want %q", gotDir, bundleDir)
+	}
+}
+
+func TestUpdateBundleInfoPlistNonFatalOnResignFailure(t *testing.T) {
+	dir := t.TempDir()
+	bundleDir := filepath.Join(dir, "branchdam-agent.app")
+	plistPath := filepath.Join(bundleDir, "Contents", "Info.plist")
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	withResignAppBundle(t, func(string) error { return errors.New("codesign: boom") })
+
+	if err := updateBundleInfoPlist(plistPath, "3.1.4"); err != nil {
+		t.Fatalf("updateBundleInfoPlist returned an error despite a successful plist write: %v", err)
+	}
+	got, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "3.1.4") {
+		t.Errorf("Info.plist = %q, want it to mention version 3.1.4 even though resign failed", got)
 	}
 }
 

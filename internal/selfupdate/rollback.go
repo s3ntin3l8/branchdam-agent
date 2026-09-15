@@ -5,12 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	suUpdate "github.com/creativeprojects/go-selfupdate/update"
-
-	"github.com/s3ntin3l8/branchdam-agent/internal/appbundle"
 )
 
 // rollbackSuffix names the backup file each target's OldSavePath (see
@@ -123,22 +120,13 @@ func Rollback(layout InstallLayout) (string, error) {
 		}
 	}
 
+	// By this point every target has already been restored and its
+	// .previous backup already removed by the loop above, so a failure
+	// inside updateBundleInfoPlist's own (best-effort) resign step can't
+	// undo that -- see its doc comment for why that's the right call.
 	if layout.InfoPlist != "" {
-		plist := appbundle.RenderInfoPlist(prevVersion)
-		if err := os.WriteFile(layout.InfoPlist, []byte(plist), 0o644); err != nil {
-			return "", fmt.Errorf("selfupdate: rollback: update %s: %w", layout.InfoPlist, err)
-		}
-		// Same reasoning as Apply's own call site -- see resignAppBundle's
-		// doc comment: the restored binaries and the Info.plist rewrite
-		// just above both invalidate the bundle's ad-hoc signature seal.
-		// Best-effort, deliberately, and for a sharper reason than Apply's:
-		// by this point every target has already been restored and its
-		// .previous backup already removed by the loop above, so a fatal
-		// error here would report a fully-completed rollback as failed
-		// with no backup left to retry from -- strictly worse than a
-		// merely-stale signature seal. Logged, not swallowed.
-		if err := resignAppBundle(filepath.Dir(filepath.Dir(layout.InfoPlist))); err != nil {
-			slog.Warn("selfupdate: rollback: could not re-sign app bundle", "path", layout.InfoPlist, "err", err)
+		if err := updateBundleInfoPlist(layout.InfoPlist, prevVersion); err != nil {
+			return "", fmt.Errorf("selfupdate: rollback: %w", err)
 		}
 	}
 

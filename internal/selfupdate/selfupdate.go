@@ -53,14 +53,10 @@ package selfupdate
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
-	"path/filepath"
 
 	"github.com/Masterminds/semver/v3"
 	su "github.com/creativeprojects/go-selfupdate"
-
-	"github.com/s3ntin3l8/branchdam-agent/internal/appbundle"
 )
 
 // ChecksumAsset is the release asset every published archive is verified
@@ -225,24 +221,12 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 		}
 	}
 
+	// Every target is already live on the new version by this point, so a
+	// failure inside updateBundleInfoPlist's own (best-effort) resign step
+	// can't undo that -- see its doc comment.
 	if layout.InfoPlist != "" {
-		plist := appbundle.RenderInfoPlist(release.Version())
-		if err := os.WriteFile(layout.InfoPlist, []byte(plist), 0o644); err != nil {
-			return "", fmt.Errorf("selfupdate: update %s: %w", layout.InfoPlist, err)
-		}
-		// Both the inner-binary swap above and the Info.plist rewrite just
-		// above invalidate the bundle's ad-hoc signature seal -- see
-		// resignAppBundle's own doc comment for why this must run every
-		// time InfoPlist is rewritten. Best-effort, deliberately: by this
-		// point every target is already live on the new version and the
-		// rollback backups already exist, so the update has genuinely
-		// succeeded. A resign failure only leaves the bundle's signature
-		// seal exactly as stale as it was before this feature existed
-		// (still launchable, just not codesign --verify clean) -- treating
-		// it as fatal would report a successful update as failed, which is
-		// strictly worse. Logged, not swallowed, so it's diagnosable.
-		if err := resignAppBundle(filepath.Dir(filepath.Dir(layout.InfoPlist))); err != nil {
-			slog.Warn("selfupdate: could not re-sign app bundle after update", "path", layout.InfoPlist, "err", err)
+		if err := updateBundleInfoPlist(layout.InfoPlist, release.Version()); err != nil {
+			return "", err
 		}
 	}
 
