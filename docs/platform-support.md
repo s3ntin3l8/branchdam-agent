@@ -207,7 +207,14 @@ never runs the tray at all.
 **A separate, authenticated `/api/*` surface now exists alongside the legacy page**
 (`internal/tray/statusapi.go`), built for the upcoming native app UI (Track 3 of the
 distribution/UX plan) rather than for the status page itself: `GET /api/status`, `GET`/`POST
-/api/settings`, and `POST /api/actions/{ingest,drain,prune,sync,hook-install,pause}`. Every request
+/api/settings`, `POST /api/settings/integration-path`, `POST /api/settings/integration-rewrites`,
+and `POST /api/actions/{ingest,drain,prune,sync,hook-install,pause}`. `POST /api/settings`'s value
+selects the setter by JSON type -- boolean, number, string, or array of strings -- so, unlike at
+#206 landing, a free-text field (server URL, agent ID, the two ingest roots, `pathMappings`, ...) is
+now reachable non-interactively via `Settings.SetString`, not just through the tray's zenity-backed
+dialog. Per-integration catalog paths and Resolve's path rewrites need the two dedicated routes
+above instead, since a raw dotted key alone can't disambiguate `catalogPath` from `databaseUrl`, and
+rewrites parse into a structured value the generic string path never handles. Every request
 must present `Authorization: Bearer <token>`, where `<token>` is a fresh value
 `internal/sessiontoken.Generate` writes 0600 beside `agent.log` on each tray start (never persisted
 across restarts, never passed as an argument). The routes are registered at all only when the status

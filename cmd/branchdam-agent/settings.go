@@ -598,6 +598,99 @@ func settingsPromptFor(field tray.SettingsField) (settingsPrompt, error) {
 	}
 }
 
+// patchValueForStringKey converts a raw string value into the shape
+// config.Patch expects for the keys validateStringChange treats specially
+// (comma-separated lists, path mappings) -- every other key patches the
+// string value verbatim. Shared by PromptAndSet and SetString so the
+// interactive and non-interactive entry points can never diverge on what
+// a given key's on-disk representation looks like.
+func patchValueForStringKey(key, value string) (any, error) {
+	switch key {
+	case "ingest.cardRoots":
+		return splitCommaPaths(value), nil
+	case "ingest.allowedExtensions":
+		return splitCommaExtensions(value)
+	case "pathMappings":
+		return parsePathMappings(value)
+	default:
+		return value, nil
+	}
+}
+
+// validateAndPatchString runs validateStringChange then patches key's
+// on-disk value, without reloading -- the piece PromptAndSet and
+// SetString share; each calls s.reload() itself exactly once after this
+// succeeds.
+func (s *configSettings) validateAndPatchString(key, value string) error {
+	if err := s.validateStringChange(key, value); err != nil {
+		return err
+	}
+	patchVal, err := patchValueForStringKey(key, value)
+	if err != nil {
+		return err
+	}
+	if err := config.Patch(s.path, map[string]any{key: patchVal}); err != nil {
+		return fmt.Errorf("save %s: %w", key, err)
+	}
+	return nil
+}
+
+// SetString is PromptAndSet's non-interactive counterpart -- see
+// tray.Settings.SetString's own doc comment.
+func (s *configSettings) SetString(key, value string) error {
+	if err := s.validateAndPatchString(key, value); err != nil {
+		return err
+	}
+	return s.reload()
+}
+
+// SetIntegrationPath is PromptAndSetIntegrationPath's non-interactive
+// counterpart -- same catalogPath/databaseUrl key resolution, no dialog.
+func (s *configSettings) SetIntegrationPath(id tray.IntegrationID, value string) error {
+	b, ok := builderFor(id)
+	if !ok {
+		return fmt.Errorf("settings: unknown integration %q", id)
+	}
+	pathKey := "catalogPath"
+	if b.ID == tray.IntegrationResolveDB {
+		pathKey = "databaseUrl"
+	}
+	return s.SetString(b.ConfigKey(pathKey), value)
+}
+
+// SetIntegrationRewrites is PromptAndSetIntegrationRewrites's
+// non-interactive counterpart. Path rewrites are not reachable through
+// SetString/validateStringChange at all (applyIntegrationStringChange only
+// handles catalogPath/databaseUrl) -- the parse-and-validate steps are
+// duplicated from PromptAndSetIntegrationRewrites rather than shared,
+// since that function interleaves them with dialog-argument building.
+func (s *configSettings) SetIntegrationRewrites(id tray.IntegrationID, value string) error {
+	b, ok := builderFor(id)
+	if !ok || b.ApplyRewrites == nil {
+		return fmt.Errorf("settings: integration %q does not support path rewrites", id)
+	}
+
+	rewrites, err := parseResolvePathRewrites(value)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	cfgForValidation := cfg
+	cfgForValidation.Integrations.ResolveDB.PathRewrites = rewrites
+	if problem := firstBlockingProblem(cfgForValidation); problem != nil {
+		return fmt.Errorf("config problem: %s", problem)
+	}
+
+	key := b.ConfigKey("pathRewrites")
+	if err := config.Patch(s.path, map[string]any{key: rewrites}); err != nil {
+		return fmt.Errorf("save %s: %w", key, err)
+	}
+	return s.reload()
+}
+
 func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 	prompt, err := settingsPromptFor(field)
 	if err != nil {
@@ -633,22 +726,8 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 		return false, fmt.Errorf("settings dialog for %s failed (exit %d)", prompt.key, exitCode)
 	}
 
-	if err := s.validateStringChange(prompt.key, value); err != nil {
+	if err := s.validateAndPatchString(prompt.key, value); err != nil {
 		return false, err
-	}
-	var patchVal any = value
-	switch prompt.key {
-	case "ingest.cardRoots":
-		patchVal = splitCommaPaths(value)
-	case "ingest.allowedExtensions":
-		exts, _ := splitCommaExtensions(value)
-		patchVal = exts
-	case "pathMappings":
-		mappings, _ := parsePathMappings(value)
-		patchVal = mappings
-	}
-	if err := config.Patch(s.path, map[string]any{prompt.key: patchVal}); err != nil {
-		return false, fmt.Errorf("save %s: %w", prompt.key, err)
 	}
 	return true, s.reload()
 }

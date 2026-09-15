@@ -1606,16 +1606,19 @@ func (fakeSettings) Snapshot() SettingsView                     { return Setting
 func (fakeSettings) SetBool(_ string, _ bool) error             { return nil }
 func (fakeSettings) SetInt(_ string, _ int) error               { return nil }
 func (fakeSettings) SetStringSlice(_ string, _ []string) error  { return nil }
+func (fakeSettings) SetString(_, _ string) error                { return nil }
 func (fakeSettings) PromptAndSet(_ SettingsField) (bool, error) { return false, nil }
 func (fakeSettings) PromptAndSetIntegrationPath(_ IntegrationID) (bool, error) {
 	return false, nil
 }
+func (fakeSettings) SetIntegrationPath(_ IntegrationID, _ string) error { return nil }
 func (fakeSettings) PromptAndSetIntegrationRewrites(_ IntegrationID) (bool, error) {
 	return false, nil
 }
-func (fakeSettings) Reload() error             { return nil }
-func (fakeSettings) OpenConfigFile() error     { return nil }
-func (fakeSettings) RevealConfigFolder() error { return nil }
+func (fakeSettings) SetIntegrationRewrites(_ IntegrationID, _ string) error { return nil }
+func (fakeSettings) Reload() error                                          { return nil }
+func (fakeSettings) OpenConfigFile() error                                  { return nil }
+func (fakeSettings) RevealConfigFolder() error                              { return nil }
 
 type blockingIngester struct {
 	started chan struct{}

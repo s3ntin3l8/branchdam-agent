@@ -129,6 +129,8 @@ func (s *StatusServer) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/status", s.withAPIAuth(s.handleStatusJSON))
 	mux.HandleFunc("GET /api/settings", s.withAPIAuth(s.handleAPISettingsGet))
 	mux.HandleFunc("POST /api/settings", s.withAPIAuth(s.handleAPISettingsPost))
+	mux.HandleFunc("POST /api/settings/integration-path", s.withAPIAuth(s.handleAPISettingsIntegrationPath))
+	mux.HandleFunc("POST /api/settings/integration-rewrites", s.withAPIAuth(s.handleAPISettingsIntegrationRewrites))
 	mux.HandleFunc("POST /api/actions/ingest", s.withAPIAuth(s.handleActionIngest))
 	mux.HandleFunc("POST /api/actions/drain", s.withAPIAuth(s.handleActionDrain))
 	mux.HandleFunc("POST /api/actions/prune", s.withAPIAuth(s.handleActionPrune))
@@ -155,16 +157,23 @@ func (s *StatusServer) handleAPISettingsGet(w http.ResponseWriter, r *http.Reque
 
 // settingsPatchRequest is POST /api/settings's body: a single (key, value)
 // pair. One key per request, deliberately -- Settings.SetBool/SetInt/
-// SetStringSlice each validate the WHOLE hypothetical config before
-// writing (see cmd/branchdam-agent/settings.go's validate*Change doc
-// comments), so batching several keys into one call would need its own
-// atomic multi-key validate-then-patch, which config.Patch doesn't offer
-// today. Value's JSON type selects which Settings setter runs: a JSON
-// boolean routes to SetBool, a JSON number to SetInt, a JSON array of
-// strings to SetStringSlice. There is no route to Settings.PromptAndSet's
-// free-text fields -- those are interactive-dialog-only on this
-// interface; a non-interactive string setter would be a Settings
-// interface change, out of scope here.
+// SetString/SetStringSlice each validate the WHOLE hypothetical config
+// before writing (see cmd/branchdam-agent/settings.go's validate*Change
+// doc comments), so batching several keys into one call would need its
+// own atomic multi-key validate-then-patch, which config.Patch doesn't
+// offer today. Value's JSON type selects which Settings setter runs: a
+// JSON boolean routes to SetBool, a JSON number to SetInt, a JSON string
+// to SetString, a JSON array of strings to SetStringSlice. Per-integration
+// path rewrites are not reachable through this generic key/value shape
+// (they parse into a structured value, not a plain string) -- see
+// POST /api/settings/integration-rewrites instead.
+//
+// "ingest.cardRoots" and "ingest.allowedExtensions" are reachable through
+// BOTH a string (SetString, comma-separated, split and trimmed) and an
+// array of strings (SetStringSlice, copied verbatim) -- a caller should
+// pick one wire shape per key and stick to it; the array form is the one
+// a real list-editing UI should use, since it can't produce a malformed
+// comma-separated string in the first place.
 type settingsPatchRequest struct {
 	Key   string `json:"key"`
 	Value any    `json:"value"`
@@ -189,6 +198,8 @@ func (s *StatusServer) handleAPISettingsPost(w http.ResponseWriter, r *http.Requ
 	switch v := req.Value.(type) {
 	case bool:
 		err = s.Settings.SetBool(req.Key, v)
+	case string:
+		err = s.Settings.SetString(req.Key, v)
 	case float64: // encoding/json decodes every JSON number into float64
 		// v != math.Trunc(v) catches a fractional value (int(3.7) would
 		// silently truncate to 3); the range check catches a value outside
@@ -215,6 +226,61 @@ func (s *StatusServer) handleAPISettingsPost(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, s.Settings.Snapshot())
+}
+
+// idValueSettingsRequest is the body shape shared by
+// /api/settings/integration-path and /api/settings/integration-rewrites --
+// both select their target purely by integration ID, mirroring
+// idActionRequest's own by-ID convention for /api/actions/sync and
+// /api/actions/hook-install. Neither route fits settingsPatchRequest's
+// generic dotted-key shape: SetIntegrationPath resolves the actual key
+// itself (catalogPath vs. databaseUrl), and SetIntegrationRewrites parses
+// Value into a structured value SetString never handles.
+type idValueSettingsRequest struct {
+	ID    string `json:"id"`
+	Value string `json:"value"`
+}
+
+func (s *StatusServer) handleAPISettingsIntegrationPath(w http.ResponseWriter, r *http.Request) {
+	if s.Settings == nil {
+		http.Error(w, "settings not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req idValueSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.Settings.SetIntegrationPath(IntegrationID(req.ID), req.Value); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, s.Settings.Snapshot())
+}
+
+func (s *StatusServer) handleAPISettingsIntegrationRewrites(w http.ResponseWriter, r *http.Request) {
+	if s.Settings == nil {
+		http.Error(w, "settings not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req idValueSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.Settings.SetIntegrationRewrites(IntegrationID(req.ID), req.Value); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

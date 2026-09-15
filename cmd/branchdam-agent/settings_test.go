@@ -512,6 +512,146 @@ func TestConfigSettingsPromptAndSetIntegrationPathUnknownID(t *testing.T) {
 	}
 }
 
+// TestConfigSettingsSetStringHappyPath drives SetString's non-interactive
+// validate → patch → reload path directly, without a dialog.
+func TestConfigSettingsSetStringHappyPath(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetString("agentId", "workstation-7"); err != nil {
+		t.Fatalf("SetString: %v", err)
+	}
+	if got := s.Snapshot().AgentID; got != "workstation-7" {
+		t.Errorf("AgentID = %q, want %q", got, "workstation-7")
+	}
+}
+
+// TestConfigSettingsSetStringRejectsInvalid confirms SetString runs the
+// same validateStringChange gate PromptAndSet does -- an empty agentId
+// must be rejected without persisting.
+func TestConfigSettingsSetStringRejectsInvalid(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetString("agentId", "   "); err == nil {
+		t.Fatal("expected an error for a blank agentId")
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.AgentID != "test-agent" {
+		t.Errorf("AgentID = %q, want unchanged %q", reloaded.AgentID, "test-agent")
+	}
+}
+
+// TestConfigSettingsSetStringSpecialKeys confirms SetString applies the
+// same comma-separated/path-mapping conversions PromptAndSet's inline
+// switch used to -- both now share patchValueForStringKey.
+func TestConfigSettingsSetStringSpecialKeys(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetString("pathMappings", "/mnt/nas:/storage/archive"); err != nil {
+		t.Fatalf("SetString(pathMappings): %v", err)
+	}
+	sv := s.Snapshot()
+	if sv.PathMappings != "/mnt/nas:/storage/archive" {
+		t.Errorf("PathMappings = %q", sv.PathMappings)
+	}
+}
+
+// TestConfigSettingsSetIntegrationPathHappyPath is
+// TestConfigSettingsPromptAndSetIntegrationPathHappyPath's non-interactive
+// counterpart.
+func TestConfigSettingsSetIntegrationPathHappyPath(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetIntegrationPath(tray.IntegrationLuminar, "/data/catalog.db"); err != nil {
+		t.Fatalf("SetIntegrationPath: %v", err)
+	}
+	iv, _ := s.Snapshot().Integration(tray.IntegrationLuminar)
+	if iv.CatalogPath != "/data/catalog.db" {
+		t.Errorf("CatalogPath = %q", iv.CatalogPath)
+	}
+}
+
+// TestConfigSettingsSetIntegrationPathResolveUsesDatabaseURLKey confirms
+// SetIntegrationPath resolves the same catalogPath/databaseUrl key
+// PromptAndSetIntegrationPath does, for the one integration (Resolve)
+// where they differ.
+func TestConfigSettingsSetIntegrationPathResolveUsesDatabaseURLKey(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	authValue := "fixture-value"
+	databaseURL := "postgres://user:" + authValue + "@localhost:5432/resolve"
+	if err := s.SetIntegrationPath(tray.IntegrationResolveDB, databaseURL); err != nil {
+		t.Fatalf("SetIntegrationPath: %v", err)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.Integrations.ResolveDB.DatabaseURL; got != databaseURL {
+		t.Errorf("databaseUrl = %q, want %q", got, databaseURL)
+	}
+}
+
+func TestConfigSettingsSetIntegrationPathUnknownID(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetIntegrationPath("not-a-real-integration", "/x"); err == nil {
+		t.Fatal("expected an error for an unknown integration ID")
+	}
+}
+
+// TestConfigSettingsSetIntegrationRewritesHappyPath is
+// TestPromptAndSetIntegrationRewritesOK's non-interactive counterpart.
+func TestConfigSettingsSetIntegrationRewritesHappyPath(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetIntegrationRewrites(tray.IntegrationResolveDB, `D:\Videos\:/storage/archive/videos/`); err != nil {
+		t.Fatalf("SetIntegrationRewrites: %v", err)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := reloaded.Integrations.ResolveDB.PathRewrites
+	if len(got) != 1 || got[0].From != `D:\Videos\` || got[0].To != "/storage/archive/videos/" {
+		t.Errorf("pathRewrites = %v, want [{D:\\Videos\\ /storage/archive/videos/}]", got)
+	}
+}
+
+func TestConfigSettingsSetIntegrationRewritesInvalid(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetIntegrationRewrites(tray.IntegrationResolveDB, "/mnt/nas/videos"); err == nil {
+		t.Fatal("expected error for invalid format")
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Integrations.ResolveDB.PathRewrites) != 0 {
+		t.Errorf("pathRewrites = %v, want empty (should not persist on invalid input)", reloaded.Integrations.ResolveDB.PathRewrites)
+	}
+}
+
+func TestConfigSettingsSetIntegrationRewritesUnsupported(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetIntegrationRewrites(tray.IntegrationLuminar, "a:b"); err == nil {
+		t.Fatal("expected error for unsupported integration")
+	}
+}
+
 func TestConfigSettingsReloadDetectsRestartRequiredStatusAddr(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner, nil)

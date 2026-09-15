@@ -121,6 +121,8 @@ func TestAPIRoutesRequireToken(t *testing.T) {
 		{http.MethodGet, "/api/status"},
 		{http.MethodGet, "/api/settings"},
 		{http.MethodPost, "/api/settings"},
+		{http.MethodPost, "/api/settings/integration-path"},
+		{http.MethodPost, "/api/settings/integration-rewrites"},
 		{http.MethodPost, "/api/actions/ingest"},
 		{http.MethodPost, "/api/actions/drain"},
 		{http.MethodPost, "/api/actions/prune"},
@@ -196,18 +198,25 @@ func (a *spyActions) TriggerHookInstall(_ context.Context, id HookID) (HookState
 func (a *spyActions) Paused() bool     { return a.paused }
 func (a *spyActions) SetPaused(v bool) { a.paused = v }
 
-// spySettings is a fake Settings recording SetBool/SetInt/SetStringSlice
-// calls and returning a configurable error from each.
+// spySettings is a fake Settings recording SetBool/SetInt/SetString/
+// SetStringSlice/SetIntegrationPath/SetIntegrationRewrites calls and
+// returning a configurable error from each.
 type spySettings struct {
 	snapshot SettingsView
 	setErr   error
 
-	lastBoolKey  string
-	lastBoolVal  bool
-	lastIntKey   string
-	lastIntVal   int
-	lastSliceKey string
-	lastSliceVal []string
+	lastBoolKey    string
+	lastBoolVal    bool
+	lastIntKey     string
+	lastIntVal     int
+	lastSliceKey   string
+	lastSliceVal   []string
+	lastStringKey  string
+	lastStringVal  string
+	lastPathID     IntegrationID
+	lastPathVal    string
+	lastRewriteID  IntegrationID
+	lastRewriteVal string
 }
 
 func (s *spySettings) Snapshot() SettingsView { return s.snapshot }
@@ -223,12 +232,24 @@ func (s *spySettings) SetStringSlice(key string, v []string) error {
 	s.lastSliceKey, s.lastSliceVal = key, v
 	return s.setErr
 }
+func (s *spySettings) SetString(key, v string) error {
+	s.lastStringKey, s.lastStringVal = key, v
+	return s.setErr
+}
 func (s *spySettings) PromptAndSet(_ SettingsField) (bool, error) { return false, nil }
 func (s *spySettings) PromptAndSetIntegrationPath(_ IntegrationID) (bool, error) {
 	return false, nil
 }
+func (s *spySettings) SetIntegrationPath(id IntegrationID, v string) error {
+	s.lastPathID, s.lastPathVal = id, v
+	return s.setErr
+}
 func (s *spySettings) PromptAndSetIntegrationRewrites(_ IntegrationID) (bool, error) {
 	return false, nil
+}
+func (s *spySettings) SetIntegrationRewrites(id IntegrationID, v string) error {
+	s.lastRewriteID, s.lastRewriteVal = id, v
+	return s.setErr
 }
 func (s *spySettings) Reload() error             { return nil }
 func (s *spySettings) OpenConfigFile() error     { return nil }
@@ -528,6 +549,90 @@ func TestHandleAPISettingsPostStringSlice(t *testing.T) {
 	}
 	if len(settings.lastSliceVal) != 2 || settings.lastSliceVal[0] != "cr3" {
 		t.Errorf("SetStringSlice called with %v", settings.lastSliceVal)
+	}
+}
+
+func TestHandleAPISettingsPostString(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(settingsPatchRequest{Key: "agentId", Value: "workstation-7"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if settings.lastStringKey != "agentId" || settings.lastStringVal != "workstation-7" {
+		t.Errorf("SetString called with (%q, %q)", settings.lastStringKey, settings.lastStringVal)
+	}
+}
+
+func TestHandleAPISettingsIntegrationPath(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(idValueSettingsRequest{ID: string(IntegrationLuminar), Value: "/data/catalog.db"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings/integration-path", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if settings.lastPathID != IntegrationLuminar || settings.lastPathVal != "/data/catalog.db" {
+		t.Errorf("SetIntegrationPath called with (%q, %q)", settings.lastPathID, settings.lastPathVal)
+	}
+}
+
+func TestHandleAPISettingsIntegrationPathRequiresID(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(idValueSettingsRequest{Value: "/data/catalog.db"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings/integration-path", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPISettingsIntegrationRewrites(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(idValueSettingsRequest{ID: string(IntegrationResolveDB), Value: `D:\Videos\:/storage/archive/videos/`})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings/integration-rewrites", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if settings.lastRewriteID != IntegrationResolveDB || settings.lastRewriteVal != `D:\Videos\:/storage/archive/videos/` {
+		t.Errorf("SetIntegrationRewrites called with (%q, %q)", settings.lastRewriteID, settings.lastRewriteVal)
+	}
+}
+
+func TestHandleAPISettingsIntegrationRewritesRequiresID(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(idValueSettingsRequest{Value: "a:b"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings/integration-rewrites", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
 
