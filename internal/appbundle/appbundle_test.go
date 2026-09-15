@@ -36,6 +36,7 @@ func TestRenderInfoPlist(t *testing.T) {
 		"<key>CFBundleIdentifier</key>\n    <string>" + autostart.Label + "</string>",
 		"<key>CFBundleShortVersionString</key>\n    <string>1.2.3</string>",
 		"<key>CFBundleVersion</key>\n    <string>1.2.3</string>",
+		"<key>CFBundleIconFile</key>\n    <string>icon</string>",
 		"<key>LSUIElement</key>\n    <true/>",
 	} {
 		if !strings.Contains(plist, want) {
@@ -68,6 +69,15 @@ func TestWrite(t *testing.T) {
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
 		t.Errorf("inner binary not executable: mode %v", info.Mode())
+	}
+
+	iconPath := filepath.Join(appDir, "Contents", "Resources", IconFileName)
+	iconData, err := os.ReadFile(iconPath)
+	if err != nil {
+		t.Fatalf("icon not written: %v", err)
+	}
+	if len(iconData) < 8 || string(iconData[:4]) != "icns" {
+		t.Errorf("icon at %s is not a valid .icns file", iconPath)
 	}
 
 	if err := Write(appDir, binPath, "v1.0.0"); err == nil {

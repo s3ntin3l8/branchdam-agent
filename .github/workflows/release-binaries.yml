@@ -144,25 +144,62 @@ jobs:
           go build -trimpath \
             -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" \
             -o dist/branchdam-agent ./cmd/branchdam-agent
-      # Assembles dist/branchdam-agent.app around the binary just built and
-      # tars ONLY the bundle -- shipping a bare binary alongside it would
+      # Assembles dist/branchdam-agent.app around the binary just built.
+      # The CLI subcommands (preflight/ingest/etc.) work fine invoked
+      # directly at branchdam-agent.app/Contents/MacOS/branchdam-agent --
+      # no separate console binary is needed the way Windows needs one
+      # (macOS has no link-time GUI/console split; LSUIElement is a bundle
+      # property, not a linker flag).
+      - name: Assemble bundle
+        run: go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -version "$RELEASE_VERSION"
+      # Ad-hoc signs the BUNDLE (not just its inner binary, which Go's
+      # darwin/arm64 linker already ad-hoc signs on its own -- confirmed via
+      # LC_CODE_SIGNATURE on the built Mach-O). An unsigned bundle is what
+      # made a fresh download present as "is damaged and can't be opened",
+      # a dead end distinct from the ordinary unidentified-developer
+      # Gatekeeper prompt -- see docs/platform-support.md. Plain --sign (no
+      # --deep): there is exactly one executable and no nested frameworks,
+      # and Apple documents --deep as a diagnostic aid, not a signing
+      # mechanism. No Apple Developer account or secret is involved -- "-"
+      # is codesign's own syntax for an ad-hoc identity. This does NOT
+      # notarize the bundle and does NOT remove the Gatekeeper prompt on
+      # first launch; it only makes the prompt the recoverable
+      # right-click-Open kind instead of "damaged". Runs BEFORE packaging
+      # below (a Hermes review finding on this PR: signing after tar'ing
+      # left the self-update tarball payload silently unsigned) so every
+      # packaged artifact -- the tarball AND the .dmg -- carries the same
+      # signed bundle.
+      - name: Ad-hoc sign bundle
+        run: |
+          codesign --force --sign - dist/branchdam-agent.app
+          codesign --verify --strict --verbose=2 dist/branchdam-agent.app
+      # Tars ONLY the bundle -- shipping a bare binary alongside it would
       # put two archive entries with the base name "branchdam-agent" in
       # the same tar, and go-selfupdate's unarchiveTar returns whichever
       # one it reads first (see internal/selfupdate's doc comment and
-      # docs/platform-support.md's Self-update section). The CLI
-      # subcommands (preflight/ingest/etc.) work fine invoked directly at
-      # branchdam-agent.app/Contents/MacOS/branchdam-agent -- no separate
-      # console binary is needed the way Windows needs one (macOS has no
-      # link-time GUI/console split; LSUIElement is a bundle property, not
-      # a linker flag).
+      # docs/platform-support.md's Self-update section).
       - name: Package
+        run: tar -C dist -czf branchdam-agent-darwin-arm64.tar.gz branchdam-agent.app
+      # The user-facing download: a .dmg with an /Applications symlink so
+      # drag-to-install is the obvious gesture. This is what actually
+      # resolves App Translocation (internal/selfupdate.DetectLayout's
+      # ErrTranslocated path) for a normal browser download -- extracting a
+      # tarball into ~/Downloads and double-clicking the .app is exactly
+      # the scenario translocation targets. hdiutil is a macOS built-in, no
+      # extra tool needed.
+      - name: Build DMG
         run: |
-          go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -version "$RELEASE_VERSION"
-          tar -C dist -czf branchdam-agent-darwin-arm64.tar.gz branchdam-agent.app
+          mkdir -p dist/dmg-root
+          cp -R dist/branchdam-agent.app dist/dmg-root/
+          ln -s /Applications dist/dmg-root/Applications
+          hdiutil create -volname "branchDAM Agent" -srcfolder dist/dmg-root \
+            -ov -format UDZO branchdam-agent-darwin-arm64.dmg
       - uses: actions/upload-artifact@v7
         with:
           name: darwin-arm64
-          path: branchdam-agent-darwin-arm64.tar.gz
+          path: |
+            branchdam-agent-darwin-arm64.tar.gz
+            branchdam-agent-darwin-arm64.dmg
           retention-days: 1
 
   # Builds one complete, verified release set before anything is published.
@@ -186,6 +223,7 @@ jobs:
           cp dist/windows-amd64/branchdam-agent-windows-amd64.zip release-assets/
           cp dist/windows-amd64/branchdam-agent-setup.exe release-assets/
           cp dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz release-assets/
+          cp dist/darwin-arm64/branchdam-agent-darwin-arm64.dmg release-assets/
           cd release-assets
           sha256sum branchdam-agent-* | sort -k2 > SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt

@@ -110,6 +110,54 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 	workflowStep(t, upload, "Upload complete release set")
 }
 
+// TestReleaseWorkflowSignsDarwinBundleBeforePackaging pins the ordering
+// invariant a real bug briefly violated: ad-hoc signing must run BEFORE
+// both darwin packaging steps (the .tar.gz self-update payload and the
+// .dmg), or whichever one was packaged first silently ships unsigned. This
+// exact regression shipped once -- caught by review, not by any existing
+// test, since this file's other ordering assertions only ever covered the
+// attest job -- see resign.go's own doc comment for the runtime-side half
+// of this fix (resignAppBundle re-signs after self-update mutates the
+// bundle, which only matters if the shipped bundle was actually signed to
+// begin with).
+func TestReleaseWorkflowSignsDarwinBundleBeforePackaging(t *testing.T) {
+	b, err := os.ReadFile("../../.github/workflows/release-binaries.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]releaseWorkflowJob `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(b, &workflow); err != nil {
+		t.Fatalf("parse release workflow: %v", err)
+	}
+
+	darwin, ok := workflow.Jobs["build-darwin"]
+	if !ok {
+		t.Fatal("release workflow is missing build-darwin job")
+	}
+
+	sign, signIndex := workflowStep(t, darwin, "Ad-hoc sign bundle")
+	for _, want := range []string{
+		"codesign --force --sign -",
+		"codesign --verify --strict",
+	} {
+		if !strings.Contains(sign.Run, want) {
+			t.Errorf("darwin sign step is missing %q", want)
+		}
+	}
+
+	_, packageIndex := workflowStep(t, darwin, "Package")
+	if packageIndex <= signIndex {
+		t.Errorf("build-darwin must sign before packaging the tarball (sign=%d package=%d) -- otherwise the self-update payload ships unsigned", signIndex, packageIndex)
+	}
+
+	_, dmgIndex := workflowStep(t, darwin, "Build DMG")
+	if dmgIndex <= signIndex {
+		t.Errorf("build-darwin must sign before building the .dmg (sign=%d dmg=%d) -- otherwise the manual-install download ships unsigned", signIndex, dmgIndex)
+	}
+}
+
 func TestWindowsInstallerDesktopLaunchContract(t *testing.T) {
 	b, err := os.ReadFile("../../installer/windows/branchdam-agent.nsi")
 	if err != nil {

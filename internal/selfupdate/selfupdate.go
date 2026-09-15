@@ -57,8 +57,6 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	su "github.com/creativeprojects/go-selfupdate"
-
-	"github.com/s3ntin3l8/branchdam-agent/internal/appbundle"
 )
 
 // ChecksumAsset is the release asset every published archive is verified
@@ -223,10 +221,12 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 		}
 	}
 
+	// Every target is already live on the new version by this point, so a
+	// failure inside updateBundleInfoPlist's own (best-effort) resign step
+	// can't undo that -- see its doc comment.
 	if layout.InfoPlist != "" {
-		plist := appbundle.RenderInfoPlist(release.Version())
-		if err := os.WriteFile(layout.InfoPlist, []byte(plist), 0o644); err != nil {
-			return "", fmt.Errorf("selfupdate: update %s: %w", layout.InfoPlist, err)
+		if err := updateBundleInfoPlist(layout.InfoPlist, release.Version()); err != nil {
+			return "", err
 		}
 	}
 

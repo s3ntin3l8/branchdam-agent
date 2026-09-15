@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/s3ntin3l8/branchdam-agent/internal/appicon"
 	"github.com/s3ntin3l8/branchdam-agent/internal/autostart"
 )
 
@@ -30,6 +31,11 @@ const BinaryName = "branchdam-agent"
 // DisplayName is CFBundleName/CFBundleDisplayName -- what Finder and (were
 // LSUIElement not set) the Dock would show.
 const DisplayName = "branchDAM Agent"
+
+// IconFileName is Contents/Resources/<IconFileName> -- CFBundleIconFile is
+// written without the extension (Apple's own convention), so RenderInfoPlist
+// strips it.
+const IconFileName = "icon.icns"
 
 var versionComponent = regexp.MustCompile(`^\d+$`)
 
@@ -67,9 +73,14 @@ func BundleVersion(tag string) string {
 // sufficient -- unverified without a macOS host). CFBundleIdentifier
 // reuses internal/autostart.Label so the bundle ID and the LaunchAgent
 // Label are always the same string, not two names for the same thing that
-// could drift.
+// could drift. CFBundleIconFile names Contents/Resources/icon.icns (written
+// once, at build time, by Write below) without its extension, matching
+// Apple's own convention -- self-update's Apply/Rollback (see this file's
+// package doc) call RenderInfoPlist again on an update, but neither ever
+// touches Resources, so the icon persists unmodified across updates.
 func RenderInfoPlist(version string) string {
 	bv := BundleVersion(version)
+	iconName := strings.TrimSuffix(IconFileName, filepath.Ext(IconFileName))
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -81,6 +92,8 @@ func RenderInfoPlist(version string) string {
     <key>CFBundleName</key>
     <string>%s</string>
     <key>CFBundleDisplayName</key>
+    <string>%s</string>
+    <key>CFBundleIconFile</key>
     <string>%s</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
@@ -96,15 +109,15 @@ func RenderInfoPlist(version string) string {
     <string>11.0</string>
 </dict>
 </plist>
-`, BinaryName, autostart.Label, BinaryName, DisplayName, bv, bv)
+`, BinaryName, autostart.Label, BinaryName, DisplayName, iconName, bv, bv)
 }
 
 // Write assembles appDir (typically "branchdam-agent.app") as a fresh
-// bundle around binPath: Contents/Info.plist and a copy of binPath at
-// Contents/MacOS/<BinaryName> with the executable bit preserved. appDir
-// must not already exist -- Write never overwrites an existing bundle, so
-// a build script that runs it twice fails loudly instead of merging state
-// from a stale previous run.
+// bundle around binPath: Contents/Info.plist, Contents/Resources/icon.icns,
+// and a copy of binPath at Contents/MacOS/<BinaryName> with the executable
+// bit preserved. appDir must not already exist -- Write never overwrites an
+// existing bundle, so a build script that runs it twice fails loudly
+// instead of merging state from a stale previous run.
 func Write(appDir, binPath, version string) error {
 	if _, err := os.Stat(appDir); err == nil {
 		return fmt.Errorf("appbundle: %s already exists", appDir)
@@ -114,10 +127,23 @@ func Write(appDir, binPath, version string) error {
 	if err := os.MkdirAll(macOSDir, 0o755); err != nil {
 		return fmt.Errorf("appbundle: create %s: %w", macOSDir, err)
 	}
+	resourcesDir := filepath.Join(appDir, "Contents", "Resources")
+	if err := os.MkdirAll(resourcesDir, 0o755); err != nil {
+		return fmt.Errorf("appbundle: create %s: %w", resourcesDir, err)
+	}
 
 	plistPath := filepath.Join(appDir, "Contents", "Info.plist")
 	if err := os.WriteFile(plistPath, []byte(RenderInfoPlist(version)), 0o644); err != nil {
 		return fmt.Errorf("appbundle: write %s: %w", plistPath, err)
+	}
+
+	icns, err := appicon.ICNS()
+	if err != nil {
+		return fmt.Errorf("appbundle: render icon: %w", err)
+	}
+	iconPath := filepath.Join(resourcesDir, IconFileName)
+	if err := os.WriteFile(iconPath, icns, 0o644); err != nil {
+		return fmt.Errorf("appbundle: write %s: %w", iconPath, err)
 	}
 
 	if err := copyExecutable(binPath, filepath.Join(macOSDir, BinaryName)); err != nil {
