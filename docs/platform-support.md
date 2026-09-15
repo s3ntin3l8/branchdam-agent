@@ -90,8 +90,9 @@ The embedded status page (still the `<meta http-equiv="refresh">` HTML page from
 also renders an "Integrations" section (per-integration enabled/dry-run config state joined by ID
 against the last sync summary -- see the `integrationView` template func in
 `internal/tray/statusserver.go`) and a "DaVinci Resolve render hook" section (issue #60/#61) -- see
-the Status page section below. A `/status.json` route and a smoother live-refresh loop are still
-deferred to issue #32's own tray-timer work. Live per-file ingest progress
+the Status page section below. `/status.json` has since shipped (`statusserver.go`'s
+`handleStatusJSON`, also reachable via `Accept: application/json` on `/` itself); a smoother
+live-refresh loop is still deferred to issue #32's own tray-timer work. Live per-file ingest progress
 (per-file path, bytes done / total, phase, and elapsed time) is already
 shipped by #85: it renders in the tray tooltip while a card is being
 ingested and on the status page under the same busy-card header. See
@@ -170,12 +171,26 @@ exists for queue counts). **Installed**, **up to date**, and **modified/out of d
 as distinct states since a hand-edited copy and a stale shipped version are the same SHA-256
 mismatch, indistinguishable by design -- see `HookState`'s own doc comment.
 
-**Read-only.** Neither section is itself interactive -- both are plain `<meta http-equiv="refresh">`
-HTML, no JS, no POST endpoints (see `handleIndex`'s own doc comment on why this repo never adds one).
-The actions themselves live one level up, in the tray menu: catalog sync via the Integrations menu's
-"Sync now" (or its background timer), and the Resolve hook via the "DaVinci Resolve" menu's
-"Install / update render hook" (issue #68) -- see that section below. `branchdam-agent resolve-hook
--install` remains available headlessly, for a workstation that never runs the tray at all.
+**The legacy page (`/`, `/status`, `/status.json`) stays read-only.** Neither section is itself
+interactive -- both are plain `<meta http-equiv="refresh">` HTML, no JS, no auth, matching this
+page's original issue #3/#61 shape. The actions themselves live one level up, in the tray menu:
+catalog sync via the Integrations menu's "Sync now" (or its background timer), and the Resolve hook
+via the "DaVinci Resolve" menu's "Install / update render hook" (issue #68) -- see that section
+below. `branchdam-agent resolve-hook -install` remains available headlessly, for a workstation that
+never runs the tray at all.
+
+**A separate, authenticated `/api/*` surface now exists alongside the legacy page**
+(`internal/tray/statusapi.go`), built for the upcoming native app UI (Track 3 of the
+distribution/UX plan) rather than for the status page itself: `GET /api/status`, `GET`/`POST
+/api/settings`, and `POST /api/actions/{ingest,drain,prune,sync,hook-install,pause}`. Every request
+must present `Authorization: Bearer <token>`, where `<token>` is a fresh value
+`GenerateSessionToken` writes 0600 beside `agent.log` on each tray start (never persisted across
+restarts, never passed as an argument). The routes are registered at all only when the status
+server's own bind address resolves to loopback -- an operator-widened `tray.statusAddr` gets a 404
+on every `/api/*` route, not a 403 that would still confirm they exist -- and every request is also
+checked against `Origin`/`Sec-Fetch-Site` to reject the classic loopback-CSRF shape (a page loaded
+from elsewhere issuing a same-machine POST via a browser's fetch). See Known gaps for what this
+surface does not yet do.
 
 ## DaVinci Resolve hook menu (issue #68)
 
@@ -528,6 +543,15 @@ A live-refresh via TUF is the proper long-term answer but is out of scope here.
   convention (`_upscale`/`_panorama`), not read from the catalog. Use `--dump-schema` /
   `-query-file` to correct row extraction against a different version, and
   `-derivative-suffixes` to correct the pairing heuristic without a code change.
+- **The hardened `/api/*` surface (see Status page above) has no consumer yet.** It exists ahead of
+  the native app UI it was built for (Track 3 of the distribution/UX plan) so the API can land and
+  be reviewed on its own. Known limitations, by design rather than oversight: `POST
+  /api/actions/ingest` runs synchronously to completion with no server-side timeout (a real card
+  ingest can take minutes; the caller should not assume a fast response); there is no rate limiting
+  beyond the token check itself; and the only way to revoke a leaked token is a tray restart (no
+  explicit revoke endpoint). `POST /api/actions/pause` only ever toggles the session-only pause gate
+  -- toggling the persisted `ingest.pauseUploadOnMetered` config key goes through `POST
+  /api/settings` instead, like any other persisted setting.
 - **`prune` is not real Tier-1 NLE scratch pruning.** It only ever considers files ingested via
   `ingest -offline` (rows in `queue.db`) -- a plain online `ingest` has no durable local-path
   ledger to prune against. Real Tier-1 `LOCAL_SCRATCH` pruning stays architecturally blocked on
