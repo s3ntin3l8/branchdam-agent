@@ -82,6 +82,13 @@ type IntegrationBuilder struct {
 	// config.CatalogSyncConfig.Enabled's own doc comment for why a
 	// cross-field completeness check there would deadlock the Settings
 	// menu.
+	//
+	// NOTE: Ready=true is a "worth constructing" signal, NOT a guarantee
+	// that New returns non-nil. The resolve integration's auto-detect
+	// mode returns Ready=true for Enabled + empty DatabaseURL even when
+	// no local DB exists, in which case New returns nil (handled as
+	// "not configured"). Callers must tolerate a nil entry for a
+	// Ready=true builder.
 	Ready func(cfg config.Config) bool
 	// New builds the syncer once Ready reports true.
 	New func(cfg config.Config, client *branchdam.Client) tray.IntegrationSyncer
@@ -216,7 +223,13 @@ var integrationBuilders = []IntegrationBuilder{
 			// platform-standard local Resolve database paths.
 			databaseURL := r.DatabaseURL
 			if databaseURL == "" {
-				discovered, derr := resolve.DiscoverDefaultDatabaseURL(context.Background())
+				// Bounded even though discovery today only stats local
+				// paths: a future candidate list that probes a network
+				// path (mounted share, etc.) must not be able to hang
+				// tray startup indefinitely.
+				dctx, dcancel := context.WithTimeout(context.Background(), discoveryTimeout)
+				defer dcancel()
+				discovered, derr := resolve.DiscoverDefaultDatabaseURL(dctx)
 				if derr != nil {
 					slog.Warn("resolve: auto-detect failed", "err", derr)
 					return nil
@@ -611,6 +624,13 @@ const integrationSyncCheckInterval = 30 * time.Second
 // runs at most once an hour by default -- there is no cost to a more
 // generous ceiling.
 const integrationSyncTimeout = 10 * time.Minute
+
+// discoveryTimeout bounds one Resolve database auto-discovery probe.
+// Discovery today only stats platform-standard local paths, so a couple
+// of seconds is generous -- but if candidate probing ever grows a
+// network path (mounted share, NAS), the bound keeps tray startup from
+// hanging on an unreachable host.
+const discoveryTimeout = 5 * time.Second
 
 // trayToResolveMemberships converts tray.SyncMembershipEntry slice to
 // resolve.MembershipEntry slice for wiring into resolve.Syncer.

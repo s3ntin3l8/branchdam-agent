@@ -197,6 +197,50 @@ func TestWireRuntimeStateWithOpsFreshInstall(t *testing.T) {
 	}
 }
 
+// TestHandshakeSavePreservesResolveMemberships pins the fix for the
+// PR #198 review warning: the handshake save callback must NOT wipe
+// ResolveEmittedMemberships. Before the fix, a successful drain after
+// the last resolve-sync overwrote runtime.json with a bare
+// {LastHandshakeAt} state, erasing the membership baseline -- so the
+// next restart loaded an empty baseline and every edge was re-emitted
+// as new (cross-restart delta detection silently off).
+func TestHandshakeSavePreservesResolveMemberships(t *testing.T) {
+	r := tray.NewRunner(&fakeIngester{}, nil, "")
+
+	persisted := []runtimeState.MembershipEntry{
+		{MediaPath: "/storage/clip1.mp4", TimelineID: "tl-1"},
+	}
+	prior := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	var savedState runtimeState.State
+	wireRuntimeStateWithOps(r, runtimeStateOps{
+		Path: func() (string, error) { return "/some/path/runtime.json", nil },
+		Load: func(string) (runtimeState.State, error) {
+			return runtimeState.State{LastHandshakeAt: prior, ResolveEmittedMemberships: persisted}, nil
+		},
+		Save: func(_ string, st runtimeState.State) error {
+			savedState = st
+			return nil
+		},
+	})
+
+	// A successful drain fires the handshake save callback.
+	fresh := time.Date(2026, 9, 3, 13, 0, 0, 0, time.UTC)
+	fd := &fakeDrainer{summary: tray.DrainSummary{At: fresh, HandshakeOK: true, LastHandshakeAt: fresh}}
+	r.SetQueueDeps(nil, fd, nil)
+	r.TriggerDrain(t.Context())
+
+	if !savedState.LastHandshakeAt.Equal(fresh) {
+		t.Errorf("saved LastHandshakeAt = %v, want %v (the just-stamped handshake must be persisted)", savedState.LastHandshakeAt, fresh)
+	}
+	if len(savedState.ResolveEmittedMemberships) != 1 {
+		t.Fatalf("saved ResolveEmittedMemberships len = %d, want 1 -- the handshake save wiped the membership baseline", len(savedState.ResolveEmittedMemberships))
+	}
+	if savedState.ResolveEmittedMemberships[0].MediaPath != "/storage/clip1.mp4" {
+		t.Errorf("saved ResolveEmittedMemberships[0] = %+v, want {clip1.mp4 tl-1}", savedState.ResolveEmittedMemberships[0])
+	}
+}
+
 // TestWireRuntimeStateWithOpsSaveErrorPropagatesThroughDrain
 // pins the "failing WriteFile must not block the drain" contract
 // from issue #149, end-to-end through the cmd wiring. The

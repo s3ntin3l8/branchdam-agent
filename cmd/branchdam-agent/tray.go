@@ -723,21 +723,30 @@ func wireRuntimeStateWithOps(runner *tray.Runner, ops runtimeStateOps) {
 	case !rt.LastHandshakeAt.IsZero():
 		runner.SeedLastHandshakeAt(rt.LastHandshakeAt)
 		slog.Info("seeded LastHandshakeAt from runtime state", "path", runtimePath, "at", rt.LastHandshakeAt)
-		// Seed resolve memberships from loaded state.
-		if len(rt.ResolveEmittedMemberships) > 0 {
-			entries := make([]tray.SyncMembershipEntry, len(rt.ResolveEmittedMemberships))
-			for i, e := range rt.ResolveEmittedMemberships {
-				entries[i] = tray.SyncMembershipEntry{MediaPath: e.MediaPath, TimelineID: e.TimelineID}
-			}
-			runner.SeedResolveMemberships(entries)
-			slog.Info("seeded Resolve membership set from runtime state", "path", runtimePath, "count", len(entries))
-		}
-		runner.SetOnSuccessfulHandshake(func(t time.Time) error {
-			return ops.Save(runtimePath, runtimeState.State{LastHandshakeAt: t})
-		})
+		runner.SetOnSuccessfulHandshake(handshakeSaveCallback(ops, runtimePath))
 	default:
-		runner.SetOnSuccessfulHandshake(func(t time.Time) error {
-			return ops.Save(runtimePath, runtimeState.State{LastHandshakeAt: t})
+		runner.SetOnSuccessfulHandshake(handshakeSaveCallback(ops, runtimePath))
+	}
+}
+
+// handshakeSaveCallback returns the callback invoked on every successful
+// drain handshake. It persists the just-stamped LastHandshakeAt WITHOUT
+// wiping the resolve fields a sync pass may have written to runtime.json:
+// the handshake and sync persistence paths are two independent writers to
+// the same file, and a handshake save landing after the last resolve-sync
+// must not erase ResolveEmittedMemberships -- otherwise the next restart
+// loads an empty baseline, cross-restart delta detection stays off, and
+// every edge is re-emitted as new. (The sync-side callback, by contrast,
+// already preserves LastHandshakeAt when it writes memberships; see
+// wireResolveSyncCallback.)
+func handshakeSaveCallback(ops runtimeStateOps, runtimePath string) func(t time.Time) error {
+	return func(t time.Time) error {
+		cur, _ := ops.Load(runtimePath)
+		return ops.Save(runtimePath, runtimeState.State{
+			LastHandshakeAt:             t,
+			ResolveLastChangeCursor:     cur.ResolveLastChangeCursor,
+			ResolveEmittedMemberships:   cur.ResolveEmittedMemberships,
+			ResolveMembershipCapReached: cur.ResolveMembershipCapReached,
 		})
 	}
 }
