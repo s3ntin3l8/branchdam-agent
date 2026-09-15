@@ -147,6 +147,16 @@ type Settings interface {
 	SetInt(key string, v int) error
 	SetStringSlice(key string, v []string) error
 
+	// SetString is SetBool/SetInt's counterpart for a free-text value --
+	// PromptAndSet's non-interactive twin, for a caller with no dialog
+	// backend of its own (the loopback API's POST /api/settings, and
+	// eventually a Wails-bound settings form). Same dotted-key/validate/
+	// patch/reload path as PromptAndSet, just without the dialog
+	// round-trip. Not every free-text field reaches this: per-integration
+	// path rewrites parse into a structured value the generic string path
+	// never handles, so they go through SetIntegrationRewrites instead.
+	SetString(key, value string) error
+
 	// PromptAndSet shows whatever dialog backend the implementation uses
 	// for field, applies the answer if one was given, and reconfigures the
 	// running tray. ok is false when the operator dismissed the dialog --
@@ -162,10 +172,19 @@ type Settings interface {
 	// PromptAndSet.
 	PromptAndSetIntegrationPath(id IntegrationID) (ok bool, err error)
 
+	// SetIntegrationPath is PromptAndSetIntegrationPath's non-interactive
+	// counterpart -- same catalogPath/databaseUrl key resolution, no
+	// dialog.
+	SetIntegrationPath(id IntegrationID, value string) error
+
 	// PromptAndSetIntegrationRewrites prompts for path rewrite rules
 	// (from:to pairs) for the given integration. Only meaningful for
 	// integrations that have a pathRewrites config field (Resolve).
 	PromptAndSetIntegrationRewrites(id IntegrationID) (ok bool, err error)
+
+	// SetIntegrationRewrites is PromptAndSetIntegrationRewrites's
+	// non-interactive counterpart.
+	SetIntegrationRewrites(id IntegrationID, value string) error
 
 	// Reload re-reads config.yaml from disk and reconfigures the running
 	// tray -- the same path a hand-edit followed by "Reload config" takes,
@@ -186,10 +205,6 @@ type Settings interface {
 	// When a field graduates, remove the matching entry below in the
 	// same PR so this comment and the inventory doc never disagree.
 	//
-	//   * pathMappings: hand-edit by design (config.go:446-456 -- each
-	//     rule is a workstation-to-container prefix pair, not a single
-	//     value, and a wrong entry silently misroutes every event for
-	//     a prefix). OpenConfigFile/Pre-flight stay the operator path.
 	//   * ingest.cardRoots: pending M5 #78 (graduates once a tray-side
 	//     Detector restart lands; see the "cardRoots" line in
 	//     docs/tray-settings-inventory.md).
@@ -215,15 +230,6 @@ type Settings interface {
 	//     rarely-touched operator override, not worth a menu slot --
 	//     OpenConfigFile is the path for the (uncommon) machine with
 	//     more than one exiftool install.
-	//
-	// Fields the issue (#110) lists as future graduates but that do
-	// not yet exist in the Config struct (no M5 sub-issue has landed):
-	// ingest.requireDCIM (#81),
-	// ingest.pauseUploadOnMetered (#84),
-	// ingest.autoImportPaths (#79), tray.confirmDestructive (E3 #S2-14).
-	// Each appears in docs/tray-settings-inventory.md's table as a
-	// not-yet-applicable row -- it is a settings.go follow-up, not a
-	// pre-existing gap.
 	OpenConfigFile() error
 	RevealConfigFolder() error
 }

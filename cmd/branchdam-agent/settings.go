@@ -598,6 +598,119 @@ func settingsPromptFor(field tray.SettingsField) (settingsPrompt, error) {
 	}
 }
 
+// patchValueForStringKey converts a raw string value into the shape
+// config.Patch expects for the keys validateStringChange treats specially
+// (comma-separated lists, path mappings) -- every other key patches the
+// string value verbatim. Shared by PromptAndSet and SetString so the
+// interactive and non-interactive entry points can never diverge on what
+// a given key's on-disk representation looks like.
+func patchValueForStringKey(key, value string) (any, error) {
+	switch key {
+	case "ingest.cardRoots":
+		return splitCommaPaths(value), nil
+	case "ingest.allowedExtensions":
+		return splitCommaExtensions(value)
+	case "pathMappings":
+		return parsePathMappings(value)
+	case "agentId":
+		// validateStringChange trims agentId before validating (a
+		// surrounding-whitespace-only value must not read as "set"); patch
+		// the same trimmed form here so a validated value and a persisted
+		// value can never differ (Hermes review finding on this PR).
+		return strings.TrimSpace(value), nil
+	default:
+		return value, nil
+	}
+}
+
+// validateAndPatchString runs validateStringChange then patches key's
+// on-disk value, without reloading -- the piece PromptAndSet and
+// SetString share; each calls s.reload() itself exactly once after this
+// succeeds.
+func (s *configSettings) validateAndPatchString(key, value string) error {
+	if err := s.validateStringChange(key, value); err != nil {
+		return err
+	}
+	patchVal, err := patchValueForStringKey(key, value)
+	if err != nil {
+		return err
+	}
+	if err := config.Patch(s.path, map[string]any{key: patchVal}); err != nil {
+		return fmt.Errorf("save %s: %w", key, err)
+	}
+	return nil
+}
+
+// SetString is PromptAndSet's non-interactive counterpart -- see
+// tray.Settings.SetString's own doc comment.
+func (s *configSettings) SetString(key, value string) error {
+	if err := s.validateAndPatchString(key, value); err != nil {
+		return err
+	}
+	return s.reload()
+}
+
+// SetIntegrationPath is PromptAndSetIntegrationPath's non-interactive
+// counterpart -- same catalogPath/databaseUrl key resolution, no dialog.
+func (s *configSettings) SetIntegrationPath(id tray.IntegrationID, value string) error {
+	b, ok := builderFor(id)
+	if !ok {
+		return fmt.Errorf("settings: unknown integration %q", id)
+	}
+	pathKey := "catalogPath"
+	if b.ID == tray.IntegrationResolveDB {
+		pathKey = "databaseUrl"
+	}
+	return s.SetString(b.ConfigKey(pathKey), value)
+}
+
+// parseAndValidateRewrites parses value into path rewrite rules and
+// validates the result against cfg's own copy (applying the parsed rules
+// to Integrations.ResolveDB.PathRewrites before running
+// firstBlockingProblem, so validation sees the post-change state, not the
+// stale snapshot) -- shared by PromptAndSetIntegrationRewrites and
+// SetIntegrationRewrites so the interactive and non-interactive paths can
+// never diverge on how a rewrite string is parsed or validated (Hermes
+// review suggestion on this PR).
+func parseAndValidateRewrites(cfg config.Config, value string) ([]config.ResolvePathRewrite, error) {
+	rewrites, err := parseResolvePathRewrites(value)
+	if err != nil {
+		return nil, err
+	}
+	cfgForValidation := cfg
+	cfgForValidation.Integrations.ResolveDB.PathRewrites = rewrites
+	if problem := firstBlockingProblem(cfgForValidation); problem != nil {
+		return nil, fmt.Errorf("config problem: %s", problem)
+	}
+	return rewrites, nil
+}
+
+// SetIntegrationRewrites is PromptAndSetIntegrationRewrites's
+// non-interactive counterpart. Path rewrites are not reachable through
+// SetString/validateStringChange at all (applyIntegrationStringChange only
+// handles catalogPath/databaseUrl), so this shares parseAndValidateRewrites
+// with the interactive path instead.
+func (s *configSettings) SetIntegrationRewrites(id tray.IntegrationID, value string) error {
+	b, ok := builderFor(id)
+	if !ok || b.ApplyRewrites == nil {
+		return fmt.Errorf("settings: integration %q does not support path rewrites", id)
+	}
+
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	rewrites, err := parseAndValidateRewrites(cfg, value)
+	if err != nil {
+		return err
+	}
+
+	key := b.ConfigKey("pathRewrites")
+	if err := config.Patch(s.path, map[string]any{key: rewrites}); err != nil {
+		return fmt.Errorf("save %s: %w", key, err)
+	}
+	return s.reload()
+}
+
 func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 	prompt, err := settingsPromptFor(field)
 	if err != nil {
@@ -633,22 +746,8 @@ func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
 		return false, fmt.Errorf("settings dialog for %s failed (exit %d)", prompt.key, exitCode)
 	}
 
-	if err := s.validateStringChange(prompt.key, value); err != nil {
+	if err := s.validateAndPatchString(prompt.key, value); err != nil {
 		return false, err
-	}
-	var patchVal any = value
-	switch prompt.key {
-	case "ingest.cardRoots":
-		patchVal = splitCommaPaths(value)
-	case "ingest.allowedExtensions":
-		exts, _ := splitCommaExtensions(value)
-		patchVal = exts
-	case "pathMappings":
-		mappings, _ := parsePathMappings(value)
-		patchVal = mappings
-	}
-	if err := config.Patch(s.path, map[string]any{prompt.key: patchVal}); err != nil {
-		return false, fmt.Errorf("save %s: %w", prompt.key, err)
 	}
 	return true, s.reload()
 }
@@ -753,17 +852,9 @@ func (s *configSettings) PromptAndSetIntegrationRewrites(id tray.IntegrationID) 
 		return false, fmt.Errorf("path rewrites dialog for %s failed (exit %d)", key, exitCode)
 	}
 
-	// Validate by parsing before persisting.
-	rewrites, err := parseResolvePathRewrites(value)
+	rewrites, err := parseAndValidateRewrites(cfg, value)
 	if err != nil {
 		return false, err
-	}
-	// Apply rewrites to a config copy so firstBlockingProblem validates
-	// the post-change state, not the stale snapshot taken before the dialog.
-	cfgForValidation := cfg
-	cfgForValidation.Integrations.ResolveDB.PathRewrites = rewrites
-	if problem := firstBlockingProblem(cfgForValidation); problem != nil {
-		return false, fmt.Errorf("config problem: %s", problem)
 	}
 
 	// Persist the parsed slice (not the formatted string) so YAML gets
