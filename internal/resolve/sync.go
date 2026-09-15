@@ -332,11 +332,17 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	}
 	hasPrev := s.PrevMemberships != nil
 
-	// Track emitted clips separately from all queried clips. Only emitted
-	// clips are persisted for next-pass delta detection — a clip that
-	// failed to emit (error, unresolved, no-rewrite) should be retried
-	// on the next pass, not marked "unchanged".
-	var emittedMemberships []MembershipEntry
+	// Track the next-pass baseline separately from emitted clips. The
+	// next baseline MUST include both newly-emitted clips AND unchanged
+	// clips (consumed from prevSet) -- otherwise an all-unchanged pass
+	// would emit nothing and OnSaveMemberships would receive an empty
+	// set, resetting s.prevMemberships to nil on the next call. The next
+	// pass would then treat every clip as new and re-emit, defeating
+	// delta detection for the entire session after the first no-change
+	// pass. (Errored, unresolved, and no-rewrite clips are deliberately
+	// excluded -- they should be retried on the next pass, not pinned
+	// in the baseline as "still here".)
+	var emittedMemberships, nextBaseline []MembershipEntry
 
 	for _, key := range membershipOrder {
 		clip := memberships[key]
@@ -370,6 +376,13 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 			if _, existed := prevSet[key]; existed {
 				delete(prevSet, key) // consumed
 				stats.Unchanged++
+				// Unchanged clips MUST stay in the next baseline so a
+				// subsequent all-unchanged pass doesn't reset it to
+				// empty (which would re-emit everything as new).
+				nextBaseline = append(nextBaseline, MembershipEntry{
+					MediaPath:  key.mediaPath,
+					TimelineID: key.timelineID,
+				})
 				continue // skip server call — edge already emitted
 			}
 		}
@@ -451,10 +464,13 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 		}
 		stats.Emitted++
 		stats.EdgesAttached++
-		emittedMemberships = append(emittedMemberships, MembershipEntry{
+		entry := MembershipEntry{
 			MediaPath:  clip.MediaFilePath,
 			TimelineID: clip.TimelineID,
-		})
+		}
+		emittedMemberships = append(emittedMemberships, entry)
+		// Newly-emitted clips obviously belong in the next baseline.
+		nextBaseline = append(nextBaseline, entry)
 		s.logger().Info("resolve-sync: emitted edge",
 			"sourceUuid", nodeUUID, "targetUuid", targetUUID,
 			"mediaFilePath", clip.MediaFilePath, "timeline", clip.TimelineName)
@@ -486,12 +502,16 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 		}
 	}
 
-	// Persist the emitted membership set for the next pass's delta
-	// detection. Only clips whose edge was actually confirmed emitted
-	// are persisted — clips that errored, were unresolved, or had no
-	// path rewrite are retried on the next pass as new memberships.
+	// Persist the next-pass baseline: clips that successfully emitted
+	// (new this pass) AND unchanged clips (consumed from prevSet). This
+	// keeps the in-session baseline advancing across passes -- an
+	// all-unchanged pass would emit nothing, but the baseline still
+	// reflects what exists, so the next pass correctly classifies
+	// everything as Unchanged and skips re-emission. Errored,
+	// unresolved, and no-rewrite clips are deliberately excluded -- they
+	// should be retried on the next pass, not pinned in the baseline.
 	if !s.DryRun && s.OnSaveMemberships != nil {
-		if err := s.OnSaveMemberships(emittedMemberships); err != nil {
+		if err := s.OnSaveMemberships(nextBaseline); err != nil {
 			s.logger().Warn("resolve-sync: failed to persist membership set", "err", err)
 		}
 	}

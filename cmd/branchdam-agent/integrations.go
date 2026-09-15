@@ -471,9 +471,16 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 		VirtualRoot:     s.virtualRoot,
 		PrevMemberships: trayToResolveMemberships(s.prevMemberships),
 		OnSaveMemberships: func(entries []resolve.MembershipEntry) error {
-			// Bridge: update runner's in-memory carry-forward with
-			// the fresh emitted set, then persist to runtime.json.
+			// Bridge: advance the in-session baseline, update the
+			// runner's in-memory carry-forward, then persist to
+			// runtime.json. Order matters: s.prevMemberships must be
+			// set BEFORE the next call to Sync() reads it, otherwise
+			// every pass in a long-running session would compare
+			// against the same startup snapshot -- a clip added mid-
+			// session would be re-emitted as a duplicate edge, and a
+			// removed clip would be re-logged as removed forever.
 			trayEntries := resolveToTrayMemberships(entries)
+			s.prevMemberships = trayEntries
 			if s.onSyncComplete != nil {
 				s.onSyncComplete(trayEntries)
 			}

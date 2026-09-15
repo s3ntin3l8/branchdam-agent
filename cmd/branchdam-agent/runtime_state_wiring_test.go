@@ -2,15 +2,20 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	runtimeState "github.com/s3ntin3l8/branchdam-agent/internal/runtime"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
+	_ "modernc.org/sqlite"
 )
 
 // fakeIngester implements tray.Ingester minimally for the
@@ -371,4 +376,282 @@ func TestBuildIntegrationDepsReturnsNilResolveSyncerWhenNotReady(t *testing.T) {
 	if syncer != nil {
 		t.Errorf("buildIntegrationDeps returned non-nil resolve syncer for an integration that's not Ready: %T", syncer)
 	}
+}
+
+// resolveSchemaDdl mirrors the schema from internal/resolve/resolve_test.go
+// so cmd tests can stand up a real Resolve SQLite DB without reaching
+// into the internal package's test helpers (which are package-private).
+// Schema column ordering and types must match exactly -- the syncer's
+// query.go reads them in this shape.
+const resolveSchemaDdl = `
+CREATE TABLE IF NOT EXISTS "Sm2Timeline" (
+	"Sm2Timeline_id" TEXT PRIMARY KEY,
+	"Name" TEXT
+);
+CREATE TABLE IF NOT EXISTS "Sm2Sequence" (
+	"Sm2Sequence_id" TEXT PRIMARY KEY,
+	"Sm2Timeline_id" TEXT
+);
+CREATE TABLE IF NOT EXISTS "Sm2TiTrack" (
+	"Sm2TiTrack_id" TEXT PRIMARY KEY,
+	"Type" INTEGER,
+	"Sequence" TEXT
+);
+CREATE TABLE IF NOT EXISTS "Sm2TiItem" (
+	"Sm2TiItem_id" TEXT PRIMARY KEY,
+	"Name" TEXT,
+	"MediaFilePath" TEXT,
+	"In" TEXT,
+	"Start" TEXT,
+	"Duration" TEXT,
+	"Sm2TiTrack_id" TEXT
+);
+`
+
+// buildTestResolveDB creates a tempdir-backed SQLite DB with the Resolve
+// schema and one clip, returning its path. Pass multiple clips via
+// additionalClip to extend the DB after the first sync.
+func buildTestResolveDB(t *testing.T, timeline, seq, track, item, mediaPath string) string {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "resolve.db")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer raw.Close()
+	if _, err := raw.ExecContext(context.Background(), resolveSchemaDdl); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if _, err := raw.ExecContext(context.Background(),
+		`INSERT INTO "Sm2Timeline" VALUES (?, ?)`,
+		timeline, "Master"); err != nil {
+		t.Fatalf("insert timeline: %v", err)
+	}
+	if _, err := raw.ExecContext(context.Background(),
+		`INSERT INTO "Sm2Sequence" VALUES (?, ?)`,
+		seq, timeline); err != nil {
+		t.Fatalf("insert sequence: %v", err)
+	}
+	if _, err := raw.ExecContext(context.Background(),
+		`INSERT INTO "Sm2TiTrack" VALUES (?, 0, ?)`,
+		track, seq); err != nil {
+		t.Fatalf("insert track: %v", err)
+	}
+	if _, err := raw.ExecContext(context.Background(),
+		`INSERT INTO "Sm2TiItem" VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		item, "clip1.mp4", mediaPath, "0", "0", "100", track); err != nil {
+		t.Fatalf("insert item: %v", err)
+	}
+	return dbPath
+}
+
+// addClipToResolveDB inserts an additional clip into an existing test
+// Resolve DB. Used to simulate a clip being added mid-session: pass 1
+// sees N clips, pass 2 (after addClipToResolveDB) sees N+1.
+func addClipToResolveDB(t *testing.T, dbPath, itemID, mediaPath string) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer raw.Close()
+	if _, err := raw.ExecContext(context.Background(),
+		`INSERT INTO "Sm2TiItem" VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		itemID, "clip2.mp4", mediaPath, "0", "100", "50", "trk-1"); err != nil {
+		t.Fatalf("insert item: %v", err)
+	}
+}
+
+// TestResolveDBSyncerAdvancesPrevMembershipsAcrossPasses is the
+// in-session regression guard flagged in the review: the OnSaveMemberships
+// bridge must advance s.prevMemberships after each successful pass,
+// otherwise every pass compares against the same startup snapshot --
+// a clip added mid-session is re-emitted as a duplicate edge on each
+// subsequent pass, and a removed clip is re-logged as removed every
+// remaining pass.
+//
+// The test wires a real resolveDBSyncer against a real SQLite Resolve
+// DB and a real (test-temp) node index JSON, then runs Sync() twice --
+// pass 1 sees one clip, pass 2 sees two (added via addClipToResolveDB
+// plus a node-index file rewrite). After pass 1, syncer.prevMemberships
+// must contain clip1 and the runner's carry-forward must match. After
+// pass 2, both must contain BOTH clips -- not just the newly-emitted
+// clip2 -- so clip1 is correctly classified as Unchanged and skip-emit
+// on pass 2 (the load-bearing in-session delta detection behavior).
+//
+// DryRun=false is required so the OnSaveMemberships bridge actually
+// fires (the !s.DryRun guard in resolve.Syncer prevents it from running
+// during dry runs -- otherwise a dry-run would pollute the in-session
+// baseline with simulated emissions that the real pass would skip as
+// already-emitted). We inject a no-op fake client so PostEdgeAttached
+// returns success without a real server.
+func TestResolveDBSyncerAdvancesPrevMembershipsAcrossPasses(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	dbPath := buildTestResolveDB(t,
+		"tl-1", "seq-1", "trk-1", "item-1",
+		`D:\Videos\clip1.mp4`)
+
+	// Build the node-index file in a tempdir we control so we can
+	// rewrite it between passes (the resolve syncer loads it once at
+	// the top of Sync(), so we don't need to mutate it in-memory).
+	indexDir := t.TempDir()
+	indexPath := filepath.Join(indexDir, "node-index.json")
+	indexEntries := map[string]string{
+		"/storage/videos/clip1.mp4": "node-1",
+	}
+	if err := os.WriteFile(indexPath, indexJSON(indexEntries), 0o644); err != nil {
+		t.Fatalf("write initial node index: %v", err)
+	}
+
+	cfg := config.Config{
+		AgentID: "test-agent",
+		Integrations: config.IntegrationsConfig{
+			NodeIndexPath: indexPath,
+			ResolveDB: config.ResolveDBConfig{
+				Enabled:     true,
+				DatabaseURL: "file:" + dbPath + "?mode=ro",
+				DryRun:      false, // required so the OnSaveMemberships bridge fires
+				PathRewrites: []config.ResolvePathRewrite{
+					{From: `D:\Videos\`, To: "/storage/videos/"},
+				},
+			},
+		},
+	}
+
+	_, syncer := buildIntegrationDeps(cfg, nil)
+	if syncer == nil {
+		t.Fatal("buildIntegrationDeps returned nil syncer for an enabled ResolveDB config")
+	}
+	// Inject a fake client so PostEdgeAttached returns success without
+	// a real branchDAM server. Required because DryRun=false needs a
+	// working client to exercise the OnSaveMemberships bridge.
+	syncer.client = fakeResolveClient{}
+	syncer.virtualEmitter = fakeResolveClient{}
+
+	r := tray.NewRunner(&fakeIngester{}, nil, "")
+	wireResolveSyncer(r, syncer)
+
+	// Pre-pass: nothing in the carry-forward (startup fresh).
+	if got := r.LastResolveMemberships(); len(got) != 0 {
+		t.Errorf("pre-pass LastResolveMemberships len = %d, want 0", len(got))
+	}
+	if len(syncer.prevMemberships) != 0 {
+		t.Errorf("pre-pass syncer.prevMemberships len = %d, want 0", len(syncer.prevMemberships))
+	}
+
+	// Pass 1: emits clip1.
+	summary1, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	if summary1.Emitted != 1 {
+		t.Errorf("pass 1 Emitted = %d, want 1", summary1.Emitted)
+	}
+	if summary1.Errors != 0 {
+		t.Errorf("pass 1 Errors = %d, want 0", summary1.Errors)
+	}
+	if got := r.LastResolveMemberships(); len(got) != 1 {
+		t.Errorf("after pass 1, runner LastResolveMemberships len = %d, want 1", len(got))
+	} else if got[0].MediaPath != `D:\Videos\clip1.mp4` {
+		t.Errorf("after pass 1, runner.LastResolveMemberships[0] = %+v, want {clip1.mp4 tl-1}", got[0])
+	}
+	if got := syncer.prevMemberships; len(got) != 1 {
+		t.Errorf("after pass 1, syncer.prevMemberships len = %d, want 1 -- the in-session baseline did not advance", len(got))
+	} else if got[0].MediaPath != `D:\Videos\clip1.mp4` {
+		t.Errorf("after pass 1, syncer.prevMemberships[0] = %+v, want {clip1.mp4 tl-1}", got[0])
+	}
+
+	// Mid-session: add a new clip to the Resolve DB and the node index.
+	// Without the in-session fix, pass 2 would either re-emit clip1
+	// (if the baseline was reset to nil) or fail to see clip2 as new
+	// (if the OnSaveMemberships bridge never updated s.prevMemberships).
+	addClipToResolveDB(t, dbPath, "item-2", `D:\Videos\clip2.mp4`)
+	indexEntries["/storage/videos/clip2.mp4"] = "node-2"
+	if err := os.WriteFile(indexPath, indexJSON(indexEntries), 0o644); err != nil {
+		t.Fatalf("rewrite node index: %v", err)
+	}
+
+	// Pass 2: clip1 unchanged (no re-emit), clip2 new.
+	summary2, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+	if summary2.Emitted != 1 {
+		// With the fix, only clip2 newly emits (clip1 is unchanged,
+		// so it's skipped). Without the fix, pass 2 would either emit
+		// nothing (if the baseline was over-broad and excluded both
+		// clips) or re-emit clip1 (if the baseline was reset to nil).
+		t.Errorf("pass 2 Emitted = %d, want 1 (only clip2 should emit; clip1 is unchanged)", summary2.Emitted)
+	}
+	if summary2.Errors != 0 {
+		t.Errorf("pass 2 Errors = %d, want 0", summary2.Errors)
+	}
+
+	// The runner's carry-forward should now hold BOTH clips, not just
+	// the newly-emitted clip2. This is the load-bearing check: the
+	// OnSaveMemberships bridge must include unchanged clips in the
+	// next-pass baseline, otherwise an all-unchanged pass would emit
+	// nothing and the baseline would reset to empty on the next sync.
+	got := r.LastResolveMemberships()
+	if len(got) != 2 {
+		t.Fatalf("after pass 2, runner LastResolveMemberships len = %d, want 2 (clip1 + clip2): %+v", len(got), got)
+	}
+	gotPaths := map[string]string{}
+	for _, m := range got {
+		gotPaths[m.MediaPath] = m.TimelineID
+	}
+	wantPaths := map[string]string{
+		`D:\Videos\clip1.mp4`: "tl-1",
+		`D:\Videos\clip2.mp4`: "tl-1",
+	}
+	for path, timeline := range wantPaths {
+		if gotPaths[path] != timeline {
+			t.Errorf("after pass 2, missing or wrong entry for %q (got %+v, want timeline=%q)", path, gotPaths[path], timeline)
+		}
+	}
+
+	// And syncer.prevMemberships should likewise hold both clips,
+	// so pass 3 (if it ran) would correctly classify them as Unchanged.
+	if len(syncer.prevMemberships) != 2 {
+		t.Errorf("after pass 2, syncer.prevMemberships len = %d, want 2 -- the in-session baseline did not advance correctly across the unchanged + new split", len(syncer.prevMemberships))
+	}
+}
+
+// fakeResolveClient satisfies both resolve.EdgeAttacher and
+// resolve.VirtualNodeEmitter with no-op success responses. Used by
+// the in-session baseline regression test to exercise the
+// OnSaveMemberships bridge without a real branchDAM server.
+type fakeResolveClient struct{}
+
+func (fakeResolveClient) PostEdgeAttached(_ context.Context, _ string, _ branchdam.EdgeAttachedPayload) (*branchdam.EventResponse, error) {
+	return &branchdam.EventResponse{EventID: "fake"}, nil
+}
+
+func (fakeResolveClient) PostVirtualNodeCreated(_ context.Context, _ string, _ branchdam.VirtualNodeCreated) (*branchdam.EventResponse, error) {
+	return &branchdam.EventResponse{EventID: "fake"}, nil
+}
+
+// indexJSON serializes a map[string]string to a JSON object body,
+// matching nodeindex.FileIndex's on-disk shape.
+func indexJSON(entries map[string]string) []byte {
+	var buf []byte
+	buf = append(buf, '{')
+	first := true
+	for k, v := range entries {
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		buf = append(buf, '"')
+		buf = append(buf, k...)
+		buf = append(buf, `":"`...)
+		buf = append(buf, v...)
+		buf = append(buf, '"')
+	}
+	buf = append(buf, '}')
+	return buf
 }
