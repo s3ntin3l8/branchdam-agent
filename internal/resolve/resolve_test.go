@@ -1136,37 +1136,6 @@ func TestSyncDryRunDoesNotPersist(t *testing.T) {
 	}
 }
 
-func openTestDBForSync(t *testing.T) *DB {
-	t.Helper()
-	dbPath := t.TempDir() + "/test.db"
-	// Create the database file and schema using raw database/sql.
-	raw, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	for _, stmt := range []string{
-		`CREATE TABLE IF NOT EXISTS "Sm2Timeline" ("Sm2Timeline_id" TEXT PRIMARY KEY, "Name" TEXT)`,
-		`CREATE TABLE IF NOT EXISTS "Sm2Sequence" ("Sm2Sequence_id" TEXT PRIMARY KEY, "Sm2Timeline_id" TEXT)`,
-		`CREATE TABLE IF NOT EXISTS "Sm2TiTrack" ("Sm2TiTrack_id" TEXT PRIMARY KEY, "Type" INTEGER, "Sequence" TEXT)`,
-		`CREATE TABLE IF NOT EXISTS "Sm2TiItem" ("Sm2TiItem_id" TEXT PRIMARY KEY, "Name" TEXT, "MediaFilePath" TEXT, "In" TEXT, "Start" TEXT, "Duration" TEXT, "Sm2TiTrack_id" TEXT)`,
-	} {
-		if _, err := raw.ExecContext(context.Background(), stmt); err != nil {
-			_ = raw.Close()
-			t.Fatalf("create schema: %v", err)
-		}
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatalf("close raw db: %v", err)
-	}
-	// Reopen via resolve.Open in read-only mode for the syncer.
-	db, err := openTestDB(dbPath)
-	if err != nil {
-		t.Fatalf("openTestDB: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
-}
-
 // insertClipRaw inserts a clip using raw database/sql (for test setup
 // before switching to read-only mode). Uses INSERT OR IGNORE for parent
 // tables so multiple clips can share the same timeline/sequence/track.
@@ -1221,10 +1190,4 @@ func openTestDBForSyncWithClips(t *testing.T, clips []struct {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
-}
-
-// insertClipForSync inserts a clip into the test DB for sync tests.
-func insertClipForSync(t *testing.T, db *DB, timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string) {
-	t.Helper()
-	insertClip(t, db, timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration)
 }
