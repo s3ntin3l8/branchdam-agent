@@ -2,9 +2,11 @@ package resolve
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // CandidateDatabaseURLs returns file: URLs for DaVinci Resolve's local
@@ -17,6 +19,11 @@ import (
 // the Open convention in db.go. Each candidate is a path where DaVinci
 // Resolve 19 stores its local project cache database on the given
 // platform.
+//
+// On Windows, filepath.Join emits backslashes — but RFC 8089 file:
+// URIs require forward slashes, and SQLite's URI parser will reject
+// raw backslashes. Each path segment is therefore path-escaped and
+// joined with forward slashes via filepath.ToSlash.
 func CandidateDatabaseURLs(goos, home, appData string) []string {
 	switch goos {
 	case "windows":
@@ -24,7 +31,7 @@ func CandidateDatabaseURLs(goos, home, appData string) []string {
 			return nil
 		}
 		dbPath := filepath.Join(appData, "Blackmagic Design", "DaVinci Resolve", "Support", "Manager", "Cache", "sqlite", "DaVinciResolveDatabase.db")
-		return []string{"file:" + dbPath + "?mode=ro"}
+		return []string{fileURI(dbPath)}
 	case "darwin":
 		if home == "" {
 			return nil
@@ -42,6 +49,38 @@ func CandidateDatabaseURLs(goos, home, appData string) []string {
 		dbPath := filepath.Join(home, ".local", "share", "DaVinciResolve", "Support", "Manager", "Cache", "sqlite", "DaVinciResolveDatabase.db")
 		return []string{"file:" + dbPath + "?mode=ro"}
 	}
+}
+
+// fileURI builds a file: DSN from an OS-native Windows path. Windows
+// paths can contain backslashes (the OS separator) and spaces
+// ("Blackmagic Design"). For the URI, backslashes must become forward
+// slashes and each segment must be percent-encoded. Leading slashes
+// (which indicate an absolute path on Linux hosts and the drive-
+// letter separator on Windows) are preserved.
+func fileURI(path string) string {
+	// Normalize: convert OS-native backslashes to forward slashes.
+	// filepath.ToSlash on Linux is a no-op for a path with only
+	// backslashes (no '/' to find), so we also do a direct replace
+	// on '\\' to handle Windows-style input on a Linux test host.
+	slashed := strings.ReplaceAll(path, `\`, "/")
+	slashed = filepath.ToSlash(slashed)
+
+	var segments []string
+	for _, s := range strings.Split(slashed, "/") {
+		if s != "" {
+			segments = append(segments, url.PathEscape(s))
+		}
+	}
+	if len(segments) == 0 {
+		// Path was all separators (degenerate); emit a syntactically
+		// valid root URI.
+		return "file:///?"
+	}
+	prefix := ""
+	if strings.HasPrefix(slashed, "/") {
+		prefix = "/"
+	}
+	return "file:" + prefix + strings.Join(segments, "/") + "?mode=ro"
 }
 
 // DiscoverDatabaseURL probes each candidate URL with a brief Open+Close

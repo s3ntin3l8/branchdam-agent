@@ -2,10 +2,11 @@ package resolve
 
 import (
 	"context"
-	"database/sql"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -17,9 +18,37 @@ func TestCandidateDatabaseURLsWindows(t *testing.T) {
 	if len(urls) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(urls))
 	}
-	want := "file:" + filepath.Join(appData, "Blackmagic Design", "DaVinci Resolve", "Support", "Manager", "Cache", "sqlite", "DaVinciResolveDatabase.db") + "?mode=ro"
+	// The DSN must percent-encode spaces in path segments so the
+	// resulting file: URI is RFC 8089-compliant (and valid input
+	// to SQLite's URI parser). On Linux TempDir returns a path
+	// without backslashes, so the conversion is a no-op.
+	want := "file:" + filepath.ToSlash(filepath.Join(appData, "Blackmagic Design", "DaVinci Resolve", "Support", "Manager", "Cache", "sqlite", "DaVinciResolveDatabase.db"))
+	want = strings.ReplaceAll(want, "Blackmagic Design", "Blackmagic%20Design")
+	want = strings.ReplaceAll(want, "DaVinci Resolve", "DaVinci%20Resolve")
+	want += "?mode=ro"
 	if urls[0] != want {
 		t.Errorf("got %q, want %q", urls[0], want)
+	}
+}
+
+// TestCandidateDatabaseURLsWindowsEscapesPath verifies the DSN is
+// RFC 8089-compliant on Windows: backslashes are converted to forward
+// slashes and path segments containing spaces (e.g. "Blackmagic Design")
+// are percent-encoded. Raw backslashes produce a DSN SQLite's URI
+// parser rejects.
+func TestCandidateDatabaseURLsWindowsEscapesPath(t *testing.T) {
+	const appData = `C:\Users\Alice\AppData\Roaming`
+	urls := CandidateDatabaseURLs("windows", "", appData)
+	if len(urls) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(urls))
+	}
+	got := urls[0]
+	want := "file:" + url.PathEscape("C:") + "/" + url.PathEscape("Users") + "/" + url.PathEscape("Alice") + "/" + url.PathEscape("AppData") + "/" + url.PathEscape("Roaming") + "/Blackmagic%20Design/DaVinci%20Resolve/Support/Manager/Cache/sqlite/DaVinciResolveDatabase.db?mode=ro"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if strings.Contains(got, `\`) {
+		t.Errorf("DSN contains raw backslashes, invalid for file: URI: %q", got)
 	}
 }
 
@@ -163,23 +192,4 @@ func TestDiscoverDatabaseURLForGOOS(t *testing.T) {
 	if got != "" {
 		t.Errorf("expected empty for empty home, got %q", got)
 	}
-}
-
-// openTestDB creates a minimal SQLite database at path for testing.
-// It uses database/sql directly to create the file, then returns a
-// read-only *DB handle via Open.
-func openTestDB(path string) (*DB, error) {
-	// Create the database file with a table so it's a valid SQLite DB.
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := db.ExecContext(context.Background(), "CREATE TABLE IF NOT EXISTS _probe (id INTEGER PRIMARY KEY)"); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := db.Close(); err != nil {
-		return nil, err
-	}
-	return Open(context.Background(), "file:"+path+"?mode=ro")
 }
