@@ -63,13 +63,11 @@ func TestOriginAllowed(t *testing.T) {
 }
 
 func TestTokenValid(t *testing.T) {
-	s := &StatusServer{Token: "secret-token"}
-
 	tests := []struct {
-		name   string
-		token  string
-		header string
-		want   bool
+		name        string
+		serverToken string
+		header      string
+		want        bool
 	}{
 		{"correct token", "secret-token", "Bearer secret-token", true},
 		{"wrong token", "secret-token", "Bearer nope", false},
@@ -79,10 +77,7 @@ func TestTokenValid(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := s
-			if tt.name == "empty server token fails closed" {
-				srv = &StatusServer{Token: ""}
-			}
+			srv := &StatusServer{Token: tt.serverToken}
 			req := httptest.NewRequest(http.MethodPost, "/api/actions/drain", nil)
 			if tt.header != "" {
 				req.Header.Set("Authorization", tt.header)
@@ -470,14 +465,14 @@ func TestHandleAPISettingsPostInt(t *testing.T) {
 	mux := http.NewServeMux()
 	s.registerAPIRoutes(mux)
 
-	body, _ := json.Marshal(settingsPatchRequest{Key: "selfUpdate.checkIntervalHrs", Value: 6})
+	body, _ := json.Marshal(settingsPatchRequest{Key: "selfUpdate.checkIntervalHours", Value: 6})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings", body))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if settings.lastIntKey != "selfUpdate.checkIntervalHrs" || settings.lastIntVal != 6 {
+	if settings.lastIntKey != "selfUpdate.checkIntervalHours" || settings.lastIntVal != 6 {
 		t.Errorf("SetInt called with (%q, %v)", settings.lastIntKey, settings.lastIntVal)
 	}
 }

@@ -261,6 +261,16 @@ func newIngestActionResult(sum IngestSummary) ingestActionResult {
 // phase that wants live progress during a long ingest should poll
 // GET /api/status (internal/ingest/progress.go's progress feed already
 // flows through Status()) rather than this route returning early.
+//
+// Every action handler below passes context.WithoutCancel(r.Context()) to
+// its Trigger* call, not r.Context() directly -- net/http cancels a
+// handler's request context the moment the client disconnects (a closed
+// browser tab, an aborted fetch, a network blip), and that has no business
+// tearing down a real DualWrite mid-stream. selfupdate.Apply's own doc
+// comment makes the identical argument for the identical reason; AGENTS.md
+// invariant #15's tray pause gate ("never cancels an in-flight ingest") is
+// the other half of it. WithoutCancel deliberately keeps r.Context()'s
+// values (there are none here) while dropping only its Done channel/error.
 func (s *StatusServer) handleActionIngest(w http.ResponseWriter, r *http.Request) {
 	if s.Actions == nil {
 		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
@@ -275,7 +285,7 @@ func (s *StatusServer) handleActionIngest(w http.ResponseWriter, r *http.Request
 		http.Error(w, "cardPath is required", http.StatusBadRequest)
 		return
 	}
-	summary := s.Actions.TriggerIngest(r.Context(), req.CardPath)
+	summary := s.Actions.TriggerIngest(context.WithoutCancel(r.Context()), req.CardPath)
 	s.writeJSON(w, http.StatusOK, newIngestActionResult(summary))
 }
 
@@ -312,7 +322,7 @@ func (s *StatusServer) handleActionDrain(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
 		return
 	}
-	summary, ran := s.Actions.TriggerDrain(r.Context())
+	summary, ran := s.Actions.TriggerDrain(context.WithoutCancel(r.Context()))
 	s.writeJSON(w, http.StatusOK, newDrainActionResult(summary, ran))
 }
 
@@ -341,7 +351,7 @@ func (s *StatusServer) handleActionPrune(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
 		return
 	}
-	summary, ran := s.Actions.TriggerPrune(r.Context())
+	summary, ran := s.Actions.TriggerPrune(context.WithoutCancel(r.Context()))
 	s.writeJSON(w, http.StatusOK, newPruneActionResult(summary, ran))
 }
 
@@ -397,7 +407,7 @@ func (s *StatusServer) handleActionSync(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
-	summary, ran := s.Actions.TriggerSync(r.Context(), IntegrationID(req.ID))
+	summary, ran := s.Actions.TriggerSync(context.WithoutCancel(r.Context()), IntegrationID(req.ID))
 	s.writeJSON(w, http.StatusOK, newSyncActionResult(summary, ran))
 }
 
@@ -437,7 +447,7 @@ func (s *StatusServer) handleActionHookInstall(w http.ResponseWriter, r *http.Re
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
-	state, ran := s.Actions.TriggerHookInstall(r.Context(), HookID(req.ID))
+	state, ran := s.Actions.TriggerHookInstall(context.WithoutCancel(r.Context()), HookID(req.ID))
 	s.writeJSON(w, http.StatusOK, newHookInstallActionResult(state, ran))
 }
 
