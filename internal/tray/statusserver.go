@@ -81,8 +81,8 @@ type StatusServer struct {
 	Settings Settings
 	// Token, when set, is the shared secret every /api/* request must
 	// present as "Authorization: Bearer <Token>" -- see
-	// GenerateSessionToken and tokenValid. Left empty, every /api/*
-	// request is rejected (fail closed), never "auth disabled".
+	// internal/sessiontoken.Generate and tokenValid. Left empty, every
+	// /api/* request is rejected (fail closed), never "auth disabled".
 	Token string
 
 	srv *http.Server

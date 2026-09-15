@@ -2,6 +2,7 @@ package tray
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -65,6 +66,16 @@ type HookState struct {
 	Installed bool
 	UpToDate  bool
 	Err       error
+}
+
+// MarshalJSON renders Err as a string -- see
+// IngestSummary.MarshalJSON's doc comment (tray.go) for why and how.
+func (s HookState) MarshalJSON() ([]byte, error) {
+	type alias HookState
+	return json.Marshal(struct {
+		alias
+		Err string `json:"Err,omitempty"`
+	}{alias: alias(s), Err: errString(s.Err)})
 }
 
 // HookInstaller is the KindHookInstall-shaped counterpart to

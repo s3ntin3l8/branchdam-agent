@@ -13,6 +13,7 @@ package tray
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -55,14 +56,35 @@ type Ingester interface {
 // IngestSummary is a condensed, human-readable view of the most recent
 // IngestCard call -- what the status page and the tray tooltip both show.
 type IngestSummary struct {
-	CardPath  string
-	StartedAt time.Time
-	Elapsed   time.Duration
-	Submitted int
-	Skipped   int
-	Failed    int
-	Err       error
-	Offline   bool
+	CardPath  string        `json:"cardPath"`
+	StartedAt time.Time     `json:"startedAt"`
+	Elapsed   time.Duration `json:"elapsed"`
+	Submitted int           `json:"submitted"`
+	Skipped   int           `json:"skipped"`
+	Failed    int           `json:"failed"`
+	Err       error         `json:"-"`
+	Offline   bool          `json:"offline"`
+}
+
+// MarshalJSON renders Err as its message string rather than encoding the
+// error value directly -- a bare `error`-typed field silently marshals to
+// "{}" for most error implementations, since they expose no fields of
+// their own for encoding/json to see (see statusapi.go's errString doc
+// comment, which this reuses). Every other field is tagged camelCase to
+// match the rest of Status's JSON surface -- this is the only nested
+// summary type Status.LastIngest ever reaches app.js by field name, so
+// getting the casing right here (rather than leaving it at its untagged
+// PascalCase default like this file's other summary/state types) is what
+// keeps the one JSON consumer this PR adds internally consistent. Err is
+// tagged `json:"-"` on the struct itself and re-added explicitly below at
+// the lowercase "err" key, alongside every other field via the embedded
+// alias.
+func (s IngestSummary) MarshalJSON() ([]byte, error) {
+	type alias IngestSummary
+	return json.Marshal(struct {
+		alias
+		Err string `json:"err,omitempty"`
+	}{alias: alias(s), Err: errString(s.Err)})
 }
 
 // OK reports whether every file that should have been submitted succeeded
@@ -128,6 +150,16 @@ type UpdateStatus struct {
 	// Applied is set to the version string once ApplyLatest has
 	// succeeded this session.
 	Applied string
+}
+
+// MarshalJSON renders Err as a string -- see IngestSummary.MarshalJSON's
+// doc comment for why and how.
+func (u UpdateStatus) MarshalJSON() ([]byte, error) {
+	type alias UpdateStatus
+	return json.Marshal(struct {
+		alias
+		Err string `json:"Err,omitempty"`
+	}{alias: alias(u), Err: errString(u.Err)})
 }
 
 // Note renders UpdateStatus as the one-line string the status page shows

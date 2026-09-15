@@ -1,4 +1,4 @@
-package tray
+package sessiontoken
 
 import (
 	"os"
@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// withXDGStateHome points agentlog.Path (and therefore GenerateSessionToken)
-// at a temp directory on non-Windows/darwin GOOS -- mirrors the seam
+// withXDGStateHome points agentlog.Path (and therefore this package) at a
+// temp directory on non-Windows/darwin GOOS -- mirrors the seam
 // internal/agentlog's own tests rely on (pathForGOOS's "other" branch).
 func withXDGStateHome(t *testing.T) string {
 	t.Helper()
@@ -20,18 +20,18 @@ func withXDGStateHome(t *testing.T) string {
 	return dir
 }
 
-func TestGenerateSessionTokenWritesFileBesideAgentLog(t *testing.T) {
+func TestGenerateWritesFileBesideAgentLog(t *testing.T) {
 	dir := withXDGStateHome(t)
 
-	token, err := GenerateSessionToken()
+	token, err := Generate()
 	if err != nil {
-		t.Fatalf("GenerateSessionToken: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	if len(token) == 0 {
 		t.Fatal("token is empty")
 	}
 
-	path := filepath.Join(dir, "branchdam-agent", sessionTokenFileName)
+	path := filepath.Join(dir, "branchdam-agent", FileName)
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat token file: %v", err)
@@ -49,10 +49,10 @@ func TestGenerateSessionTokenWritesFileBesideAgentLog(t *testing.T) {
 	}
 }
 
-func TestGenerateSessionTokenRetightensPreExistingLoosePermissions(t *testing.T) {
+func TestGenerateRetightensPreExistingLoosePermissions(t *testing.T) {
 	dir := withXDGStateHome(t)
 
-	path := filepath.Join(dir, "branchdam-agent", sessionTokenFileName)
+	path := filepath.Join(dir, "branchdam-agent", FileName)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -60,8 +60,8 @@ func TestGenerateSessionTokenRetightensPreExistingLoosePermissions(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if _, err := GenerateSessionToken(); err != nil {
-		t.Fatalf("GenerateSessionToken: %v", err)
+	if _, err := Generate(); err != nil {
+		t.Fatalf("Generate: %v", err)
 	}
 
 	info, err := os.Stat(path)
@@ -73,18 +73,42 @@ func TestGenerateSessionTokenRetightensPreExistingLoosePermissions(t *testing.T)
 	}
 }
 
-func TestGenerateSessionTokenIsFreshEveryCall(t *testing.T) {
+func TestGenerateIsFreshEveryCall(t *testing.T) {
 	withXDGStateHome(t)
 
-	first, err := GenerateSessionToken()
+	first, err := Generate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := GenerateSessionToken()
+	second, err := Generate()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first == second {
-		t.Error("GenerateSessionToken returned the same token twice in a row")
+		t.Error("Generate returned the same token twice in a row")
+	}
+}
+
+func TestReadReturnsWhatGenerateWrote(t *testing.T) {
+	withXDGStateHome(t)
+
+	token, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got != token {
+		t.Errorf("Read() = %q, want %q", got, token)
+	}
+}
+
+func TestReadFailsWhenNoTokenHasBeenGenerated(t *testing.T) {
+	withXDGStateHome(t)
+
+	if _, err := Read(); err == nil {
+		t.Error("Read succeeded with no token file present, want an error")
 	}
 }

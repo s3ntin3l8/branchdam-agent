@@ -83,7 +83,7 @@ func originAllowed(r *http.Request, addr string) bool {
 // tokenValid reports whether r carries the "Authorization: Bearer <token>"
 // header matching s.Token, compared in constant time so response timing
 // can't be used to brute-force the token byte by byte. An empty s.Token
-// (GenerateSessionToken failed at tray startup -- see tray.go's call site)
+// (sessiontoken.Generate failed at tray startup -- see tray.go's call site)
 // fails closed: every /api/* request is rejected rather than the check
 // degrading to "any token accepted".
 func (s *StatusServer) tokenValid(r *http.Request) bool {

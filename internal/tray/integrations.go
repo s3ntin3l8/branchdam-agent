@@ -2,6 +2,7 @@ package tray
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -67,6 +68,16 @@ type SyncSummary struct {
 	Removed       int // memberships in previous pass but not current (clip removed from timeline)
 	FileMissing   int // clips in current query whose rewritten path doesn't exist on disk
 	Err           error
+}
+
+// MarshalJSON renders Err as a string -- see
+// IngestSummary.MarshalJSON's doc comment (tray.go) for why and how.
+func (s SyncSummary) MarshalJSON() ([]byte, error) {
+	type alias SyncSummary
+	return json.Marshal(struct {
+		alias
+		Err string `json:"Err,omitempty"`
+	}{alias: alias(s), Err: errString(s.Err)})
 }
 
 // SyncMembershipEntry is one (media path, timeline ID) pair from a Resolve

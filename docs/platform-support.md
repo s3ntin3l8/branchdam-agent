@@ -184,13 +184,64 @@ never runs the tray at all.
 distribution/UX plan) rather than for the status page itself: `GET /api/status`, `GET`/`POST
 /api/settings`, and `POST /api/actions/{ingest,drain,prune,sync,hook-install,pause}`. Every request
 must present `Authorization: Bearer <token>`, where `<token>` is a fresh value
-`GenerateSessionToken` writes 0600 beside `agent.log` on each tray start (never persisted across
-restarts, never passed as an argument). The routes are registered at all only when the status
+`internal/sessiontoken.Generate` writes 0600 beside `agent.log` on each tray start (never persisted
+across restarts, never passed as an argument). The routes are registered at all only when the status
 server's own bind address resolves to loopback -- an operator-widened `tray.statusAddr` gets a 404
 on every `/api/*` route, not a 403 that would still confirm they exist -- and every request is also
 checked against `Origin`/`Sec-Fetch-Site` to reject the classic loopback-CSRF shape (a page loaded
 from elsewhere issuing a same-machine POST via a browser's fetch). See Known gaps for what this
-surface does not yet do.
+surface does not yet do. `internal/sessiontoken` is a package of its own, separate from
+`internal/tray`, specifically so `cmd/branchdam-agent-ui` (below) can read the token without pulling
+in `fyne.io/systray` -- a process with no tray menu has no business depending on it.
+
+## Native app UI (`cmd/branchdam-agent-ui`, Track 3c)
+
+A second GUI binary, a plain status window built on Wails v2, sitting alongside the tray rather than
+inside it: on macOS both `fyne.io/systray` and Wails need to own the platform's `NSApplication` main
+run loop, and only one process can hold that loop, so the window talks to the tray over the loopback
+`/api/*` surface above instead of sharing a process with it. Today this window does exactly one
+thing -- poll `GET /api/status` every 5 seconds and render it -- read-only, at rough parity with the
+embedded status page's own sections. Settings/integrations editing (the plan's Track 3d/3e) and
+packaging this binary into the installers (`internal/selfupdate.InstallLayout`, NSIS, the macOS
+bundle -- Track 3f) are both explicitly out of scope for this PR; the tray's "Open status page" menu
+item is untouched for the same reason -- retitling it to launch this binary needs a packaged install
+layout to find the binary in, which doesn't exist yet.
+
+**No `wails` CLI, no npm, no bundler.** `wails build`/`wails dev` generate Go-side bindings by
+compiling and *running* a host binary, which fails cross-compiling from Linux to Windows. Wails
+v2's `Bind` option dispatches to Go methods via runtime reflection instead, and the JS glue
+(`window.go.main.App.*`) is injected by `wails.Run` itself at window-load time -- neither needs the
+CLI. `frontend/dist/` is hand-written vanilla HTML/CSS/JS, embedded via a plain `//go:embed
+all:frontend/dist`, with zero npm dependencies and no build step: this window's job (parse a JSON
+blob, render a handful of tables) doesn't need a framework, and skipping one keeps Node out of CI
+entirely for this feature. `App.StatusJSON` deliberately returns the agent's raw JSON response as a
+string rather than decoding it into a Go struct first -- the frontend can start rendering a new
+field the agent adds without a matching Go-side change.
+
+**Cross-compile posture, verified empirically before committing to it:** `CGO_ENABLED=0 GOOS=windows
+GOARCH=amd64 go build ./cmd/branchdam-agent-ui` succeeds from Linux (Wails' Windows backend is
+WebView2-based, no cgo) -- confirmed locally, matching `fyne.io/systray`'s own precedent for the
+tray binary. The darwin backend is cgo/Cocoa/WebKit, same as `fyne.io/systray`'s -- `make
+build-darwin`'s `go list ./...`-based exclusion of `internal/tray`/`cmd/branchdam-agent` needed no
+change for this new package: it lists under the *host's* GOOS (Linux, no `GOOS` override on that
+specific step), where `cmd/branchdam-agent-ui`'s `//go:build windows || darwin`-tagged files already
+resolve to zero matching files and the package is invisible to `go list ./...` before `GOOS=darwin`
+is ever applied to the subsequent build. The existing CI matrix validates this binary natively for
+free, with no new job added in this PR: `test (windows/amd64, native)`'s `go test ./...` on
+`windows-latest` compiles and tests it on real Windows, and `build (darwin/arm64, full, incl.
+tray)`'s `go test ./...`/`go build ./...` on the `macos-26` runner does the same on real macOS.
+
+**Token handling is per-request, not cached.** `App.StatusJSON` re-reads both `config.yaml` (for the
+status server's address) and the session token on every call rather than once at startup -- the tray
+this window talks to may not be running yet, may start after the window opens, or may have restarted
+(rotating its token) since the last call, and there is no notification path for any of that. A 401 is
+surfaced to the operator as "the agent likely restarted, try again" rather than a bare HTTP error; a
+transport-level failure (connection refused) is surfaced as "branchDAM doesn't seem to be running."
+
+**Unverified on real hardware**, same caveat as everything else in this file that can only be
+checked from CI: the window actually rendering and being usable, WebView2 runtime presence on a
+real Windows machine (the NSIS installer bootstrapping it is Track 3f's job, not this one's), and
+whether `SingleInstanceLock`'s second-launch window-focus behavior actually works as documented.
 
 ## DaVinci Resolve hook menu (issue #68)
 
@@ -543,9 +594,9 @@ A live-refresh via TUF is the proper long-term answer but is out of scope here.
   convention (`_upscale`/`_panorama`), not read from the catalog. Use `--dump-schema` /
   `-query-file` to correct row extraction against a different version, and
   `-derivative-suffixes` to correct the pairing heuristic without a code change.
-- **The hardened `/api/*` surface (see Status page above) has no consumer yet.** It exists ahead of
-  the native app UI it was built for (Track 3 of the distribution/UX plan) so the API can land and
-  be reviewed on its own. Known limitations, by design rather than oversight: `POST
+- **The hardened `/api/*` surface (see Status page above) has one read-only consumer so far** --
+  `cmd/branchdam-agent-ui`'s status window (`GET /api/status` only). Settings/actions calls from a
+  real UI remain unexercised end-to-end. Known limitations, by design rather than oversight: `POST
   /api/actions/ingest` runs synchronously to completion with no server-side timeout (a real card
   ingest can take minutes; the caller should not assume a fast response); there is no rate limiting
   beyond the token check itself; and the only way to revoke a leaked token is a tray restart (no
@@ -618,6 +669,13 @@ to say "verified."
     confirm Explorer opens the correct directory. Also confirm a rapid double-click on "Install /
     update render hook" shows the "(skipped just now -- already running)" note rather than running
     two installs concurrently or silently dropping the second click.
+11. Native app UI status window (`cmd/branchdam-agent-ui`, Track 3c): with the tray running, launch
+    `branchdam-agent-ui.exe` directly (no installer entry point exists yet) -- confirm a window opens
+    showing the same status the embedded page shows, refreshing roughly every 5 seconds; quit the
+    tray and confirm the window switches to an "agent doesn't seem to be running" message rather than
+    hanging or crashing; restart the tray and confirm the window recovers on its own once the new
+    session token is in place. Launch a second copy of the binary and confirm it focuses the existing
+    window (`SingleInstanceLock`) rather than opening a second one.
 
 **macOS (Apple Silicon):**
 
@@ -675,6 +733,10 @@ to say "verified."
 12. DaVinci Resolve hook menu: same as Windows item 10 -- additionally confirm "Reveal Scripts
     folder" opens the per-user path via `osascript`/Finder, including when the tray is launched by
     launchd rather than from Finder.
+13. Native app UI status window: same as Windows item 11 -- additionally confirm the window has no
+    Dock tile/Cmd-Tab entry suppression issue of its own (it is a normal windowed app, not
+    `LSUIElement=1` like the tray) and that it opens with `Wails`' Cocoa/WebKit backend without
+    needing anything beyond what a stock macOS install already has.
 
 ### M5 additions (epic #77, #78–#88)
 
