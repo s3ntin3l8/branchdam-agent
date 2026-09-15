@@ -57,5 +57,13 @@ func writeSessionTokenFile(token string) error {
 	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
 		return fmt.Errorf("tray: write session token: %w", err)
 	}
+	// os.WriteFile only applies its mode argument when it creates the
+	// file -- a pre-existing session.token left behind with looser
+	// permissions (a prior build's bug, a manual edit) would otherwise
+	// keep them. Chmod unconditionally, after every write, to retighten
+	// regardless of whether this call created or overwrote the file.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("tray: tighten session token permissions: %w", err)
+	}
 	return nil
 }

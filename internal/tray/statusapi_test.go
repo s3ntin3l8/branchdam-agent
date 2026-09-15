@@ -477,6 +477,42 @@ func TestHandleAPISettingsPostInt(t *testing.T) {
 	}
 }
 
+func TestHandleAPISettingsPostRejectsFractionalInt(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(settingsPatchRequest{Key: "selfUpdate.checkIntervalHours", Value: 3.7})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if settings.lastIntKey != "" {
+		t.Errorf("SetInt was called with a fractional value, want rejected before reaching Settings")
+	}
+}
+
+func TestHandleAPISettingsPostRejectsOutOfRangeInt(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(settingsPatchRequest{Key: "selfUpdate.checkIntervalHours", Value: 1e18})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if settings.lastIntKey != "" {
+		t.Errorf("SetInt was called with an out-of-range value, want rejected before reaching Settings")
+	}
+}
+
 func TestHandleAPISettingsPostStringSlice(t *testing.T) {
 	settings := &spySettings{}
 	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}

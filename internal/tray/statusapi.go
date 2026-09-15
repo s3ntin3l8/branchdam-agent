@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"time"
@@ -189,6 +190,14 @@ func (s *StatusServer) handleAPISettingsPost(w http.ResponseWriter, r *http.Requ
 	case bool:
 		err = s.Settings.SetBool(req.Key, v)
 	case float64: // encoding/json decodes every JSON number into float64
+		// v != math.Trunc(v) catches a fractional value (int(3.7) would
+		// silently truncate to 3); the range check catches a value outside
+		// int32 -- both would otherwise wrap/truncate silently through
+		// int(v) rather than surfacing as the 400 they should be.
+		if v != math.Trunc(v) || v < math.MinInt32 || v > math.MaxInt32 {
+			http.Error(w, fmt.Sprintf("value must be a whole number in range for key %q", req.Key), http.StatusBadRequest)
+			return
+		}
 		err = s.Settings.SetInt(req.Key, int(v))
 	case []any:
 		strs := make([]string, len(v))

@@ -49,6 +49,30 @@ func TestGenerateSessionTokenWritesFileBesideAgentLog(t *testing.T) {
 	}
 }
 
+func TestGenerateSessionTokenRetightensPreExistingLoosePermissions(t *testing.T) {
+	dir := withXDGStateHome(t)
+
+	path := filepath.Join(dir, "branchdam-agent", sessionTokenFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := GenerateSessionToken(); err != nil {
+		t.Fatalf("GenerateSessionToken: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("token file mode = %o, want 0600 (os.WriteFile alone only applies mode on creation)", perm)
+	}
+}
+
 func TestGenerateSessionTokenIsFreshEveryCall(t *testing.T) {
 	withXDGStateHome(t)
 
