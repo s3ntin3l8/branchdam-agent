@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	suUpdate "github.com/creativeprojects/go-selfupdate/update"
@@ -126,6 +127,12 @@ func Rollback(layout InstallLayout) (string, error) {
 		plist := appbundle.RenderInfoPlist(prevVersion)
 		if err := os.WriteFile(layout.InfoPlist, []byte(plist), 0o644); err != nil {
 			return "", fmt.Errorf("selfupdate: rollback: update %s: %w", layout.InfoPlist, err)
+		}
+		// Same reasoning as Apply's own call site -- see resignAppBundle's
+		// doc comment: the restored binaries and the Info.plist rewrite
+		// just above both invalidate the bundle's ad-hoc signature seal.
+		if err := resignAppBundle(filepath.Dir(filepath.Dir(layout.InfoPlist))); err != nil {
+			return "", fmt.Errorf("selfupdate: rollback: %w", err)
 		}
 	}
 

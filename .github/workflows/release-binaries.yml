@@ -144,21 +144,14 @@ jobs:
           go build -trimpath \
             -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" \
             -o dist/branchdam-agent ./cmd/branchdam-agent
-      # Assembles dist/branchdam-agent.app around the binary just built and
-      # tars ONLY the bundle -- shipping a bare binary alongside it would
-      # put two archive entries with the base name "branchdam-agent" in
-      # the same tar, and go-selfupdate's unarchiveTar returns whichever
-      # one it reads first (see internal/selfupdate's doc comment and
-      # docs/platform-support.md's Self-update section). The CLI
-      # subcommands (preflight/ingest/etc.) work fine invoked directly at
-      # branchdam-agent.app/Contents/MacOS/branchdam-agent -- no separate
-      # console binary is needed the way Windows needs one (macOS has no
-      # link-time GUI/console split; LSUIElement is a bundle property, not
-      # a linker flag).
-      - name: Package
-        run: |
-          go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -version "$RELEASE_VERSION"
-          tar -C dist -czf branchdam-agent-darwin-arm64.tar.gz branchdam-agent.app
+      # Assembles dist/branchdam-agent.app around the binary just built.
+      # The CLI subcommands (preflight/ingest/etc.) work fine invoked
+      # directly at branchdam-agent.app/Contents/MacOS/branchdam-agent --
+      # no separate console binary is needed the way Windows needs one
+      # (macOS has no link-time GUI/console split; LSUIElement is a bundle
+      # property, not a linker flag).
+      - name: Assemble bundle
+        run: go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -version "$RELEASE_VERSION"
       # Ad-hoc signs the BUNDLE (not just its inner binary, which Go's
       # darwin/arm64 linker already ad-hoc signs on its own -- confirmed via
       # LC_CODE_SIGNATURE on the built Mach-O). An unsigned bundle is what
@@ -171,15 +164,22 @@ jobs:
       # is codesign's own syntax for an ad-hoc identity. This does NOT
       # notarize the bundle and does NOT remove the Gatekeeper prompt on
       # first launch; it only makes the prompt the recoverable
-      # right-click-Open kind instead of "damaged". Runs against the tar'd
-      # copy's *source* directory, so the tarball above (the self-update
-      # payload) stays exactly as go-selfupdate's archive-entry selection
-      # already expects -- signing happens before packaging the .dmg below,
-      # which is the actual user-facing download.
+      # right-click-Open kind instead of "damaged". Runs BEFORE packaging
+      # below (a Hermes review finding on this PR: signing after tar'ing
+      # left the self-update tarball payload silently unsigned) so every
+      # packaged artifact -- the tarball AND the .dmg -- carries the same
+      # signed bundle.
       - name: Ad-hoc sign bundle
         run: |
           codesign --force --sign - dist/branchdam-agent.app
           codesign --verify --strict --verbose=2 dist/branchdam-agent.app
+      # Tars ONLY the bundle -- shipping a bare binary alongside it would
+      # put two archive entries with the base name "branchdam-agent" in
+      # the same tar, and go-selfupdate's unarchiveTar returns whichever
+      # one it reads first (see internal/selfupdate's doc comment and
+      # docs/platform-support.md's Self-update section).
+      - name: Package
+        run: tar -C dist -czf branchdam-agent-darwin-arm64.tar.gz branchdam-agent.app
       # The user-facing download: a .dmg with an /Applications symlink so
       # drag-to-install is the obvious gesture. This is what actually
       # resolves App Translocation (internal/selfupdate.DetectLayout's

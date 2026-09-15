@@ -54,6 +54,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/Masterminds/semver/v3"
 	su "github.com/creativeprojects/go-selfupdate"
@@ -227,6 +228,13 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 		plist := appbundle.RenderInfoPlist(release.Version())
 		if err := os.WriteFile(layout.InfoPlist, []byte(plist), 0o644); err != nil {
 			return "", fmt.Errorf("selfupdate: update %s: %w", layout.InfoPlist, err)
+		}
+		// Both the inner-binary swap above and the Info.plist rewrite
+		// just above invalidate the bundle's ad-hoc signature seal -- see
+		// resignAppBundle's own doc comment for why this must run every
+		// time InfoPlist is rewritten, not just occasionally.
+		if err := resignAppBundle(filepath.Dir(filepath.Dir(layout.InfoPlist))); err != nil {
+			return "", err
 		}
 	}
 
