@@ -183,9 +183,3 @@ func openTestDB(path string) (*DB, error) {
 	}
 	return Open(context.Background(), "file:"+path+"?mode=ro")
 }
-
-// openTestDBRW opens a SQLite database at path in read-write mode for
-// schema creation. Returns a *DB with a writable connection.
-func openTestDBRW(path string) (*DB, error) {
-	return Open(context.Background(), "file:"+path+"?mode=rw")
-}
