@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	runtimeState "github.com/s3ntin3l8/branchdam-agent/internal/runtime"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
@@ -254,5 +255,120 @@ func TestWireRuntimeStatePersistenceRealWiringReachesTheDisk(t *testing.T) {
 	st := r.Status(tray.UpdateStatus{})
 	if !st.LastHandshakeAt.Equal(prior) {
 		t.Errorf("after wireRuntimeStatePersistence with a real stamped file: LastHandshakeAt = %v, want %v", st.LastHandshakeAt, prior)
+	}
+}
+
+// TestWireResolveSyncerWiresDeltaDetectionCallbacks verifies the resolve
+// integration's delta-detection callbacks are populated after wiring.
+// Without this, every sync pass would re-emit every edge (hasPrev=false)
+// and never persist -- the exact regression that motivated issue #184's
+// full hand-off chain (#195 runtime state, #196 delta detection,
+// #197+#198 wiring). The two callbacks (onSyncComplete updates the
+// runner's in-memory carry-forward; onSaveMemberships persists to
+// runtime.json) must both be non-nil and must do the right thing when
+// invoked.
+func TestWireResolveSyncerWiresDeltaDetectionCallbacks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	cfg := config.Config{
+		Server:  config.ServerConfig{BaseURL: "http://localhost:8080", APIKey: "0123456789abcdef0123456789abcdef"},
+		AgentID: "test-agent",
+		Integrations: config.IntegrationsConfig{
+			NodeIndexPath: "/dev/null/non-existent-but-Ready-only-checks-string",
+			ResolveDB: config.ResolveDBConfig{
+				Enabled:     true,
+				DatabaseURL: "file:/dev/null/db?mode=ro",
+				DryRun:      true, // skip the node index existence check
+			},
+		},
+	}
+
+	deps, syncer := buildIntegrationDeps(cfg, nil)
+	if syncer == nil {
+		t.Fatal("buildIntegrationDeps returned nil syncer for an enabled ResolveDB config")
+	}
+	if _, ok := deps[tray.IntegrationResolveDB]; !ok {
+		t.Fatal("ResolveDB not in built deps map")
+	}
+
+	// Pre-wiring: the freshly-built syncer has no callbacks set.
+	// (We can't read these directly without exposing them, but
+	// we know wireResolveSyncer is what sets them.)
+	if syncer.prevMemberships != nil {
+		t.Errorf("pre-wiring prevMemberships = %v, want nil", syncer.prevMemberships)
+	}
+	if syncer.onSaveMemberships != nil {
+		t.Error("pre-wiring onSaveMemberships is set; should only be set by wireResolveSyncer")
+	}
+	if syncer.onSyncComplete != nil {
+		t.Error("pre-wiring onSyncComplete is set; should only be set by wireResolveSyncer")
+	}
+
+	r := tray.NewRunner(&fakeIngester{}, nil, "")
+	wireResolveSyncer(r, syncer)
+
+	if syncer.onSyncComplete == nil {
+		t.Fatal("after wireResolveSyncer: onSyncComplete is nil -- sync pass cannot update in-memory carry-forward")
+	}
+	if syncer.onSaveMemberships == nil {
+		t.Fatal("after wireResolveSyncer: onSaveMemberships is nil -- next restart loses the delta baseline")
+	}
+
+	// onSyncComplete must update the runner's in-memory carry-forward.
+	// This is the bridge that keeps hasPrev=true on subsequent passes.
+	fresh := []tray.SyncMembershipEntry{
+		{MediaPath: "/storage/clip1.mp4", TimelineID: "tl-1"},
+		{MediaPath: "/storage/clip2.mp4", TimelineID: "tl-1"},
+	}
+	syncer.onSyncComplete(fresh)
+
+	got := r.LastResolveMemberships()
+	if len(got) != 2 {
+		t.Fatalf("after onSyncComplete: LastResolveMemberships len = %d, want 2", len(got))
+	}
+	if got[0].MediaPath != "/storage/clip1.mp4" || got[1].TimelineID != "tl-1" {
+		t.Errorf("after onSyncComplete: LastResolveMemberships = %+v", got)
+	}
+
+	// onSaveMemberships must persist the membership set to runtime.json.
+	// Same contract as onSuccessfulHandshake: a failing save is logged,
+	// never blocks the sync pass -- but the call must succeed for a
+	// happy-path round-trip.
+	if err := syncer.onSaveMemberships(fresh); err != nil {
+		t.Fatalf("onSaveMemberships failed on happy path: %v", err)
+	}
+	rtPath, err := runtimeState.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := runtimeState.Load(rtPath)
+	if err != nil {
+		t.Fatalf("runtimeState.Load after onSaveMemberships: %v", err)
+	}
+	if len(rt.ResolveEmittedMemberships) != 2 {
+		t.Errorf("runtime.json ResolveEmittedMemberships len = %d, want 2 (next-restart seed missing)", len(rt.ResolveEmittedMemberships))
+	}
+	if rt.ResolveEmittedMemberships[0].MediaPath != "/storage/clip1.mp4" {
+		t.Errorf("runtime.json [0] = %+v, want {clip1.mp4 tl-1}", rt.ResolveEmittedMemberships[0])
+	}
+}
+
+// TestBuildIntegrationDepsReturnsNilResolveSyncerWhenNotReady confirms
+// the second return value from buildIntegrationDeps is the honest
+// "not configured" signal when the resolve integration isn't Ready.
+// Without this, settings.reload() and runTrayCmd would crash calling
+// wireResolveSyncer(runner, nil).
+func TestBuildIntegrationDepsReturnsNilResolveSyncerWhenNotReady(t *testing.T) {
+	cfg := config.Config{
+		Integrations: config.IntegrationsConfig{
+			// No ResolveDB config at all -- Ready must return false.
+			Luminar: config.CatalogSyncConfig{Enabled: true, CatalogPath: "/c.db", DryRun: true},
+		},
+	}
+	_, syncer := buildIntegrationDeps(cfg, nil)
+	if syncer != nil {
+		t.Errorf("buildIntegrationDeps returned non-nil resolve syncer for an integration that's not Ready: %T", syncer)
 	}
 }

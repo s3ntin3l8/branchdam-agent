@@ -329,19 +329,15 @@ type Runner struct {
 	lastSync     map[IntegrationID]*SyncSummary
 
 	// lastResolveMemberships is the in-memory carry-forward of the
-	// Resolve sync's emitted membership set. Persisted to runtime.json
-	// via onSuccessfulSync for cross-restart continuity (issue #184).
-	// The in-memory copy is the primary correctness layer; the file is
+	// Resolve sync's emitted membership set. Updated by the resolve
+	// integration's OnSaveMemberships bridge (cmd/branchdam-agent/tray.go)
+	// under r.mu after each successful pass, and consumed as
+	// PrevMemberships on the next pass to enable delta detection.
+	// The cross-restart load is performed by wireResolveSyncer at
+	// startup from runtime.json's ResolveEmittedMemberships -- the
+	// in-memory copy is the primary correctness layer; the file is
 	// cross-session only and must never block the sync pass.
 	lastResolveMemberships []SyncMembershipEntry
-
-	// onSuccessfulSync is invoked after every TriggerSync pass that
-	// completes without error (including dry runs). The callback receives
-	// the current pass's emitted membership set for persistence to the
-	// runtime state file. Stored in an atomic.Pointer so TriggerSync can
-	// read it without holding r.mu (the save may be slow on a network
-	// share). Nil means no persistence (headless CLI, test).
-	onSuccessfulSync atomic.Pointer[func(entries []SyncMembershipEntry) error]
 
 	// hookInstallers/hookInFlight/hookState mirror syncers/syncInFlight/
 	// lastSync's own shape exactly (issue #60), one map keyed by HookID
@@ -844,31 +840,38 @@ func (r *Runner) SetOnSuccessfulHandshake(cb func(t time.Time) error) {
 	r.onSuccessfulHandshake.Store(&cb)
 }
 
-// SetOnSuccessfulSync registers a callback invoked after every TriggerSync
-// pass that completes without error. The callback receives the current
-// pass's emitted membership set for persistence to the runtime state file.
-// Nil disables persistence (headless CLI, test). The callback is allowed to
-// fail (logged at WARN) and panic (recovered); a failing save must never
-// block a sync pass.
-func (r *Runner) SetOnSuccessfulSync(cb func(entries []SyncMembershipEntry) error) {
-	r.onSuccessfulSync.Store(&cb)
-}
-
-// SeedResolveMemberships pre-populates the in-memory membership set from
-// the runtime state file loaded at startup. Called once from runTrayCmd
-// after Load returns a non-empty ResolveEmittedMemberships. The seed is
-// skipped if the carry-forward is already set (matching SeedLastHandshakeAt's
-// contract).
+// SeedResolveMemberships updates the in-memory carry-forward of the
+// Resolve sync's emitted membership set. Called from the resolve
+// integration's OnSaveMemberships bridge after each successful
+// pass (cmd/branchdam-agent/tray.go wireResolveSyncer) under r.mu,
+// and at startup from runtime.json's ResolveEmittedMemberships by
+// wireResolveSyncer.
+//
+// Always overwrites (matching the caller's contract: "overwrites with
+// fresh data"). The earlier skip-if-set guard was a latent stale-data
+// trap: if the startup seed set the field first, subsequent live
+// updates from the bridge were silently no-ops and the carry-forward
+// would never reflect what the syncer actually emitted.
 func (r *Runner) SeedResolveMemberships(entries []SyncMembershipEntry) {
 	if len(entries) == 0 {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.lastResolveMemberships) > 0 {
-		return
-	}
 	r.lastResolveMemberships = entries
+}
+
+// LastResolveMemberships returns a snapshot of the in-memory carry-forward
+// of the resolve sync's emitted membership set. Exposed primarily for tests;
+// production code reads via Next-pass wiring (resolve.Syncer.PrevMemberships
+// is set from this snapshot by wireResolveSyncer at startup, then updated
+// in place by the bridge on every pass).
+func (r *Runner) LastResolveMemberships() []SyncMembershipEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]SyncMembershipEntry, len(r.lastResolveMemberships))
+	copy(out, r.lastResolveMemberships)
+	return out
 }
 
 // SetPauseUploadOnMetered sets whether queue drain and streaming upload
@@ -1145,31 +1148,17 @@ func (r *Runner) TriggerSync(ctx context.Context, id IntegrationID) (summary Syn
 	r.mu.Lock()
 	stamped := summary
 	r.lastSync[id] = &stamped
-	memberships := r.lastResolveMemberships
 	r.mu.Unlock()
 
-	// Cross-session persistence hook (issue #184): on every successful
-	// sync pass, ask the registered callback to persist the emitted
-	// membership set to the runtime state file. Same shape
-	// and safety contract as onSuccessfulHandshake: the callback is
-	// read via atomic.Pointer, called AFTER r.mu.Unlock(), allowed to
-	// fail (logged, swallowed), and panic-recovered.
-	if err == nil {
-		cbPtr := r.onSuccessfulSync.Load()
-		if cbPtr != nil {
-			cb := *cbPtr
-			func() {
-				defer func() {
-					if rec := recover(); rec != nil {
-						slog.Error("onSuccessfulSync callback panicked; Resolve membership state will not be persisted this pass", "panic", rec)
-					}
-				}()
-				if err := cb(memberships); err != nil {
-					slog.Warn("Resolve membership state save failed; delta detection will not survive the next restart", "err", err)
-				}
-			}()
-		}
-	}
+	// Cross-session persistence of the emitted membership set is
+	// handled inside resolve.Syncer (its own OnSaveMemberships hook,
+	// wired by cmd/branchdam-agent/tray.go wireResolveSyncer). The
+	// runner-level plumbing this used to live in (SetOnSuccessfulSync,
+	// the onSuccessfulSync atomic.Pointer, the memberships capture
+	// below) was dead -- the syncer's hook is the only path that
+	// has any current data to persist, and it captures fresh data
+	// inside the syncer's own OnSaveMemberships invocation rather
+	// than reading from r.lastResolveMemberships at callback time.
 
 	return summary, true
 }

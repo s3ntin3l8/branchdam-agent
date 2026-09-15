@@ -856,8 +856,18 @@ func (s *configSettings) reload() error {
 	// every enabled integration POSTing edges with the stale client
 	// indefinitely -- silently, since a 401 on an EVENT_EDGE_ATTACHED
 	// surfaces only as SyncSummary.Errors, not a visible failure.
-	syncers, _ := buildIntegrationDeps(newCfg, client)
+	syncers, resolveSyncer := buildIntegrationDeps(newCfg, client)
 	s.runner.SetIntegrationSyncers(syncers)
+	if resolveSyncer != nil {
+		// Re-wire the freshly-built resolve syncer against the runtime
+		// state file. Without this, a settings reload (e.g. apiKey or
+		// baseUrl rotation) would install a fresh resolveDBSyncer
+		// with nil prevMemberships/onSyncComplete/onSaveMemberships:
+		// delta detection and persistence silently stop until process
+		// restart -- first pass re-emits every edge as new and nothing
+		// is persisted.
+		wireResolveSyncer(s.runner, resolveSyncer)
+	}
 
 	// Hook-state cache refresh on settings change (issue #154 / audit
 	// F-17): if the operator edited integrations.resolve.scriptsDir (the

@@ -75,8 +75,20 @@ type SyncSummary struct {
 // query which edges exist on the server, so this local snapshot is the
 // only way to detect removals.
 //
-// Duplicated in internal/resolve and internal/runtime — kept in sync by
-// convention to avoid import cycles between the three packages.
+// Structural duplicate of resolve.MembershipEntry (internal/resolve/sync.go)
+// and runtime.MembershipEntry (internal/runtime/runtime.go). All three are
+// kept identical by convention -- the trayToResolveMemberships /
+// resolveToTrayMemberships converters in cmd/bridge the tray and resolve
+// sides; runtime.MembershipEntry matches the on-disk JSON shape so it can
+// round-trip through runtime.json without a separate adapter.
+//
+// Consolidation would require a fourth package (e.g. internal/membership)
+// that all three could import, but that's a structural refactor that
+// touches every reference site for a single struct of two strings. The
+// duplication cost is bounded: three definitions, two converters, and a
+// rule that adding/removing a field updates all three. The structural
+// cost of a shared package is unbounded: a new dependency every resolve/
+// runtime/tray consumer takes on forever.
 type SyncMembershipEntry struct {
 	MediaPath  string `json:"mp"`
 	TimelineID string `json:"tl"`

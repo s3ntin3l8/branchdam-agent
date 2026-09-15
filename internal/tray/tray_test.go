@@ -2951,3 +2951,57 @@ func TestConfigIncompleteConcurrentAccess(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestRunnerSeedResolveMembershipsOverwritesNotSkips pins the contract
+// that SeedResolveMemberships always overwrites the in-memory carry-
+// forward with the freshest data. The earlier skip-if-set guard was
+// a latent stale-data trap: if the startup seed ran first, subsequent
+// live updates from the resolve.OnSaveMemberships bridge were silent
+// no-ops and the carry-forward never reflected what the syncer
+// actually emitted on the current pass.
+func TestRunnerSeedResolveMembershipsOverwritesNotSkips(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	first := []SyncMembershipEntry{
+		{MediaPath: "/storage/clip1.mp4", TimelineID: "tl-1"},
+		{MediaPath: "/storage/clip2.mp4", TimelineID: "tl-1"},
+	}
+	r.SeedResolveMemberships(first)
+
+	// Second call -- the live bridge after a real sync pass. Must
+	// overwrite, not be silently ignored.
+	second := []SyncMembershipEntry{
+		{MediaPath: "/storage/clip3.mp4", TimelineID: "tl-1"},
+	}
+	r.SeedResolveMemberships(second)
+
+	got := r.LastResolveMemberships()
+	if len(got) != 1 {
+		t.Fatalf("LastResolveMemberships len = %d, want 1 (second call must overwrite, not skip)", len(got))
+	}
+	if got[0].MediaPath != "/storage/clip3.mp4" {
+		t.Errorf("LastResolveMemberships[0] = %+v, want {clip3.mp4 tl-1}", got[0])
+	}
+}
+
+// TestRunnerSeedResolveMembershipsEmptyNoOp ensures the empty-input
+// guard is preserved (a nil/empty pass must not clobber the in-memory
+// state with nil). The bridge can hand an empty set on a no-clips
+// pass; that should be a no-op, not a state reset.
+func TestRunnerSeedResolveMembershipsEmptyNoOp(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	initial := []SyncMembershipEntry{
+		{MediaPath: "/storage/clip1.mp4", TimelineID: "tl-1"},
+	}
+	r.SeedResolveMemberships(initial)
+	r.SeedResolveMemberships(nil)
+
+	got := r.LastResolveMemberships()
+	if len(got) != 1 {
+		t.Errorf("empty SeedResolveMemberships clobbered state: len = %d, want 1", len(got))
+	}
+	if got[0].MediaPath != "/storage/clip1.mp4" {
+		t.Errorf("got %+v, want {clip1.mp4 tl-1}", got[0])
+	}
+}
