@@ -92,15 +92,30 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - name: Build
+      # dist/icon.ico (internal/appicon, issue #201) is generated fresh
+      # here rather than committed, same as the macOS .icns build -- both
+      # the .exe resource embedding below and the installer's MUI_ICON/
+      # MUI_UNICON (installer/windows/branchdam-agent.nsi) read it from
+      # this exact path.
+      - name: Generate icon
         run: |
           mkdir -p dist
+          go run ./tools/mkicon dist/icon.ico
+      - name: Build
+        run: |
+          # The @v1.7.0 pin here MUST match Makefile's GOVERSIONINFO_VERSION
+          # -- both install the same tool for the same reason (see that
+          # var's doc comment); they can't share a variable across a
+          # Makefile/workflow boundary, so keep them in sync by hand.
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.7.0
+          "$(go env GOPATH)/bin/goversioninfo" -icon=dist/icon.ico -skip-versioninfo -o=cmd/branchdam-agent/resource.syso
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
             -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" \
             -o dist/branchdam-agent.exe ./cmd/branchdam-agent
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
             -ldflags="-s -w -H windowsgui -X main.version=${{ env.RELEASE_VERSION }}" \
             -o dist/branchdam-agent-tray.exe ./cmd/branchdam-agent
+          rm -f cmd/branchdam-agent/resource.syso
       - name: Install NSIS
         run: sudo apt-get update && sudo apt-get install -y nsis
       # Windows' version-resource format (VIProductVersion) requires a

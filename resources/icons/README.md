@@ -1,65 +1,51 @@
-# branchDAM Agent Icons
+# branchDAM Agent icons
 
-This directory contains icon assets for the branchDAM Agent.
+Every binary icon asset this repo ships (macOS `.icns`, Windows `.ico`) is generated in pure Go at
+build time, not committed here and not hand-authored via ImageMagick/iconutil. `icon.svg` in this
+directory is the design reference the geometry was drawn from — it is not itself consumed by any
+build step.
 
-## Required Files
+## Where the real pipeline lives
 
-### Windows
-- `icon.ico` - Application icon (256x256, 128x128, 48x48, 32x32, 16x16)
-- `installer-header.bmp` - NSIS installer header (150x57)
-- `installer-sidebar.bmp` - NSIS installer sidebar (164x314)
+- **macOS `.icns`** — `internal/appicon.ICNS()`, invoked by `go run ./tools/mkbundle` (see
+  `docs/platform-support.md`'s macOS `.app` bundle section). Produces every size
+  Finder/Dock/the DMG window need, packaged as a real `.icns` container.
+- **Windows `.ico`** — `internal/appicon.ICO()`, invoked by `go run ./tools/mkicon dist/icon.ico`
+  (`make build-windows`, `.github/workflows/release-binaries.yml`'s `build-windows` job). A
+  multi-resolution (16/32/48/256) `.ico`, embedded into both `branchdam-agent.exe` and
+  `branchdam-agent-tray.exe` via `github.com/josephspurrier/goversioninfo` generating a
+  `resource.syso` ahead of `go build` (Go auto-links a `resource.syso` present in a package
+  directory into that package's Windows build; no `//go:generate` or build-tag machinery needed),
+  and wired into the NSIS installer via `MUI_ICON`/`MUI_UNICON`
+  (`installer/windows/branchdam-agent.nsi`). Neither `dist/icon.ico` nor `resource.syso` is
+  committed — both are regenerated on every build and gitignored.
+- **Tray icon** (the small systray glyph, distinct from the app icon above) —
+  `internal/tray/icon.go`, rendered directly into memory at tray startup, never written to disk at
+  all.
 
-### macOS
-- `icon.icns` - macOS application icon
+All three render the same b-node monogram geometry, hand-duplicated across the three files rather
+than shared (each file's own doc comment explains why: none of the call sites benefit enough from a
+shared abstraction to be worth the indirection). A geometry change needs to be mirrored by hand in
+whichever of the three actually need it.
 
-### Linux/General
-- `icon.png` - Application icon (256x256)
+## Why no ImageMagick/iconutil
 
-## Generating Icons
+This directory used to document a manual `convert`/`sips`/`iconutil` recipe for generating these
+assets by hand. That recipe was never actually run — no binary icon asset was ever committed from
+it — which is exactly the kind of drift a documented-but-unexecuted process invites. Generating
+icons in Go instead means: no external tool dependency for contributors, no binary asset to keep in
+sync with `icon.svg`, and the icon pipeline is exercised by the same `make build-windows`/
+`build-darwin-app` a contributor already runs, so it can't silently rot the way the old recipe did.
 
-From the SVG source (`icon.svg`), generate the required formats:
+That old recipe's doc also listed an NSIS installer header/sidebar bitmap
+(`installer-header.bmp`/`installer-sidebar.bmp`) as a "required file." Neither was ever generated or
+committed either; `installer/windows/branchdam-agent.nsi` intentionally leaves `MUI_HEADERIMAGE`/
+`MUI_WELCOMEFINISHPAGE_BITMAP` unset and uses the MUI2 defaults, so there is nothing missing here —
+just a scope this repo hasn't picked up.
 
-```bash
-# Install dependencies
-brew install imagemagick   # macOS
-# or: apt-get install imagemagick  # Linux
+## Design reference
 
-# Generate PNG (256x256)
-convert icon.svg -resize 256x256 icon.png
-
-# Generate ICO (Windows)
-convert icon.svg -resize 256x256 icon_256.png
-convert icon.svg -resize 128x128 icon_128.png
-convert icon.svg -resize 48x48 icon_48.png
-convert icon.svg -resize 32x32 icon_32.png
-convert icon.svg -resize 16x16 icon_16.png
-convert icon_256.png icon_128.png icon_48.png icon_32.png icon_16.png icon.ico
-rm icon_*.png
-
-# Generate ICNS (macOS)
-# Requires iconutil on macOS
-mkdir icon.iconset
-sips -z 16 16 icon.png --out icon.iconset/icon_16x16.png
-sips -z 32 32 icon.png --out icon.iconset/icon_16x16@2x.png
-sips -z 32 32 icon.png --out icon.iconset/icon_32x32.png
-sips -z 64 64 icon.png --out icon.iconset/icon_32x32@2x.png
-sips -z 128 128 icon.png --out icon.iconset/icon_128x128.png
-sips -z 256 256 icon.png --out icon.iconset/icon_128x128@2x.png
-sips -z 256 256 icon.png --out icon.iconset/icon_256x256.png
-sips -z 512 512 icon.png --out icon.iconset/icon_256x256@2x.png
-sips -z 512 512 icon.png --out icon.iconset/icon_512x512.png
-sips -z 1024 1024 icon.png --out icon.iconset/icon_512x512@2x.png
-iconutil -c icns icon.iconset -o icon.icns
-rm -rf icon.iconset
-
-# Generate installer bitmaps (NSIS)
-convert icon.svg -resize 150x57 -gravity center -background #1a1a2e -extent 150x57 installer-header.bmp
-convert icon.svg -resize 164x314 -gravity center -background #1a1a2e -extent 164x314 installer-sidebar.bmp
-```
-
-## Design Guidelines
-
-- **Primary color**: #1a1a2e (dark navy)
-- **Accent color**: #e94560 (coral red)
-- **Text color**: #ffffff (white)
-- Icon should be recognizable at 16x16 (system tray) and 256x256 (installer)
+- **Foreground**: branchDAM teal (`#2ba69a`) — see `internal/appicon.Foreground` /
+  `internal/tray/icon.go`'s own color constant, which must stay in sync with it.
+- The monogram should stay recognizable at 16×16 (Windows taskbar / macOS Dock at the smallest
+  practical size) through 1024×1024 (a Retina Dock/Finder icon).

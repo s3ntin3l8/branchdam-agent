@@ -199,3 +199,79 @@ func ICNS() ([]byte, error) {
 	out.Write(body.Bytes())
 	return out.Bytes(), nil
 }
+
+// icoSizes are the sizes a Windows .ico embeds -- Explorer/the taskbar/
+// Add-Remove-Programs each pick whichever entry best matches the context
+// they're rendering in (small-icon view, large-icon view, a jumbo Explorer
+// thumbnail), same reasoning as icnsSlots above. 16/32/48/256 is the
+// standard modern set (48 covers the classic "large icons" Explorer view
+// that 32 would otherwise upscale blurrily; 256 is the PNG-payload size
+// every icon size above 32 has used since Vista).
+var icoSizes = []int{16, 32, 48, 256}
+
+// ICO renders the monogram at every size icoSizes needs and packages the
+// result as a complete, multi-resolution .ico file: a 6-byte ICONDIR
+// (reserved, type=1, count=N), N 16-byte ICONDIRENTRY headers, then the
+// PNG-payload image data itself for each entry, in the same order --
+// PNG-in-ICO has been valid since Windows Vista, the same encoding
+// internal/tray/icon.go's single-size encodeIco already relies on for the
+// tray glyph, just with more than one ICONDIRENTRY here. A width/height
+// byte value of 0 means 256 in this format; encoding size 256 as byte(256)
+// already truncates to 0 in Go, so no special case is needed for it.
+func ICO() ([]byte, error) {
+	type entry struct {
+		size int
+		png  []byte
+	}
+	entries := make([]entry, 0, len(icoSizes))
+	for _, size := range icoSizes {
+		data, err := PNG(size)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry{size: size, png: data})
+	}
+
+	const (
+		iconDirLen      = 6
+		iconDirEntryLen = 16
+	)
+	headerLen := iconDirLen + iconDirEntryLen*len(entries)
+
+	var out bytes.Buffer
+	// ICONDIR.
+	if err := binary.Write(&out, binary.LittleEndian, uint16(0)); err != nil { // reserved
+		return nil, fmt.Errorf("appicon: write ico header: %w", err)
+	}
+	if err := binary.Write(&out, binary.LittleEndian, uint16(1)); err != nil { // type = icon
+		return nil, fmt.Errorf("appicon: write ico header: %w", err)
+	}
+	if err := binary.Write(&out, binary.LittleEndian, uint16(len(entries))); err != nil {
+		return nil, fmt.Errorf("appicon: write ico header: %w", err)
+	}
+
+	offset := headerLen
+	for _, e := range entries {
+		out.WriteByte(byte(e.size))                                                // width  (0 means 256)
+		out.WriteByte(byte(e.size))                                                // height (0 means 256)
+		out.WriteByte(0)                                                           // color count (0 = no palette, >=8bpp)
+		out.WriteByte(0)                                                           // reserved
+		if err := binary.Write(&out, binary.LittleEndian, uint16(1)); err != nil { // color planes
+			return nil, fmt.Errorf("appicon: write ico entry: %w", err)
+		}
+		if err := binary.Write(&out, binary.LittleEndian, uint16(32)); err != nil { // bits per pixel
+			return nil, fmt.Errorf("appicon: write ico entry: %w", err)
+		}
+		if err := binary.Write(&out, binary.LittleEndian, uint32(len(e.png))); err != nil {
+			return nil, fmt.Errorf("appicon: write ico entry: %w", err)
+		}
+		if err := binary.Write(&out, binary.LittleEndian, uint32(offset)); err != nil {
+			return nil, fmt.Errorf("appicon: write ico entry: %w", err)
+		}
+		offset += len(e.png)
+	}
+	for _, e := range entries {
+		out.Write(e.png)
+	}
+	return out.Bytes(), nil
+}
