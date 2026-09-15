@@ -10,12 +10,13 @@ import (
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	runtimeState "github.com/s3ntin3l8/branchdam-agent/internal/runtime"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
-	_ "modernc.org/sqlite"
 )
 
 // fakeIngester implements tray.Ingester minimally for the
@@ -399,7 +400,7 @@ func buildTestResolveDB(t *testing.T, timeline, seq, track, item, mediaPath stri
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	if _, err := raw.ExecContext(context.Background(), resolveSchemaDdl); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
@@ -435,7 +436,7 @@ func addClipToResolveDB(t *testing.T, dbPath, itemID, mediaPath string) {
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	if _, err := raw.ExecContext(context.Background(),
 		`INSERT INTO "Sm2TiItem" VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		itemID, "clip2.mp4", mediaPath, "0", "100", "50", "trk-1"); err != nil {

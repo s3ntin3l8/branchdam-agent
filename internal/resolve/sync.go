@@ -332,17 +332,16 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	}
 	hasPrev := s.PrevMemberships != nil
 
-	// Track the next-pass baseline separately from emitted clips. The
-	// next baseline MUST include both newly-emitted clips AND unchanged
-	// clips (consumed from prevSet) -- otherwise an all-unchanged pass
-	// would emit nothing and OnSaveMemberships would receive an empty
-	// set, resetting s.prevMemberships to nil on the next call. The next
-	// pass would then treat every clip as new and re-emit, defeating
-	// delta detection for the entire session after the first no-change
-	// pass. (Errored, unresolved, and no-rewrite clips are deliberately
-	// excluded -- they should be retried on the next pass, not pinned
-	// in the baseline as "still here".)
-	var emittedMemberships, nextBaseline []MembershipEntry
+	// Track the next-pass baseline. It MUST include both newly-emitted
+	// clips AND unchanged clips (consumed from prevSet) -- otherwise an
+	// all-unchanged pass would emit nothing and OnSaveMemberships would
+	// receive an empty set, resetting s.prevMemberships to nil on the
+	// next call. The next pass would then treat every clip as new and
+	// re-emit, defeating delta detection for the entire session after
+	// the first no-change pass. (Errored, unresolved, and no-rewrite
+	// clips are deliberately excluded -- they should be retried on the
+	// next pass, not pinned in the baseline as "still here".)
+	var nextBaseline []MembershipEntry
 
 	for _, key := range membershipOrder {
 		clip := memberships[key]
@@ -464,13 +463,11 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 		}
 		stats.Emitted++
 		stats.EdgesAttached++
-		entry := MembershipEntry{
+		// Newly-emitted clips obviously belong in the next baseline.
+		nextBaseline = append(nextBaseline, MembershipEntry{
 			MediaPath:  clip.MediaFilePath,
 			TimelineID: clip.TimelineID,
-		}
-		emittedMemberships = append(emittedMemberships, entry)
-		// Newly-emitted clips obviously belong in the next baseline.
-		nextBaseline = append(nextBaseline, entry)
+		})
 		s.logger().Info("resolve-sync: emitted edge",
 			"sourceUuid", nodeUUID, "targetUuid", targetUUID,
 			"mediaFilePath", clip.MediaFilePath, "timeline", clip.TimelineName)
