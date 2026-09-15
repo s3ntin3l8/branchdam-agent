@@ -3,6 +3,8 @@ package resolve
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -680,8 +682,12 @@ func (f *fakeVirtualEmitter) PostVirtualNodeCreated(ctx context.Context, agentID
 }
 
 // fakeEdgeAttacher captures PostEdgeAttached calls for test assertions.
+// failOnPaths makes PostEdgeAttached return an error for any clip whose
+// MediaFilePath (extracted from EvidenceJSON) appears in the slice,
+// simulating transient emission failures.
 type fakeEdgeAttacher struct {
-	calls []edgeCall
+	calls       []edgeCall
+	failOnPaths []string
 }
 
 type edgeCall struct {
@@ -691,6 +697,18 @@ type edgeCall struct {
 
 func (f *fakeEdgeAttacher) PostEdgeAttached(ctx context.Context, agentID string, payload branchdam.EdgeAttachedPayload) (*branchdam.EventResponse, error) {
 	f.calls = append(f.calls, edgeCall{agentID: agentID, payload: payload})
+	if len(f.failOnPaths) > 0 && len(payload.EvidenceJSON) > 0 {
+		var ev struct {
+			MediaFilePath string `json:"mediaFilePath"`
+		}
+		if err := json.Unmarshal(payload.EvidenceJSON, &ev); err == nil {
+			for _, p := range f.failOnPaths {
+				if ev.MediaFilePath == p {
+					return nil, errors.New("simulated transient emission failure")
+				}
+			}
+		}
+	}
 	return &branchdam.EventResponse{EventID: "test-event-id"}, nil
 }
 
@@ -974,7 +992,150 @@ func TestSyncOnSaveMembershipsCallback(t *testing.T) {
 	}
 }
 
-// openTestDBForSync creates a temp SQLite DB with the resolve schema for testing.
+// TestSyncEmissionFailureRetriedNextPass verifies that a transient
+// PostEdgeAttached failure prevents the failing clip from being
+// persisted into OnSaveMemberships. The next sync pass (with the
+// same PrevMemberships) must re-classify the clip as new and retry
+// emission. Without the persisted-only-emitted fix, the clip would
+// be marked "unchanged" forever and the edge would be permanently
+// dropped until the clip was removed and re-added.
+func TestSyncEmissionFailureRetriedNextPass(t *testing.T) {
+	db := openTestDBForSyncWithClips(t, []struct {
+		timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string
+	}{
+		{"tl-1", "Master", "seq-1", "trk-1", "item-1", "clip1.mp4", "D:\\Videos\\clip1.mp4", "", "0", "100"},
+	})
+
+	client := &fakeEdgeAttacher{failOnPaths: []string{"D:\\Videos\\clip1.mp4"}}
+
+	var savedEntries []MembershipEntry
+	syncer := &Syncer{
+		DB:             db,
+		Index:          &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
+		Client:         client,
+		VirtualEmitter: &fakeVirtualEmitter{},
+		AgentID:        "agent-1",
+		DatabaseURL:    "file::memory:",
+		PathRewrites:   []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		OnSaveMemberships: func(entries []MembershipEntry) error {
+			savedEntries = entries
+			return nil
+		},
+	}
+
+	stats, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Errors != 1 {
+		t.Errorf("Errors = %d, want 1", stats.Errors)
+	}
+	if stats.Emitted != 0 {
+		t.Errorf("Emitted = %d, want 0 (emission failed)", stats.Emitted)
+	}
+	if len(savedEntries) != 0 {
+		t.Errorf("OnSaveMemberships called with %d entries, want 0 (errored clip must NOT be persisted)", len(savedEntries))
+	}
+
+	// Second pass: PostEdgeAttached now succeeds. The failing clip
+	// must NOT be in PrevMemberships (since it was never persisted),
+	// so it should be re-classified as new and emitted.
+	client.failOnPaths = nil
+	syncer.PrevMemberships = savedEntries
+	stats2, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats2.NewMemberships != 1 {
+		t.Errorf("second pass NewMemberships = %d, want 1 (failed clip must retry as new)", stats2.NewMemberships)
+	}
+	if stats2.Emitted != 1 {
+		t.Errorf("second pass Emitted = %d, want 1", stats2.Emitted)
+	}
+}
+
+// TestSyncNoRewriteClipNotCountedAsRemoved verifies that a no-rewrite
+// clip in PrevMemberships does NOT appear in stats.Removed on the
+// next pass. Without the delete(prevSet, key) fix, no-rewrite clips
+// would leak into the removal loop every pass and be falsely logged
+// as "clip removed from timeline".
+func TestSyncNoRewriteClipNotCountedAsRemoved(t *testing.T) {
+	db := openTestDBForSyncWithClips(t, []struct {
+		timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string
+	}{
+		{"tl-1", "Master", "seq-1", "trk-1", "item-1", "clip1.mp4", "D:\\Videos\\clip1.mp4", "", "0", "100"},
+	})
+
+	// No PathRewrites configured -> every clip is no-rewrite.
+	syncer := &Syncer{
+		DB:             db,
+		Index:          &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
+		Client:         &fakeEdgeAttacher{},
+		VirtualEmitter: &fakeVirtualEmitter{},
+		AgentID:        "agent-1",
+		DatabaseURL:    "file::memory:",
+		// empty PathRewrites slice
+		PrevMemberships: []MembershipEntry{
+			{MediaPath: "D:\\Videos\\clip1.mp4", TimelineID: "tl-1"},
+		},
+	}
+
+	stats, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.NoRewrite != 1 {
+		t.Errorf("NoRewrite = %d, want 1", stats.NoRewrite)
+	}
+	if stats.Removed != 0 {
+		t.Errorf("Removed = %d, want 0 (no-rewrite clips must NOT be reported as removed)", stats.Removed)
+	}
+}
+
+// TestSyncDryRunDoesNotPersist verifies that DryRun mode skips the
+// OnSaveMemberships callback entirely. Without the !s.DryRun guard,
+// a dry run would persist a membership set whose edges were counted
+// but never emitted, poisoning the next real pass.
+func TestSyncDryRunDoesNotPersist(t *testing.T) {
+	db := openTestDBForSyncWithClips(t, []struct {
+		timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string
+	}{
+		{"tl-1", "Master", "seq-1", "trk-1", "item-1", "clip1.mp4", "D:\\Videos\\clip1.mp4", "", "0", "100"},
+	})
+
+	var callbackCalls int
+	var savedEntries []MembershipEntry
+	syncer := &Syncer{
+		DB:             db,
+		Index:          &fakeIndex{entries: map[string]string{"/storage/videos/clip1.mp4": "node-1"}},
+		Client:         &fakeEdgeAttacher{},
+		VirtualEmitter: &fakeVirtualEmitter{},
+		AgentID:        "agent-1",
+		DatabaseURL:    "file::memory:",
+		PathRewrites:   []PathRewrite{{From: "D:\\Videos\\", To: "/storage/videos/"}},
+		DryRun:         true,
+		OnSaveMemberships: func(entries []MembershipEntry) error {
+			callbackCalls++
+			savedEntries = entries
+			return nil
+		},
+	}
+
+	stats, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Emitted != 1 {
+		t.Errorf("dry run Emitted = %d, want 1 (counted, not emitted)", stats.Emitted)
+	}
+	if callbackCalls != 0 {
+		t.Errorf("OnSaveMemberships called %d times in DryRun, want 0", callbackCalls)
+	}
+	if len(savedEntries) != 0 {
+		t.Errorf("savedEntries = %v, want nil/empty (dry run must not persist)", savedEntries)
+	}
+}
+
 func openTestDBForSync(t *testing.T) *DB {
 	t.Helper()
 	dbPath := t.TempDir() + "/test.db"
