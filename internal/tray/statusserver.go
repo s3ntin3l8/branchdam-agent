@@ -70,6 +70,21 @@ type StatusServer struct {
 	SettingsFunc func() SettingsView
 	Version      string
 
+	// Actions, Settings, and Token gate the hardened /api/* surface (see
+	// statusapi.go) -- all three are nil-tolerant, matching SettingsFunc's
+	// own precedent: a StatusServer built without them (as most existing
+	// tests still do, and as any caller not wiring the API in yet) serves
+	// the legacy read-only page/status endpoints exactly as before, and
+	// registerAPIRoutes's handlers each 503 rather than panic when Actions
+	// or Settings is nil.
+	Actions  ActionRunner
+	Settings Settings
+	// Token, when set, is the shared secret every /api/* request must
+	// present as "Authorization: Bearer <Token>" -- see
+	// GenerateSessionToken and tokenValid. Left empty, every /api/*
+	// request is rejected (fail closed), never "auth disabled".
+	Token string
+
 	srv *http.Server
 }
 
@@ -117,6 +132,7 @@ func (s *StatusServer) Serve(ctx context.Context, ln net.Listener) error {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/status", s.handleStatusJSON)
 	mux.HandleFunc("/status.json", s.handleStatusJSON)
+	s.registerAPIRoutes(mux)
 
 	s.srv = &http.Server{
 		Handler:           mux,
