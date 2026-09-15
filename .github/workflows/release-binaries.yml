@@ -111,11 +111,19 @@ jobs:
       # tools/winversion's doc comment) rather than re-deriving version
       # parsing a third time in NSIS's own preprocessor language.
       - name: Compute Windows version resource
-        run: echo "PRODUCT_VERSION_QUAD=$(go run ./tools/winversion "${{ env.RELEASE_VERSION }}")" >> "$GITHUB_ENV"
+        run: |
+          echo "PRODUCT_VERSION_QUAD=$(go run ./tools/winversion "${{ env.RELEASE_VERSION }}")" >> "$GITHUB_ENV"
+          # Strips the tag's leading "v" (a Hermes review suggestion) so
+          # every human-readable version surface this feeds -- Explorer's
+          # Properties > Details AND Add/Remove Programs' DisplayVersion --
+          # shows "1.6.0", not "v1.6.0". A non-numeric placeholder tag
+          # ("ci-check"/"manual-test") has no leading "v" to strip, so
+          # passes through unchanged.
+          echo "INSTALLER_VERSION=$(echo "${{ env.RELEASE_VERSION }}" | sed -E 's/^v//')" >> "$GITHUB_ENV"
       - name: Build installer
         run: |
           cd installer/windows
-          makensis -DVERSION="${{ env.RELEASE_VERSION }}" -DPRODUCT_VERSION_QUAD="${{ env.PRODUCT_VERSION_QUAD }}" branchdam-agent.nsi
+          makensis -DVERSION="${{ env.INSTALLER_VERSION }}" -DPRODUCT_VERSION_QUAD="${{ env.PRODUCT_VERSION_QUAD }}" branchdam-agent.nsi
           mv branchdam-agent-setup.exe ../../dist/
       - name: Package
         run: |

@@ -7,18 +7,20 @@
 !include "WinMessages.nsh"
 
 ; --- Version (populated by CI) ---
-; VERSION is the human-readable release tag (e.g. "v1.6.0", or "ci-check"/
-; "manual-test" for a non-release build) -- used for DisplayVersion and the
-; version-resource VIAddVersionKey fields, where a non-numeric string is
-; harmless. PRODUCT_VERSION_QUAD is the strict X.X.X.X numeric form
-; VIProductVersion itself requires (it rejects anything else outright) --
-; CI computes it via `go run ./tools/winversion "$RELEASE_VERSION"`, which
-; reuses internal/appbundle.BundleVersion's own tag-normalization (the same
-; logic the macOS Info.plist build already relies on) rather than
-; re-deriving version parsing a third time in NSIS's own preprocessor
-; language. Both default to a build with no version resource at all when
-; not supplied (e.g. a local `makensis` run with no -D flags), rather than
-; a hard compile error.
+; VERSION is the human-readable release version with any leading "v"
+; stripped (e.g. "1.6.0", or "ci-check"/"manual-test" for a non-release
+; build) -- used for DisplayVersion and the version-resource
+; VIAddVersionKey fields, where a non-numeric string is harmless.
+; PRODUCT_VERSION_QUAD is the strict X.X.X.X numeric form VIProductVersion
+; itself requires (it rejects anything else outright) -- CI computes it via
+; `go run ./tools/winversion "$RELEASE_VERSION"`, which reuses
+; internal/appbundle.BundleVersion's own tag-normalization (the same logic
+; the macOS Info.plist build already relies on) rather than re-deriving
+; version parsing a third time in NSIS's own preprocessor language. Both
+; default to "0.0.0"/"0.0.0.0" when not supplied (e.g. a local `makensis`
+; run with no -D flags) -- the version resource still exists in that case,
+; just zeroed, which keeps a bare local compile working rather than a hard
+; compile error.
 !ifndef VERSION
     !define VERSION "0.0.0"
 !endif
