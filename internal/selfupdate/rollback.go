@@ -126,7 +126,7 @@ func Rollback(layout InstallLayout) (string, error) {
 	// undo that -- see its doc comment for why that's the right call.
 	if layout.InfoPlist != "" {
 		if err := updateBundleInfoPlist(layout.InfoPlist, prevVersion); err != nil {
-			return "", fmt.Errorf("selfupdate: rollback: %w", err)
+			return "", err
 		}
 	}
 

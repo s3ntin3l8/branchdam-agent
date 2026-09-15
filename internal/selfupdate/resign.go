@@ -14,12 +14,15 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/appbundle"
 )
 
-// resignTimeout bounds the codesign subprocess -- matching sigstore.go's
-// fetchClient timeout precedent for an external-process call this package
-// makes -- so a wedged codesign can't hang Apply/Rollback indefinitely.
-// Neither call site has a natural ctx to thread through here (Apply's is
-// scoped to the whole multi-target download, Rollback has none at all), so
-// a fixed timeout is the pragmatic choice.
+// resignTimeout bounds the codesign subprocess so a wedged codesign can't
+// hang Apply/Rollback indefinitely -- the same rationale as this repo's
+// existing subprocess bound, dialogTimeout (cmd/branchdam-agent/bootstrap.go),
+// though shorter: codesign on this bundle's single ~29 MB executable is fast,
+// and this runs unattended mid-update, where a long hang is worse than a
+// failed resign that logs and continues. Neither call site has a natural ctx
+// to thread through here (Apply's is scoped to the whole multi-target
+// download, Rollback has none at all), so a fixed timeout is the pragmatic
+// choice.
 const resignTimeout = 30 * time.Second
 
 // resignAppBundle re-signs a macOS .app bundle with an ad-hoc signature.
