@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 	"time"
 
@@ -15,21 +14,6 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/resolve"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
-
-// stripDatabaseURLCredentials removes userinfo from a database URL so
-// it can be safely logged without leaking credentials. Returns the
-// original string if parsing fails or no credentials are present.
-// Local copy of internal/resolve's unexported stripCredentials: the
-// resolve helper is package-private, and a database URL needs to be
-// safe to log from cmd/ paths that can't import unexported helpers.
-func stripDatabaseURLCredentials(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil || u.User == nil {
-		return rawURL
-	}
-	u.User = nil
-	return u.String()
-}
 
 // IntegrationBuilder is the EXECUTION-side registry entry cmd/branchdam-agent
 // owns -- the counterpart to internal/tray.Integrations()'s presentation
@@ -83,12 +67,14 @@ type IntegrationBuilder struct {
 	// cross-field completeness check there would deadlock the Settings
 	// menu.
 	//
-	// NOTE: Ready=true is a "worth constructing" signal, NOT a guarantee
-	// that New returns non-nil. The resolve integration's auto-detect
-	// mode returns Ready=true for Enabled + empty DatabaseURL even when
-	// no local DB exists, in which case New returns nil (handled as
-	// "not configured"). Callers must tolerate a nil entry for a
-	// Ready=true builder.
+	// A builder MAY report Ready=true yet still hand back a nil syncer
+	// from New (the caller must tolerate it) -- e.g. the resolve
+	// integration's auto-detect mode is Ready for Enabled + empty
+	// DatabaseURL, and the actual DB probe happens per sync pass inside
+	// Sync(), so New always succeeds and a no-DB-found pass is a no-op.
+	// Previously New returned nil when the probe came up empty; the
+	// probe moving into Sync made that nil impossible, which is cleaner
+	// for the "Ready=true implies registered" contract.
 	Ready func(cfg config.Config) bool
 	// New builds the syncer once Ready reports true.
 	New func(cfg config.Config, client *branchdam.Client) tray.IntegrationSyncer
@@ -219,28 +205,15 @@ var integrationBuilders = []IntegrationBuilder{
 		New: func(cfg config.Config, client *branchdam.Client) tray.IntegrationSyncer {
 			r := cfg.Integrations.ResolveDB
 
-			// Auto-detect: when DatabaseURL is empty, probe
-			// platform-standard local Resolve database paths.
+			// Auto-detect mode: DatabaseURL is empty. The probe is NOT
+			// run here -- it runs inside Sync() on every pass, so a
+			// Resolve database that appears after tray startup is
+			// picked up on the next sync (discover.go's documented
+			// contract), not only at startup/reload. Ready returns
+			// true for Enabled + empty DatabaseURL, so this syncer is
+			// always constructed and the per-pass probe decides whether
+			// each pass has anything to do.
 			databaseURL := r.DatabaseURL
-			if databaseURL == "" {
-				// Bounded even though discovery today only stats local
-				// paths: a future candidate list that probes a network
-				// path (mounted share, etc.) must not be able to hang
-				// tray startup indefinitely.
-				dctx, dcancel := context.WithTimeout(context.Background(), discoveryTimeout)
-				defer dcancel()
-				discovered, derr := resolve.DiscoverDefaultDatabaseURL(dctx)
-				if derr != nil {
-					slog.Warn("resolve: auto-detect failed", "err", derr)
-					return nil
-				}
-				if discovered == "" {
-					slog.Info("resolve: no local database found at standard paths; set integrations.resolvedb.databaseUrl to enable")
-					return nil
-				}
-				slog.Info("resolve: auto-detected local database", "url", stripDatabaseURLCredentials(discovered))
-				databaseURL = discovered
-			}
 
 			var edgeClient resolve.EdgeAttacher
 			var vEmitter resolve.VirtualNodeEmitter
@@ -492,7 +465,31 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	db, err := resolve.Open(ctx, s.databaseURL)
+	// Auto-detect mode: empty configured URL means probe platform-
+	// standard local paths on EVERY pass. This keeps discover.go's
+	// documented contract -- a Resolve DB that appears after tray
+	// startup is picked up on the next sync pass, not only at
+	// startup/reload. Bounded so a future network-path candidate
+	// cannot hang a pass indefinitely.
+	databaseURL := s.databaseURL
+	if databaseURL == "" {
+		dctx, dcancel := context.WithTimeout(ctx, discoveryTimeout)
+		defer dcancel()
+		discovered, derr := resolve.DiscoverDefaultDatabaseURL(dctx)
+		if derr != nil {
+			return tray.SyncSummary{DryRun: s.dryRun}, fmt.Errorf("resolve: auto-detect failed: %w", derr)
+		}
+		if discovered == "" {
+			// No local database at standard paths yet. A no-op pass
+			// (nothing to sync), not an error -- the next pass re-probes.
+			slog.Info("resolve: no local database found at standard paths; set integrations.resolvedb.databaseUrl to enable")
+			return tray.SyncSummary{DryRun: s.dryRun}, nil
+		}
+		slog.Info("resolve: auto-detected local database", "url", resolve.StripCredentials(discovered))
+		databaseURL = discovered
+	}
+
+	db, err := resolve.Open(ctx, databaseURL)
 	if err != nil {
 		return tray.SyncSummary{DryRun: s.dryRun}, err
 	}
@@ -517,7 +514,7 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 		Client:          s.client,
 		VirtualEmitter:  s.virtualEmitter,
 		AgentID:         s.agentID,
-		DatabaseURL:     s.databaseURL,
+		DatabaseURL:     databaseURL,
 		DryRun:          s.dryRun,
 		PathRewrites:    s.pathRewrites,
 		VirtualRoot:     s.virtualRoot,

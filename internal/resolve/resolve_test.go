@@ -384,7 +384,7 @@ func TestStripCredentials(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := stripCredentials(tc.in)
+			got := StripCredentials(tc.in)
 			if got != tc.want {
 				t.Errorf("stripCredentials(%q) = %q, want %q", tc.in, got, tc.want)
 			}

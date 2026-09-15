@@ -531,10 +531,17 @@ func databaseIdentity(rawURL string) string {
 	return u.String()
 }
 
-// stripCredentials removes userinfo from a database URL so it can be
-// safely included in evidence JSON persisted server-side. Returns the
-// original string if parsing fails or no credentials are present.
-func stripCredentials(rawURL string) string {
+// StripCredentials removes userinfo from a database URL so it can be
+// safely logged or included in evidence JSON persisted server-side.
+// Returns the original string if parsing fails or no credentials are
+// present.
+//
+// Exported because cmd/branchdam-agent's auto-detect logging path needs
+// to render a discovered URL without leaking its userinfo. PR #196
+// briefly un-exported it (no consumer outside the package then); this
+// consumer makes the export load-bearing again -- re-exporting is
+// preferable to a byte-identical second copy in cmd/ that would drift.
+func StripCredentials(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.User == nil {
 		return rawURL
