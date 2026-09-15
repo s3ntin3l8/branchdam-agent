@@ -268,10 +268,8 @@ func TestWireRuntimeStatePersistenceRealWiringReachesTheDisk(t *testing.T) {
 // Without this, every sync pass would re-emit every edge (hasPrev=false)
 // and never persist -- the exact regression that motivated issue #184's
 // full hand-off chain (#195 runtime state, #196 delta detection,
-// #197+#198 wiring). The two callbacks (onSyncComplete updates the
-// runner's in-memory carry-forward; onSaveMemberships persists to
-// runtime.json) must both be non-nil and must do the right thing when
-// invoked.
+// #197+#198 wiring). onSaveMemberships persists to runtime.json and
+// must be non-nil and do the right thing when invoked.
 func TestWireResolveSyncerWiresDeltaDetectionCallbacks(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -307,40 +305,22 @@ func TestWireResolveSyncerWiresDeltaDetectionCallbacks(t *testing.T) {
 	if syncer.onSaveMemberships != nil {
 		t.Error("pre-wiring onSaveMemberships is set; should only be set by wireResolveSyncer")
 	}
-	if syncer.onSyncComplete != nil {
-		t.Error("pre-wiring onSyncComplete is set; should only be set by wireResolveSyncer")
-	}
 
 	r := tray.NewRunner(&fakeIngester{}, nil, "")
 	wireResolveSyncer(r, syncer)
 
-	if syncer.onSyncComplete == nil {
-		t.Fatal("after wireResolveSyncer: onSyncComplete is nil -- sync pass cannot update in-memory carry-forward")
-	}
 	if syncer.onSaveMemberships == nil {
 		t.Fatal("after wireResolveSyncer: onSaveMemberships is nil -- next restart loses the delta baseline")
-	}
-
-	// onSyncComplete must update the runner's in-memory carry-forward.
-	// This is the bridge that keeps hasPrev=true on subsequent passes.
-	fresh := []tray.SyncMembershipEntry{
-		{MediaPath: "/storage/clip1.mp4", TimelineID: "tl-1"},
-		{MediaPath: "/storage/clip2.mp4", TimelineID: "tl-1"},
-	}
-	syncer.onSyncComplete(fresh)
-
-	got := r.LastResolveMemberships()
-	if len(got) != 2 {
-		t.Fatalf("after onSyncComplete: LastResolveMemberships len = %d, want 2", len(got))
-	}
-	if got[0].MediaPath != "/storage/clip1.mp4" || got[1].TimelineID != "tl-1" {
-		t.Errorf("after onSyncComplete: LastResolveMemberships = %+v", got)
 	}
 
 	// onSaveMemberships must persist the membership set to runtime.json.
 	// Same contract as onSuccessfulHandshake: a failing save is logged,
 	// never blocks the sync pass -- but the call must succeed for a
 	// happy-path round-trip.
+	fresh := []tray.SyncMembershipEntry{
+		{MediaPath: "/storage/clip1.mp4", TimelineID: "tl-1"},
+		{MediaPath: "/storage/clip2.mp4", TimelineID: "tl-1"},
+	}
 	if err := syncer.onSaveMemberships(fresh); err != nil {
 		t.Fatalf("onSaveMemberships failed on happy path: %v", err)
 	}
@@ -535,10 +515,7 @@ func TestResolveDBSyncerAdvancesPrevMembershipsAcrossPasses(t *testing.T) {
 	r := tray.NewRunner(&fakeIngester{}, nil, "")
 	wireResolveSyncer(r, syncer)
 
-	// Pre-pass: nothing in the carry-forward (startup fresh).
-	if got := r.LastResolveMemberships(); len(got) != 0 {
-		t.Errorf("pre-pass LastResolveMemberships len = %d, want 0", len(got))
-	}
+	// Pre-pass: no baseline (startup fresh).
 	if len(syncer.prevMemberships) != 0 {
 		t.Errorf("pre-pass syncer.prevMemberships len = %d, want 0", len(syncer.prevMemberships))
 	}
@@ -553,11 +530,6 @@ func TestResolveDBSyncerAdvancesPrevMembershipsAcrossPasses(t *testing.T) {
 	}
 	if summary1.Errors != 0 {
 		t.Errorf("pass 1 Errors = %d, want 0", summary1.Errors)
-	}
-	if got := r.LastResolveMemberships(); len(got) != 1 {
-		t.Errorf("after pass 1, runner LastResolveMemberships len = %d, want 1", len(got))
-	} else if got[0].MediaPath != `D:\Videos\clip1.mp4` {
-		t.Errorf("after pass 1, runner.LastResolveMemberships[0] = %+v, want {clip1.mp4 tl-1}", got[0])
 	}
 	if got := syncer.prevMemberships; len(got) != 1 {
 		t.Errorf("after pass 1, syncer.prevMemberships len = %d, want 1 -- the in-session baseline did not advance", len(got))
@@ -591,14 +563,14 @@ func TestResolveDBSyncerAdvancesPrevMembershipsAcrossPasses(t *testing.T) {
 		t.Errorf("pass 2 Errors = %d, want 0", summary2.Errors)
 	}
 
-	// The runner's carry-forward should now hold BOTH clips, not just
-	// the newly-emitted clip2. This is the load-bearing check: the
+	// The in-session baseline should now hold BOTH clips, not just the
+	// newly-emitted clip2. This is the load-bearing check: the
 	// OnSaveMemberships bridge must include unchanged clips in the
 	// next-pass baseline, otherwise an all-unchanged pass would emit
 	// nothing and the baseline would reset to empty on the next sync.
-	got := r.LastResolveMemberships()
+	got := syncer.prevMemberships
 	if len(got) != 2 {
-		t.Fatalf("after pass 2, runner LastResolveMemberships len = %d, want 2 (clip1 + clip2): %+v", len(got), got)
+		t.Fatalf("after pass 2, syncer.prevMemberships len = %d, want 2 (clip1 + clip2): %+v", len(got), got)
 	}
 	gotPaths := map[string]string{}
 	for _, m := range got {
@@ -612,12 +584,6 @@ func TestResolveDBSyncerAdvancesPrevMembershipsAcrossPasses(t *testing.T) {
 		if gotPaths[path] != timeline {
 			t.Errorf("after pass 2, missing or wrong entry for %q (got %+v, want timeline=%q)", path, gotPaths[path], timeline)
 		}
-	}
-
-	// And syncer.prevMemberships should likewise hold both clips,
-	// so pass 3 (if it ran) would correctly classify them as Unchanged.
-	if len(syncer.prevMemberships) != 2 {
-		t.Errorf("after pass 2, syncer.prevMemberships len = %d, want 2 -- the in-session baseline did not advance correctly across the unchanged + new split", len(syncer.prevMemberships))
 	}
 }
 

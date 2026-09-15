@@ -316,8 +316,8 @@ func applyIntegrationStringChange(cfg *config.Config, key, v string) (handled bo
 // after a server.apiKey rotation.
 //
 // The returned *resolveDBSyncer (if non-nil) is the concrete wiring
-// target for delta-detection callbacks -- callers set prevMemberships,
-// onSaveMemberships, and onSyncComplete after construction.
+// target for delta-detection callbacks -- callers set prevMemberships
+// and onSaveMemberships after construction.
 func buildIntegrationDeps(cfg config.Config, client *branchdam.Client) (map[tray.IntegrationID]tray.IntegrationSyncer, *resolveDBSyncer) {
 	deps := make(map[tray.IntegrationID]tray.IntegrationSyncer, len(integrationBuilders))
 	var resolveSyncer *resolveDBSyncer
@@ -426,14 +426,12 @@ type resolveDBSyncer struct {
 	virtualRoot    string
 	timeout        time.Duration
 	// prevMemberships is the set from the previous successful sync pass,
-	// loaded from runtime.json. Enables delta detection.
+	// loaded from runtime.json and advanced in-place by the
+	// OnSaveMemberships bridge after each pass. Enables delta detection.
 	prevMemberships []tray.SyncMembershipEntry
 	// onSaveMemberships persists the current pass's emitted membership
 	// set to runtime.json. Nil means no persistence (test).
 	onSaveMemberships func(entries []tray.SyncMembershipEntry) error
-	// onSyncComplete updates the runner's in-memory carry-forward with
-	// the fresh emitted set from this pass. Called under r.mu.
-	onSyncComplete func(entries []tray.SyncMembershipEntry)
 }
 
 func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
@@ -471,8 +469,7 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 		VirtualRoot:     s.virtualRoot,
 		PrevMemberships: trayToResolveMemberships(s.prevMemberships),
 		OnSaveMemberships: func(entries []resolve.MembershipEntry) error {
-			// Bridge: advance the in-session baseline, update the
-			// runner's in-memory carry-forward, then persist to
+			// Bridge: advance the in-session baseline, then persist to
 			// runtime.json. Order matters: s.prevMemberships must be
 			// set BEFORE the next call to Sync() reads it, otherwise
 			// every pass in a long-running session would compare
@@ -481,9 +478,6 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 			// removed clip would be re-logged as removed forever.
 			trayEntries := resolveToTrayMemberships(entries)
 			s.prevMemberships = trayEntries
-			if s.onSyncComplete != nil {
-				s.onSyncComplete(trayEntries)
-			}
 			if s.onSaveMemberships != nil {
 				return s.onSaveMemberships(trayEntries)
 			}

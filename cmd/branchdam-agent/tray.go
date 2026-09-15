@@ -734,9 +734,11 @@ func wireRuntimeStateWithOps(runner *tray.Runner, ops runtimeStateOps) {
 }
 
 // wireResolveSyncer connects the resolve DB syncer's delta-detection
-// fields (prevMemberships, onSaveMemberships, onSyncComplete) to the
-// runner and runtime state. Called once at startup after buildIntegrationDeps.
-func wireResolveSyncer(runner *tray.Runner, syncer *resolveDBSyncer) {
+// fields (prevMemberships, onSaveMemberships) to the runner and
+// runtime state. Called once at startup after buildIntegrationDeps,
+// and again on every settings reload (settings.go) so a rebuilt
+// resolveDBSyncer gets the same wiring.
+func wireResolveSyncer(_ *tray.Runner, syncer *resolveDBSyncer) {
 	runtimePath, pathErr := runtimeState.Path()
 	if pathErr != nil {
 		slog.Warn("could not resolve runtime state path; resolve delta detection unavailable this session", "err", pathErr)
@@ -754,22 +756,15 @@ func wireResolveSyncer(runner *tray.Runner, syncer *resolveDBSyncer) {
 		syncer.prevMemberships = entries
 	}
 
-	// onSyncComplete updates the runner's in-memory carry-forward with
-	// the fresh emitted set from each pass, so TriggerSync can capture
-	// the current data for persistence.
-	syncer.onSyncComplete = func(entries []tray.SyncMembershipEntry) {
-		runner.SeedResolveMemberships(entries) // overwrites with fresh data
-	}
-
 	// onSaveMemberships persists the emitted set to runtime.json.
-	syncer.onSaveMemberships = wireResolveSyncCallback(runner, runtimePath)
+	syncer.onSaveMemberships = wireResolveSyncCallback(runtimePath)
 }
 
 // wireResolveSyncCallback returns an onSaveMemberships callback that
 // persists the emitted membership set to runtime.json alongside the
 // handshake callback's LastHandshakeAt. This is the sync-side
 // counterpart of the handshake callback in wireRuntimeStateWithOps.
-func wireResolveSyncCallback(_ *tray.Runner, runtimePath string) func(entries []tray.SyncMembershipEntry) error {
+func wireResolveSyncCallback(runtimePath string) func(entries []tray.SyncMembershipEntry) error {
 	return func(entries []tray.SyncMembershipEntry) error {
 		// Load the current handshake timestamp so the full state write
 		// is consistent. The handshake callback writes this under its

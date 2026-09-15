@@ -862,10 +862,9 @@ func (s *configSettings) reload() error {
 		// Re-wire the freshly-built resolve syncer against the runtime
 		// state file. Without this, a settings reload (e.g. apiKey or
 		// baseUrl rotation) would install a fresh resolveDBSyncer
-		// with nil prevMemberships/onSyncComplete/onSaveMemberships:
-		// delta detection and persistence silently stop until process
-		// restart -- first pass re-emits every edge as new and nothing
-		// is persisted.
+		// with nil prevMemberships/onSaveMemberships: delta detection
+		// and persistence silently stop until process restart -- first
+		// pass re-emits every edge as new and nothing is persisted.
 		wireResolveSyncer(s.runner, resolveSyncer)
 	}
 

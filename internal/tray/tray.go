@@ -328,17 +328,6 @@ type Runner struct {
 	syncInFlight map[IntegrationID]bool
 	lastSync     map[IntegrationID]*SyncSummary
 
-	// lastResolveMemberships is the in-memory carry-forward of the
-	// Resolve sync's emitted membership set. Updated by the resolve
-	// integration's OnSaveMemberships bridge (cmd/branchdam-agent/tray.go)
-	// under r.mu after each successful pass, and consumed as
-	// PrevMemberships on the next pass to enable delta detection.
-	// The cross-restart load is performed by wireResolveSyncer at
-	// startup from runtime.json's ResolveEmittedMemberships -- the
-	// in-memory copy is the primary correctness layer; the file is
-	// cross-session only and must never block the sync pass.
-	lastResolveMemberships []SyncMembershipEntry
-
 	// hookInstallers/hookInFlight/hookState mirror syncers/syncInFlight/
 	// lastSync's own shape exactly (issue #60), one map keyed by HookID
 	// instead of IntegrationID -- a hook is a separate concept (see
@@ -840,40 +829,6 @@ func (r *Runner) SetOnSuccessfulHandshake(cb func(t time.Time) error) {
 	r.onSuccessfulHandshake.Store(&cb)
 }
 
-// SeedResolveMemberships updates the in-memory carry-forward of the
-// Resolve sync's emitted membership set. Called from the resolve
-// integration's OnSaveMemberships bridge after each successful
-// pass (cmd/branchdam-agent/tray.go wireResolveSyncer) under r.mu,
-// and at startup from runtime.json's ResolveEmittedMemberships by
-// wireResolveSyncer.
-//
-// Always overwrites (matching the caller's contract: "overwrites with
-// fresh data"). The earlier skip-if-set guard was a latent stale-data
-// trap: if the startup seed set the field first, subsequent live
-// updates from the bridge were silently no-ops and the carry-forward
-// would never reflect what the syncer actually emitted.
-func (r *Runner) SeedResolveMemberships(entries []SyncMembershipEntry) {
-	if len(entries) == 0 {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.lastResolveMemberships = entries
-}
-
-// LastResolveMemberships returns a snapshot of the in-memory carry-forward
-// of the resolve sync's emitted membership set. Exposed primarily for tests;
-// production code reads via Next-pass wiring (resolve.Syncer.PrevMemberships
-// is set from this snapshot by wireResolveSyncer at startup, then updated
-// in place by the bridge on every pass).
-func (r *Runner) LastResolveMemberships() []SyncMembershipEntry {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]SyncMembershipEntry, len(r.lastResolveMemberships))
-	copy(out, r.lastResolveMemberships)
-	return out
-}
-
 // SetPauseUploadOnMetered sets whether queue drain and streaming upload
 // operations should be deferred when connected to a metered network.
 func (r *Runner) SetPauseUploadOnMetered(v bool) {
@@ -1154,11 +1109,11 @@ func (r *Runner) TriggerSync(ctx context.Context, id IntegrationID) (summary Syn
 	// handled inside resolve.Syncer (its own OnSaveMemberships hook,
 	// wired by cmd/branchdam-agent/tray.go wireResolveSyncer). The
 	// runner-level plumbing this used to live in (SetOnSuccessfulSync,
-	// the onSuccessfulSync atomic.Pointer, the memberships capture
-	// below) was dead -- the syncer's hook is the only path that
-	// has any current data to persist, and it captures fresh data
-	// inside the syncer's own OnSaveMemberships invocation rather
-	// than reading from r.lastResolveMemberships at callback time.
+	// the onSuccessfulSync atomic.Pointer, the memberships capture)
+	// was dead -- the syncer's hook is the only path that has any
+	// current data to persist, and it captures fresh data inside the
+	// syncer's own OnSaveMemberships invocation rather than reading
+	// from a runner field at callback time.
 
 	return summary, true
 }
