@@ -96,3 +96,79 @@ func TestICNSStructure(t *testing.T) {
 		}
 	}
 }
+
+func TestICOStructure(t *testing.T) {
+	data, err := ICO()
+	if err != nil {
+		t.Fatalf("ICO(): %v", err)
+	}
+	if len(data) < 6 {
+		t.Fatalf("ICO() too short: %d bytes", len(data))
+	}
+
+	reserved := binary.LittleEndian.Uint16(data[0:2])
+	kind := binary.LittleEndian.Uint16(data[2:4])
+	count := binary.LittleEndian.Uint16(data[4:6])
+	if reserved != 0 {
+		t.Errorf("ICONDIR reserved = %d, want 0", reserved)
+	}
+	if kind != 1 {
+		t.Errorf("ICONDIR type = %d, want 1 (icon)", kind)
+	}
+	if int(count) != len(icoSizes) {
+		t.Fatalf("ICONDIR count = %d, want %d", count, len(icoSizes))
+	}
+
+	wantSizes := make(map[int]bool, len(icoSizes))
+	for _, s := range icoSizes {
+		wantSizes[s] = true
+	}
+
+	const entryLen = 16
+	seenSizes := make(map[int]bool)
+	for i := 0; i < int(count); i++ {
+		off := 6 + i*entryLen
+		if off+entryLen > len(data) {
+			t.Fatalf("truncated ICONDIRENTRY at index %d", i)
+		}
+		entry := data[off : off+entryLen]
+		width := int(entry[0])
+		if width == 0 {
+			width = 256
+		}
+		height := int(entry[1])
+		if height == 0 {
+			height = 256
+		}
+		if width != height {
+			t.Errorf("entry %d: width %d != height %d", i, width, height)
+		}
+		if !wantSizes[width] {
+			t.Errorf("entry %d: unexpected size %d", i, width)
+		}
+		seenSizes[width] = true
+
+		bpp := binary.LittleEndian.Uint16(entry[6:8])
+		if bpp != 32 {
+			t.Errorf("entry %d: bpp = %d, want 32", i, bpp)
+		}
+		dataSize := binary.LittleEndian.Uint32(entry[8:12])
+		dataOffset := binary.LittleEndian.Uint32(entry[12:16])
+		if int(dataOffset)+int(dataSize) > len(data) {
+			t.Fatalf("entry %d: data range [%d:%d] exceeds file length %d", i, dataOffset, dataOffset+dataSize, len(data))
+		}
+		payload := data[dataOffset : dataOffset+dataSize]
+		img, err := png.Decode(bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("entry %d payload did not decode as PNG: %v", i, err)
+		}
+		if b := img.Bounds(); b.Dx() != width || b.Dy() != height {
+			t.Errorf("entry %d decoded to %dx%d, want %dx%d", i, b.Dx(), b.Dy(), width, height)
+		}
+	}
+	for size := range wantSizes {
+		if !seenSizes[size] {
+			t.Errorf("ico output missing expected size %d", size)
+		}
+	}
+}

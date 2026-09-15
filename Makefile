@@ -46,6 +46,15 @@ tidy: ## Tidy Go modules
 VULNCHECK_IGNORE ?= GO-2026-5932
 VULNCHECK_VERSION ?= v1.7.0
 
+# Pinned for the same determinism reason as VULNCHECK_VERSION above --
+# goversioninfo's .syso output format is undocumented/unversioned wire
+# format, not a stable API, so an unpinned @latest could silently start
+# producing a resource.syso the linker rejects. This value MUST match
+# the @v1.7.0 pin in .github/workflows/release-binaries.yml's
+# build-windows job -- there's no way to share a Make variable into a
+# workflow, so keep the two in sync by hand.
+GOVERSIONINFO_VERSION ?= v1.7.0
+
 # govulncheck is in Go's x/vuln module family, so we install on the fly
 # rather than committing a pre-installed binary. Pinned to a released
 # version (VULNCHECK_VERSION, default v1.7.0) rather than @latest so
@@ -121,8 +130,12 @@ build: ## Build all packages
 
 build-windows: ## Cross-compile the Windows binaries (from any host) -- see README for why there are two
 	mkdir -p dist
+	go run ./tools/mkicon dist/icon.ico
+	go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@$(GOVERSIONINFO_VERSION)
+	$$(go env GOPATH)/bin/goversioninfo -icon=dist/icon.ico -skip-versioninfo -o=cmd/branchdam-agent/resource.syso
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-X main.version=$(VERSION)" -o dist/branchdam-agent.exe ./cmd/branchdam-agent
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-X main.version=$(VERSION) -H windowsgui" -o dist/branchdam-agent-tray.exe ./cmd/branchdam-agent
+	rm -f cmd/branchdam-agent/resource.syso
 
 build-darwin: ## Build-only check for darwin/arm64, EXCLUDING internal/tray and cmd/branchdam-agent -- see README
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $$(go list ./... | grep -v '/internal/tray$$' | grep -v '/cmd/branchdam-agent$$')

@@ -51,9 +51,16 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 
 ; --- Interface ---
 !define MUI_ABORTWARNING
-; MUI_ICON/MUI_UNICON/MUI_HEADERIMAGE_BITMAP/MUI_WELCOMEFINISHPAGE_BITMAP
-; use MUI2 bundled defaults. Custom assets go in resources/icons/ and
-; will be wired in once the icon generation pipeline is in place.
+; MUI_ICON/MUI_UNICON point at dist/icon.ico -- generated at build time by
+; `go run ./tools/mkicon` (internal/appicon, issue #201), the same
+; generate-don't-commit pattern the macOS .icns build already uses. Both
+; the installer and uninstaller windows/taskbar entries use it; the path
+; is relative to this .nsi file (installer/windows/), two levels up to the
+; repo root's dist/. MUI_HEADERIMAGE_BITMAP/MUI_WELCOMEFINISHPAGE_BITMAP
+; (the wizard's header/sidebar banner images) remain MUI2's bundled
+; defaults -- out of scope for #201, which is icon-only.
+!define MUI_ICON "..\..\dist\icon.ico"
+!define MUI_UNICON "..\..\dist\icon.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\branchdam-agent-tray.exe"
 !define MUI_FINISHPAGE_RUN_PARAMETERS "tray"
 !define MUI_FINISHPAGE_RUN_TEXT "Launch branchDAM Agent"
