@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -65,6 +66,15 @@ type IntegrationBuilder struct {
 	// config.CatalogSyncConfig.Enabled's own doc comment for why a
 	// cross-field completeness check there would deadlock the Settings
 	// menu.
+	//
+	// A builder MAY report Ready=true yet still hand back a nil syncer
+	// from New (the caller must tolerate it) -- e.g. the resolve
+	// integration's auto-detect mode is Ready for Enabled + empty
+	// DatabaseURL, and the actual DB probe happens per sync pass inside
+	// Sync(), so New always succeeds and a no-DB-found pass is a no-op.
+	// Previously New returned nil when the probe came up empty; the
+	// probe moving into Sync made that nil impossible, which is cleaner
+	// for the "Ready=true implies registered" contract.
 	Ready func(cfg config.Config) bool
 	// New builds the syncer once Ready reports true.
 	New func(cfg config.Config, client *branchdam.Client) tray.IntegrationSyncer
@@ -178,16 +188,33 @@ var integrationBuilders = []IntegrationBuilder{
 		DatabaseURL: true,
 		Ready: func(cfg config.Config) bool {
 			r := cfg.Integrations.ResolveDB
-			if !r.Enabled || r.DatabaseURL == "" {
+			if !r.Enabled {
 				return false
 			}
-			if !r.DryRun && cfg.Integrations.NodeIndexPath == "" {
+			// A real (non-dry-run) sync with an explicit DatabaseURL
+			// needs the node index to resolve paths at all — without
+			// it every candidate is unconditionally skipped. Auto-detect
+			// mode (empty DatabaseURL) handles missing node index
+			// gracefully via emptyNodeIndex{}, so we only gate on
+			// NodeIndexPath when the URL is explicitly configured.
+			if r.DatabaseURL != "" && !r.DryRun && cfg.Integrations.NodeIndexPath == "" {
 				return false
 			}
 			return true
 		},
 		New: func(cfg config.Config, client *branchdam.Client) tray.IntegrationSyncer {
 			r := cfg.Integrations.ResolveDB
+
+			// Auto-detect mode: DatabaseURL is empty. The probe is NOT
+			// run here -- it runs inside Sync() on every pass, so a
+			// Resolve database that appears after tray startup is
+			// picked up on the next sync (discover.go's documented
+			// contract), not only at startup/reload. Ready returns
+			// true for Enabled + empty DatabaseURL, so this syncer is
+			// always constructed and the per-pass probe decides whether
+			// each pass has anything to do.
+			databaseURL := r.DatabaseURL
+
 			var edgeClient resolve.EdgeAttacher
 			var vEmitter resolve.VirtualNodeEmitter
 			if !r.DryRun {
@@ -202,7 +229,7 @@ var integrationBuilders = []IntegrationBuilder{
 				client:         edgeClient,
 				virtualEmitter: vEmitter,
 				agentID:        cfg.AgentID,
-				databaseURL:    r.DatabaseURL,
+				databaseURL:    databaseURL,
 				nodeIndexPath:  cfg.Integrations.NodeIndexPath,
 				dryRun:         r.DryRun,
 				pathRewrites:   rewrites,
@@ -438,7 +465,31 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	db, err := resolve.Open(ctx, s.databaseURL)
+	// Auto-detect mode: empty configured URL means probe platform-
+	// standard local paths on EVERY pass. This keeps discover.go's
+	// documented contract -- a Resolve DB that appears after tray
+	// startup is picked up on the next sync pass, not only at
+	// startup/reload. Bounded so a future network-path candidate
+	// cannot hang a pass indefinitely.
+	databaseURL := s.databaseURL
+	if databaseURL == "" {
+		dctx, dcancel := context.WithTimeout(ctx, discoveryTimeout)
+		defer dcancel()
+		discovered, derr := resolve.DiscoverDefaultDatabaseURL(dctx)
+		if derr != nil {
+			return tray.SyncSummary{DryRun: s.dryRun}, fmt.Errorf("resolve: auto-detect failed: %w", derr)
+		}
+		if discovered == "" {
+			// No local database at standard paths yet. A no-op pass
+			// (nothing to sync), not an error -- the next pass re-probes.
+			slog.Info("resolve: no local database found at standard paths; set integrations.resolvedb.databaseUrl to enable")
+			return tray.SyncSummary{DryRun: s.dryRun}, nil
+		}
+		slog.Info("resolve: auto-detected local database", "url", resolve.StripCredentials(discovered))
+		databaseURL = discovered
+	}
+
+	db, err := resolve.Open(ctx, databaseURL)
 	if err != nil {
 		return tray.SyncSummary{DryRun: s.dryRun}, err
 	}
@@ -463,7 +514,7 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 		Client:          s.client,
 		VirtualEmitter:  s.virtualEmitter,
 		AgentID:         s.agentID,
-		DatabaseURL:     s.databaseURL,
+		DatabaseURL:     databaseURL,
 		DryRun:          s.dryRun,
 		PathRewrites:    s.pathRewrites,
 		VirtualRoot:     s.virtualRoot,
@@ -570,6 +621,13 @@ const integrationSyncCheckInterval = 30 * time.Second
 // runs at most once an hour by default -- there is no cost to a more
 // generous ceiling.
 const integrationSyncTimeout = 10 * time.Minute
+
+// discoveryTimeout bounds one Resolve database auto-discovery probe.
+// Discovery today only stats platform-standard local paths, so a couple
+// of seconds is generous -- but if candidate probing ever grows a
+// network path (mounted share, NAS), the bound keeps tray startup from
+// hanging on an unreachable host.
+const discoveryTimeout = 5 * time.Second
 
 // trayToResolveMemberships converts tray.SyncMembershipEntry slice to
 // resolve.MembershipEntry slice for wiring into resolve.Syncer.
