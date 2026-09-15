@@ -67,7 +67,18 @@ func TestRollbackCallsResignAppBundleWithBundleDir(t *testing.T) {
 	}
 }
 
-func TestRollbackPropagatesResignError(t *testing.T) {
+// TestRollbackSucceedsDespiteResignFailure pins the corrected, non-fatal
+// contract (a Hermes-reviewer-caught regression against an earlier version
+// of this change, which made resign failure fatal): a resign failure must
+// never fail Rollback. By the point resign runs, every target has already
+// been restored and its .previous backup already consumed -- the rollback
+// has genuinely, fully succeeded; only the signature seal is stale.
+// Reporting that as a Rollback failure, with no backup left to retry from,
+// would be strictly worse than the merely-stale seal. Caught for real on
+// darwin CI: the pre-fix version of this code broke
+// TestRollbackRewritesInfoPlist there, since that test's flat (non-bundle)
+// fixture path makes the real codesign call fail every time.
+func TestRollbackSucceedsDespiteResignFailure(t *testing.T) {
 	dir := t.TempDir()
 	primary := filepath.Join(dir, "branchdam-agent.app", "Contents", "MacOS", "branchdam-agent")
 	if err := os.MkdirAll(filepath.Dir(primary), 0o755); err != nil {
@@ -83,12 +94,28 @@ func TestRollbackPropagatesResignError(t *testing.T) {
 	}
 	layout := InstallLayout{Primary: primary, InfoPlist: plistPath}
 
-	wantErr := errors.New("codesign: boom")
-	withResignAppBundle(t, func(string) error { return wantErr })
+	var calls int
+	withResignAppBundle(t, func(string) error {
+		calls++
+		return errors.New("codesign: boom")
+	})
 
-	_, err := Rollback(layout)
-	if err == nil || !errors.Is(err, wantErr) {
-		t.Fatalf("Rollback error = %v, want it to wrap %v", err, wantErr)
+	version, err := Rollback(layout)
+	if err != nil {
+		t.Fatalf("Rollback returned an error despite a fully-successful restore: %v", err)
+	}
+	if version != "2.0.0" {
+		t.Errorf("Rollback version = %q, want %q", version, "2.0.0")
+	}
+	if calls != 1 {
+		t.Errorf("resignAppBundle called %d times, want 1 (the failure must still be attempted, just not fatal)", calls)
+	}
+	got, err := os.ReadFile(primary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "old binary bytes" {
+		t.Errorf("primary binary after rollback = %q, want the restored old content", got)
 	}
 }
 

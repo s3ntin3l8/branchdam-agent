@@ -53,6 +53,7 @@ package selfupdate
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -229,12 +230,19 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 		if err := os.WriteFile(layout.InfoPlist, []byte(plist), 0o644); err != nil {
 			return "", fmt.Errorf("selfupdate: update %s: %w", layout.InfoPlist, err)
 		}
-		// Both the inner-binary swap above and the Info.plist rewrite
-		// just above invalidate the bundle's ad-hoc signature seal -- see
+		// Both the inner-binary swap above and the Info.plist rewrite just
+		// above invalidate the bundle's ad-hoc signature seal -- see
 		// resignAppBundle's own doc comment for why this must run every
-		// time InfoPlist is rewritten, not just occasionally.
+		// time InfoPlist is rewritten. Best-effort, deliberately: by this
+		// point every target is already live on the new version and the
+		// rollback backups already exist, so the update has genuinely
+		// succeeded. A resign failure only leaves the bundle's signature
+		// seal exactly as stale as it was before this feature existed
+		// (still launchable, just not codesign --verify clean) -- treating
+		// it as fatal would report a successful update as failed, which is
+		// strictly worse. Logged, not swallowed, so it's diagnosable.
 		if err := resignAppBundle(filepath.Dir(filepath.Dir(layout.InfoPlist))); err != nil {
-			return "", err
+			slog.Warn("selfupdate: could not re-sign app bundle after update", "path", layout.InfoPlist, "err", err)
 		}
 	}
 

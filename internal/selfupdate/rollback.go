@@ -131,8 +131,14 @@ func Rollback(layout InstallLayout) (string, error) {
 		// Same reasoning as Apply's own call site -- see resignAppBundle's
 		// doc comment: the restored binaries and the Info.plist rewrite
 		// just above both invalidate the bundle's ad-hoc signature seal.
+		// Best-effort, deliberately, and for a sharper reason than Apply's:
+		// by this point every target has already been restored and its
+		// .previous backup already removed by the loop above, so a fatal
+		// error here would report a fully-completed rollback as failed
+		// with no backup left to retry from -- strictly worse than a
+		// merely-stale signature seal. Logged, not swallowed.
 		if err := resignAppBundle(filepath.Dir(filepath.Dir(layout.InfoPlist))); err != nil {
-			return "", fmt.Errorf("selfupdate: rollback: %w", err)
+			slog.Warn("selfupdate: rollback: could not re-sign app bundle", "path", layout.InfoPlist, "err", err)
 		}
 	}
 

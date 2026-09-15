@@ -254,6 +254,13 @@ payload -- see Self-update below for why it must stay a bare-bundle tarball) and
 `branchdam-agent-darwin-arm64.dmg` (the user-facing manual-install download, with an
 `/Applications` symlink alongside the app so drag-to-install is the obvious gesture -- see
 Gatekeeper/quarantine/translocation below for why this is the download the README points at).
+Shipping a second darwin asset raised the obvious question of whether go-selfupdate might pick
+the `.dmg` instead of the `.tar.gz` -- checked against the vendored source
+(`$(go env GOMODCACHE)/github.com/creativeprojects/go-selfupdate@v1.6.0/detect.go`'s
+`getSuffixes`), not assumed: its candidate suffix list is a closed set
+(`.zip`, `.tar.gz`, `.tgz`, `.gzip`, `.gz`, `.tar.xz`, `.xz`, `.bz2`, or no extension at all),
+which does not include `.dmg` -- an asset ending `-arm64.dmg` cannot match. Re-check this if
+go-selfupdate is ever upgraded past v1.6.0.
 `LSUIElement=1` is what's meant to keep the tray out of the Dock and Cmd-Tab switcher; **this is
 unverified on real hardware** -- no macOS host has been used interactively to confirm it. Verify
 before relying on the macOS tray for day-to-day use.
@@ -594,35 +601,54 @@ to say "verified."
    no Dock tile and no Cmd-Tab entry appear, both when opened normally (`open -a`) and via a
    LaunchAgent (`tray.startOnLogin: true`, which execs the bundle's inner binary rather than
    opening the bundle -- confirm AppKit's Dock-suppression still applies in that path too).
-2. Gatekeeper/quarantine: download the release archive via a browser (not `curl`), extract, and
-   launch `branchdam-agent.app` from `~/Downloads` without moving it first -- confirm it either
-   triggers App Translocation (and `internal/selfupdate.DetectLayout` refuses with
-   `ErrTranslocated`, surfaced as a startup-error dialog, not a crash) or exhibits whatever the
-   actual Gatekeeper prompt wording turns out to be. Then move it to `/Applications` and confirm
-   translocation clears.
-3. Startup-error dialog and settings dialogs: same two checks as Windows items 2-3 above, but
+2. Gatekeeper/quarantine, the recommended `.dmg` path: download
+   `branchdam-agent-darwin-arm64.dmg` via a browser (not `curl`), open it -- confirm the disk
+   image mounts, `branchdam-agent.app` and an `Applications` symlink both appear in the window,
+   and the icon renders correctly in both Finder (the DMG window) and the icon itself (not a
+   generic document icon). Drag the app onto `Applications`, eject, and launch from
+   `/Applications` -- confirm the ad-hoc signature downgrades the failure mode from the pre-#200
+   "is damaged and can't be opened" dead end to the ordinary unidentified-developer prompt, and
+   that right-click → Open clears it. Then, separately, launch `branchdam-agent.app` directly from
+   the still-mounted (read-only) `.dmg` without dragging it out first -- confirm this hits either
+   `internal/selfupdate.DetectLayout`'s `ErrTranslocated` path or `Apply`'s `checkWritable` probe
+   failing with an actionable `ErrTargetNotWritable` message (see docs/platform-support.md's
+   Gatekeeper/quarantine/translocation section for which is expected and why blanket-refusing
+   every `/Volumes/...` path would be wrong). Also confirm `codesign -dv --verbose=4` and
+   `codesign --verify --strict` both pass against the installed bundle.
+4. Gatekeeper/quarantine, the manual `.tar.gz` path: extract via `tar` in Terminal (not Archive
+   Utility) and launch from `~/Downloads` without moving it first -- confirm it either triggers App
+   Translocation (`ErrTranslocated`, surfaced as a startup-error dialog, not a crash) or exhibits
+   whatever the actual Gatekeeper prompt wording turns out to be. Then move it to `/Applications`
+   and confirm translocation clears.
+5. Startup-error dialog and settings dialogs: same two checks as Windows items 2-3 above, but
    confirm the `osascript`-backed dialog renders correctly when the bundle is launched by launchd
    (a LaunchAgent `RunAtLoad`), not just from Finder.
-4. Full self-update cycle: same as Windows item 4 -- confirm go-selfupdate replaces only
+6. Full self-update cycle: same as Windows item 4 -- confirm go-selfupdate replaces only
    `branchdam-agent.app/Contents/MacOS/branchdam-agent` (never the bundle itself), `Info.plist`'s
    `CFBundleVersion` is rewritten to match, and the relaunch (`open -n -a`, not a bare `exec`)
-   produces exactly one running tray process, not two.
-5. Rollback: same as Windows item 5 -- additionally confirm `Info.plist`'s `CFBundleVersion` is
-   rewritten back to the rolled-back version, not left at the version being rolled back FROM.
-6. Tray-driven queue: same as Windows item 6.
-7. Integrations menu: same as Windows item 7 -- confirm the `-kind file` picker renders correctly
+   produces exactly one running tray process, not two. **New in #200:** also confirm
+   `codesign --verify --strict` still passes against the bundle immediately after the update --
+   `internal/selfupdate.Apply` re-signs it (`resignAppBundle` in `internal/selfupdate/resign.go`)
+   right after the binary swap and `Info.plist` rewrite, deliberately best-effort (a failure there
+   is logged via `slog.Warn`, not fatal -- the update itself has already fully succeeded by that
+   point), so this is the one check nothing else in this checklist validates.
+7. Rollback: same as Windows item 5 -- additionally confirm `Info.plist`'s `CFBundleVersion` is
+   rewritten back to the rolled-back version, not left at the version being rolled back FROM, and
+   (same as item 6 above) that `codesign --verify --strict` still passes afterward.
+8. Tray-driven queue: same as Windows item 6.
+9. Integrations menu: same as Windows item 7 -- confirm the `-kind file` picker renders correctly
    via `osascript`, including when the tray is launched by launchd rather than from Finder.
-8. Timer-driven sync: same as Windows item 8.
-9. Resolve hook install, admin-rights path (headless): `branchdam-agent resolve-hook -install` with
-   no `-dir` override targets the per-user
-   `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/` path
-   first (no admin rights needed) -- confirm that succeeds, then separately confirm the
-   ADMIN-RIGHTS path by running
-   `branchdam-agent resolve-hook -install -dir "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"`
-   without `sudo` and confirming it fails with a permissions error (not a silent no-op), then with
-   `sudo` and confirming it succeeds. Confirm Resolve picks up the script from whichever location it
-   ends up in via Workspace ▸ Scripts ▸ Utility.
-10. DaVinci Resolve hook menu: same as Windows item 10 -- additionally confirm "Reveal Scripts
+10. Timer-driven sync: same as Windows item 8.
+11. Resolve hook install, admin-rights path (headless): `branchdam-agent resolve-hook -install` with
+    no `-dir` override targets the per-user
+    `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/` path
+    first (no admin rights needed) -- confirm that succeeds, then separately confirm the
+    ADMIN-RIGHTS path by running
+    `branchdam-agent resolve-hook -install -dir "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"`
+    without `sudo` and confirming it fails with a permissions error (not a silent no-op), then with
+    `sudo` and confirming it succeeds. Confirm Resolve picks up the script from whichever location it
+    ends up in via Workspace ▸ Scripts ▸ Utility.
+12. DaVinci Resolve hook menu: same as Windows item 10 -- additionally confirm "Reveal Scripts
     folder" opens the per-user path via `osascript`/Finder, including when the tray is launched by
     launchd rather than from Finder.
 
