@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -53,6 +55,18 @@ type PathRewrite struct {
 	To   string // e.g. "/storage/archive/videos/"
 }
 
+// MembershipEntry is one (media path, timeline ID) pair from a Resolve
+// sync pass. Stored in the runtime state file for delta detection across
+// sync passes. The agent cannot query which edges exist on the server,
+// so this local snapshot is the only way to detect removals.
+//
+// Duplicated in internal/runtime and internal/tray — kept in sync by
+// convention to avoid import cycles between the three packages.
+type MembershipEntry struct {
+	MediaPath  string `json:"mp"`
+	TimelineID string `json:"tl"`
+}
+
 // Stats summarizes one Sync run.
 type Stats struct {
 	ClipsFound    int // unique file paths found in timelines
@@ -63,6 +77,11 @@ type Stats struct {
 	VirtualNodes  int // virtual project nodes created
 	EdgesAttached int // PROJECT_SIDECAR edges emitted
 	EvidenceOnly  int // clips whose evidence was logged but no edge emitted (dry run mode)
+	// Delta detection fields (populated when PrevMemberships is set):
+	NewMemberships int // memberships in current query but not PrevMemberships
+	Unchanged      int // memberships present in both passes (edges skipped)
+	Removed        int // memberships in PrevMemberships but not current pass
+	FileMissing    int // clips in current query whose rewritten path doesn't exist on disk
 }
 
 // evidence is the evidenceJson object stamped onto every emitted edge.
@@ -95,6 +114,21 @@ type Syncer struct {
 	PathRewrites   []PathRewrite
 	VirtualRoot    string // root prefix for virtual paths, e.g. "/virtual/resolve"
 	Logger         *slog.Logger
+
+	// PrevMemberships is the set of (mediaPath, timelineID) pairs from
+	// the previous successful sync pass, loaded from the runtime state
+	// file. When set, Sync performs delta detection: only newly-added
+	// memberships emit edges, unchanged memberships are skipped, and
+	// removed memberships are logged. When nil, all memberships are
+	// treated as added (first-pass behavior).
+	PrevMemberships []MembershipEntry
+
+	// OnSaveMemberships is called after a successful sync with the
+	// current pass's membership set. The callback persists the set to
+	// the runtime state file for the next pass's delta detection.
+	// Called after r.mu.Unlock() semantics: slow saves must not block
+	// the sync pass's return. Nil means no persistence (dry run or test).
+	OnSaveMemberships func(entries []MembershipEntry) error
 }
 
 func (s *Syncer) logger() *slog.Logger {
@@ -290,16 +324,56 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	}
 
 	// Emit PROJECT_SIDECAR edges from each clip to its timeline's virtual node.
+	// When PrevMemberships is set, only newly-added memberships emit edges;
+	// unchanged memberships are skipped and removed memberships are logged.
+	prevSet := make(map[membershipKey]struct{}, len(s.PrevMemberships))
+	for _, m := range s.PrevMemberships {
+		prevSet[membershipKey{mediaPath: m.MediaPath, timelineID: m.TimelineID}] = struct{}{}
+	}
+	hasPrev := s.PrevMemberships != nil
+
+	// Track emitted clips separately from all queried clips. Only emitted
+	// clips are persisted for next-pass delta detection — a clip that
+	// failed to emit (error, unresolved, no-rewrite) should be retried
+	// on the next pass, not marked "unchanged".
+	var emittedMemberships []MembershipEntry
+
 	for _, key := range membershipOrder {
 		clip := memberships[key]
 
 		rewrittenPath, ok := rewritePath(s.PathRewrites, clip.MediaFilePath)
 		if !ok {
 			stats.NoRewrite++
+			// Consume from prevSet so no-rewrite clips aren't
+			// falsely reported as "removed from timeline" on the
+			// next pass. They simply can't be emitted; not
+			// persisted, so next pass retries them as new.
+			if hasPrev {
+				delete(prevSet, key)
+			}
 			s.logger().Info("resolve-sync: skipping clip, no path rewrite matches",
 				"mediaFilePath", clip.MediaFilePath, "timeline", clip.TimelineName)
 			continue
 		}
+
+		// File-existence check: detect clips whose referenced file is
+		// missing from disk (asset moved/deleted but still in timeline).
+		if _, lstatErr := os.Lstat(rewrittenPath); lstatErr != nil && errors.Is(lstatErr, fs.ErrNotExist) {
+			stats.FileMissing++
+			s.logger().Warn("resolve-sync: clip file missing from disk",
+				"mediaFilePath", clip.MediaFilePath, "rewrittenPath", rewrittenPath,
+				"timeline", clip.TimelineName)
+		}
+
+		// Delta detection: classify this membership as added or unchanged.
+		if hasPrev {
+			if _, existed := prevSet[key]; existed {
+				delete(prevSet, key) // consumed
+				stats.Unchanged++
+				continue // skip server call — edge already emitted
+			}
+		}
+		stats.NewMemberships++
 
 		nodeUUID, nodeOK, err := s.Index.Resolve(rewrittenPath)
 		if err != nil {
@@ -348,6 +422,9 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 				"sourceUuid", nodeUUID, "targetUuid", targetUUID,
 				"mediaFilePath", clip.MediaFilePath, "timeline", clip.TimelineName)
 			stats.Emitted++
+			// DryRun: count as emitted for stats but don't persist —
+			// the edge wasn't actually posted, so persisting would
+			// mark it "unchanged" on the next real pass.
 			continue
 		}
 
@@ -374,9 +451,49 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 		}
 		stats.Emitted++
 		stats.EdgesAttached++
+		emittedMemberships = append(emittedMemberships, MembershipEntry{
+			MediaPath:  clip.MediaFilePath,
+			TimelineID: clip.TimelineID,
+		})
 		s.logger().Info("resolve-sync: emitted edge",
 			"sourceUuid", nodeUUID, "targetUuid", targetUUID,
 			"mediaFilePath", clip.MediaFilePath, "timeline", clip.TimelineName)
+	}
+
+	// Detect removed memberships: entries in PrevMemberships that are not
+	// in the current pass's query result. The agent cannot query which
+	// edges exist on the server, so this is informational only — no
+	// server-side edge deletion occurs. When a path rewrite matches, the
+	// file-existence check distinguishes intentional removals (file still
+	// on disk) from missing-asset errors (file also gone).
+	if hasPrev {
+		for key := range prevSet {
+			stats.Removed++
+			rewrittenPath, ok := rewritePath(s.PathRewrites, key.mediaPath)
+			if ok {
+				if _, lstatErr := os.Lstat(rewrittenPath); lstatErr != nil && errors.Is(lstatErr, fs.ErrNotExist) {
+					stats.FileMissing++
+					s.logger().Warn("resolve-sync: removed clip file also missing from disk",
+						"mediaPath", key.mediaPath, "rewrittenPath", rewrittenPath, "timelineId", key.timelineID)
+					continue
+				}
+			}
+			// Non-ErrNotExist Lstat errors (permission denied, etc.) are
+			// deliberately ignored — the file may be inaccessible but not
+			// missing.
+			s.logger().Info("resolve-sync: clip removed from timeline since last sync",
+				"mediaPath", key.mediaPath, "timelineId", key.timelineID)
+		}
+	}
+
+	// Persist the emitted membership set for the next pass's delta
+	// detection. Only clips whose edge was actually confirmed emitted
+	// are persisted — clips that errored, were unresolved, or had no
+	// path rewrite are retried on the next pass as new memberships.
+	if !s.DryRun && s.OnSaveMemberships != nil {
+		if err := s.OnSaveMemberships(emittedMemberships); err != nil {
+			s.logger().Warn("resolve-sync: failed to persist membership set", "err", err)
+		}
 	}
 
 	return stats, nil
@@ -397,9 +514,9 @@ func databaseIdentity(rawURL string) string {
 	return u.String()
 }
 
-// stripCredentials removes userinfo from a database URL so it can be safely
-// included in evidence JSON persisted server-side. Returns the original
-// string if parsing fails or no credentials are present.
+// stripCredentials removes userinfo from a database URL so it can be
+// safely included in evidence JSON persisted server-side. Returns the
+// original string if parsing fails or no credentials are present.
 func stripCredentials(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.User == nil {
