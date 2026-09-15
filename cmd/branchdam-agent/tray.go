@@ -410,7 +410,11 @@ func runTrayCmd(args []string) int {
 	// via settings.currentConfig() rather than a value captured once here.
 	// TriggerSync's own ran=false for an unregistered/disabled ID is what
 	// makes a check tick with nothing configured a free no-op.
-	runner.SetIntegrationSyncers(buildIntegrationDeps(cfg, client))
+	syncers, resolveSyncer := buildIntegrationDeps(cfg, client)
+	runner.SetIntegrationSyncers(syncers)
+	if resolveSyncer != nil {
+		wireResolveSyncer(runner, resolveSyncer)
+	}
 	for _, b := range integrationBuilders {
 		id, interval := b.ID, b.Interval
 		go startPeriodicVar(ctx, integrationSyncCheckInterval, func() time.Duration {
@@ -726,6 +730,63 @@ func wireRuntimeStateWithOps(runner *tray.Runner, ops runtimeStateOps) {
 		runner.SetOnSuccessfulHandshake(func(t time.Time) error {
 			return ops.Save(runtimePath, runtimeState.State{LastHandshakeAt: t})
 		})
+	}
+}
+
+// wireResolveSyncer connects the resolve DB syncer's delta-detection
+// fields (prevMemberships, onSaveMemberships, onSyncComplete) to the
+// runner and runtime state. Called once at startup after buildIntegrationDeps.
+func wireResolveSyncer(runner *tray.Runner, syncer *resolveDBSyncer) {
+	runtimePath, pathErr := runtimeState.Path()
+	if pathErr != nil {
+		slog.Warn("could not resolve runtime state path; resolve delta detection unavailable this session", "err", pathErr)
+		return
+	}
+
+	// Load previous membership set from the runtime state file so the
+	// first sync pass can perform delta detection.
+	rt, err := runtimeState.Load(runtimePath)
+	if err == nil && len(rt.ResolveEmittedMemberships) > 0 {
+		entries := make([]tray.SyncMembershipEntry, len(rt.ResolveEmittedMemberships))
+		for i, e := range rt.ResolveEmittedMemberships {
+			entries[i] = tray.SyncMembershipEntry{MediaPath: e.MediaPath, TimelineID: e.TimelineID}
+		}
+		syncer.prevMemberships = entries
+	}
+
+	// onSyncComplete updates the runner's in-memory carry-forward with
+	// the fresh emitted set from each pass, so TriggerSync can capture
+	// the current data for persistence.
+	syncer.onSyncComplete = func(entries []tray.SyncMembershipEntry) {
+		runner.SeedResolveMemberships(entries) // overwrites with fresh data
+	}
+
+	// onSaveMemberships persists the emitted set to runtime.json.
+	syncer.onSaveMemberships = wireResolveSyncCallback(runner, runtimePath)
+}
+
+// wireResolveSyncCallback returns an onSaveMemberships callback that
+// persists the emitted membership set to runtime.json alongside the
+// handshake callback's LastHandshakeAt. This is the sync-side
+// counterpart of the handshake callback in wireRuntimeStateWithOps.
+func wireResolveSyncCallback(_ *tray.Runner, runtimePath string) func(entries []tray.SyncMembershipEntry) error {
+	return func(entries []tray.SyncMembershipEntry) error {
+		// Load the current handshake timestamp so the full state write
+		// is consistent. The handshake callback writes this under its
+		// own timing; reading here is safe because Save is atomic
+		// (temp+rename) and last-wins is benign.
+		rt, err := runtimeState.Load(runtimePath)
+		st := runtimeState.State{}
+		if err == nil {
+			st.LastHandshakeAt = rt.LastHandshakeAt
+		}
+		if len(entries) > 0 {
+			st.ResolveEmittedMemberships = make([]runtimeState.MembershipEntry, len(entries))
+			for i, m := range entries {
+				st.ResolveEmittedMemberships[i] = runtimeState.MembershipEntry{MediaPath: m.MediaPath, TimelineID: m.TimelineID}
+			}
+		}
+		return runtimeState.Save(runtimePath, st)
 	}
 }
 

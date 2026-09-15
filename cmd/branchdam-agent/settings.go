@@ -856,7 +856,8 @@ func (s *configSettings) reload() error {
 	// every enabled integration POSTing edges with the stale client
 	// indefinitely -- silently, since a 401 on an EVENT_EDGE_ATTACHED
 	// surfaces only as SyncSummary.Errors, not a visible failure.
-	s.runner.SetIntegrationSyncers(buildIntegrationDeps(newCfg, client))
+	syncers, _ := buildIntegrationDeps(newCfg, client)
+	s.runner.SetIntegrationSyncers(syncers)
 
 	// Hook-state cache refresh on settings change (issue #154 / audit
 	// F-17): if the operator edited integrations.resolve.scriptsDir (the
