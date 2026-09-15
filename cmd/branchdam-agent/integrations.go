@@ -460,15 +460,15 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 	}
 
 	syncer := &resolve.Syncer{
-		DB:             db,
-		Index:          index,
-		Client:         s.client,
-		VirtualEmitter: s.virtualEmitter,
-		AgentID:        s.agentID,
-		DatabaseURL:    s.databaseURL,
-		DryRun:         s.dryRun,
-		PathRewrites:   s.pathRewrites,
-		VirtualRoot:    s.virtualRoot,
+		DB:              db,
+		Index:           index,
+		Client:          s.client,
+		VirtualEmitter:  s.virtualEmitter,
+		AgentID:         s.agentID,
+		DatabaseURL:     s.databaseURL,
+		DryRun:          s.dryRun,
+		PathRewrites:    s.pathRewrites,
+		VirtualRoot:     s.virtualRoot,
 		PrevMemberships: trayToResolveMemberships(s.prevMemberships),
 		OnSaveMemberships: func(entries []resolve.MembershipEntry) error {
 			// Bridge: update runner's in-memory carry-forward with
