@@ -21,8 +21,10 @@ import (
 //
 // A package-level var, matching sigstore.go's fetchClient seam, so tests
 // can substitute a fake and assert it was called with the right bundle
-// path and that its error propagates -- without needing a real macOS host
-// or a real codesign binary. defaultResignAppBundle no-ops on any GOOS
+// path, and that a failure there is logged rather than returned (Apply
+// and Rollback both treat it as best-effort -- see their own call sites)
+// -- without needing a real macOS host or a real codesign binary.
+// defaultResignAppBundle no-ops on any GOOS
 // other than darwin: codesign doesn't exist there, and layout.InfoPlist
 // being set is only ever a signal of a real macOS bundle path in
 // production, even though BundlePath's own pure-string check (see
