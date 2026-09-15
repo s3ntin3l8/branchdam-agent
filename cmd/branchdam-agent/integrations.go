@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -14,6 +15,21 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/resolve"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
+
+// stripDatabaseURLCredentials removes userinfo from a database URL so
+// it can be safely logged without leaking credentials. Returns the
+// original string if parsing fails or no credentials are present.
+// Local copy of internal/resolve's unexported stripCredentials: the
+// resolve helper is package-private, and a database URL needs to be
+// safe to log from cmd/ paths that can't import unexported helpers.
+func stripDatabaseURLCredentials(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.User == nil {
+		return rawURL
+	}
+	u.User = nil
+	return u.String()
+}
 
 // IntegrationBuilder is the EXECUTION-side registry entry cmd/branchdam-agent
 // owns -- the counterpart to internal/tray.Integrations()'s presentation
@@ -209,7 +225,7 @@ var integrationBuilders = []IntegrationBuilder{
 					slog.Info("resolve: no local database found at standard paths; set integrations.resolvedb.databaseUrl to enable")
 					return nil
 				}
-				slog.Info("resolve: auto-detected local database", "url", resolve.StripCredentials(discovered))
+				slog.Info("resolve: auto-detected local database", "url", stripDatabaseURLCredentials(discovered))
 				databaseURL = discovered
 			}
 
