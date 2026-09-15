@@ -612,6 +612,12 @@ func patchValueForStringKey(key, value string) (any, error) {
 		return splitCommaExtensions(value)
 	case "pathMappings":
 		return parsePathMappings(value)
+	case "agentId":
+		// validateStringChange trims agentId before validating (a
+		// surrounding-whitespace-only value must not read as "set"); patch
+		// the same trimmed form here so a validated value and a persisted
+		// value can never differ (Hermes review finding on this PR).
+		return strings.TrimSpace(value), nil
 	default:
 		return value, nil
 	}
@@ -658,30 +664,44 @@ func (s *configSettings) SetIntegrationPath(id tray.IntegrationID, value string)
 	return s.SetString(b.ConfigKey(pathKey), value)
 }
 
+// parseAndValidateRewrites parses value into path rewrite rules and
+// validates the result against cfg's own copy (applying the parsed rules
+// to Integrations.ResolveDB.PathRewrites before running
+// firstBlockingProblem, so validation sees the post-change state, not the
+// stale snapshot) -- shared by PromptAndSetIntegrationRewrites and
+// SetIntegrationRewrites so the interactive and non-interactive paths can
+// never diverge on how a rewrite string is parsed or validated (Hermes
+// review suggestion on this PR).
+func parseAndValidateRewrites(cfg config.Config, value string) ([]config.ResolvePathRewrite, error) {
+	rewrites, err := parseResolvePathRewrites(value)
+	if err != nil {
+		return nil, err
+	}
+	cfgForValidation := cfg
+	cfgForValidation.Integrations.ResolveDB.PathRewrites = rewrites
+	if problem := firstBlockingProblem(cfgForValidation); problem != nil {
+		return nil, fmt.Errorf("config problem: %s", problem)
+	}
+	return rewrites, nil
+}
+
 // SetIntegrationRewrites is PromptAndSetIntegrationRewrites's
 // non-interactive counterpart. Path rewrites are not reachable through
 // SetString/validateStringChange at all (applyIntegrationStringChange only
-// handles catalogPath/databaseUrl) -- the parse-and-validate steps are
-// duplicated from PromptAndSetIntegrationRewrites rather than shared,
-// since that function interleaves them with dialog-argument building.
+// handles catalogPath/databaseUrl), so this shares parseAndValidateRewrites
+// with the interactive path instead.
 func (s *configSettings) SetIntegrationRewrites(id tray.IntegrationID, value string) error {
 	b, ok := builderFor(id)
 	if !ok || b.ApplyRewrites == nil {
 		return fmt.Errorf("settings: integration %q does not support path rewrites", id)
 	}
 
-	rewrites, err := parseResolvePathRewrites(value)
-	if err != nil {
-		return err
-	}
-
 	s.mu.Lock()
 	cfg := s.cfg
 	s.mu.Unlock()
-	cfgForValidation := cfg
-	cfgForValidation.Integrations.ResolveDB.PathRewrites = rewrites
-	if problem := firstBlockingProblem(cfgForValidation); problem != nil {
-		return fmt.Errorf("config problem: %s", problem)
+	rewrites, err := parseAndValidateRewrites(cfg, value)
+	if err != nil {
+		return err
 	}
 
 	key := b.ConfigKey("pathRewrites")
@@ -832,17 +852,9 @@ func (s *configSettings) PromptAndSetIntegrationRewrites(id tray.IntegrationID) 
 		return false, fmt.Errorf("path rewrites dialog for %s failed (exit %d)", key, exitCode)
 	}
 
-	// Validate by parsing before persisting.
-	rewrites, err := parseResolvePathRewrites(value)
+	rewrites, err := parseAndValidateRewrites(cfg, value)
 	if err != nil {
 		return false, err
-	}
-	// Apply rewrites to a config copy so firstBlockingProblem validates
-	// the post-change state, not the stale snapshot taken before the dialog.
-	cfgForValidation := cfg
-	cfgForValidation.Integrations.ResolveDB.PathRewrites = rewrites
-	if problem := firstBlockingProblem(cfgForValidation); problem != nil {
-		return false, fmt.Errorf("config problem: %s", problem)
 	}
 
 	// Persist the parsed slice (not the formatted string) so YAML gets

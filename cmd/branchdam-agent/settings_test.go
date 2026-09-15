@@ -526,6 +526,26 @@ func TestConfigSettingsSetStringHappyPath(t *testing.T) {
 	}
 }
 
+// TestConfigSettingsSetStringTrimsAgentID guards against a validate/patch
+// divergence: validateStringChange trims agentId before validating, so the
+// persisted value must be trimmed too, or a padded ID could validate as
+// one thing and persist as another (Hermes review finding on this PR).
+func TestConfigSettingsSetStringTrimsAgentID(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if err := s.SetString("agentId", "  box  "); err != nil {
+		t.Fatalf("SetString: %v", err)
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.AgentID != "box" {
+		t.Errorf("persisted AgentID = %q, want trimmed %q", reloaded.AgentID, "box")
+	}
+}
+
 // TestConfigSettingsSetStringRejectsInvalid confirms SetString runs the
 // same validateStringChange gate PromptAndSet does -- an empty agentId
 // must be rejected without persisting.
