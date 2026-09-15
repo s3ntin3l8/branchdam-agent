@@ -774,8 +774,8 @@ func TestSyncDeltaDetectionFirstPass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Added != 2 {
-		t.Errorf("Added = %d, want 2 (first pass treats all as added)", stats.Added)
+	if stats.NewMemberships != 2 {
+		t.Errorf("NewMemberships = %d, want 2 (first pass treats all as new)", stats.NewMemberships)
 	}
 	if stats.Unchanged != 0 {
 		t.Errorf("Unchanged = %d, want 0", stats.Unchanged)
@@ -814,8 +814,8 @@ func TestSyncDeltaDetectionSecondPassNoChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Added != 0 {
-		t.Errorf("Added = %d, want 0 (no new memberships)", stats.Added)
+	if stats.NewMemberships != 0 {
+		t.Errorf("NewMemberships = %d, want 0 (no new memberships)", stats.NewMemberships)
 	}
 	if stats.Unchanged != 1 {
 		t.Errorf("Unchanged = %d, want 1", stats.Unchanged)
@@ -855,8 +855,8 @@ func TestSyncDeltaDetectionRemovedClip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Added != 0 {
-		t.Errorf("Added = %d, want 0", stats.Added)
+	if stats.NewMemberships != 0 {
+		t.Errorf("NewMemberships = %d, want 0", stats.NewMemberships)
 	}
 	if stats.Unchanged != 1 {
 		t.Errorf("Unchanged = %d, want 1", stats.Unchanged)
@@ -893,8 +893,8 @@ func TestSyncDeltaDetectionNewClipAdded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Added != 1 {
-		t.Errorf("Added = %d, want 1 (clip2 is new)", stats.Added)
+	if stats.NewMemberships != 1 {
+		t.Errorf("NewMemberships = %d, want 1 (clip2 is new)", stats.NewMemberships)
 	}
 	if stats.Unchanged != 1 {
 		t.Errorf("Unchanged = %d, want 1 (clip1 is unchanged)", stats.Unchanged)

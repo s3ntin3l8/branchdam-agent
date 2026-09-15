@@ -78,10 +78,10 @@ type Stats struct {
 	EdgesAttached int // PROJECT_SIDECAR edges emitted
 	EvidenceOnly  int // clips whose evidence was logged but no edge emitted (dry run mode)
 	// Delta detection fields (populated when PrevMemberships is set):
-	Added       int // new memberships not in PrevMemberships (edges emitted)
-	Unchanged   int // memberships present in both passes (edges skipped)
-	Removed     int // memberships in PrevMemberships but not current pass
-	FileMissing int // clips in current query whose rewritten path doesn't exist on disk
+	NewMemberships int // memberships in current query but not PrevMemberships
+	Unchanged      int // memberships present in both passes (edges skipped)
+	Removed        int // memberships in PrevMemberships but not current pass
+	FileMissing    int // clips in current query whose rewritten path doesn't exist on disk
 }
 
 // evidence is the evidenceJson object stamped onto every emitted edge.
@@ -332,12 +332,25 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	}
 	hasPrev := s.PrevMemberships != nil
 
+	// Track emitted clips separately from all queried clips. Only emitted
+	// clips are persisted for next-pass delta detection — a clip that
+	// failed to emit (error, unresolved, no-rewrite) should be retried
+	// on the next pass, not marked "unchanged".
+	var emittedMemberships []MembershipEntry
+
 	for _, key := range membershipOrder {
 		clip := memberships[key]
 
 		rewrittenPath, ok := rewritePath(s.PathRewrites, clip.MediaFilePath)
 		if !ok {
 			stats.NoRewrite++
+			// Consume from prevSet so no-rewrite clips aren't
+			// falsely reported as "removed from timeline" on the
+			// next pass. They simply can't be emitted; not
+			// persisted, so next pass retries them as new.
+			if hasPrev {
+				delete(prevSet, key)
+			}
 			s.logger().Info("resolve-sync: skipping clip, no path rewrite matches",
 				"mediaFilePath", clip.MediaFilePath, "timeline", clip.TimelineName)
 			continue
@@ -360,7 +373,7 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 				continue // skip server call — edge already emitted
 			}
 		}
-		stats.Added++
+		stats.NewMemberships++
 
 		nodeUUID, nodeOK, err := s.Index.Resolve(rewrittenPath)
 		if err != nil {
@@ -409,6 +422,9 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 				"sourceUuid", nodeUUID, "targetUuid", targetUUID,
 				"mediaFilePath", clip.MediaFilePath, "timeline", clip.TimelineName)
 			stats.Emitted++
+			// DryRun: count as emitted for stats but don't persist —
+			// the edge wasn't actually posted, so persisting would
+			// mark it "unchanged" on the next real pass.
 			continue
 		}
 
@@ -435,6 +451,10 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 		}
 		stats.Emitted++
 		stats.EdgesAttached++
+		emittedMemberships = append(emittedMemberships, MembershipEntry{
+			MediaPath:  clip.MediaFilePath,
+			TimelineID: clip.TimelineID,
+		})
 		s.logger().Info("resolve-sync: emitted edge",
 			"sourceUuid", nodeUUID, "targetUuid", targetUUID,
 			"mediaFilePath", clip.MediaFilePath, "timeline", clip.TimelineName)
@@ -466,20 +486,12 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 		}
 	}
 
-	// Persist the current membership set for the next pass's delta
-	// detection. All membershipOrder keys are tracked — including
-	// no-rewrite, unresolved, and error clips — so the next pass can
-	// classify them as unchanged or detect their removal.
-	currentMemberships := make([]MembershipEntry, 0, len(membershipOrder))
-	for _, key := range membershipOrder {
-		currentMemberships = append(currentMemberships, MembershipEntry{
-			MediaPath:  key.mediaPath,
-			TimelineID: key.timelineID,
-		})
-	}
-
-	if s.OnSaveMemberships != nil {
-		if err := s.OnSaveMemberships(currentMemberships); err != nil {
+	// Persist the emitted membership set for the next pass's delta
+	// detection. Only clips whose edge was actually confirmed emitted
+	// are persisted — clips that errored, were unresolved, or had no
+	// path rewrite are retried on the next pass as new memberships.
+	if !s.DryRun && s.OnSaveMemberships != nil {
+		if err := s.OnSaveMemberships(emittedMemberships); err != nil {
 			s.logger().Warn("resolve-sync: failed to persist membership set", "err", err)
 		}
 	}
