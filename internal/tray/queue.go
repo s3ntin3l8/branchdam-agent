@@ -2,6 +2,7 @@ package tray
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -64,6 +65,16 @@ type DrainSummary struct {
 	Err               error
 }
 
+// MarshalJSON renders Err as a string -- see
+// IngestSummary.MarshalJSON's doc comment (tray.go) for why and how.
+func (s DrainSummary) MarshalJSON() ([]byte, error) {
+	type alias DrainSummary
+	return json.Marshal(struct {
+		alias
+		Err string `json:"Err,omitempty"`
+	}{alias: alias(s), Err: errString(s.Err)})
+}
+
 // Drainer is the subset of internal/ingest.Drain's behavior the tray runs
 // on its own timer and from the "Drain queue now" menu item (see
 // Runner.TriggerDrain).
@@ -80,6 +91,16 @@ type PruneSummary struct {
 	Pruned     int
 	FreedBytes int64
 	Err        error
+}
+
+// MarshalJSON renders Err as a string -- see
+// IngestSummary.MarshalJSON's doc comment (tray.go) for why and how.
+func (s PruneSummary) MarshalJSON() ([]byte, error) {
+	type alias PruneSummary
+	return json.Marshal(struct {
+		alias
+		Err string `json:"Err,omitempty"`
+	}{alias: alias(s), Err: errString(s.Err)})
 }
 
 // Pruner is the subset of internal/prune.Pass's behavior the tray runs on
@@ -108,4 +129,17 @@ type QueueStatus struct {
 	PruneEnabled bool
 	LastDrain    *DrainSummary
 	LastPrune    *PruneSummary
+}
+
+// MarshalJSON renders Err as a string -- see
+// IngestSummary.MarshalJSON's doc comment (tray.go) for why and how.
+// LastDrain/LastPrune need no special handling here: DrainSummary and
+// PruneSummary each have their own MarshalJSON, which encoding/json
+// invokes automatically through the pointer.
+func (s QueueStatus) MarshalJSON() ([]byte, error) {
+	type alias QueueStatus
+	return json.Marshal(struct {
+		alias
+		Err string `json:"Err,omitempty"`
+	}{alias: alias(s), Err: errString(s.Err)})
 }

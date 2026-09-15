@@ -13,6 +13,7 @@ package tray
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -63,6 +64,22 @@ type IngestSummary struct {
 	Failed    int
 	Err       error
 	Offline   bool
+}
+
+// MarshalJSON renders Err as its message string rather than encoding the
+// error value directly -- a bare `error`-typed field silently marshals to
+// "{}" for most error implementations, since they expose no fields of
+// their own for encoding/json to see (see statusapi.go's errString doc
+// comment, which this reuses). The embedded alias's own Err field is
+// shadowed by the explicit one below at the same JSON key -- encoding/json
+// resolves that in favor of the shallower, explicitly-declared field, so
+// the interface-typed one is never actually encoded.
+func (s IngestSummary) MarshalJSON() ([]byte, error) {
+	type alias IngestSummary
+	return json.Marshal(struct {
+		alias
+		Err string `json:"Err,omitempty"`
+	}{alias: alias(s), Err: errString(s.Err)})
 }
 
 // OK reports whether every file that should have been submitted succeeded
@@ -128,6 +145,16 @@ type UpdateStatus struct {
 	// Applied is set to the version string once ApplyLatest has
 	// succeeded this session.
 	Applied string
+}
+
+// MarshalJSON renders Err as a string -- see IngestSummary.MarshalJSON's
+// doc comment for why and how.
+func (u UpdateStatus) MarshalJSON() ([]byte, error) {
+	type alias UpdateStatus
+	return json.Marshal(struct {
+		alias
+		Err string `json:"Err,omitempty"`
+	}{alias: alias(u), Err: errString(u.Err)})
 }
 
 // Note renders UpdateStatus as the one-line string the status page shows

@@ -28,6 +28,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 	"github.com/s3ntin3l8/branchdam-agent/internal/resolvehook"
 	runtimeState "github.com/s3ntin3l8/branchdam-agent/internal/runtime"
+	"github.com/s3ntin3l8/branchdam-agent/internal/sessiontoken"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
@@ -530,12 +531,12 @@ func runTrayCmd(args []string) int {
 	statusSrv.Actions = runner
 	statusSrv.Settings = settings
 
-	// A fresh token every tray start -- see GenerateSessionToken's own doc
+	// A fresh token every tray start -- see sessiontoken.Generate's own doc
 	// comment for why this is regenerated rather than persisted/reused.
 	// Non-fatal on failure: the /api/* action routes fail closed (every
 	// request rejected, since StatusServer.Token stays "") rather than the
 	// whole tray refusing to start over a token file write error.
-	if token, err := tray.GenerateSessionToken(); err != nil {
+	if token, err := sessiontoken.Generate(); err != nil {
 		slog.Warn("session token generation failed; loopback API actions disabled this session", "err", err)
 	} else {
 		statusSrv.Token = token
