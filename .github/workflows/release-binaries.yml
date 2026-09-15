@@ -103,10 +103,19 @@ jobs:
             -o dist/branchdam-agent-tray.exe ./cmd/branchdam-agent
       - name: Install NSIS
         run: sudo apt-get update && sudo apt-get install -y nsis
+      # Windows' version-resource format (VIProductVersion) requires a
+      # strict X.X.X.X numeric string and rejects anything else outright --
+      # RELEASE_VERSION itself can be a real tag ("v1.6.0"), or a non-semver
+      # placeholder ("manual-test") for a signed-candidate dispatch. Reuses
+      # internal/appbundle.BundleVersion's own tag-normalization (see
+      # tools/winversion's doc comment) rather than re-deriving version
+      # parsing a third time in NSIS's own preprocessor language.
+      - name: Compute Windows version resource
+        run: echo "PRODUCT_VERSION_QUAD=$(go run ./tools/winversion "${{ env.RELEASE_VERSION }}")" >> "$GITHUB_ENV"
       - name: Build installer
         run: |
           cd installer/windows
-          makensis -DVERSION="${{ env.RELEASE_VERSION }}" branchdam-agent.nsi
+          makensis -DVERSION="${{ env.RELEASE_VERSION }}" -DPRODUCT_VERSION_QUAD="${{ env.PRODUCT_VERSION_QUAD }}" branchdam-agent.nsi
           mv branchdam-agent-setup.exe ../../dist/
       - name: Package
         run: |

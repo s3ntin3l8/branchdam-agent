@@ -104,14 +104,16 @@ against the release's `SHA256SUMS.txt`:
 
 ### Windows Installer (Recommended)
 
-The NSIS installer provides a one-click setup experience:
+`branchdam-agent-setup.exe` is the supported way to install on Windows -- the
+`branchdam-agent-windows-amd64.zip` on the same release is what self-update itself downloads,
+not a recommended manual-install path.
 
 1. Download `branchdam-agent-setup.exe` from the latest release
 2. Run the installer - it will:
    - Extract binaries to `%LOCALAPPDATA%\Programs\branchDAM\`
    - Create Start Menu shortcuts
    - Write a starter config with your computer name as the agent ID
-   - Add the agent to Add/Remove Programs
+   - Add the agent to Add/Remove Programs, with a real version number
 3. On finish, check "Launch branchDAM Agent" to start the tray
 4. The tray starts in **"not configured" mode** (gray icon) - configure through the Settings menu:
    - Set your server URL, API key, and agent ID
@@ -120,7 +122,7 @@ The NSIS installer provides a one-click setup experience:
 
 The installer does not collect any configuration at install time (except the default agent ID) - all settings are configured through the tray's Settings menu after installation.
 
-> **Note:** Uninstalling via Add/Remove Programs preserves `%APPDATA%\branchdam-agent\config.yaml`. The installer also preserves it on upgrade (`IfFileExists` guard). Uninstall-then-reinstall keeps your settings.
+> **Note:** Uninstalling via Add/Remove Programs preserves `%APPDATA%\branchdam-agent\config.yaml`. The installer also preserves it on upgrade (`IfFileExists` guard). Uninstall-then-reinstall keeps your settings. If branchDAM Agent is currently running, installing or uninstalling over it prompts you to quit it (right-click the tray icon → Quit) and retry, rather than silently failing to update the files or leaving the install directory behind.
 
 ### Manual Installation
 
