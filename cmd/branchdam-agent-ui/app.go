@@ -66,7 +66,15 @@ func (a *App) StatusJSON() (string, error) {
 		return "", errors.New("branchDAM doesn't seem to be running (no session token found) -- start the tray app first")
 	}
 
-	req, err := http.NewRequestWithContext(a.ctx, http.MethodGet, "http://"+addr+"/api/status", nil)
+	// a.ctx is nil until Startup fires; falling back to context.Background
+	// rather than passing it straight through avoids a
+	// NewRequestWithContext panic if a bound method is ever invoked before
+	// then (or Startup is never reached for some reason).
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/api/status", nil)
 	if err != nil {
 		return "", err
 	}

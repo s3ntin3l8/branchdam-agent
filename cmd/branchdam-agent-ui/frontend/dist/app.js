@@ -100,16 +100,13 @@ function renderIngest(status) {
     byId("ingest-body").innerHTML = `<p class="empty">No ingest has run this session.</p>`;
     return;
   }
-  // IngestSummary has no json tags of its own (unlike Status's fields),
-  // so it marshals with its Go field names as-is -- PascalCase, not
-  // camelCase like everything else in this section.
   const rows = [
-    ["Card", last.CardPath],
-    ["Started", fmtTime(last.StartedAt) ?? "—"],
-    ["Submitted / Skipped / Failed", `${last.Submitted ?? 0} / ${last.Skipped ?? 0} / ${last.Failed ?? 0}`],
+    ["Card", last.cardPath],
+    ["Started", fmtTime(last.startedAt) ?? "—"],
+    ["Submitted / Skipped / Failed", `${last.submitted ?? 0} / ${last.skipped ?? 0} / ${last.failed ?? 0}`],
   ];
-  if (last.Offline) rows.push(["Mode", raw(pill("offline queue", "neutral"))]);
-  if (last.Err) rows.push(["Error", raw(pill(last.Err, "bad"))]);
+  if (last.offline) rows.push(["Mode", raw(pill("offline queue", "neutral"))]);
+  if (last.err) rows.push(["Error", raw(pill(last.err, "bad"))]);
   byId("ingest-body").innerHTML = table(rows);
 }
 
