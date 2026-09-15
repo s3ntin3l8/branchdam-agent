@@ -328,6 +328,21 @@ type Runner struct {
 	syncInFlight map[IntegrationID]bool
 	lastSync     map[IntegrationID]*SyncSummary
 
+	// lastResolveMemberships is the in-memory carry-forward of the
+	// Resolve sync's emitted membership set. Persisted to runtime.json
+	// via onSuccessfulSync for cross-restart continuity (issue #184).
+	// The in-memory copy is the primary correctness layer; the file is
+	// cross-session only and must never block the sync pass.
+	lastResolveMemberships []SyncMembershipEntry
+
+	// onSuccessfulSync is invoked after every TriggerSync pass that
+	// completes without error (including dry runs). The callback receives
+	// the current pass's emitted membership set for persistence to the
+	// runtime state file. Stored in an atomic.Pointer so TriggerSync can
+	// read it without holding r.mu (the save may be slow on a network
+	// share). Nil means no persistence (headless CLI, test).
+	onSuccessfulSync atomic.Pointer[func(entries []SyncMembershipEntry) error]
+
 	// hookInstallers/hookInFlight/hookState mirror syncers/syncInFlight/
 	// lastSync's own shape exactly (issue #60), one map keyed by HookID
 	// instead of IntegrationID -- a hook is a separate concept (see
@@ -829,6 +844,33 @@ func (r *Runner) SetOnSuccessfulHandshake(cb func(t time.Time) error) {
 	r.onSuccessfulHandshake.Store(&cb)
 }
 
+// SetOnSuccessfulSync registers a callback invoked after every TriggerSync
+// pass that completes without error. The callback receives the current
+// pass's emitted membership set for persistence to the runtime state file.
+// Nil disables persistence (headless CLI, test). The callback is allowed to
+// fail (logged at WARN) and panic (recovered); a failing save must never
+// block a sync pass.
+func (r *Runner) SetOnSuccessfulSync(cb func(entries []SyncMembershipEntry) error) {
+	r.onSuccessfulSync.Store(&cb)
+}
+
+// SeedResolveMemberships pre-populates the in-memory membership set from
+// the runtime state file loaded at startup. Called once from runTrayCmd
+// after Load returns a non-empty ResolveEmittedMemberships. The seed is
+// skipped if the carry-forward is already set (matching SeedLastHandshakeAt's
+// contract).
+func (r *Runner) SeedResolveMemberships(entries []SyncMembershipEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.lastResolveMemberships) > 0 {
+		return
+	}
+	r.lastResolveMemberships = entries
+}
+
 // SetPauseUploadOnMetered sets whether queue drain and streaming upload
 // operations should be deferred when connected to a metered network.
 func (r *Runner) SetPauseUploadOnMetered(v bool) {
@@ -1103,7 +1145,31 @@ func (r *Runner) TriggerSync(ctx context.Context, id IntegrationID) (summary Syn
 	r.mu.Lock()
 	stamped := summary
 	r.lastSync[id] = &stamped
+	memberships := r.lastResolveMemberships
 	r.mu.Unlock()
+
+	// Cross-session persistence hook (issue #184): on every successful
+	// sync pass, ask the registered callback to persist the emitted
+	// membership set to the runtime state file. Same shape
+	// and safety contract as onSuccessfulHandshake: the callback is
+	// read via atomic.Pointer, called AFTER r.mu.Unlock(), allowed to
+	// fail (logged, swallowed), and panic-recovered.
+	if err == nil {
+		cbPtr := r.onSuccessfulSync.Load()
+		if cbPtr != nil {
+			cb := *cbPtr
+			func() {
+				defer func() {
+					if rec := recover(); rec != nil {
+						slog.Error("onSuccessfulSync callback panicked; Resolve membership state will not be persisted this pass", "panic", rec)
+					}
+				}()
+				if err := cb(memberships); err != nil {
+					slog.Warn("Resolve membership state save failed; delta detection will not survive the next restart", "err", err)
+				}
+			}()
+		}
+	}
 
 	return summary, true
 }

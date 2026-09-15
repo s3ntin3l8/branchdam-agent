@@ -64,7 +64,22 @@ type SyncSummary struct {
 	VirtualNodes  int // virtual project nodes created (or, in a dry run, that would have been)
 	EdgesAttached int // PROJECT_SIDECAR edges emitted (or, in a dry run, that would have been)
 	EvidenceOnly  int // clips whose evidence was logged but no edge emitted (deprecated, kept for compat)
+	Removed       int // memberships in previous pass but not current (clip removed from timeline)
+	FileMissing   int // clips in current query whose rewritten path doesn't exist on disk
 	Err           error
+}
+
+// SyncMembershipEntry is one (media path, timeline ID) pair from a Resolve
+// sync pass. Stored in Runner's in-memory carry-forward and persisted to
+// runtime.json for delta detection across sync passes. The agent cannot
+// query which edges exist on the server, so this local snapshot is the
+// only way to detect removals.
+//
+// Duplicated in internal/resolve and internal/runtime — kept in sync by
+// convention to avoid import cycles between the three packages.
+type SyncMembershipEntry struct {
+	MediaPath  string `json:"mp"`
+	TimelineID string `json:"tl"`
 }
 
 // IntegrationSyncer is the subset of one catalog integration's behavior the
