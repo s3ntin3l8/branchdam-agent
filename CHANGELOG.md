@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.7.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.6.0...v1.7.0) (2026-09-16)
+
+
+### Features
+
+* **tray:** add non-interactive Settings.SetString and integration-path/rewrite setters ([#209](https://github.com/s3ntin3l8/branchdam-agent/issues/209)) ([6cd1574](https://github.com/s3ntin3l8/branchdam-agent/commit/6cd157449f6f545ee4f620d434e643401422a0e0))
+* **tray:** harden the loopback status-server API with actions and auth ([#206](https://github.com/s3ntin3l8/branchdam-agent/issues/206)) ([db4aa50](https://github.com/s3ntin3l8/branchdam-agent/commit/db4aa50c0e350f484c2b886fd455e531dd0ed81f))
+* **ui:** add a Settings section to the Wails app UI ([#210](https://github.com/s3ntin3l8/branchdam-agent/issues/210)) ([330e9e6](https://github.com/s3ntin3l8/branchdam-agent/commit/330e9e6a42d9d21232b095308b9d24349c30833d))
+* **ui:** add cmd/branchdam-agent-ui, a native status window (Wails v2) ([#207](https://github.com/s3ntin3l8/branchdam-agent/issues/207)) ([20f928a](https://github.com/s3ntin3l8/branchdam-agent/commit/20f928ab205f3e40a0edaf09b976f317953aa3da))
+
+
+### Bug Fixes
+
+* **macos:** ad-hoc sign the app bundle and ship a .dmg with an icon ([#200](https://github.com/s3ntin3l8/branchdam-agent/issues/200)) ([d65b1d9](https://github.com/s3ntin3l8/branchdam-agent/commit/d65b1d9d23bca346213ef1ff3b599438f9f9601d))
+* **windows:** harden the NSIS installer ([#202](https://github.com/s3ntin3l8/branchdam-agent/issues/202)) ([70537c2](https://github.com/s3ntin3l8/branchdam-agent/commit/70537c21f8c00b0ce0555e5e2bbac8785c7e5b90))
+
 ## [1.6.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.5.0...v1.6.0) (2026-09-15)
 
 
