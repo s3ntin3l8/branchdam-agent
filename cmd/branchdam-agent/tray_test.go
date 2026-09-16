@@ -46,7 +46,6 @@ func stubTrayDialog(t *testing.T, run dialogRunner) {
 	trayRun = func(
 		context.Context,
 		*tray.Runner,
-		string,
 		tray.SelfUpdater,
 		tray.Settings,
 		func(context.Context, string, string) bool,

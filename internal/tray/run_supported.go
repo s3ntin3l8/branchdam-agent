@@ -84,11 +84,11 @@ type menuActionResult struct {
 // failure or unexpected detector crash). Returns Outcome describing whether
 // a self-update requested a restart, so main() can exit with the right code.
 //
-// r drives the tray's state snapshot and ingest triggers; statusURL is shown
-// in the menu and opened by "Open status page". up drives the "Install and
-// restart" affordance; settings drives the "Settings" submenu (issue #31) --
-// Run itself does not know how to check for updates or persist config,
-// matching Runner's own separation from the ingest core (see tray.go).
+// r drives the tray's state snapshot and ingest triggers. up drives the
+// "Install and restart" affordance; settings drives the "Advanced" submenu
+// (issue #31) -- Run itself does not know how to check for updates or
+// persist config, matching Runner's own separation from the ingest core
+// (see tray.go).
 //
 // confirm and confirmDestructive gate the four destructive menu actions
 // (issue #108 / E3 #S2-14: "Drain queue now", "Prune now", "Install
@@ -106,7 +106,6 @@ type menuActionResult struct {
 func Run(
 	ctx context.Context,
 	r *Runner,
-	statusURL string,
 	up SelfUpdater,
 	settings Settings,
 	confirm func(ctx context.Context, title, body string) bool,
@@ -125,8 +124,7 @@ func Run(
 
 		statusItem := systray.AddMenuItem("Status: starting...", "Current tray status")
 		statusItem.Disable()
-		openStatus := systray.AddMenuItem("Open status page", statusURL)
-		openUI := systray.AddMenuItem("Open branchDAM", "Open the native branchDAM window (issue #211)")
+		openUI := systray.AddMenuItem("Open branchDAM", "Open the native branchDAM window -- the single settings/status surface")
 		systray.AddSeparator()
 
 		updateItem := systray.AddMenuItem("Self-update: checking...", "Self-update status")
@@ -458,8 +456,6 @@ func Run(
 				}
 				systray.Quit()
 				return
-			case <-openStatus.ClickedCh:
-				_ = openBrowser(statusURL)
 			case <-openUI.ClickedCh:
 				// No focus-existing-window logic needed here: Wails'
 				// SingleInstanceLock (cmd/branchdam-agent-ui/main.go) already
@@ -812,21 +808,4 @@ func resolveUIBinaryPath(execPath string) (string, error) {
 		return "", fmt.Errorf("not found at %s (install predates packaging, or a dev build?)", uiPath)
 	}
 	return uiPath, nil
-}
-
-// openBrowser shells out to the platform's own "open a URL" command. This
-// file only builds for windows/darwin (see the build tag above), so the
-// switch's default branch is unreachable in practice; it exists so the
-// function still compiles as ordinary, non-platform-specific Go without a
-// further per-OS split.
-func openBrowser(url string) error {
-	switch runtime.GOOS {
-	case "darwin":
-		return exec.Command("open", url).Start()
-	case "windows":
-		// rundll32 avoids the cmd.exe quoting pitfalls of "cmd /c start".
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
-	default:
-		return exec.Command("xdg-open", url).Start()
-	}
 }
