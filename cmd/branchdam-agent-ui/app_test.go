@@ -479,6 +479,27 @@ func TestIntegrationBlockWritesSyncTimeoutKey(t *testing.T) {
 	}
 }
 
+// TestIntegrationBlockRendersFriendlyTitle guards issue #221: the Settings
+// form's per-integration heading must render iv.Title ("Luminar Neo",
+// "DaVinci Resolve"), falling back to the raw iv.ID only when Title is
+// empty -- the same iv.Title || iv.ID pattern renderIntegrations/
+// renderHooks already use for the live-status side of this same window.
+// tray.IntegrationView carries no json: struct tags (see that type's own
+// doc comment), so this is the only guard on the fallback itself: a Go
+// test asserting the Go struct field is non-empty would prove nothing
+// about what the JS actually does with it.
+func TestIntegrationBlockRendersFriendlyTitle(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	if !strings.Contains(body, "h3.textContent = iv.Title || iv.ID;") {
+		t.Error("frontend/dist/app.js's renderIntegrationBlock no longer renders iv.Title || iv.ID for its <h3> heading")
+	}
+}
+
 // TestSettingsSectionsPrecedeLiveSections pins decision 2 of the tray/window
 // UX rethink ("settings order also confusing, integration status before
 // setup"): every config-zone section (id ending "-config") must appear in

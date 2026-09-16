@@ -436,6 +436,17 @@ func TestConfigSettingsSnapshotIncludesIntegrations(t *testing.T) {
 	if iv.SyncIntervalMinutes != 15 {
 		t.Errorf("SyncIntervalMinutes = %d, want 15", iv.SyncIntervalMinutes)
 	}
+	if iv.Title != "Luminar Neo" {
+		t.Errorf("Title = %q, want %q", iv.Title, "Luminar Neo")
+	}
+
+	resolveIv, ok := sv.Integration(tray.IntegrationResolveDB)
+	if !ok {
+		t.Fatal("expected an IntegrationView for IntegrationResolveDB")
+	}
+	if resolveIv.Title != "DaVinci Resolve" {
+		t.Errorf("Title = %q, want %q", resolveIv.Title, "DaVinci Resolve")
+	}
 }
 
 func TestConfigSettingsSnapshotIntegrationsDefaultsUnconfigured(t *testing.T) {
@@ -448,6 +459,13 @@ func TestConfigSettingsSnapshotIntegrationsDefaultsUnconfigured(t *testing.T) {
 	}
 	if iv.Enabled || iv.CatalogPathSet {
 		t.Errorf("expected a fresh config's Luminar entry to be disabled and unconfigured, got %+v", iv)
+	}
+	// Title is compile-time (IntegrationBuilder.Title), not read from
+	// config -- it must be populated even for an integration that has
+	// never been configured, so the Settings form never falls back to the
+	// raw ID for a fresh install (issue #221).
+	if iv.Title != "Luminar Neo" {
+		t.Errorf("Title = %q, want %q even when unconfigured", iv.Title, "Luminar Neo")
 	}
 }
 

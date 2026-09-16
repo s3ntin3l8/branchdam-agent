@@ -146,6 +146,7 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		}
 		integrations = append(integrations, tray.IntegrationView{
 			ID:                  b.ID,
+			Title:               b.Title,
 			Enabled:             c.Enabled,
 			DryRun:              c.DryRun,
 			CatalogPath:         displayPath,
