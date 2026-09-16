@@ -88,6 +88,14 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
+      # go test ./... above tests cmd/branchdam-agent-ui WITHOUT -tags
+      # production, same gap ci-cd.yml's build-darwin-full job had before
+      # this PR -- it proves the package compiles and its tests pass
+      # under wails' stub app_default_windows.go, not under the real one
+      # that ships. A Hermes review finding on this PR: without this
+      # step, Windows had a build-time guard (make check -> build-windows)
+      # but no TEST-time guard exercising the tagged configuration.
+      - run: go test -tags production ./cmd/branchdam-agent-ui
 
   # darwin/arm64 build-only check, EXCLUDING internal/tray and
   # cmd/branchdam-agent (which imports it). Verified locally: Go's linker

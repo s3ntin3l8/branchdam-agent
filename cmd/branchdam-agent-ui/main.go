@@ -21,8 +21,10 @@
 // (internal/app/app_default_windows.go / app_default_unix.go) substitutes
 // a stub CreateApp: on Windows that pops a "Wails applications will not
 // build without the correct build tags" MessageBox; on macOS it returns an
-// error that surfaces only as this file's own `println` below, to a
-// stdout nobody reads, so the window silently never appears. The tag is
+// error that main below now logs via agentlog (see main's own comment for
+// why that replaced a bare println), so the window still silently never
+// appears on screen, but the failure is at least diagnosable after the
+// fact. The tag is
 // self-contained -- wails embeds its production runtime JS
 // (internal/frontend/runtime/runtime_prod_desktop.go) from the module
 // itself, so no `wails` CLI and no npm step are required, and it is
@@ -40,11 +42,14 @@ package main
 
 import (
 	"embed"
+	"log/slog"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/agentlog"
 )
 
 //go:embed all:frontend/dist
@@ -68,6 +73,25 @@ const singleInstanceID = "com.branchdam.agent.ui"
 var version = "dev"
 
 func main() {
+	// A Hermes review finding on this PR: the missing-build-tag failure
+	// this file's own doc comment above describes (wails' stub CreateApp
+	// returning an error on macOS) had no trace anywhere a user could
+	// find it -- println writes to a stdout nobody reads for a
+	// double-clicked .app or a launchd-started process. agentlog.Setup
+	// installs the same durable-log-file-plus-stderr default logger
+	// cmd/branchdam-agent's tray.go uses (internal/agentlog's own doc
+	// comment: built specifically for "a `-H windowsgui`-linked tray or a
+	// macOS `.app` launched by launchd, neither of which has anywhere for
+	// stderr to go"), so a mis-tagged build now leaves a diagnosable
+	// footprint on the user's machine, not just in CI.
+	_, closeLog, logErr := agentlog.Setup()
+	defer func() { _ = closeLog() }()
+	if logErr != nil {
+		// Non-fatal, matching tray.go's own precedent: agentlog.Setup
+		// already fell back to an stderr-only default logger.
+		slog.Warn("could not set up durable logging", "err", logErr)
+	}
+
 	app := NewApp()
 	err := wails.Run(&options.App{
 		Title:       "branchDAM (" + version + ")",
@@ -96,6 +120,6 @@ func main() {
 		},
 	})
 	if err != nil {
-		println("branchdam-agent-ui: " + err.Error())
+		slog.Error("branchdam-agent-ui exited with an error", "err", err)
 	}
 }
