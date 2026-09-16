@@ -21,13 +21,20 @@ surface calls them moved, so the line numbers below pointing into
 exists) but the graduation status itself still holds. `settingsmenu.go`
 now owns only `Reload`/`OpenConfigFile`/`RevealConfigFolder` --
 hand-edit-config affordances with no settings VALUE and therefore nothing
-to graduate. `integrationsmenu.go` now owns only the per-integration status line, the
-`integrations.<id>.timeoutSecs` field, and the "Sync now" action.
-`timeoutSecs` is a genuine, not-yet-closed gap, not a deliberate one like
-the fields in the "hand-edit only" list below: the Wails window's
-`renderIntegrationBlock` has no sync-timeout control at all, so this is
-the one per-integration value reachable ONLY from the tray now (everything
-else moved to the window, or was already reachable from both).
+to graduate.
+
+**v1.8.1 update:** `internal/tray/integrationsmenu.go` and
+`internal/tray/hooksmenu.go` are gone entirely, not just slimmed -- the
+Wails window's `renderIntegrations`/`renderHooks` (live status, "Sync
+now"/"Install"/"Reveal" actions) and `renderIntegrationBlock` (config
+fields) now cover everything those two tray files did. `timeoutSecs`, the
+one field the window didn't yet have when the note above was written, is
+now `renderIntegrationBlock`'s own "Sync timeout" select, writing the same
+`integrations.<id>.timeoutSecs` key the tray always did -- so there is no
+longer a per-integration value reachable ONLY from the tray. The tray's
+remaining surface is `Settings` (`Reload config` / `Open config.yaml` /
+`Reveal config folder`, plus a hidden `Restart now`) -- config-file
+affordances with no settings VALUE of their own, same as before.
 
 ## Fields the issue already enumerates
 

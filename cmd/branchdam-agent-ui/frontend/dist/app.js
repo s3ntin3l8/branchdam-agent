@@ -202,11 +202,14 @@ function actionButtonRow(id, detailHtml, buttons) {
 }
 
 // renderIntegrations renders live sync status plus a "Sync now" button per
-// Integrations() registry entry -- mirrors internal/tray/integrationsmenu.go's
-// own per-integration submenu, minus the config fields (those live in the
-// Settings section's renderIntegrationBlock instead). Re-rendered on every
-// 5s status poll, same as every other render* function in this file except
-// the settings form.
+// Integrations() registry entry -- the config fields live in the Settings
+// section's renderIntegrationBlock instead. This window is now the ONLY
+// place these actions live; the tray's own per-integration submenu
+// (internal/tray/integrationsmenu.go) was deleted once this covered
+// everything it did except Sync timeout, which renderIntegrationBlock
+// gained instead (see its own doc comment). Re-rendered on every 5s status
+// poll, same as every other render* function in this file except the
+// settings form.
 function renderIntegrations(status) {
   const container = byId("integrations-body");
   container.innerHTML = "";
@@ -228,7 +231,7 @@ function renderIntegrations(status) {
     }
     const syncKey = `sync:${i.ID}`;
     container.appendChild(
-      actionButtonRow(i.ID, `${label} ${detail}`, [
+      actionButtonRow(i.Title || i.ID, `${label} ${detail}`, [
         {
           label: "Sync now",
           busyText: "Syncing…",
@@ -277,8 +280,10 @@ function renderIntegrations(status) {
 }
 
 // renderHooks renders live hook install status plus "Install"/"Reveal"
-// buttons per HookDescriptors() registry entry -- mirrors
-// internal/tray/hooksmenu.go's own per-hook submenu items.
+// buttons per HookDescriptors() registry entry. This window is now the
+// ONLY place these actions live; the tray's own per-hook submenu
+// (internal/tray/hooksmenu.go) was deleted once this covered everything
+// it did.
 function renderHooks(status) {
   const container = byId("hooks-body");
   container.innerHTML = "";
@@ -294,7 +299,7 @@ function renderHooks(status) {
     if (st && st.Err) label += " " + pill(st.Err, "bad");
     const installKey = `hookInstall:${h.ID}`;
     container.appendChild(
-      actionButtonRow(h.ID, label, [
+      actionButtonRow(h.Title || h.ID, label, [
         {
           label: "Install",
           busyText: "Installing…",
@@ -681,8 +686,10 @@ function renderSelectField(label, options, current, onChange) {
 }
 
 // renderIntegrationBlock renders one Integrations() registry entry's own
-// enabled/dry-run/path/rewrites/interval fields, mirroring
-// internal/tray/integrationsmenu.go's own per-integration submenu.
+// enabled/dry-run/path/rewrites/interval/timeout fields -- the full set of
+// per-integration config the tray's own submenu (internal/tray/
+// integrationsmenu.go, deleted once this block covered everything it did)
+// used to own.
 // "resolvedb" (tray.IntegrationResolveDB) is the one integration with a
 // database URL instead of a catalog file path, and the only one with
 // path rewrites -- both special-cased here the same way
@@ -794,6 +801,26 @@ function renderIntegrationBlock(iv) {
       ],
       iv.SyncIntervalMinutes || 60,
       (val, status) => saveSetting(`integrations.${iv.ID}.syncIntervalMinutes`, Number(val), status),
+    ),
+  );
+
+  // Sync timeout used to be the one field only the tray's own per-integration
+  // submenu could edit (internal/tray/integrationsmenu.go, now deleted); this
+  // is that field's new home, so nothing was lost when that submenu went
+  // away. renderSelectField's own "hand-configured" fallback reproduces the
+  // tray's "Sync timeout (currently: %ds, hand-configured)" note for a value
+  // outside the fixed set, same as the "Sync every" field above.
+  block.appendChild(
+    renderSelectField(
+      "Sync timeout",
+      [
+        ["30", "30 seconds (default)"],
+        ["60", "1 minute"],
+        ["300", "5 minutes"],
+        ["600", "10 minutes"],
+      ],
+      iv.TimeoutSecs || 30,
+      (val, status) => saveSetting(`integrations.${iv.ID}.timeoutSecs`, Number(val), status),
     ),
   );
 

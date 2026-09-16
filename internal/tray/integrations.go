@@ -36,10 +36,20 @@ type IntegrationDescriptor struct {
 // package var, matching this package's DefaultX/XOrDefault house style and
 // keeping the list immutable to callers.
 //
-// DaVinci Resolve is deliberately NOT in this list: it has no
-// CatalogSyncConfig and no IntegrationSyncer (see
-// internal/config.IntegrationsConfig's own doc comment) -- it's an
-// installer, not a sync integration, and gets its own seam in issue #60.
+// DaVinci Resolve IS in this list, as IntegrationResolveDB: a project
+// database watcher with a real CatalogSyncConfig and a real
+// IntegrationSyncer (internal/resolve.Syncer, wired by
+// cmd/branchdam-agent/tray.go's wireResolveSyncer). Don't confuse it with
+// HookResolve in hooks.go -- that's a different registry entirely, for
+// the render-hook installer, which really does have no CatalogSyncConfig
+// or IntegrationSyncer. Both descriptors carry the identical Title
+// "DaVinci Resolve" (correct: they're rendered in separately headed
+// sections, "Integrations" vs. "Render hooks" -- see
+// TestRegistryTitlesAreUnique's own doc comment for why that's fine and
+// what it does and doesn't guard). The two registries having the same
+// Title is exactly what produced a duplicate flat top-level tray menu
+// entry before this package's per-integration menu code was removed in
+// favor of the Wails window (issue #211's follow-through).
 func Integrations() []IntegrationDescriptor {
 	return []IntegrationDescriptor{
 		{ID: IntegrationLuminar, Title: "Luminar Neo"},
@@ -127,8 +137,22 @@ type IntegrationSyncer interface {
 // missing a required config field" -- mirroring QueueStatus.Configured.
 type IntegrationStatus struct {
 	ID         IntegrationID
+	Title      string // from IntegrationDescriptor.Title; see DisplayName
 	Registered bool
 	LastSync   *SyncSummary
+}
+
+// DisplayName is what a UI surface should render instead of ID -- Title
+// when Status() populated it, ID otherwise. The fallback matters:
+// statusserver_test.go builds IntegrationStatus literals directly (not via
+// Status()) and never sets Title, and a status blob from an older agent
+// version has no Title field at all once decoded. Both cases must keep
+// rendering exactly what they render today (the raw ID), not go blank.
+func (is IntegrationStatus) DisplayName() string {
+	if is.Title != "" {
+		return is.Title
+	}
+	return string(is.ID)
 }
 
 // Integration looks up st's entry for id by ID, mirroring

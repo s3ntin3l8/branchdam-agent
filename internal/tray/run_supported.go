@@ -45,45 +45,6 @@ const menuRefreshInterval = 5 * time.Second
 // until a Hermes review finding on this PR caught the inconsistency.
 const drainPruneClickTimeout = 2 * time.Minute
 
-// integrationSyncClickTimeout bounds a menu-triggered "Sync now" pass --
-// deliberately NOT drainPruneClickTimeout (2 minutes): a large third-party
-// catalog plus a per-edge POST loop can run considerably longer than a
-// queue drain/prune pass. Matches cmd/branchdam-agent's own
-// integrationSyncTimeout, which bounds the SAME operation on its
-// timer-driven path.
-const integrationSyncClickTimeout = 10 * time.Minute
-
-// hookInstallClickTimeout bounds a menu-triggered "Install / update render
-// hook" pass -- matches drainPruneClickTimeout's own 2 minutes, not
-// integrationSyncClickTimeout's 10: an atomic temp-then-rename script
-// write is a small, local (or at worst LAN-networked scriptsDir) file
-// operation, much closer in shape to a drain/prune pass than a
-// third-party-catalog sync.
-const hookInstallClickTimeout = 2 * time.Minute
-
-// syncClickResult is what each integrationSubmenu's own "Sync now" worker
-// goroutine feeds back to the main select loop.
-type syncClickResult struct {
-	id  IntegrationID
-	ran bool
-}
-
-// hookInstallResult is what each hookSubmenu's own "Install / update
-// render hook" worker goroutine feeds back to the main select loop --
-// mirrors syncClickResult's own shape exactly.
-type hookInstallResult struct {
-	id  HookID
-	ran bool
-}
-
-// hookRevealResult is what each hookSubmenu's own "Reveal Scripts folder"
-// worker goroutine feeds back to the main select loop -- err is nil on a
-// successful shell-out, matching Runner.RevealHook's own contract.
-type hookRevealResult struct {
-	id  HookID
-	err error
-}
-
 // applyResult is what the install goroutine feeds back to the select loop.
 type applyResult struct {
 	version string
@@ -91,15 +52,19 @@ type applyResult struct {
 }
 
 // menuAction pairs one blocking Settings call with the menu item that owns
-// its error -- settingsMenu and integrationsMenu (and each of the latter's
-// per-registry-entry integrationSubmenus) all share ONE worker
-// goroutine/channel (see onReady below), so a plain func() error is no
-// longer enough to route a result back to the RIGHT lastErr field. The
-// worker goroutine must never call report itself: report mutates a
-// *systray.MenuItem-owning struct's own field, which sync() (called from
-// Run's own select loop) also reads -- calling report from any other
-// goroutine would race. It is therefore called ONLY from the select loop's
-// menuDoneCh case, never from the worker.
+// its error -- settingsMenu is the sole producer today (see onReady
+// below), routed through one worker goroutine/channel so a plain func()
+// error is no longer enough to route a result back to the RIGHT lastErr
+// field. Before the per-integration/per-hook tray submenus were removed
+// in favor of the Wails window's equivalent actions (issue #211's
+// follow-through), integrationsMenu and each of its per-registry-entry
+// integrationSubmenus fed this same channel; the pair-of-funcs shape is
+// kept even with one producer, since a second config-changing tray menu
+// would need it again. The worker goroutine must never call report
+// itself: report mutates a *systray.MenuItem-owning struct's own field,
+// which sync() (called from Run's own select loop) also reads -- calling
+// report from any other goroutine would race. It is therefore called ONLY
+// from the select loop's menuDoneCh case, never from the worker.
 type menuAction struct {
 	run    func() error
 	report func(error)
@@ -107,8 +72,7 @@ type menuAction struct {
 
 // menuActionResult is what the shared worker goroutine feeds back --
 // report is carried through unchanged so the select loop can invoke it
-// without needing to know which menu (or which of N integration
-// submenus) originated the action.
+// without needing to know which menu originated the action.
 type menuActionResult struct {
 	report func(error)
 	err    error
@@ -187,18 +151,22 @@ func Run(
 		systray.AddSeparator()
 
 		// Every config-changing action -- a Settings checkbox/free-text
-		// prompt/Reload/Open/Reveal, AND (now) an Integrations
-		// checkbox/catalog-path prompt/interval choice -- runs through
-		// this ONE shared worker, for the same reason ingestNow does:
-		// they all do blocking I/O (disk, a dialog subprocess, rebuilding
-		// the ingest Engine and integration syncers), and running any of
-		// that inline in the select loop below would freeze the whole
-		// menu, including Quit, for as long as it takes. Each menu's own
-		// dispatch goroutine feeds this channel directly (non-blocking,
-		// drops a click if one is already in flight anywhere -- Settings
-		// and Integrations included) rather than routing through the
-		// select loop below. See menuAction's own doc comment for why the
-		// worker never calls report itself.
+		// prompt/Reload/Open/Reveal -- runs through this ONE shared
+		// worker, for the same reason ingestNow does: they all do
+		// blocking I/O (disk, a dialog subprocess, rebuilding the ingest
+		// Engine), and running any of that inline in the select loop
+		// below would freeze the whole menu, including Quit, for as long
+		// as it takes. settingsMenu's own dispatch goroutine feeds this
+		// channel directly (non-blocking, drops a click if one is already
+		// in flight) rather than routing through the select loop below.
+		// See menuAction's own doc comment for why the worker never calls
+		// report itself.
+		//
+		// Prior to the per-integration/per-hook tray submenus being
+		// removed in favor of the Wails window's equivalent actions
+		// (issue #211's follow-through), Integrations' own
+		// checkbox/catalog-path/interval clicks fed this same channel
+		// too -- settingsMenu is the sole producer now.
 		menuActionCh := make(chan menuAction, 1)
 		menuDoneCh := make(chan menuActionResult, 1)
 		go func() {
@@ -206,16 +174,6 @@ func Run(
 				menuDoneCh <- menuActionResult{report: a.report, err: a.run()}
 			}
 		}()
-
-		im := newIntegrationsMenu(settings, menuActionCh)
-		systray.AddSeparator()
-
-		// The hooks menu (issue #68) takes no Settings/actionCh dependency
-		// at all -- a hook has no menu-editable config in this PR's scope,
-		// see hookSubmenu's own doc comment -- so, unlike im/sm, it's built
-		// with no arguments.
-		hm := newHooksMenu()
-		systray.AddSeparator()
 
 		sm := newSettingsMenu(settings, menuActionCh)
 		restartNowItem := sm.parent.AddSubMenuItem("Restart now", "Apply a change that needs a restart (status address)")
@@ -319,8 +277,6 @@ func Run(
 
 			sv := settings.Snapshot()
 			sm.sync(sv)
-			im.sync(sv, st)
-			hm.sync(st)
 			if sv.RestartRequired {
 				restartNowItem.Show()
 			} else {
@@ -471,83 +427,6 @@ func Run(
 			}
 		}()
 
-		// "Sync now" per integration, one worker goroutine per registry
-		// entry (built generically from im.subs, so a new integration
-		// needs no new code here) -- each goroutine reads its OWN
-		// syncNow.ClickedCh directly in a for-range loop rather than a
-		// select case, sidestepping the "N dynamic cases in one static
-		// select" problem entirely. TriggerSync's own per-ID in-flight
-		// tracking (tray.go) already makes a rapid double-click safe even
-		// without a request-channel dedup layer like ingestRequestCh's:
-		// a for-range loop over one item's own ClickedCh already
-		// serializes calls for that ID, and a second click arriving while
-		// the first is still running simply waits its turn in the
-		// channel's own buffer -- TriggerSync would report ran=false for
-		// it regardless, since only one call per ID and this goroutine
-		// can be in flight at a time. Only the RESULT needs to reach the
-		// main select loop (to mutate the right submenu's own fields,
-		// which must only ever happen from one goroutine, matching every
-		// other *systray.MenuItem mutation in this file).
-		syncDoneCh := make(chan syncClickResult, 1)
-		for _, sub := range im.subs {
-			sub := sub
-			go func() {
-				for range sub.syncNow.ClickedCh {
-					sctx, cancel := context.WithTimeout(ctx, integrationSyncClickTimeout)
-					_, ran := r.TriggerSync(sctx, sub.id)
-					cancel()
-					syncDoneCh <- syncClickResult{id: sub.id, ran: ran}
-				}
-			}()
-		}
-
-		// "Install / update render hook" per hook, same shape as "Sync
-		// now" above: one worker goroutine per registry entry, reading its
-		// own install.ClickedCh directly rather than a select case, so a
-		// second hook needs no new code here. TriggerHookInstall's own
-		// per-ID in-flight tracking (tray.go) makes a rapid double-click
-		// safe the same way TriggerSync's does.
-		//
-		// Buffered to len(hm.subs), not 1: a Hermes review finding on this
-		// PR -- with a cap-1 channel, N hooks completing their installs in
-		// the same instant would have all but one worker block on its send
-		// until the select loop drains the channel, delaying that worker's
-		// NEXT read of its own install.ClickedCh. One hook today makes this
-		// unreachable, but sizing it correctly now is what actually makes
-		// "a second hook needs no new code here" true.
-		hookInstallDoneCh := make(chan hookInstallResult, len(hm.subs))
-		for _, sub := range hm.subs {
-			sub := sub
-			go func() {
-				for range sub.install.ClickedCh {
-					hctx, cancel := context.WithTimeout(ctx, hookInstallClickTimeout)
-					_, ran := r.TriggerHookInstall(hctx, sub.id)
-					cancel()
-					hookInstallDoneCh <- hookInstallResult{id: sub.id, ran: ran}
-				}
-			}()
-		}
-
-		// "Reveal Scripts folder" -- a Hermes review finding on this PR:
-		// the original version discarded RevealHook's error entirely
-		// (matching openBrowser's own precedent for "Open status page"),
-		// which meant a failed Reveal -- an unregistered hook, or the
-		// installer's own shell-out failing -- had zero feedback anywhere,
-		// unlike Install (which has both the skipped-note and the status
-		// line). Reveal never mutates HookState, so it still needs no
-		// SetHookState/hookInFlight involvement and (unlike Install) the
-		// result never triggers a refresh of the status line -- only the
-		// parent item's own title, via revealErr.
-		hookRevealDoneCh := make(chan hookRevealResult, len(hm.subs))
-		for _, sub := range hm.subs {
-			sub := sub
-			go func() {
-				for range sub.reveal.ClickedCh {
-					hookRevealDoneCh <- hookRevealResult{id: sub.id, err: r.RevealHook(sub.id)}
-				}
-			}()
-		}
-
 		applyDoneCh := make(chan applyResult, 1)
 		rollbackDoneCh := make(chan applyResult, 1)
 		var releaseGate func()
@@ -658,31 +537,6 @@ func Run(
 				refresh()
 			case res := <-menuDoneCh:
 				res.report(res.err)
-				refresh()
-			case res := <-syncDoneCh:
-				if !res.ran {
-					for _, sub := range im.subs {
-						if sub.id == res.id {
-							sub.syncSkipped = true
-						}
-					}
-				}
-				refresh()
-			case res := <-hookInstallDoneCh:
-				if !res.ran {
-					for _, sub := range hm.subs {
-						if sub.id == res.id {
-							sub.installSkipped = true
-						}
-					}
-				}
-				refresh()
-			case res := <-hookRevealDoneCh:
-				for _, sub := range hm.subs {
-					if sub.id == res.id {
-						sub.revealErr = res.err
-					}
-				}
 				refresh()
 			case <-restartNowItem.ClickedCh:
 				if rel, ok := r.TryLockIdle(); ok {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -431,5 +432,40 @@ func TestStatusJSONRejectsInvalidJSONBody(t *testing.T) {
 	_, err := a.StatusJSON()
 	if err == nil {
 		t.Fatal("StatusJSON succeeded with a non-JSON 200 body, want an error")
+	}
+}
+
+// TestIntegrationBlockWritesSyncTimeoutKey guards frontend/dist/app.js's
+// Sync timeout field, the one config value the tray's own per-integration
+// submenu (internal/tray/integrationsmenu.go) used to own exclusively and
+// that this window's renderIntegrationBlock had to gain before that
+// submenu could be deleted without losing functionality.
+//
+// There is no JS test harness in this repo -- no package.json, no
+// bundler -- and frontend/dist/app.js is a committed artifact, not
+// generated at build time. This Go-reads-a-non-Go-file guard is the only
+// mechanical check available, the same precedent
+// internal/selfupdate/release_workflow_contract_test.go sets by parsing
+// release-binaries.yml directly rather than trusting a comment. It only
+// runs on this package's own windows/darwin-tagged test jobs, never on
+// the Linux required check.
+func TestIntegrationBlockWritesSyncTimeoutKey(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	if !strings.Contains(body, "Sync timeout") {
+		t.Error(`frontend/dist/app.js no longer renders a "Sync timeout" field`)
+	}
+	// Must match the exact source form the adjacent "Sync every" field
+	// uses (a JS template literal), not string concatenation -- both must
+	// write to the identical config.yaml key
+	// internal/tray/integrationsmenu.go's integrationKey and
+	// cmd/branchdam-agent/integrations.go's IntegrationBuilder.ConfigKey
+	// independently derive on the agent side.
+	if !strings.Contains(body, "`integrations.${iv.ID}.timeoutSecs`") {
+		t.Error("frontend/dist/app.js's Sync timeout field doesn't write the `integrations.${iv.ID}.timeoutSecs` key")
 	}
 }

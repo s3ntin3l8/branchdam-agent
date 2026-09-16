@@ -1551,7 +1551,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	// own r.lastSync[id] = &stamped assignment.
 	integrations := make([]IntegrationStatus, 0, len(Integrations()))
 	for _, d := range Integrations() {
-		st := IntegrationStatus{ID: d.ID, Registered: r.syncers[d.ID] != nil}
+		st := IntegrationStatus{ID: d.ID, Title: d.Title, Registered: r.syncers[d.ID] != nil}
 		if ls, ok := r.lastSync[d.ID]; ok {
 			st.LastSync = ls
 		}
@@ -1561,10 +1561,14 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	// Built under the same lock, same reasoning as integrations above:
 	// r.hookState is read map entries here, not a copied whole-map
 	// reference, so a concurrent TriggerHookInstall write could otherwise
-	// race this read.
-	hooks := make([]HookStatus, 0, len(Hooks()))
-	for _, id := range Hooks() {
-		hs := HookStatus{ID: id, Registered: r.hookInstallers[id] != nil}
+	// race this read. Ranges over HookDescriptors() rather than Hooks()
+	// (which the menu-building code used to prefer, back when the ID was
+	// all a tray menu item needed) so Title is available to populate
+	// HookStatus.Title -- same ID set and order, just with titles attached.
+	hooks := make([]HookStatus, 0, len(HookDescriptors()))
+	for _, d := range HookDescriptors() {
+		id := d.ID
+		hs := HookStatus{ID: id, Title: d.Title, Registered: r.hookInstallers[id] != nil}
 		if s, ok := r.hookState[id]; ok {
 			hs.State = s
 		}

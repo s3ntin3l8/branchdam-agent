@@ -36,10 +36,16 @@ type HookDescriptor struct {
 	Title string
 }
 
-// HookDescriptors is the compile-time registry newHooksMenu builds items
-// from -- mirrors Integrations()'s own doc-comment rationale exactly: the
-// menu is built once with no teardown-and-rebuild path (onReady), so this
-// list must stay static.
+// HookDescriptors is the compile-time registry of hook titles. It no
+// longer feeds a menu -- the per-hook tray submenu it used to build items
+// for (newHooksMenu) was deleted once the Wails window grew equivalent
+// actions (TriggerHookInstall/RevealHook), leaving Status() (which
+// populates HookStatus.Title from here) and TestRegistryTitlesAreUnique
+// as its only callers. It stays a real registry, not a single hardcoded
+// constant, because the ID/Title split it shares with IntegrationDescriptor
+// is what makes DisplayName's fallback and the uniqueness test meaningful,
+// and because a second hook (issue #68 left this open) should cost one
+// entry here, not a signature change.
 func HookDescriptors() []HookDescriptor {
 	return []HookDescriptor{
 		{ID: HookResolve, Title: "DaVinci Resolve"},
@@ -99,8 +105,19 @@ type HookInstaller interface {
 // installer for this ID, never an error.
 type HookStatus struct {
 	ID         HookID
+	Title      string // from HookDescriptor.Title; see DisplayName
 	Registered bool
 	State      *HookState
+}
+
+// DisplayName mirrors IntegrationStatus.DisplayName -- see that method's
+// doc comment for why the fallback exists and which existing test fixtures
+// depend on it.
+func (hs HookStatus) DisplayName() string {
+	if hs.Title != "" {
+		return hs.Title
+	}
+	return string(hs.ID)
 }
 
 // Hook looks up st's entry for id by ID, mirroring
