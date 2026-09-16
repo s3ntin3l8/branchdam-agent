@@ -37,8 +37,17 @@ func TestResolveUIBinaryPathFindsSibling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveUIBinaryPath: %v", err)
 	}
-	if got != uiPath {
-		t.Errorf("resolveUIBinaryPath() = %q, want %q", got, uiPath)
+	// resolveUIBinaryPath itself runs execPath through filepath.EvalSymlinks
+	// before joining the sibling name, so the expected path must too: on
+	// macOS, t.TempDir() returns a path under /var/folders/..., but /var is
+	// itself a symlink to /private/var, matching internal/selfupdate's own
+	// tests' precedent for the identical gotcha (install_test.go).
+	wantUIPath, err := filepath.EvalSymlinks(uiPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != wantUIPath {
+		t.Errorf("resolveUIBinaryPath() = %q, want %q", got, wantUIPath)
 	}
 }
 
