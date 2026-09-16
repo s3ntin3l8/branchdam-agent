@@ -32,7 +32,10 @@
 // build-windows and build-darwin jobs, and ci-cd.yml's build-darwin-full
 // job (which exists solely to typecheck this build on a real macOS host
 // before release, since darwin has no visible failure mode to catch a
-// missing tag in the field).
+// missing tag in the field). Turning the tag on for the first time on a
+// real macOS host surfaced a separate, genuine upstream gap in wails
+// v2.16.0's own darwin cgo linking -- see cgo_darwin.go's own doc
+// comment.
 package main
 
 import (
