@@ -22,11 +22,11 @@
          and class before id on every panel below: app_test.go's
          correspondence/ordering checks depend on that attribute order. -->
     <nav id="nav" aria-label="Categories">
-      <button type="button" class="nav-item active" data-panel="panel-server" aria-current="page">Server</button>
-      <button type="button" class="nav-item" data-panel="panel-storage">Storage &amp; ingest</button>
-      <button type="button" class="nav-item" data-panel="panel-integrations">Integrations</button>
-      <button type="button" class="nav-item" data-panel="panel-behavior">Behavior</button>
-      <button type="button" class="nav-item" data-panel="panel-selfupdate">Self-update</button>
+      <button type="button" class="nav-item active" data-panel="panel-server" aria-controls="panel-server" aria-current="page">Server</button>
+      <button type="button" class="nav-item" data-panel="panel-storage" aria-controls="panel-storage">Storage &amp; ingest</button>
+      <button type="button" class="nav-item" data-panel="panel-integrations" aria-controls="panel-integrations">Integrations</button>
+      <button type="button" class="nav-item" data-panel="panel-behavior" aria-controls="panel-behavior">Behavior</button>
+      <button type="button" class="nav-item" data-panel="panel-selfupdate" aria-controls="panel-selfupdate">Self-update</button>
     </nav>
 
     <!-- Every panel stays in the DOM at all times (app.js's showCategory

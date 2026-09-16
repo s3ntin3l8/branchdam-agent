@@ -537,37 +537,38 @@ func TestCategoryPanelsGroupSettingsWithTheirStatus(t *testing.T) {
 		t.Fatal(`index.html missing "</main>" -- can't bound the last panel's span`)
 	}
 
-	panelStart := func(id string) int {
-		idx := strings.Index(body, `id="`+id+`"`)
-		if idx == -1 {
-			t.Fatalf("index.html missing panel %q", id)
+	// uniqueIndex is strings.Index plus a uniqueness check: a bare
+	// strings.Index only ever finds the FIRST occurrence, silently matching
+	// what getElementById itself would resolve to if an id were
+	// accidentally duplicated elsewhere in the file -- the same
+	// silent-wrong-behavior class every other test in this file exists to
+	// catch, not a hardening this one gets to skip (Hermes review finding
+	// on this PR).
+	uniqueIndex := func(id string) int {
+		needle := `id="` + id + `"`
+		if n := strings.Count(body, needle); n != 1 {
+			t.Fatalf("index.html has %d occurrences of %s, want exactly 1", n, needle)
 		}
-		return idx
+		return strings.Index(body, needle)
 	}
 
 	for i, c := range categories {
-		start := panelStart(c.panel)
+		start := uniqueIndex(c.panel)
 		end := mainEnd
 		if i+1 < len(categories) {
-			end = panelStart(categories[i+1].panel)
+			end = uniqueIndex(categories[i+1].panel)
 		}
 		if start >= end {
 			t.Fatalf("panel %q's span is empty or inverted (start=%d, end=%d)", c.panel, start, end)
 		}
 
-		configIdx := strings.Index(body, `id="`+c.config+`"`)
-		if configIdx == -1 {
-			t.Fatalf("index.html missing config container %q", c.config)
-		}
+		configIdx := uniqueIndex(c.config)
 		if configIdx < start || configIdx >= end {
 			t.Errorf("config container %q (byte %d) is outside panel %q's span [%d, %d)", c.config, configIdx, c.panel, start, end)
 		}
 
 		for _, liveID := range c.live {
-			liveIdx := strings.Index(body, `id="`+liveID+`"`)
-			if liveIdx == -1 {
-				t.Fatalf("index.html missing live-status container %q", liveID)
-			}
+			liveIdx := uniqueIndex(liveID)
 			if liveIdx < start || liveIdx >= end {
 				t.Errorf("live-status container %q (byte %d) is outside panel %q's span [%d, %d)", liveID, liveIdx, c.panel, start, end)
 			}
