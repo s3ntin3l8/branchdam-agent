@@ -140,13 +140,82 @@ function renderWatch(status) {
   byId("watch-body").innerHTML = html;
 }
 
+// inFlightActions holds "kind:id" keys (e.g. "sync:luminar") for every
+// TriggerSync/TriggerHookInstall call still awaiting its response --
+// module-level and shared across renders, not per-row state, because
+// renderIntegrations/renderHooks fully rebuild their container's DOM on
+// EVERY 5s status poll: without this, a sync slower than 5s would show a
+// fresh, clickable "Sync now" button on the next poll tick while the
+// original click's request is still in flight server-side (a Hermes
+// review finding on PR #216 -- correctness survives either way, since the
+// server itself serializes and reports "Skipped -- already running" for a
+// concurrent second call, but the busy indicator vanishing was misleading).
+const inFlightActions = new Set();
+
+// actionButtonRow builds one label/detail/button/status line as real DOM
+// (not an innerHTML string, unlike this file's other render* status
+// functions) -- the "Sync now"/"Install"/"Reveal" buttons below need a real
+// addEventListener, and Wails' default CSP blocks inline onclick handlers,
+// matching the settings form's own renderTextField/renderCheckboxField
+// precedent for exactly the same reason. A button whose `busy` field is
+// already true when the row is (re)built (see inFlightActions above)
+// starts disabled and shows its own busyText immediately, rather than
+// only reacting to a click on this particular DOM instance.
+function actionButtonRow(id, detailHtml, buttons) {
+  const row = document.createElement("div");
+  row.className = "field-row";
+
+  const label = document.createElement("label");
+  label.textContent = id;
+  row.appendChild(label);
+
+  const detail = document.createElement("span");
+  detail.className = "row-detail";
+  detail.innerHTML = detailHtml;
+  row.appendChild(detail);
+
+  const status = document.createElement("span");
+  status.className = "field-status";
+  const alreadyBusy = buttons.find((b) => b.busy);
+  if (alreadyBusy) setFieldStatus(status, alreadyBusy.busyText ?? "Working…");
+
+  for (const b of buttons) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = b.label;
+    if (b.disabled || b.busy) btn.disabled = true;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      setFieldStatus(status, b.busyText ?? "Working…");
+      try {
+        await b.run(status);
+      } catch (err) {
+        setFieldStatus(status, String(err), "error");
+      } finally {
+        btn.disabled = !!b.disabled;
+      }
+    });
+    row.appendChild(btn);
+  }
+  row.appendChild(status);
+  return row;
+}
+
+// renderIntegrations renders live sync status plus a "Sync now" button per
+// Integrations() registry entry -- mirrors internal/tray/integrationsmenu.go's
+// own per-integration submenu, minus the config fields (those live in the
+// Settings section's renderIntegrationBlock instead). Re-rendered on every
+// 5s status poll, same as every other render* function in this file except
+// the settings form.
 function renderIntegrations(status) {
+  const container = byId("integrations-body");
+  container.innerHTML = "";
   const list = status.integrations ?? [];
   if (!list.length) {
-    byId("integrations-body").innerHTML = `<p class="empty">No integrations registered.</p>`;
+    container.innerHTML = `<p class="empty">No integrations registered.</p>`;
     return;
   }
-  const rows = list.map((i) => {
+  for (const i of list) {
     const sync = i.LastSync;
     const label = i.Registered ? pill("registered", "ok") : pill("not configured", "neutral");
     let detail = "no sync run yet";
@@ -157,25 +226,124 @@ function renderIntegrations(status) {
     } else {
       detail = escapeHtml(detail);
     }
-    return [i.ID, raw(`${label} ${detail}`)];
-  });
-  byId("integrations-body").innerHTML = table(rows);
+    const syncKey = `sync:${i.ID}`;
+    container.appendChild(
+      actionButtonRow(i.ID, `${label} ${detail}`, [
+        {
+          label: "Sync now",
+          busyText: "Syncing…",
+          disabled: !i.Registered,
+          busy: inFlightActions.has(syncKey),
+          run: async (statusEl) => {
+            const app = getApp();
+            if (!app) return;
+            // inFlightActions is cleared as soon as the request itself
+            // resolves (success, "skipped", or a real error), NOT after
+            // the branching below -- the `await poll()` on the success
+            // path must see the key already gone, or the rebuild it
+            // triggers would still find this action "in flight" and
+            // render the fresh row as busy/disabled right after the sync
+            // that just finished.
+            inFlightActions.add(syncKey);
+            let result;
+            try {
+              result = JSON.parse(await app.TriggerSync(i.ID));
+            } finally {
+              inFlightActions.delete(syncKey);
+            }
+            if (!result.ran) {
+              // poll() would rebuild this row from LastSync, which a
+              // skipped pass never updates -- the message would vanish
+              // with nothing to show in its place. Leave it standing
+              // until the next natural poll tick instead.
+              setFieldStatus(statusEl, "Skipped — already running", "error");
+              return;
+            }
+            if (result.err) {
+              // Same reasoning: an errored pass DOES update LastSync.Err,
+              // but only the row's small "bad" pill reflects it after a
+              // rebuild, not this more prominent status message -- worth
+              // leaving standing too, for the same reason.
+              setFieldStatus(statusEl, result.err, "error");
+              return;
+            }
+            setFieldStatus(statusEl, `Emitted ${result.emitted ?? 0}`, "saved");
+            await poll(); // refresh this row (and everything else) from the new status immediately, rather than waiting up to POLL_INTERVAL_MS
+          },
+        },
+      ]),
+    );
+  }
 }
 
+// renderHooks renders live hook install status plus "Install"/"Reveal"
+// buttons per HookDescriptors() registry entry -- mirrors
+// internal/tray/hooksmenu.go's own per-hook submenu items.
 function renderHooks(status) {
+  const container = byId("hooks-body");
+  container.innerHTML = "";
   const list = status.hooks ?? [];
   if (!list.length) {
-    byId("hooks-body").innerHTML = `<p class="empty">No hooks registered.</p>`;
+    container.innerHTML = `<p class="empty">No hooks registered.</p>`;
     return;
   }
-  const rows = list.map((h) => {
+  for (const h of list) {
     const st = h.State;
     let label = pill("not installed", "neutral");
     if (st && st.Installed) label = st.UpToDate ? pill("up to date", "ok") : pill("installed, out of date", "bad");
     if (st && st.Err) label += " " + pill(st.Err, "bad");
-    return [h.ID, raw(label)];
-  });
-  byId("hooks-body").innerHTML = table(rows);
+    const installKey = `hookInstall:${h.ID}`;
+    container.appendChild(
+      actionButtonRow(h.ID, label, [
+        {
+          label: "Install",
+          busyText: "Installing…",
+          busy: inFlightActions.has(installKey),
+          run: async (statusEl) => {
+            const app = getApp();
+            if (!app) return;
+            // See renderIntegrations' own "Sync now" for why the key is
+            // cleared before branching, not in a finally around the
+            // whole handler -- the success path's poll() must not see
+            // this action as still "in flight".
+            inFlightActions.add(installKey);
+            let result;
+            try {
+              result = JSON.parse(await app.TriggerHookInstall(h.ID));
+            } finally {
+              inFlightActions.delete(installKey);
+            }
+            if (!result.ran) {
+              // Same reasoning as renderIntegrations' own "Sync now" --
+              // poll() rebuilds this row and would erase a message a
+              // skipped/errored pass has nothing to replace it with.
+              setFieldStatus(statusEl, "Skipped — already running", "error");
+              return;
+            }
+            if (result.err) {
+              setFieldStatus(statusEl, result.err, "error");
+              return;
+            }
+            setFieldStatus(statusEl, "Installed", "saved");
+            await poll();
+          },
+        },
+        {
+          label: "Reveal",
+          busyText: "Opening…",
+          run: async (statusEl) => {
+            const app = getApp();
+            if (!app) return;
+            // RevealHook never mutates hook state (Runner.RevealHook's own
+            // doc comment), so unlike Install there is no reason to poll()
+            // afterward -- nothing in the status view would change.
+            await app.RevealHook(h.ID);
+            setFieldStatus(statusEl, "Opened", "saved");
+          },
+        },
+      ]),
+    );
+  }
 }
 
 function renderSelfUpdate(status) {
@@ -207,8 +375,33 @@ function table(rows) {
     .join("")}</table>`;
 }
 
+// uiVersion is this window's OWN binary version (App.Version), distinct
+// from view.version below (the AGENT's own reported version) -- fetched
+// once at startup, not on the status poll, since it can't change during a
+// window's lifetime. The two normally match (they ship together), but can
+// briefly disagree if a self-update fails partway -- see main.go's
+// version var doc comment.
+let uiVersion = null;
+
+async function loadUIVersion() {
+  const app = getApp();
+  if (!app) {
+    setTimeout(loadUIVersion, 500);
+    return;
+  }
+  try {
+    uiVersion = await app.Version();
+  } catch {
+    // Cosmetic only -- an older UI binary predating this method, or any
+    // other failure, shouldn't block the rest of the page from rendering.
+  }
+}
+loadUIVersion();
+
 function render(view) {
-  byId("version").textContent = view.version ? `v${view.version}` : "";
+  const agentVersion = view.version ? `agent v${view.version}` : "";
+  const shownUIVersion = uiVersion && uiVersion !== view.version ? `UI v${uiVersion}` : "";
+  byId("version").textContent = [agentVersion, shownUIVersion].filter(Boolean).join(" · ");
   const status = view.status ?? {};
   renderServer(status);
   renderIngest(status);

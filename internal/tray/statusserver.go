@@ -17,6 +17,16 @@ import (
 //go:embed assets/index.html
 var statusPageFS embed.FS
 
+type integrationStatusLabels struct {
+	Config  string
+	Skipped string
+}
+
+var integrationStatusLabelsByID = map[IntegrationID]integrationStatusLabels{
+	IntegrationLuminar:   {Config: "Catalog", Skipped: "skipped"},
+	IntegrationResolveDB: {Config: "Database URL", Skipped: "unresolved"},
+}
+
 var statusPageTmpl = template.Must(template.New("index.html").Funcs(template.FuncMap{
 	"since": func(t time.Time) string { return time.Since(t).Round(time.Second).String() },
 	// integrationView bridges SettingsView.Integration's (T, bool) return
@@ -36,13 +46,11 @@ var statusPageTmpl = template.Must(template.New("index.html").Funcs(template.Fun
 		iv, _ := sv.Integration(id)
 		return iv
 	},
-	"integrationDescriptor": func(id IntegrationID) IntegrationDescriptor {
-		for _, descriptor := range Integrations() {
-			if descriptor.ID == id {
-				return descriptor
-			}
+	"integrationStatusLabels": func(id IntegrationID) integrationStatusLabels {
+		if labels, ok := integrationStatusLabelsByID[id]; ok {
+			return labels
 		}
-		return IntegrationDescriptor{ConfigLabel: "Catalog", SkippedLabel: "skipped"}
+		return integrationStatusLabels{Config: "Catalog", Skipped: "skipped"}
 	},
 	"lower": strings.ToLower,
 }).ParseFS(statusPageFS, "assets/index.html"))

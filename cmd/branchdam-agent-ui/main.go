@@ -35,10 +35,22 @@ var assets embed.FS
 // never collide with an unrelated app sharing the same machine.
 const singleInstanceID = "com.branchdam.agent.ui"
 
+// version is stamped at build time via -ldflags "-X main.version=...",
+// mirroring cmd/branchdam-agent's own var of the same name -- see
+// .github/workflows/release-binaries.yml's build-windows/build-darwin
+// jobs. "dev" for a local unstamped build. Shown in the title bar (visible
+// even before the page loads) and via the bound App.Version method (so
+// the frontend can show it next to the agent's own reported version --
+// see app.js's render() -- since the two binaries can be at different
+// versions if one side of a self-update fails partway; see
+// internal/selfupdate.InstallLayout's own Siblings ordering for why that
+// window should be brief, not why it can't happen at all).
+var version = "dev"
+
 func main() {
 	app := NewApp()
 	err := wails.Run(&options.App{
-		Title:       "branchDAM",
+		Title:       "branchDAM (" + version + ")",
 		Width:       960,
 		MinWidth:    640,
 		Height:      720,

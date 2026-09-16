@@ -128,6 +128,7 @@ func TestAPIRoutesRequireToken(t *testing.T) {
 		{http.MethodPost, "/api/actions/prune"},
 		{http.MethodPost, "/api/actions/sync"},
 		{http.MethodPost, "/api/actions/hook-install"},
+		{http.MethodPost, "/api/actions/hook-reveal"},
 		{http.MethodPost, "/api/actions/pause"},
 	}
 	for _, rt := range routes {
@@ -170,11 +171,13 @@ type spyActions struct {
 	syncRan       bool
 	hookState     HookState
 	hookRan       bool
+	revealErr     error
 	paused        bool
 
 	lastCardPath string
 	lastSyncID   IntegrationID
 	lastHookID   HookID
+	lastRevealID HookID
 }
 
 func (a *spyActions) TriggerIngest(_ context.Context, cardPath string) IngestSummary {
@@ -194,6 +197,10 @@ func (a *spyActions) TriggerSync(_ context.Context, id IntegrationID) (SyncSumma
 func (a *spyActions) TriggerHookInstall(_ context.Context, id HookID) (HookState, bool) {
 	a.lastHookID = id
 	return a.hookState, a.hookRan
+}
+func (a *spyActions) RevealHook(id HookID) error {
+	a.lastRevealID = id
+	return a.revealErr
 }
 func (a *spyActions) Paused() bool     { return a.paused }
 func (a *spyActions) SetPaused(v bool) { a.paused = v }
@@ -390,6 +397,60 @@ func TestHandleActionHookInstallPassesID(t *testing.T) {
 	}
 	if !got.Installed {
 		t.Errorf("Installed = false, want true")
+	}
+}
+
+func TestHandleActionHookRevealRequiresID(t *testing.T) {
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Actions: &spyActions{}}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/hook-reveal", []byte(`{}`)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleActionHookRevealPassesID(t *testing.T) {
+	actions := &spyActions{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Actions: actions}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(idActionRequest{ID: "resolve"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/hook-reveal", body))
+
+	if actions.lastRevealID != HookID("resolve") {
+		t.Errorf("RevealHook called with %q, want %q", actions.lastRevealID, "resolve")
+	}
+	var got hookRevealActionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Err != "" {
+		t.Errorf("Err = %q, want empty", got.Err)
+	}
+}
+
+func TestHandleActionHookRevealReportsErr(t *testing.T) {
+	actions := &spyActions{revealErr: errors.New("no Scripts folder found")}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Actions: actions}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(idActionRequest{ID: "resolve"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/hook-reveal", body))
+
+	var got hookRevealActionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Err != "no Scripts folder found" {
+		t.Errorf("Err = %q, want %q", got.Err, "no Scripts folder found")
 	}
 }
 

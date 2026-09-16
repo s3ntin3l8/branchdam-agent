@@ -10,35 +10,31 @@ import (
 )
 
 // integrationSubmenu owns one catalog integration's own systray items --
-// one per Integrations() registry entry, built generically in a loop
-// (see newIntegrationsMenu) so adding lrcat (#47)/applephotos (#46) needs
-// zero changes to this file. "Sync now" is deliberately NOT dispatched
-// from here: it's a Runner action (like "Drain queue now"), wired
-// directly into run_supported.go's own select loop via each submenu's
-// syncNow item, not a Settings mutation routed through actionCh.
+// one per Integrations() registry entry, built generically in a loop (see
+// newIntegrationsMenu) so adding lrcat (#47)/applephotos (#46) needs zero
+// changes to this file. "Sync now" is deliberately NOT dispatched from
+// here: it's a Runner action (like "Drain queue now"), wired directly into
+// run_supported.go's own select loop via each submenu's syncNow item, not
+// a Settings mutation routed through actionCh.
+//
+// This menu is deliberately minimal (issue #211's slimming half of Track
+// 3d): Enabled, Dry run, Catalog path/database URL, Sync every, and Path
+// rewrites all now live in the Wails Settings window's own
+// renderIntegrationBlock (cmd/branchdam-agent-ui, Track 3d/#210) instead --
+// this submenu keeps only the read-only status line, the Sync timeout
+// options (the one config field the window has no equivalent for), and the
+// "Sync now" action.
 type integrationSubmenu struct {
-	id          IntegrationID
-	title       string
-	configLabel string
-	parent      *systray.MenuItem
-	status      *systray.MenuItem
-
-	enabled     *systray.MenuItem
-	dryRun      *systray.MenuItem
-	catalogPath *systray.MenuItem
-
-	intervalParent *systray.MenuItem
-	interval15     *systray.MenuItem
-	interval60     *systray.MenuItem
-	intervalNever  *systray.MenuItem
+	id     IntegrationID
+	title  string
+	parent *systray.MenuItem
+	status *systray.MenuItem
 
 	timeoutParent *systray.MenuItem
 	timeout30s    *systray.MenuItem // 30 seconds (default)
 	timeout1m     *systray.MenuItem // 1 minute
 	timeout5m     *systray.MenuItem // 5 minutes
 	timeout10m    *systray.MenuItem // 10 minutes
-
-	pathRewrites *systray.MenuItem // Resolve only
 
 	syncNow *systray.MenuItem
 
@@ -57,29 +53,16 @@ type integrationSubmenu struct {
 // the status line and titles are correct before the first refresh tick.
 func newIntegrationSubmenu(d IntegrationDescriptor, iv IntegrationView) *integrationSubmenu {
 	parent := systray.AddMenuItem(d.Title, d.Title+" catalog sync")
-	sub := &integrationSubmenu{id: d.ID, title: d.Title, configLabel: d.ConfigLabel, parent: parent}
+	sub := &integrationSubmenu{id: d.ID, title: d.Title, parent: parent}
 
 	sub.status = parent.AddSubMenuItem("", "Last sync result")
 	sub.status.Disable()
-
-	sub.enabled = parent.AddSubMenuItemCheckbox("Enabled", "Run this integration's sync, on its own timer and via \"Sync now\"", iv.Enabled)
-	sub.dryRun = parent.AddSubMenuItemCheckbox("Dry run (log only, emit nothing)", "Resolve and log what a sync would emit without contacting the server", iv.DryRun)
-	sub.catalogPath = parent.AddSubMenuItem(configPathTitle(d.ConfigLabel, iv.CatalogPathSet), d.ConfigLabel+" this integration reads")
-
-	sub.intervalParent = parent.AddSubMenuItem("Sync every", "How often the tray runs this integration's sync on its own timer")
-	sub.interval15 = sub.intervalParent.AddSubMenuItemCheckbox("15 minutes", "", iv.SyncIntervalMinutes == 15)
-	sub.interval60 = sub.intervalParent.AddSubMenuItemCheckbox("60 minutes (default)", "", iv.SyncIntervalMinutes == 0 || iv.SyncIntervalMinutes == 60)
-	sub.intervalNever = sub.intervalParent.AddSubMenuItemCheckbox("Never (manual only)", "", iv.SyncIntervalMinutes < 0)
 
 	sub.timeoutParent = parent.AddSubMenuItem("Sync timeout", "How long one sync pass can run before timing out")
 	sub.timeout30s = sub.timeoutParent.AddSubMenuItemCheckbox("30 seconds (default)", "", iv.TimeoutSecs == 0 || iv.TimeoutSecs == 30)
 	sub.timeout1m = sub.timeoutParent.AddSubMenuItemCheckbox("1 minute", "", iv.TimeoutSecs == 60)
 	sub.timeout5m = sub.timeoutParent.AddSubMenuItemCheckbox("5 minutes", "", iv.TimeoutSecs == 300)
 	sub.timeout10m = sub.timeoutParent.AddSubMenuItemCheckbox("10 minutes", "", iv.TimeoutSecs == 600)
-
-	if d.ID == IntegrationResolveDB {
-		sub.pathRewrites = parent.AddSubMenuItem(pathRewritesTitle(iv.PathRewritesSet), "Windows-to-NAS path rewrite rules (from:to pairs)")
-	}
 
 	parent.AddSeparator()
 	sub.syncNow = parent.AddSubMenuItem("Sync now", "Run one sync pass right now")
@@ -89,12 +72,6 @@ func newIntegrationSubmenu(d IntegrationDescriptor, iv IntegrationView) *integra
 	return sub
 }
 
-// dispatch translates this submenu's own config-changing clicks into
-// menuActions on the shared channel -- a fixed, compile-time select over
-// this ONE instance's own static fields, even though newIntegrationsMenu
-// runs one such goroutine per registry entry: adding lrcat means one more
-// newIntegrationSubmenu call and one more `go sub.dispatch(...)` call, not
-// a new select case anywhere.
 // integrationKey builds the dotted config.yaml key for one of id's own
 // leaves -- "integrations.<id>.<leaf>" -- the one place that string is
 // spelled in this package, matching cmd/branchdam-agent's own
@@ -110,31 +87,16 @@ func integrationKey(id IntegrationID, leaf string) string {
 	return "integrations." + string(id) + "." + leaf
 }
 
+// dispatch translates this submenu's own config-changing clicks into
+// menuActions on the shared channel -- a fixed, compile-time select over
+// this ONE instance's own static fields, even though newIntegrationsMenu
+// runs one such goroutine per registry entry: adding lrcat means one more
+// newIntegrationSubmenu call and one more `go sub.dispatch(...)` call, not
+// a new select case anywhere.
 func (sub *integrationSubmenu) dispatch(settings Settings, actionCh chan<- menuAction) {
 	id := sub.id
-	// Nil-safe channel for pathRewrites: sub.pathRewrites is only set for
-	// Resolve, so a nil *systray.MenuItem would panic on .ClickedCh.
-	// A nil channel blocks forever in select, which is the correct no-op.
-	var pathRewritesCh <-chan struct{}
-	if sub.pathRewrites != nil {
-		pathRewritesCh = sub.pathRewrites.ClickedCh
-	}
 	for {
 		select {
-		case <-sub.enabled.ClickedCh:
-			v := !sub.enabled.Checked()
-			sub.send(actionCh, func() error { return settings.SetBool(integrationKey(id, "enabled"), v) })
-		case <-sub.dryRun.ClickedCh:
-			v := !sub.dryRun.Checked()
-			sub.send(actionCh, func() error { return settings.SetBool(integrationKey(id, "dryRun"), v) })
-		case <-sub.catalogPath.ClickedCh:
-			sub.send(actionCh, func() error { _, err := settings.PromptAndSetIntegrationPath(id); return err })
-		case <-sub.interval15.ClickedCh:
-			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "syncIntervalMinutes"), 15) })
-		case <-sub.interval60.ClickedCh:
-			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "syncIntervalMinutes"), 60) })
-		case <-sub.intervalNever.ClickedCh:
-			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "syncIntervalMinutes"), -1) })
 		case <-sub.timeout30s.ClickedCh:
 			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "timeoutSecs"), 30) })
 		case <-sub.timeout1m.ClickedCh:
@@ -143,8 +105,6 @@ func (sub *integrationSubmenu) dispatch(settings Settings, actionCh chan<- menuA
 			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "timeoutSecs"), 300) })
 		case <-sub.timeout10m.ClickedCh:
 			sub.send(actionCh, func() error { return settings.SetInt(integrationKey(id, "timeoutSecs"), 600) })
-		case <-pathRewritesCh:
-			sub.send(actionCh, func() error { _, err := settings.PromptAndSetIntegrationRewrites(id); return err })
 		}
 	}
 }
@@ -170,25 +130,6 @@ func (sub *integrationSubmenu) setLastErr(err error) { sub.lastErr = err }
 // drifted -- rendered as "not yet configured" rather than a crash, since a
 // menu item must never panic on a refresh tick.
 func (sub *integrationSubmenu) sync(iv IntegrationView, status IntegrationStatus) {
-	setChecked(sub.enabled, iv.Enabled)
-	setChecked(sub.dryRun, iv.DryRun)
-	setChecked(sub.interval15, iv.SyncIntervalMinutes == 15)
-	setChecked(sub.interval60, iv.SyncIntervalMinutes == 0 || iv.SyncIntervalMinutes == 60)
-	setChecked(sub.intervalNever, iv.SyncIntervalMinutes < 0)
-	// A Hermes review finding on this PR: a hand-edited config.yaml can
-	// set syncIntervalMinutes to a value none of the three menu options
-	// represent (e.g. 30) -- all three checkboxes would then show
-	// unchecked, silently implying "unset" rather than the real
-	// hand-configured value. Rather than guessing which of the three is
-	// "closest" (which could misleadingly suggest a click already
-	// changed it), the parent item's own title names the actual value so
-	// it's never ambiguous.
-	if iv.SyncIntervalMinutes != 15 && iv.SyncIntervalMinutes != 0 && iv.SyncIntervalMinutes != 60 && iv.SyncIntervalMinutes >= 0 {
-		sub.intervalParent.SetTitle(fmt.Sprintf("Sync every (currently: %d min, hand-configured)", iv.SyncIntervalMinutes))
-	} else {
-		sub.intervalParent.SetTitle("Sync every")
-	}
-
 	setChecked(sub.timeout30s, iv.TimeoutSecs == 0 || iv.TimeoutSecs == 30)
 	setChecked(sub.timeout1m, iv.TimeoutSecs == 60)
 	setChecked(sub.timeout5m, iv.TimeoutSecs == 300)
@@ -199,10 +140,6 @@ func (sub *integrationSubmenu) sync(iv IntegrationView, status IntegrationStatus
 		sub.timeoutParent.SetTitle("Sync timeout")
 	}
 
-	sub.catalogPath.SetTitle(configPathTitle(sub.configLabel, iv.CatalogPathSet))
-	if sub.pathRewrites != nil {
-		sub.pathRewrites.SetTitle(pathRewritesTitle(iv.PathRewritesSet))
-	}
 	sub.status.SetTitle(integrationStatusLine(sub.id, sub.title, iv, status))
 
 	if sub.lastErr != nil {
@@ -292,42 +229,45 @@ func since(t time.Time) string {
 	return time.Since(t).Round(time.Second).String()
 }
 
-// integrationsMenu owns the top-level "Node index…" item plus one
-// integrationSubmenu per registry entry.
+// setChecked is shared by every submenu with a checkbox item whose checked
+// state is driven by a Settings snapshot rather than direct user toggling
+// feedback -- kept here as its only remaining caller after issue #211
+// removed integrationSubmenu's own Enabled/Dry run/Sync-every checkboxes
+// (settingsMenu had no other user of it).
+func setChecked(item *systray.MenuItem, want bool) {
+	switch {
+	case want && !item.Checked():
+		item.Check()
+	case !want && item.Checked():
+		item.Uncheck()
+	}
+}
+
+// integrationsMenu owns one integrationSubmenu per registry entry. The
+// top-level "Node index…" item this used to also own is gone (issue #211):
+// integrations.nodeIndexPath now lives in the Wails Settings window's
+// FREE_TEXT_FIELDS instead.
 type integrationsMenu struct {
-	settings Settings
-	actionCh chan<- menuAction
-
-	nodeIndexPath *systray.MenuItem
-	nodeIndexErr  error
-
 	subs []*integrationSubmenu
 }
 
 // newIntegrationsMenu builds one top-level systray item per
-// Integrations() registry entry, plus the shared "Node index…" item --
-// called once from onReady, alongside newSettingsMenu. Each integration is
-// its own TOP-LEVEL item (not nested under a wrapper "Integrations"
-// submenu) specifically to keep every leaf at depth 3
-// (root ▸ Luminar Neo ▸ Sync every ▸ 15 minutes), matching the deepest
-// tree this repo has actually shipped (Settings ▸ Check every ▸ 1 hour) --
-// a wrapper wouldn't fit anything new under it (Enabled/Dry run/Catalog…/
-// Sync now are already depth 3) but would push "Sync every"'s own leaves
-// to depth 4, untested territory on a menu library this repo has never
-// pushed past depth 3.
+// Integrations() registry entry -- called once from onReady, alongside
+// newSettingsMenu. Each integration is its own TOP-LEVEL item (not nested
+// under a wrapper "Integrations" submenu) specifically to keep every leaf
+// at depth 3 (root ▸ Luminar Neo ▸ Sync timeout ▸ 30 seconds), matching the
+// deepest tree this repo has actually shipped (Settings ▸ Check every ▸
+// 1 hour).
 func newIntegrationsMenu(settings Settings, actionCh chan<- menuAction) *integrationsMenu {
 	sv := settings.Snapshot()
 
-	im := &integrationsMenu{settings: settings, actionCh: actionCh}
-
-	im.nodeIndexPath = systray.AddMenuItem(nodeIndexTitle(sv.NodeIndexPathSet), "JSON file mapping workstation paths to nodeUuids -- shared by every catalog integration")
+	im := &integrationsMenu{}
 
 	for _, d := range Integrations() {
 		iv, _ := sv.Integration(d.ID)
 		im.subs = append(im.subs, newIntegrationSubmenu(d, iv))
 	}
 
-	go im.dispatch()
 	for _, sub := range im.subs {
 		go sub.dispatch(settings, actionCh)
 	}
@@ -335,55 +275,13 @@ func newIntegrationsMenu(settings Settings, actionCh chan<- menuAction) *integra
 	return im
 }
 
-func (im *integrationsMenu) dispatch() {
-	for range im.nodeIndexPath.ClickedCh {
-		im.send(func() error { _, err := im.settings.PromptAndSet(FieldNodeIndexPath); return err })
-	}
-}
-
-func (im *integrationsMenu) send(run func() error) {
-	select {
-	case im.actionCh <- menuAction{run: run, report: im.setLastErr}:
-	default:
-	}
-}
-
-func (im *integrationsMenu) setLastErr(err error) { im.nodeIndexErr = err }
-
 // sync re-renders every item from a fresh Settings snapshot and Runner
 // status -- called on every refresh tick and after every action
 // completes.
 func (im *integrationsMenu) sync(sv SettingsView, st Status) {
-	if im.nodeIndexErr != nil {
-		im.nodeIndexPath.SetTitle(fmt.Sprintf("%s (last change failed: %v)", nodeIndexTitle(sv.NodeIndexPathSet), im.nodeIndexErr))
-	} else {
-		im.nodeIndexPath.SetTitle(nodeIndexTitle(sv.NodeIndexPathSet))
-	}
-
 	for _, sub := range im.subs {
 		iv, _ := sv.Integration(sub.id)
 		status, _ := st.Integration(sub.id)
 		sub.sync(iv, status)
 	}
-}
-
-func configPathTitle(label string, set bool) string {
-	if set {
-		return label + "… (configured)"
-	}
-	return label + "… (not set)"
-}
-
-func pathRewritesTitle(set bool) string {
-	if set {
-		return "Path rewrites… (configured)"
-	}
-	return "Path rewrites… (not set)"
-}
-
-func nodeIndexTitle(set bool) string {
-	if set {
-		return "Node index… (configured)"
-	}
-	return "Node index… (not set)"
 }

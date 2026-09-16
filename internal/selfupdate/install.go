@@ -5,18 +5,31 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/appbundle"
 )
 
 // Windows sibling names are hardcoded, never derived by munging execPath's
 // basename -- go-selfupdate's DecompressCommand fails outright for a name
 // that isn't actually present in the archive, which would abort the whole
-// apply for a renamed exe.
+// apply for a renamed exe. winUIExe is appbundle.WinUIBinaryName, not a
+// fourth independent literal -- see that constant's own doc comment for
+// why internal/tray needs the identical name reachable without importing
+// this package.
 const (
 	winConsoleExe = "branchdam-agent.exe"
 	winTrayExe    = "branchdam-agent-tray.exe"
+	winUIExe      = appbundle.WinUIBinaryName
 )
+
+// winKnownExes is every Windows binary shipped from the same release
+// archive (branchdam-agent-windows-amd64.zip). windowsSiblings only
+// proceeds for a resolved path whose basename is one of these -- an
+// unknown basename (a renamed exe, a dev build) gets no siblings at all.
+var winKnownExes = []string{winConsoleExe, winTrayExe, winUIExe}
 
 // InstallLayout is every file one Apply call touches, derived from the
 // running executable's path. Siblings are applied before Primary: on a
@@ -83,27 +96,59 @@ func DetectLayout(execPath string) (InstallLayout, error) {
 	// darwin host.
 	if bundle := BundlePath(resolved); bundle != "" {
 		layout.InfoPlist = filepath.Join(bundle, "Contents", "Info.plist")
+		if sibling := macOSUISibling(resolved); sibling != "" {
+			layout.Siblings = append(layout.Siblings, sibling)
+		}
 	}
 
 	return layout, nil
 }
 
+// windowsSiblings returns every other winKnownExes entry actually present
+// beside resolved, so a self-update from any one of the three Windows
+// binaries carries the other two along in the same Apply call -- see
+// InstallLayout's own doc comment for why siblings are replaced before
+// Primary. An entry that isn't on disk (e.g. an install predating the UI
+// binary shipping) is silently skipped rather than failing the whole
+// update: go-selfupdate's DecompressCommand only needs to find what it's
+// asked for, and a target that doesn't exist yet isn't asked for.
 func windowsSiblings(resolved string) []string {
+	base := filepath.Base(resolved)
+	if !slices.Contains(winKnownExes, base) {
+		return nil
+	}
 	dir := filepath.Dir(resolved)
-	var sibling string
-	switch filepath.Base(resolved) {
-	case winConsoleExe:
-		sibling = winTrayExe
-	case winTrayExe:
-		sibling = winConsoleExe
-	default:
-		return nil
+	var siblings []string
+	for _, name := range winKnownExes {
+		if name == base {
+			continue
+		}
+		siblingPath := filepath.Join(dir, name)
+		if _, err := os.Stat(siblingPath); err != nil {
+			continue
+		}
+		siblings = append(siblings, siblingPath)
 	}
-	siblingPath := filepath.Join(dir, sibling)
+	return siblings
+}
+
+// macOSUISibling returns the UI binary's path next to resolved inside the
+// same Contents/MacOS/ directory, or "" if it isn't there (an install
+// predating the UI binary shipping, or a build without it). Unlike
+// windowsSiblings, there is only ever one other binary to check on macOS --
+// the bundle has exactly one CFBundleExecutable (the tray) plus the UI
+// binary, no third target. This is a fact about the bundle shape, not an
+// enforced invariant: cmd/branchdam-agent-ui has no self-update code path
+// today, so resolved is always the tray binary here in practice, but
+// nothing in this package would misbehave if that changed -- BundlePath's
+// own .../Contents/MacOS/ check would still resolve correctly regardless of
+// which of the two binaries called DetectLayout.
+func macOSUISibling(resolved string) string {
+	siblingPath := filepath.Join(filepath.Dir(resolved), appbundle.UIBinaryName)
 	if _, err := os.Stat(siblingPath); err != nil {
-		return nil
+		return ""
 	}
-	return []string{siblingPath}
+	return siblingPath
 }
 
 // BundlePath returns the enclosing .app bundle's path when execPath is

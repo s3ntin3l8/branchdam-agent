@@ -6,6 +6,29 @@ The audit doc is gitignored (`/docs/audit/` in `.gitignore`) and is local-only w
 
 This is an **inventory** issue, not a code change. Each field below is a sub-task that graduates to `SettingsView` (and the matching `SettingsField` / `SettingsView` field, plus a `SetBool` / `SetInt` / `SetString` / `PromptAndSet` wiring where needed) as its M5 / E3 sub-issue ships. One small PR per field — this document and the audit comment block in `settings.go` are updated in the same PR that adds the field, so the two never disagree.
 
+**Post-#211 note:** every "Graduated" row below originally pointed at a
+tray systray menu item (`internal/tray/settingsmenu.go` /
+`integrationsmenu.go`). Issue #211 (Track 3d's slimming half) removed those
+menu items -- their config values now graduate into the Wails Settings
+window instead (`cmd/branchdam-agent-ui/frontend/dist/app.js`'s
+`FREE_TEXT_FIELDS`/`CHECKBOX_FIELDS`/`renderIntegrationBlock`), which reads
+the identical `SettingsView` fields and writes through the identical
+`SetBool`/`SetInt`/`SetString`/`SetIntegrationPath`/`SetIntegrationRewrites`
+methods this doc already tracks. The `SettingsView` field, `SettingsField`
+enum, and setter wiring this table cites are UNCHANGED -- only which UI
+surface calls them moved, so the line numbers below pointing into
+`settingsmenu.go`/`integrationsmenu.go` are stale (that code no longer
+exists) but the graduation status itself still holds. `settingsmenu.go`
+now owns only `Reload`/`OpenConfigFile`/`RevealConfigFolder` --
+hand-edit-config affordances with no settings VALUE and therefore nothing
+to graduate. `integrationsmenu.go` now owns only the per-integration status line, the
+`integrations.<id>.timeoutSecs` field, and the "Sync now" action.
+`timeoutSecs` is a genuine, not-yet-closed gap, not a deliberate one like
+the fields in the "hand-edit only" list below: the Wails window's
+`renderIntegrationBlock` has no sync-timeout control at all, so this is
+the one per-integration value reachable ONLY from the tray now (everything
+else moved to the window, or was already reachable from both).
+
 ## Fields the issue already enumerates
 
 The issue body lists the graduation candidates in its acceptance-criteria checklist. The table below re-states each with (a) whether the field already exists in the `Config` struct today, (b) the M5 / E3 sub-issue that introduces the field if it does not, and (c) where in `SettingsView` / `SettingsField` the field lands once it does.

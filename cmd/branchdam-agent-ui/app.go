@@ -54,6 +54,15 @@ func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
 }
 
+// Version returns this UI binary's own stamped version (main.version, "dev"
+// for a local unstamped build) -- distinct from StatusJSON's "version"
+// field, which is the AGENT's own version. The two ship together from the
+// same release and should normally match, but can briefly disagree if a
+// self-update fails partway (see main.go's version var doc comment).
+func (a *App) Version() string {
+	return version
+}
+
 // StatusJSON fetches the agent's current status. Both the server address
 // (from config.yaml) and the session token are re-read on every call
 // rather than cached at Startup: the agent process this window talks to
@@ -143,6 +152,84 @@ func (a *App) SetIntegrationRewrites(id, value string) (string, error) {
 		return "", err
 	}
 	return string(body), nil
+}
+
+// TriggerSync runs one catalog-sync pass for integration id right now --
+// POST /api/actions/sync's counterpart, mirroring internal/tray/
+// integrationsmenu.go's own "Sync now" menu item. Returns the raw
+// syncActionResult JSON (internal/tray/statusapi.go) so the frontend can
+// render pairsFound/emitted/skipped/err without a matching struct here --
+// same "never drifts out of sync" reasoning as StatusJSON's own doc
+// comment. This call runs synchronously to completion (TriggerSync's own
+// doc comment): a real sync pass can take seconds, so the frontend should
+// disable its "Sync now" button for the duration rather than assume this
+// returns quickly.
+func (a *App) TriggerSync(id string) (string, error) {
+	reqBody, err := json.Marshal(idActionRequest{ID: id})
+	if err != nil {
+		return "", err
+	}
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/sync", reqBody)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// TriggerHookInstall installs (or reinstalls) id's render hook right now --
+// POST /api/actions/hook-install's counterpart, mirroring
+// internal/tray/hooksmenu.go's own "Install / update render hook" item.
+// Returns the raw hookInstallActionResult JSON, same reasoning as
+// TriggerSync above.
+func (a *App) TriggerHookInstall(id string) (string, error) {
+	reqBody, err := json.Marshal(idActionRequest{ID: id})
+	if err != nil {
+		return "", err
+	}
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/hook-install", reqBody)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// RevealHook opens id's Scripts folder in the OS file manager --
+// POST /api/actions/hook-reveal's counterpart, mirroring
+// internal/tray/hooksmenu.go's own "Reveal Scripts folder" item. Unlike
+// TriggerSync/TriggerHookInstall, the response body carries nothing worth
+// returning to the frontend on success (Runner.RevealHook's own doc
+// comment: "fire-and-forget", no state mutation) -- only its err field is
+// worth surfacing, so this returns a plain error rather than a JSON string
+// for the frontend to re-parse.
+func (a *App) RevealHook(id string) error {
+	reqBody, err := json.Marshal(idActionRequest{ID: id})
+	if err != nil {
+		return err
+	}
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/hook-reveal", reqBody)
+	if err != nil {
+		return err
+	}
+	var res struct {
+		Err string `json:"err"`
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		return err
+	}
+	if res.Err != "" {
+		return errors.New(res.Err)
+	}
+	return nil
+}
+
+// idActionRequest mirrors internal/tray/statusapi.go's own request shape of
+// the same name -- {"id": "..."} -- for /api/actions/sync,
+// /api/actions/hook-install, and /api/actions/hook-reveal. Duplicated here
+// rather than imported: this package talks to the agent purely over the
+// loopback HTTP API (main.go's own package doc comment), never importing
+// internal/tray's Go types directly.
+type idActionRequest struct {
+	ID string `json:"id"`
 }
 
 // PickDirectory opens a native folder picker and returns the chosen path,

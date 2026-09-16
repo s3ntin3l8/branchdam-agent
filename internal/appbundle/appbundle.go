@@ -28,6 +28,31 @@ import (
 // Contents/MacOS and as CFBundleExecutable.
 const BinaryName = "branchdam-agent"
 
+// UIBinaryName is cmd/branchdam-agent-ui's binary name inside
+// Contents/MacOS, alongside BinaryName -- a second file in the bundle, not
+// a second CFBundleExecutable (the UI binary is launched by full path from
+// the tray's "Open branchDAM" menu item, never by Finder double-click, so
+// the bundle has exactly one Info.plist-declared entry point either way).
+// internal/selfupdate references this same constant (it already imports
+// this package for RenderInfoPlist) so the two packages can never disagree
+// on the name go-selfupdate looks for inside the release tarball.
+const UIBinaryName = "branchdam-agent-ui"
+
+// WinUIBinaryName is UIBinaryName's Windows counterpart -- cmd/branchdam-
+// agent-ui's built binary name with the platform's own .exe extension.
+// Exported from this package (rather than living only in
+// internal/selfupdate, which already has an unexported winUIExe of its
+// own) so internal/tray's "Open branchDAM" menu item (run_supported.go's
+// launchUIBinary) can resolve the same name without importing
+// internal/selfupdate -- SelfUpdater's own doc comment (internal/tray/
+// tray.go) already established that import is unwanted (it pulls in
+// golang.org/x/crypto/openpgp transitively). A Hermes review finding on
+// PR #218: internal/tray had re-spelled this as a third independent
+// literal, which could silently drift from internal/selfupdate's own copy
+// if the binary were ever renamed -- the exact class of bug UIBinaryName's
+// own doc comment above already guards against on the macOS side.
+const WinUIBinaryName = "branchdam-agent-ui.exe"
+
 // DisplayName is CFBundleName/CFBundleDisplayName -- what Finder and (were
 // LSUIElement not set) the Dock would show.
 const DisplayName = "branchDAM Agent"
@@ -118,7 +143,12 @@ func RenderInfoPlist(version string) string {
 // bit preserved. appDir must not already exist -- Write never overwrites an
 // existing bundle, so a build script that runs it twice fails loudly
 // instead of merging state from a stale previous run.
-func Write(appDir, binPath, version string) error {
+//
+// uiBinPath is optional (pass "" to skip it) -- when set, cmd/branchdam-
+// agent-ui's binary is copied in too, at Contents/MacOS/<UIBinaryName>,
+// a second file in the same directory rather than a second bundle
+// executable (see UIBinaryName's own doc comment).
+func Write(appDir, binPath, uiBinPath, version string) error {
 	if _, err := os.Stat(appDir); err == nil {
 		return fmt.Errorf("appbundle: %s already exists", appDir)
 	}
@@ -148,6 +178,12 @@ func Write(appDir, binPath, version string) error {
 
 	if err := copyExecutable(binPath, filepath.Join(macOSDir, BinaryName)); err != nil {
 		return fmt.Errorf("appbundle: copy binary: %w", err)
+	}
+
+	if uiBinPath != "" {
+		if err := copyExecutable(uiBinPath, filepath.Join(macOSDir, UIBinaryName)); err != nil {
+			return fmt.Errorf("appbundle: copy UI binary: %w", err)
+		}
 	}
 
 	return nil

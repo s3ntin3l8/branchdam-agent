@@ -131,7 +131,8 @@ func (u *Updater) Check(ctx context.Context, currentVersion string) (CheckResult
 // just-saved backup at the same path. A fresh per-target Updater (cheap:
 // no network, just a struct) sidesteps that without needing a shared
 // mutable field. This does mean the release archive is still downloaded
-// and checksum-validated once per target (twice on Windows) -- accepted
+// and checksum-validated once per target (three times on Windows, two on
+// macOS now that the UI binary ships as a sibling on both) -- accepted
 // as a known cost rather than reimplementing go-selfupdate's unexported
 // download/validate pipeline ourselves, which would move this repo's only
 // integrity control (see this file's own doc comment) out of the
