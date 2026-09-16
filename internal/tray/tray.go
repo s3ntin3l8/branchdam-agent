@@ -236,6 +236,13 @@ type Status struct {
 	InFlightDrain bool `json:"inFlightDrain"`
 	// InFlightPrune reports whether a prune pass is currently running.
 	InFlightPrune bool `json:"inFlightPrune"`
+	// InFlightProbe reports whether a server-reachability check
+	// (TriggerServerProbe) is currently running. Not consumed by the
+	// Wails window today (it tracks "Test connection" busy state
+	// client-side, in its own inFlightActions set), but kept for parity
+	// with InFlightDrain/InFlightPrune above -- any future consumer of
+	// Status() (a tray menu item, a second window) gets it for free.
+	InFlightProbe bool `json:"inFlightProbe"`
 	// Integrations is RUNTIME state only, ordered by the compile-time
 	// Integrations() registry so the status page and (a later PR's) menu
 	// render in the same order every time. Config state (enabled, dry
@@ -254,6 +261,15 @@ type Status struct {
 	// state, and the user configures through the Settings menu.
 	ConfigIncomplete bool     `json:"configIncomplete"`
 	MissingFields    []string `json:"missingFields,omitempty"`
+	// ServerProbe is the most recent on-demand "Test connection" result
+	// (nil if none has run yet this session, including the automatic
+	// startup/periodic checks -- see cmd/branchdam-agent's serverProbeInterval
+	// wiring). Deliberately independent of HandshakeOK/HasDrained above:
+	// those two require offline.queueDbPath to be configured at all (see
+	// QueueStatus.Configured's own doc comment); ServerProbe does not, and
+	// is what the status page renders as the Server card's reachability
+	// pill instead.
+	ServerProbe *ProbeResult `json:"serverProbe,omitempty"`
 }
 
 // Runner owns the state a tray-resident process needs: the ingest engine
@@ -279,6 +295,14 @@ type Runner struct {
 	// TriggerDrain's doc comment for why a drain pass must never be
 	// blocked by (or block) an ingest or a self-update apply.
 	drainMu sync.Mutex
+
+	// probeMu is its own dedicated mutex, same reasoning as drainMu: a
+	// server-reachability check must never be blocked by (or block) an
+	// ingest, a drain/prune pass, or a self-update apply. See
+	// TriggerServerProbe's own doc comment for why it is also
+	// deliberately not gated on ConfigIncomplete the way TriggerDrain/
+	// TriggerPrune are.
+	probeMu sync.Mutex
 
 	// paused tracks whether manual ingest pause is active (shoot-mode, issue #83).
 	// Session-only, never persisted.
@@ -317,6 +341,19 @@ type Runner struct {
 	lastPrune     *PruneSummary
 	inFlightDrain bool
 	inFlightPrune bool
+
+	// probe/lastProbe/inFlightProbe mirror drainer/lastDrain/inFlightDrain's
+	// own shape (see SetServerProbe/TriggerServerProbe), but wired
+	// independently of the offline queue: probe is set whenever the server
+	// is configured at all (server.baseUrl/apiKey/agentId), not only when
+	// offline.queueDbPath is also set. Re-registered on every settings
+	// reload, unlike queueReader/drainer/pruner, since rotating
+	// server.apiKey or server.baseUrl must not leave this probing a stale
+	// client indefinitely -- the same staleness class SetIntegrationSyncers'
+	// own doc comment describes for issue #57.
+	probe         ServerProbe
+	lastProbe     *ProbeResult
+	inFlightProbe bool
 
 	// onSuccessfulHandshake is invoked after every TriggerDrain pass
 	// whose HandshakeOK is true, with the just-stamped
@@ -778,6 +815,29 @@ func (r *Runner) SetQueueDeps(reader QueueReader, drainer Drainer, pruner Pruner
 	r.pruner = pruner
 }
 
+// SetServerProbe wires (or clears, with a nil probe) the on-demand
+// server-reachability check TriggerServerProbe drives. Unlike
+// SetQueueDeps, this is called again on every settings reload
+// (cmd/branchdam-agent's configSettings.reload) -- see the Runner field
+// doc comment above for why a stale client here is a real staleness
+// hazard that SetQueueDeps' own drainer/pruner never have to worry about.
+func (r *Runner) SetServerProbe(probe ServerProbe) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.probe = probe
+	if probe == nil {
+		// A stale "reachable" (or "unreachable") result must not survive
+		// the server fields going from configured to unconfigured --
+		// TriggerServerProbe's own doc comment ("a stale reachable
+		// surviving a real outage would be actively misleading") applies
+		// here too. Without this, an operator who blanks server.baseUrl
+		// in Settings still sees the Server card reporting "reachable"
+		// from before they cleared it, since TriggerServerProbe's own
+		// nil-probe guard returns before ever touching r.lastProbe.
+		r.lastProbe = nil
+	}
+}
+
 // SeedLastHandshakeAt pre-populates the in-memory carry-forward
 // state with a prior successful handshake, so a tray that loaded a
 // persisted runtime.json at startup can render the status page's
@@ -1066,6 +1126,59 @@ func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bo
 	r.mu.Unlock()
 
 	return summary, true
+}
+
+// TriggerServerProbe runs one ServerProbe.Probe call, if one is wired and
+// no other probe is already running. Deliberately mirrors TriggerPrune's
+// shape (its own dedicated probeMu, not Runner.gate -- a connectivity
+// check has nothing to do with an in-flight ingest or self-update) with
+// two differences:
+//
+//  1. NOT gated on r.paused.Load() or r.ConfigIncomplete(). Pause exists to
+//     suspend automatic card detection and queue draining (shoot-mode,
+//     issue #83) -- it says nothing about whether an operator should be
+//     able to click "Test connection" mid-shoot. ConfigIncomplete is set
+//     the moment ingest.localEditRoot/archiveRoot/pathMappings are
+//     missing, but confirming the server half (baseUrl/apiKey/agentId)
+//     already works is exactly the diagnostic an operator needs *while*
+//     still filling in the storage half -- gating this the same way
+//     TriggerDrain/TriggerPrune are would reproduce this very bug for a
+//     second, unrelated pill.
+//  2. No carry-forward of a prior result on failure (unlike TriggerDrain's
+//     LastHandshakeAt preservation): a probe is a point-in-time check,
+//     and a stale "reachable" surviving a real outage would be actively
+//     misleading for what this exists to answer.
+func (r *Runner) TriggerServerProbe(ctx context.Context) (result ProbeResult, ran bool) {
+	if !r.probeMu.TryLock() {
+		return ProbeResult{}, false
+	}
+	defer r.probeMu.Unlock()
+
+	r.mu.Lock()
+	probe := r.probe
+	r.mu.Unlock()
+
+	if probe == nil {
+		return ProbeResult{}, false
+	}
+
+	r.mu.Lock()
+	r.inFlightProbe = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.inFlightProbe = false
+		r.mu.Unlock()
+	}()
+
+	version, err := probe.Probe(ctx)
+	result = ProbeResult{At: time.Now(), Version: version, Err: err, OK: err == nil}
+
+	r.mu.Lock()
+	r.lastProbe = &result
+	r.mu.Unlock()
+
+	return result, true
 }
 
 // SetIntegrationSyncers swaps in the full set of registered integration
@@ -1542,6 +1655,8 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	inFlightPrune := r.inFlightPrune
 	configIncomplete := r.configIncomplete
 	missingFields := append([]string(nil), r.missingFields...)
+	lastProbe := r.lastProbe
+	inFlightProbe := r.inFlightProbe
 
 	// Built entirely under r.mu, not after unlocking: r.syncers/r.lastSync
 	// are read map entries here, not copied whole-map references, so a
@@ -1630,5 +1745,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		Hooks:            hooks,
 		ConfigIncomplete: configIncomplete,
 		MissingFields:    missingFields,
+		ServerProbe:      lastProbe,
+		InFlightProbe:    inFlightProbe,
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"fyne.io/systray"
@@ -705,9 +706,28 @@ func buildUnconfiguredTrayIcon() []byte {
 	return buildIconColor(false, color.RGBA{R: 0x80, G: 0x80, B: 0x80, A: 0xff}) // gray
 }
 
+// missingFieldsSummaryLimit bounds how many field names summarize() names
+// inline before falling back to "+N more" -- a long tail (every one of
+// ingest.archiveRoot/localEditRoot/pathMappings plus server.* fields on a
+// truly blank config) would otherwise turn the tray tooltip into a wall of
+// text instead of a quick pointer to Settings.
+const missingFieldsSummaryLimit = 3
+
 func summarize(st Status) string {
 	if st.ConfigIncomplete {
-		return "not configured — open Settings to set up"
+		if len(st.MissingFields) == 0 {
+			// Should not happen (ConfigIncomplete is only ever set alongside
+			// a non-empty MissingFields -- see SetConfigIncomplete's own doc
+			// comment), but a generic fallback beats a bare "missing: ".
+			return "not configured — open Settings to set up"
+		}
+		shown := st.MissingFields
+		suffix := ""
+		if len(shown) > missingFieldsSummaryLimit {
+			suffix = fmt.Sprintf(", +%d more", len(shown)-missingFieldsSummaryLimit)
+			shown = shown[:missingFieldsSummaryLimit]
+		}
+		return fmt.Sprintf("not configured — missing: %s%s", strings.Join(shown, ", "), suffix)
 	}
 	if st.Paused {
 		return "ingest paused by user"

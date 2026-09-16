@@ -9,6 +9,32 @@ import (
 	"testing"
 )
 
+func TestSummarizeNamesMissingFields(t *testing.T) {
+	got := summarize(Status{ConfigIncomplete: true, MissingFields: []string{"ingest.localEditRoot", "pathMappings"}})
+	want := "not configured — missing: ingest.localEditRoot, pathMappings"
+	if got != want {
+		t.Errorf("summarize() = %q, want %q", got, want)
+	}
+}
+
+func TestSummarizeTruncatesLongMissingFieldsList(t *testing.T) {
+	got := summarize(Status{ConfigIncomplete: true, MissingFields: []string{
+		"server.apiKey", "server.baseUrl", "agentId", "ingest.localEditRoot", "ingest.archiveRoot",
+	}})
+	want := "not configured — missing: server.apiKey, server.baseUrl, agentId, +2 more"
+	if got != want {
+		t.Errorf("summarize() = %q, want %q", got, want)
+	}
+}
+
+func TestSummarizeFallsBackWithoutMissingFields(t *testing.T) {
+	got := summarize(Status{ConfigIncomplete: true})
+	want := "not configured — open Settings to set up"
+	if got != want {
+		t.Errorf("summarize() = %q, want %q", got, want)
+	}
+}
+
 func TestUIBinaryNameIsPlatformSpecific(t *testing.T) {
 	got := uiBinaryName()
 	if runtime.GOOS == "windows" {

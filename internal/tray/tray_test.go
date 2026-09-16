@@ -2,6 +2,7 @@ package tray
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -292,6 +293,23 @@ func (f *fakePruner) Prune(_ context.Context) (PruneSummary, error) {
 	return f.summary, f.err
 }
 
+type fakeServerProbe struct {
+	version string
+	err     error
+	started chan struct{}
+	release chan struct{}
+	calls   int
+}
+
+func (f *fakeServerProbe) Probe(_ context.Context) (string, error) {
+	f.calls++
+	if f.started != nil {
+		close(f.started)
+		<-f.release
+	}
+	return f.version, f.err
+}
+
 func TestStatusReflectsQueueCounts(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, nil, "")
 	r.SetQueueDeps(&fakeQueueReader{counts: QueueCounts{AwaitingUpload: 3, Failed: 1}}, nil, nil)
@@ -518,6 +536,150 @@ func TestTriggerPruneSharesGateWithIngest(t *testing.T) {
 	}
 
 	close(release)
+}
+
+func TestTriggerServerProbeRunsAndRecordsResult(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetServerProbe(&fakeServerProbe{version: "1.10.0"})
+
+	result, ran := r.TriggerServerProbe(context.Background())
+	if !ran {
+		t.Fatal("expected TriggerServerProbe to run when a ServerProbe is configured")
+	}
+	if !result.OK || result.Version != "1.10.0" {
+		t.Errorf("got %+v, want OK=true Version=1.10.0", result)
+	}
+	if result.At.IsZero() {
+		t.Error("expected TriggerServerProbe to stamp At")
+	}
+
+	st := r.Status(UpdateStatus{})
+	if st.ServerProbe == nil || !st.ServerProbe.OK || st.ServerProbe.Version != "1.10.0" {
+		t.Errorf("expected Status to reflect the last probe, got %+v", st.ServerProbe)
+	}
+}
+
+func TestTriggerServerProbeSkipsWhenNotConfigured(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	_, ran := r.TriggerServerProbe(context.Background())
+	if ran {
+		t.Error("expected TriggerServerProbe to report ran=false when no ServerProbe is wired")
+	}
+	if r.Status(UpdateStatus{}).ServerProbe != nil {
+		t.Error("expected Status.ServerProbe to stay nil when no ServerProbe is wired")
+	}
+}
+
+// TestSetServerProbeNilClearsStaleResult pins a real bug caught in review:
+// SetServerProbe(nil) used to only clear r.probe, leaving r.lastProbe (and
+// therefore Status().ServerProbe) reporting the last successful result
+// forever. Concretely, blanking server.baseUrl in the Settings window
+// reaches this exact path (registerServerProbe(..., false) ->
+// SetServerProbe(nil)), and the Server card would keep showing "reachable"
+// from before the operator cleared the field -- the same staleness
+// TriggerServerProbe's own doc comment says this feature exists to avoid.
+func TestSetServerProbeNilClearsStaleResult(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetServerProbe(&fakeServerProbe{version: "1.10.0"})
+	if _, ran := r.TriggerServerProbe(context.Background()); !ran {
+		t.Fatal("expected the initial probe to run")
+	}
+	if r.Status(UpdateStatus{}).ServerProbe == nil {
+		t.Fatal("expected a non-nil ServerProbe result after a successful probe")
+	}
+
+	r.SetServerProbe(nil)
+
+	if got := r.Status(UpdateStatus{}).ServerProbe; got != nil {
+		t.Errorf("expected Status.ServerProbe to be nil after SetServerProbe(nil), got %+v (stale result)", got)
+	}
+}
+
+// TestTriggerServerProbeIgnoresConfigIncompleteAndPaused pins the
+// deliberate divergence from TriggerDrain/TriggerPrune documented on
+// TriggerServerProbe: confirming server reachability is useful precisely
+// while an operator is still filling in the storage half of setup, and
+// pause (shoot-mode) only ever meant to suspend automatic detection/
+// draining, never a manual "Test connection" click.
+func TestTriggerServerProbeIgnoresConfigIncompleteAndPaused(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	fp := &fakeServerProbe{version: "1.10.0"}
+	r.SetServerProbe(fp)
+	r.SetConfigIncomplete(true, []string{"ingest.localEditRoot"})
+	r.SetPaused(true)
+
+	_, ran := r.TriggerServerProbe(context.Background())
+	if !ran {
+		t.Error("expected TriggerServerProbe to run despite ConfigIncomplete and Paused")
+	}
+	if fp.calls != 1 {
+		t.Errorf("expected exactly 1 Probe call, got %d", fp.calls)
+	}
+}
+
+func TestTriggerServerProbeReportsErr(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetServerProbe(&fakeServerProbe{err: errors.New("dial tcp: connection refused")})
+
+	result, ran := r.TriggerServerProbe(context.Background())
+	if !ran {
+		t.Fatal("expected TriggerServerProbe to run")
+	}
+	if result.OK {
+		t.Error("expected OK=false on a probe error")
+	}
+	if result.Err == nil || result.Err.Error() != "dial tcp: connection refused" {
+		t.Errorf("got Err=%v, want the probe's error preserved", result.Err)
+	}
+}
+
+func TestTriggerServerProbeSkipsConcurrentPass(t *testing.T) {
+	fp := &fakeServerProbe{started: make(chan struct{}), release: make(chan struct{})}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetServerProbe(fp)
+
+	done := make(chan struct{})
+	go func() {
+		r.TriggerServerProbe(context.Background())
+		close(done)
+	}()
+	<-fp.started
+
+	if _, ran := r.TriggerServerProbe(context.Background()); ran {
+		t.Error("expected a second TriggerServerProbe to skip (ran=false) while a probe is already running")
+	}
+
+	close(fp.release)
+	<-done
+	if fp.calls != 1 {
+		t.Errorf("expected exactly 1 Probe call, got %d", fp.calls)
+	}
+}
+
+// TestServerProbeResultJSONRoundTripsErr pins the JSON-shape trap flagged
+// during review: a bare `error`-typed field marshals to "{}" by default
+// (see ProbeResult.MarshalJSON's own doc comment), which would silently
+// empty out the "unreachable" branch of the status page's Server card
+// while every other assertion here still passed.
+func TestServerProbeResultJSONRoundTripsErr(t *testing.T) {
+	want := ProbeResult{OK: false, At: time.Now(), Err: errors.New("server rejected the agent API key")}
+	b, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		OK  bool   `json:"ok"`
+		Err string `json:"err"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.OK {
+		t.Error("expected ok=false")
+	}
+	if got.Err != "server rejected the agent API key" {
+		t.Errorf("err = %q, want the original message preserved through JSON", got.Err)
+	}
 }
 
 // fakeIntegrationSyncer substitutes a real internal/luminar-backed syncer

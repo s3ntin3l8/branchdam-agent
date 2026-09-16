@@ -689,6 +689,11 @@ func (s *configSettings) reload() error {
 	s.runner.SetArchiveProber(func(pctx context.Context, root string) bool {
 		return probeArchive(pctx, root, client, newCfg.Ingest.UploadStream)
 	})
+	// Rebuild the server probe against the freshly reloaded client, same
+	// reasoning as the integration syncers below (issue #57): rotating
+	// server.apiKey or server.baseUrl from the Settings window must not
+	// leave "Test connection" probing a stale client indefinitely.
+	registerServerProbe(s.runner, client, serverConfigured(newCfg))
 	s.runner.SetDetectorInterval(time.Duration(newCfg.Ingest.PollIntervalSecs) * time.Second)
 	s.runner.SetDetectorRequireDCIM(newCfg.Ingest.RequireDCIM)
 	s.runner.SetPauseUploadOnMetered(newCfg.Ingest.PauseUploadOnMetered)

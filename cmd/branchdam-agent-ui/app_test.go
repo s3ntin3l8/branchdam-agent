@@ -327,6 +327,31 @@ func TestTriggerSyncPostsID(t *testing.T) {
 	}
 }
 
+func TestTestConnectionPostsToActionRoute(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/actions/test-connection" {
+			t.Errorf("method/path = %s %s, want POST /api/actions/test-connection", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"ran":true,"ok":true,"version":"1.10.0"}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	got, err := a.TestConnection()
+	if err != nil {
+		t.Fatalf("TestConnection: %v", err)
+	}
+	if !strings.Contains(got, `"version":"1.10.0"`) {
+		t.Errorf("TestConnection() = %q, want the agent's raw response body passed through", got)
+	}
+}
+
 func TestTriggerHookInstallPostsID(t *testing.T) {
 	withTempAgentDir(t)
 	if _, err := sessiontoken.Generate(); err != nil {
@@ -583,5 +608,28 @@ func TestStatusPollNeverRebuildsSettingsContainers(t *testing.T) {
 	}
 	if strings.Contains(renderBody, "renderSettingsForm") {
 		t.Error("render(view) must never call renderSettingsForm -- settings load exactly once, via loadSettings(), never on the status poll")
+	}
+	if !strings.Contains(renderBody, "renderSetupBanner(status)") {
+		t.Error("render(view) must call renderSetupBanner(status) so the missing-fields banner refreshes on every status poll")
+	}
+}
+
+// TestSetupBannerContainerIsNotASettingsContainer pins the id convention
+// TestStatusPollNeverRebuildsSettingsContainers enforces on app.js's own
+// render() body: #setup-banner is rebuilt by every 5s poll (it renders
+// Status.missingFields, which can change the moment an operator fixes a
+// field), so its id must never end in "-config" -- that suffix is reserved
+// for the five containers loadSettings() owns exclusively.
+func TestSetupBannerContainerIsNotASettingsContainer(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	if !strings.Contains(body, `id="setup-banner"`) {
+		t.Fatal("index.html missing #setup-banner")
+	}
+	if strings.Contains(body, `id="setup-banner-config"`) {
+		t.Error("#setup-banner must not be a \"-config\" container -- it is rebuilt on every status poll, not loaded once by loadSettings()")
 	}
 }
