@@ -551,6 +551,7 @@ name (`findValidationAsset`, same source file), so it must never carry the versi
 `TestReleaseWorkflowChecksumAssetIsNeverVersioned` (`internal/selfupdate/
 release_workflow_contract_test.go`) pins that. Re-check this reasoning at the same time as the
 `.dmg` suffix check above if go-selfupdate is ever upgraded.
+
 `LSUIElement=1` is what's meant to keep the tray out of the Dock and Cmd-Tab switcher; **this is
 unverified on real hardware** -- no macOS host has been used interactively to confirm it. Verify
 before relying on the macOS tray for day-to-day use.
