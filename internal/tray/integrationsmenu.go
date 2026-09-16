@@ -266,8 +266,12 @@ func integrationStatusLine(id IntegrationID, title string, iv IntegrationView, s
 		if ls.EdgesAttached > 0 {
 			edgeNote = fmt.Sprintf(", %d edge(s)", ls.EdgesAttached)
 		}
-		return fmt.Sprintf("%s: %s ago%s: %d pair(s), %d emitted, %d skipped%s%s%s",
-			title, since(ls.At), dryNote, ls.PairsFound, ls.Emitted, ls.Skipped, errNote, vnNote, edgeNote)
+		skipLabel := "skipped"
+		if iv.ID == IntegrationResolveDB {
+			skipLabel = "unresolved"
+		}
+		return fmt.Sprintf("%s: %s ago%s: %d pair(s), %d emitted, %d %s%s%s%s",
+			title, since(ls.At), dryNote, ls.PairsFound, ls.Emitted, ls.Skipped, skipLabel, errNote, vnNote, edgeNote)
 	}
 }
 

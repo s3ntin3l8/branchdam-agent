@@ -1,5 +1,5 @@
 // Package branchdam is the REST client for branchDAM's agent-server
-// contract (POST /api/v1/agent/{hello,handshake,events,rebase}). Every
+// contract (POST /api/v1/agent/{hello,handshake,events,rebase,resolve-snapshot}). Every
 // struct in this file is a byte-for-byte mirror of the server's DTOs --
 // internal/agent/types.go (payload structs) and internal/httpapi/routes.go
 // (request/response envelopes) in the branchdam repo, commit c570690's
@@ -20,7 +20,7 @@ import "encoding/json"
 // branchdam's internal/agent/types.go or internal/httpapi/routes.go's agent
 // DTOs change; conformance_test.go asserts it matches the committed golden
 // fixture.
-const ContractVersion = "branchdam@854f008"
+const ContractVersion = "branchdam@4003c24"
 
 // Event type constants, matching the event_queue.event_type CHECK
 // constraint (internal/agent/types.go in branchdam).

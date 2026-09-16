@@ -573,8 +573,10 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 		DryRun:     s.dryRun,
 		PairsFound: stats.ClipsFound,
 		Emitted:    stats.Emitted,
-		Skipped:    stats.Unresolved + stats.NoRewrite,
-		Errors:     stats.Errors + stats.ReviewedConflicts,
+		// Source-less members still reach the server to protect an existing
+		// edge; the Resolve UI labels this count "unresolved", not "skipped".
+		Skipped: stats.Unresolved + stats.NoRewrite,
+		Errors:  stats.Errors + stats.ReviewedConflicts,
 		// Reviewed edges remain intact but need operator attention.
 		// Surface them in the tray's existing error count.
 		VirtualNodes:  stats.VirtualNodes,

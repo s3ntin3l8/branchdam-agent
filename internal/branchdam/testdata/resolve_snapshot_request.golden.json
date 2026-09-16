@@ -1,0 +1,34 @@
+{
+  "agentId": "workstation-01",
+  "scopeId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "timelines": [
+    {
+      "timelineId": "timeline-1",
+      "nodeUuid": "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f61",
+      "filePath": "/virtual/resolve/0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f61",
+      "displayName": "Resolve: Master",
+      "evidenceJson": {
+        "timelineName": "Master"
+      }
+    }
+  ],
+  "memberships": [
+    {
+      "timelineId": "timeline-1",
+      "mediaFilePath": "D:\\Videos\\clip.mov",
+      "sourceNodeUuid": "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
+      "evidenceJson": {
+        "timelineId": "timeline-1",
+        "mediaFilePath": "D:\\Videos\\clip.mov"
+      }
+    },
+    {
+      "timelineId": "timeline-1",
+      "mediaFilePath": "D:\\Videos\\unresolved.mov"
+    }
+  ],
+  "legacyTimelineNodeUuids": [
+    "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f62"
+  ],
+  "retireScopeId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

@@ -131,6 +131,7 @@
     {{else}}
     <ul>
       {{range .Status.Integrations}}
+      {{$integration := .}}
       {{$cfg := integrationView $.Settings .ID}}
       <li>
         <strong>{{.ID}}</strong>:
@@ -147,7 +148,7 @@
         {{if .Err}}
         <span class="fail">failed: {{.Err}}</span>
         {{else}}
-        {{.PairsFound}} pairs found, {{.Emitted}} emitted{{if .DryRun}} <em>(dry run &mdash; nothing was emitted)</em>{{end}}{{if gt .EvidenceOnly 0}}, {{.EvidenceOnly}} evidence-only{{end}}, {{.Skipped}} skipped{{if gt .Errors 0}}, <span class="fail">{{.Errors}} errors</span>{{end}}
+        {{.PairsFound}} pairs found, {{.Emitted}} emitted{{if .DryRun}} <em>(dry run &mdash; nothing was emitted)</em>{{end}}{{if gt .EvidenceOnly 0}}, {{.EvidenceOnly}} evidence-only{{end}}, {{.Skipped}} {{if eq $integration.ID "resolvedb"}}unresolved{{else}}skipped{{end}}{{if gt .Errors 0}}, <span class="fail">{{.Errors}} errors</span>{{end}}
         {{end}}
         {{end}}
       </li>
