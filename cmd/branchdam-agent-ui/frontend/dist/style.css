@@ -191,7 +191,7 @@ ul { margin: 4px 0; padding-left: 18px; }
   display: grid;
   grid-template-columns:
     [label] var(--field-label-w) [req] 10px
-    [input] minmax(0, 1fr) [browse] auto [status] minmax(0, 90px);
+    [input] minmax(0, 1fr) [browse] auto [status] minmax(90px, 260px);
   align-items: center;
   column-gap: 6px;
   margin: 4px 0;
@@ -241,6 +241,14 @@ ul { margin: 4px 0; padding-left: 18px; }
   grid-column: status;
   font-size: 11px;
   color: var(--muted);
+  /* The status column's own track is a bounded minmax(90px, 260px), not
+     an unbounded auto, so a long error string (setFieldStatus(status,
+     String(err), "error") -- often an agent-relayed validation message)
+     must wrap WITHIN that width rather than overflow the grid
+     horizontally -- overflow-wrap:anywhere breaks even a single long
+     unbroken token (e.g. a path with no spaces), the same reasoning
+     #content's own min-width:0 comment gives for the analogous <td> case. */
+  overflow-wrap: anywhere;
 }
 .field-row > .field-status.saved { color: var(--ok); }
 .field-row > .field-status.error { color: var(--bad); }
@@ -275,7 +283,7 @@ ul { margin: 4px 0; padding-left: 18px; }
 .action-row {
   grid-template-columns:
     [label] var(--field-label-w) [detail] minmax(0, 1fr)
-    [actions] auto [status] minmax(0, 90px);
+    [actions] auto [status] minmax(90px, 260px);
 }
 .action-row > .row-detail { grid-column: detail; }
 .action-row > .row-actions {
