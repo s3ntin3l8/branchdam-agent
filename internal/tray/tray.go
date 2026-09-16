@@ -1137,15 +1137,9 @@ func (r *Runner) TriggerSync(ctx context.Context, id IntegrationID) (summary Syn
 	r.lastSync[id] = &stamped
 	r.mu.Unlock()
 
-	// Cross-session persistence of the emitted membership set is
-	// handled inside resolve.Syncer (its own OnSaveMemberships hook,
-	// wired by cmd/branchdam-agent/tray.go wireResolveSyncer). The
-	// runner-level plumbing this used to live in (SetOnSuccessfulSync,
-	// the onSuccessfulSync atomic.Pointer, the memberships capture)
-	// was dead -- the syncer's hook is the only path that has any
-	// current data to persist, and it captures fresh data inside the
-	// syncer's own OnSaveMemberships invocation rather than reading
-	// from a runner field at callback time.
+	// Resolve's confirmed scope is saved inside the syncer after the
+	// server transaction succeeds. The runner stores only this summary;
+	// it never guesses membership state from a tray-level callback.
 
 	return summary, true
 }

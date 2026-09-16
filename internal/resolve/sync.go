@@ -24,7 +24,7 @@ import (
 // Bump this whenever DefaultTimelineQuery changes in a way that could
 // change which clips get emitted — it is what lets a future data-correction
 // migration find every edge a particular schema-mapping version produced.
-const SchemaMappingVersion = "resolve-projectdb-1"
+const SchemaMappingVersion = "resolve-projectdb-2"
 
 // Tier, Confidence, and Resolver are the plan's values for a Resolve-sourced
 // edge — Tier 1 (Deterministic), Confidence 1.00 (the database is the
@@ -46,6 +46,11 @@ type EdgeAttacher interface {
 // create virtual project nodes for integration timelines.
 type VirtualNodeEmitter interface {
 	PostVirtualNodeCreated(ctx context.Context, agentID string, payload branchdam.VirtualNodeCreated) (*branchdam.EventResponse, error)
+}
+
+// SnapshotSubmitter confirms graph reconciliation before Sync returns.
+type SnapshotSubmitter interface {
+	PostResolveSnapshot(ctx context.Context, snapshot branchdam.ResolveSnapshot) (*branchdam.ResolveSnapshotResponse, error)
 }
 
 // PathRewrite maps a Windows path prefix to a NAS/container path prefix.
@@ -78,10 +83,12 @@ type Stats struct {
 	EdgesAttached int // PROJECT_SIDECAR edges emitted
 	EvidenceOnly  int // clips whose evidence was logged but no edge emitted (dry run mode)
 	// Delta detection fields (populated when PrevMemberships is set):
-	NewMemberships int // memberships in current query but not PrevMemberships
-	Unchanged      int // memberships present in both passes (edges skipped)
-	Removed        int // memberships in PrevMemberships but not current pass
-	FileMissing    int // clips in current query whose rewritten path doesn't exist on disk
+	NewMemberships    int // memberships in current query but not PrevMemberships
+	Unchanged         int // memberships present in both passes (edges skipped)
+	Removed           int // memberships in PrevMemberships but not current pass
+	FileMissing       int // clips in current query whose rewritten path doesn't exist on disk
+	Refreshed         int // existing unreviewed edges whose evidence changed
+	ReviewedConflicts int // human-reviewed edges requiring manual reconciliation
 }
 
 // evidence is the evidenceJson object stamped onto every emitted edge.
@@ -106,6 +113,8 @@ type Syncer struct {
 	DB             *DB
 	Index          nodeindex.Resolver
 	Client         EdgeAttacher
+	SnapshotClient SnapshotSubmitter
+	UseSnapshot    bool // production and dry-run path; legacy path is test-only
 	VirtualEmitter VirtualNodeEmitter
 	AgentID        string
 	DatabaseURL    string
@@ -128,7 +137,11 @@ type Syncer struct {
 	// the runtime state file for the next pass's delta detection.
 	// Called after r.mu.Unlock() semantics: slow saves must not block
 	// the sync pass's return. Nil means no persistence (dry run or test).
-	OnSaveMemberships func(entries []MembershipEntry) error
+	OnSaveMemberships       func(entries []MembershipEntry) error
+	LegacyTimelineNodeUUIDs []string
+	LegacyTimelineIDs       []string // derive UUID after resolving effective AgentID
+	RetireScopeID           string
+	OnSuccessfulSnapshot    func(scopeID string) error
 }
 
 func (s *Syncer) logger() *slog.Logger {
@@ -219,10 +232,18 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 		}
 		s.AgentID = id
 	}
+	if s.Query == "" {
+		if err := s.DB.CheckSchema(ctx); err != nil {
+			return Stats{}, err
+		}
+	}
 
 	clips, err := s.DB.TimelineClips(ctx, query)
 	if err != nil {
 		return Stats{}, fmt.Errorf("resolve: read timeline clips: %w", err)
+	}
+	if s.UseSnapshot {
+		return s.syncSnapshot(ctx, clips)
 	}
 
 	// Deduplicate repeated uses within one timeline, but retain a membership

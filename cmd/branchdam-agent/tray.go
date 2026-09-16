@@ -744,23 +744,25 @@ func wireRuntimeStateWithOps(runner *tray.Runner, ops runtimeStateOps) {
 }
 
 // handshakeSaveCallback returns the callback invoked on every successful
-// drain handshake. It persists the just-stamped LastHandshakeAt WITHOUT
-// wiping the resolve fields a sync pass may have written to runtime.json:
-// the handshake and sync persistence paths are two independent writers to
-// the same file, and a handshake save landing after the last resolve-sync
-// must not erase ResolveEmittedMemberships -- otherwise the next restart
-// loads an empty baseline, cross-restart delta detection stays off, and
-// every edge is re-emitted as new. (The sync-side callback, by contrast,
-// already preserves LastHandshakeAt when it writes memberships; see
-// wireResolveSyncCallback.)
+// drain handshake. It preserves Resolve scope and any legacy migration
+// fields while serializing the read-modify-write with scope persistence.
+// Atomic rename protects file contents; this mutex additionally prevents
+// concurrent callbacks from losing one another's fields.
+var runtimeStateWriteMu sync.Mutex
+
 func handshakeSaveCallback(ops runtimeStateOps, runtimePath string) func(t time.Time) error {
 	return func(t time.Time) error {
-		cur, _ := ops.Load(runtimePath)
+		runtimeStateWriteMu.Lock()
+		defer runtimeStateWriteMu.Unlock()
+		cur, err := ops.Load(runtimePath)
+		if err != nil {
+			return err
+		}
 		return ops.Save(runtimePath, runtimeState.State{
 			LastHandshakeAt:             t,
-			ResolveLastChangeCursor:     cur.ResolveLastChangeCursor,
 			ResolveEmittedMemberships:   cur.ResolveEmittedMemberships,
 			ResolveMembershipCapReached: cur.ResolveMembershipCapReached,
+			ResolveScopeID:              cur.ResolveScopeID,
 		})
 	}
 }
@@ -779,7 +781,9 @@ func wireResolveSyncer(_ *tray.Runner, syncer *resolveDBSyncer) {
 
 	// Load previous membership set from the runtime state file so the
 	// first sync pass can perform delta detection.
+	runtimeStateWriteMu.Lock()
 	rt, err := runtimeState.Load(runtimePath)
+	runtimeStateWriteMu.Unlock()
 	if err == nil && len(rt.ResolveEmittedMemberships) > 0 {
 		entries := make([]tray.SyncMembershipEntry, len(rt.ResolveEmittedMemberships))
 		for i, e := range rt.ResolveEmittedMemberships {
@@ -787,26 +791,49 @@ func wireResolveSyncer(_ *tray.Runner, syncer *resolveDBSyncer) {
 		}
 		syncer.prevMemberships = entries
 	}
+	if err == nil {
+		syncer.previousScopeID = rt.ResolveScopeID
+	}
 
-	// onSaveMemberships persists the emitted set to runtime.json.
-	syncer.onSaveMemberships = wireResolveSyncCallback(runtimePath)
+	if syncer.useSnapshot {
+		// A confirmed server snapshot supersedes the legacy local
+		// membership baseline. Keep old entries as migration hints.
+		syncer.onSaveScope = wireResolveScopeCallback(runtimePath)
+	} else {
+		// Compatibility path for existing tests and supervised legacy
+		// syncers; production always uses the confirmed snapshot.
+		syncer.onSaveMemberships = wireResolveSyncCallback(runtimePath)
+	}
 }
 
-// wireResolveSyncCallback returns an onSaveMemberships callback that
-// persists the emitted membership set to runtime.json alongside the
-// handshake callback's LastHandshakeAt. This is the sync-side
-// counterpart of the handshake callback in wireRuntimeStateWithOps.
+func wireResolveScopeCallback(runtimePath string) func(scopeID string) error {
+	return func(scopeID string) error {
+		runtimeStateWriteMu.Lock()
+		defer runtimeStateWriteMu.Unlock()
+		rt, err := runtimeState.Load(runtimePath)
+		if err != nil {
+			return err
+		}
+		rt.ResolveScopeID = scopeID
+		rt.ResolveEmittedMemberships = nil
+		rt.ResolveMembershipCapReached = false
+		return runtimeState.Save(runtimePath, rt)
+	}
+}
+
+// wireResolveSyncCallback is the historical membership persistence path
+// kept for legacy tests; production uses wireResolveScopeCallback.
 func wireResolveSyncCallback(runtimePath string) func(entries []tray.SyncMembershipEntry) error {
 	return func(entries []tray.SyncMembershipEntry) error {
-		// Load the current handshake timestamp so the full state write
-		// is consistent. The handshake callback writes this under its
-		// own timing; reading here is safe because Save is atomic
-		// (temp+rename) and last-wins is benign.
+		runtimeStateWriteMu.Lock()
+		defer runtimeStateWriteMu.Unlock()
+		// Preserve handshake/scope fields under the same mutex used by
+		// their callbacks; atomic Save alone cannot prevent lost updates.
 		rt, err := runtimeState.Load(runtimePath)
-		st := runtimeState.State{}
-		if err == nil {
-			st.LastHandshakeAt = rt.LastHandshakeAt
+		if err != nil {
+			return err
 		}
+		st := runtimeState.State{LastHandshakeAt: rt.LastHandshakeAt, ResolveScopeID: rt.ResolveScopeID}
 		if len(entries) > 0 {
 			st.ResolveEmittedMemberships = make([]runtimeState.MembershipEntry, len(entries))
 			for i, m := range entries {

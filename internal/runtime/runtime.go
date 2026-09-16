@@ -5,12 +5,10 @@
 // to operator intent. Anything the agent itself writes at runtime lives
 // here.
 //
-// Today, the only persisted field is the LastHandshakeAt timestamp the
-// status page renders as "last handshake: <since> ago" -- a freshness
-// signal that must survive a tray restart. Without persistence, a
-// restart before the next successful handshake suppresses the line
-// entirely, even if a successful handshake happened in the prior
-// session (issue #149 / audit F-13 follow-up).
+// It persists the LastHandshakeAt timestamp the status page renders as
+// "last handshake: <since> ago" and the last confirmed Resolve database
+// scope. Legacy Resolve membership fields are read once for migration to
+// the server's authoritative snapshot state.
 //
 // Path mirrors internal/agentlog's own platform table for the log file
 // so the two live in the same per-user state directory, separated by
@@ -47,22 +45,16 @@ type State struct {
 	// must not block the tray from starting).
 	LastHandshakeAt time.Time `json:"lastHandshakeAt,omitempty"`
 
-	// ResolveLastChangeCursor is the maximum Sm2TiItem.LastChangedTime
-	// value observed in the most recent Resolve sync pass. A zero value
-	// means "never synced" -- the next pass runs a full query. Persisted
-	// for cross-restart continuity so the agent can resume incremental
-	// syncing after a tray restart instead of replaying a full scan.
-	ResolveLastChangeCursor uint64 `json:"resolveLastChangeCursor,omitempty"`
+	// ResolveScopeID identifies the last database scope whose complete
+	// snapshot committed on the server. A later database switch sends this
+	// value as retireScopeId before replacing it after confirmed success.
+	ResolveScopeID string `json:"resolveScopeId,omitempty"`
 
-	// ResolveEmittedMemberships is the set of (mediaPath, timelineID)
-	// pairs the agent emitted PROJECT_SIDECAR edges for in the most
-	// recent Resolve sync pass. Used to detect added/unchanged/removed
-	// memberships on the next pass without querying the server. The
-	// agent cannot query which edges exist on the server, so this local
-	// snapshot is the only way to detect removals.
+	// ResolveEmittedMemberships is the legacy local delta baseline.
+	// Snapshot sync reads it once to claim previously-created timeline
+	// nodes, then clears it after the server confirms reconciliation.
 	//
-	// When the set exceeds ResolveMembershipCap, the agent falls back
-	// to full re-emission on every pass. See ResolveMembershipCap.
+	// Historical files may contain at most ResolveMembershipCap entries.
 	ResolveEmittedMemberships []MembershipEntry `json:"resolveEmittedMemberships,omitempty"`
 
 	// ResolveMembershipCapReached is set when the membership set was
@@ -105,7 +97,7 @@ const ResolveMembershipCap = 10_000
 // preventing a fresh install from writing a non-empty JSON object.
 func (s State) MarshalJSON() ([]byte, error) {
 	type stateAlias State // avoid infinite recursion on the custom MarshalJSON
-	if s.LastHandshakeAt.IsZero() && len(s.ResolveEmittedMemberships) == 0 && s.ResolveLastChangeCursor == 0 && !s.ResolveMembershipCapReached {
+	if s.LastHandshakeAt.IsZero() && len(s.ResolveEmittedMemberships) == 0 && !s.ResolveMembershipCapReached && s.ResolveScopeID == "" {
 		return []byte("{}"), nil
 	}
 	return json.Marshal(stateAlias(s))

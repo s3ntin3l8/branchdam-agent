@@ -321,7 +321,7 @@ func TestWireResolveSyncerWiresDeltaDetectionCallbacks(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 
 	cfg := config.Config{
-		Server:  config.ServerConfig{BaseURL: "http://localhost:8080", APIKey: "0123456789abcdef0123456789abcdef"},
+		Server:  config.ServerConfig{BaseURL: "http://localhost:8080", APIKey: "testtesttesttesttesttesttesttest"},
 		AgentID: "test-agent",
 		Integrations: config.IntegrationsConfig{
 			NodeIndexPath: "/dev/null/non-existent-but-Ready-only-checks-string",
@@ -337,6 +337,7 @@ func TestWireResolveSyncerWiresDeltaDetectionCallbacks(t *testing.T) {
 	if syncer == nil {
 		t.Fatal("buildIntegrationDeps returned nil syncer for an enabled ResolveDB config")
 	}
+	syncer.useSnapshot = false // exercise the historical membership bridge
 	if _, ok := deps[tray.IntegrationResolveDB]; !ok {
 		t.Fatal("ResolveDB not in built deps map")
 	}
@@ -551,6 +552,7 @@ func TestResolveDBSyncerAdvancesPrevMembershipsAcrossPasses(t *testing.T) {
 	if syncer == nil {
 		t.Fatal("buildIntegrationDeps returned nil syncer for an enabled ResolveDB config")
 	}
+	syncer.useSnapshot = false // exercise the historical membership bridge
 	// Inject a fake client so PostEdgeAttached returns success without
 	// a real branchDAM server. Required because DryRun=false needs a
 	// working client to exercise the OnSaveMemberships bridge.
@@ -665,4 +667,61 @@ func indexJSON(entries map[string]string) []byte {
 	}
 	buf = append(buf, '}')
 	return buf
+}
+
+func TestConcurrentHandshakeAndResolveScopeSavePreservesBoth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime.json")
+	ops := runtimeStateOps{Load: runtimeState.Load, Save: runtimeState.Save}
+	handshake := handshakeSaveCallback(ops, path)
+	scopeSave := wireResolveScopeCallback(path)
+	for i := 0; i < 50; i++ {
+		if err := runtimeState.Save(path, runtimeState.State{}); err != nil {
+			t.Fatal(err)
+		}
+		stamp := time.Date(2026, 9, 15, 12, 0, i, 0, time.UTC)
+		scope := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		start := make(chan struct{})
+		results := make(chan error, 2)
+		go func() { <-start; results <- handshake(stamp) }()
+		go func() { <-start; results <- scopeSave(scope) }()
+		close(start)
+		for n := 0; n < 2; n++ {
+			if err := <-results; err != nil {
+				t.Fatalf("concurrent save %d: %v", i, err)
+			}
+		}
+		state, err := runtimeState.Load(path)
+		if err != nil || !state.LastHandshakeAt.Equal(stamp) || state.ResolveScopeID != scope {
+			t.Fatalf("save %d lost a field: state=%+v err=%v", i, state, err)
+		}
+	}
+}
+
+func TestWireResolveSnapshotMigratesLegacyMembershipState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path, err := runtimeState.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	if err := runtimeState.Save(path, runtimeState.State{
+		LastHandshakeAt:           stamp,
+		ResolveEmittedMemberships: []runtimeState.MembershipEntry{{MediaPath: "D:\\a.mov", TimelineID: "tl1"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	syncer := &resolveDBSyncer{useSnapshot: true}
+	wireResolveSyncer(nil, syncer)
+	if syncer.onSaveScope == nil || len(syncer.prevMemberships) != 1 || syncer.previousScopeID != "" {
+		t.Fatalf("wiring = %+v", syncer)
+	}
+	scope := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if err := syncer.onSaveScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	state, err := runtimeState.Load(path)
+	if err != nil || state.ResolveScopeID != scope || len(state.ResolveEmittedMemberships) != 0 || !state.LastHandshakeAt.Equal(stamp) {
+		t.Fatalf("migrated state = %+v, err = %v", state, err)
+	}
 }
