@@ -896,24 +896,21 @@ func plural(n int) string {
 }
 
 // uiBinaryName is cmd/branchdam-agent-ui's built binary's platform-specific
-// basename. The macOS half imports internal/appbundle.UIBinaryName rather
-// than re-spelling it as a literal -- appbundle is a lightweight, pure-Go
-// leaf package (fmt/io/os/path/filepath/regexp only), and Hermes' review of
-// PR #214 already made exactly this case for internal/selfupdate's own
-// macOSUISibling ("appbundle.UIBinaryName is the single source of truth...
-// so the packages can't disagree on the name"). The same argument applies
-// here -- a rename in appbundle.UIBinaryName must never leave this package
-// silently disagreeing with what mkbundle actually wrote into
-// Contents/MacOS/. The Windows half stays a literal because there IS no
-// equivalent exported constant to import: internal/selfupdate's winUIExe
-// is unexported, and SelfUpdater's own doc comment above already
-// established that internal/selfupdate is deliberately NOT imported into
-// this package (it pulls in golang.org/x/crypto/openpgp transitively) --
-// that reason doesn't apply to appbundle, which is why only Windows
-// duplicates a literal here.
+// basename, both halves imported from internal/appbundle rather than
+// re-spelled as literals here -- appbundle is a lightweight, pure-Go leaf
+// package (fmt/io/os/path/filepath/regexp only) both internal/selfupdate
+// and this package can safely depend on, unlike internal/selfupdate
+// itself, which SelfUpdater's own doc comment above already established is
+// deliberately NOT imported into this package (it pulls in
+// golang.org/x/crypto/openpgp transitively). A Hermes review finding on PR
+// #218: this function used to duplicate the Windows name as an independent
+// literal, which could silently drift from internal/selfupdate's own
+// winUIExe if the binary were ever renamed -- appbundle.WinUIBinaryName is
+// now that package's own single source of truth for the same reason
+// UIBinaryName already was for the macOS name.
 func uiBinaryName() string {
 	if runtime.GOOS == "windows" {
-		return "branchdam-agent-ui.exe"
+		return appbundle.WinUIBinaryName
 	}
 	return appbundle.UIBinaryName
 }
