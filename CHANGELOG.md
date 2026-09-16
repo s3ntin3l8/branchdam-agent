@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.8.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.7.0...v1.8.0) (2026-09-16)
+
+
+### Features
+
+* **packaging:** ship the UI binary in both installers (Track 3f) ([#214](https://github.com/s3ntin3l8/branchdam-agent/issues/214)) ([30e18c3](https://github.com/s3ntin3l8/branchdam-agent/commit/30e18c3393511d20e581e550e0ce19e5dc842beb))
+* **ui:** wire "Open branchDAM" and slim the tray's Settings/Integrations menus ([#211](https://github.com/s3ntin3l8/branchdam-agent/issues/211)) ([#218](https://github.com/s3ntin3l8/branchdam-agent/issues/218)) ([c8c3ebb](https://github.com/s3ntin3l8/branchdam-agent/commit/c8c3ebb4103a9f9c50cc7429c6cc417d810ad8cf))
+* **ui:** wire Integrations/Hooks actions into the Wails window (Track 3e) ([#216](https://github.com/s3ntin3l8/branchdam-agent/issues/216)) ([5cbc618](https://github.com/s3ntin3l8/branchdam-agent/commit/5cbc618551c56fb7dc6cb7edfae5f5e934b24eac))
+
 ## [1.7.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.6.0...v1.7.0) (2026-09-16)
 
 
