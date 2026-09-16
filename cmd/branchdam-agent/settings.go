@@ -936,6 +936,16 @@ func (s *configSettings) reload() error {
 	s.runner.SetDetectorRequireDCIM(newCfg.Ingest.RequireDCIM)
 	s.runner.SetPauseUploadOnMetered(newCfg.Ingest.PauseUploadOnMetered)
 	s.runner.SetAutoEject(newCfg.Ingest.AutoEject)
+	// Closes a pre-existing gap surfaced while removing this menu item's own
+	// tray duplicate (issue #211): tray.confirmDestructive previously only
+	// ever reached the live Runner via settingsmenu.go's dispatch calling
+	// SetConfirmDestructive directly, alongside the SetBool save -- a path
+	// the Wails Settings window (Track 3d, PR #210) never had, since it
+	// only ever calls the generic SetBool/reload path below. Toggling this
+	// checkbox from the window persisted to config.yaml correctly but never
+	// took live effect until the next tray restart. Now reload() re-seeds
+	// it the same way every other live-tunable already does.
+	s.runner.SetConfirmDestructive(newCfg.Tray.ConfirmDestructive)
 	s.runner.SetConfigIncomplete(configIncomplete, missingFields)
 	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
 

@@ -15,11 +15,14 @@ import (
 // Windows sibling names are hardcoded, never derived by munging execPath's
 // basename -- go-selfupdate's DecompressCommand fails outright for a name
 // that isn't actually present in the archive, which would abort the whole
-// apply for a renamed exe.
+// apply for a renamed exe. winUIExe is appbundle.WinUIBinaryName, not a
+// fourth independent literal -- see that constant's own doc comment for
+// why internal/tray needs the identical name reachable without importing
+// this package.
 const (
 	winConsoleExe = "branchdam-agent.exe"
 	winTrayExe    = "branchdam-agent-tray.exe"
-	winUIExe      = "branchdam-agent-ui.exe"
+	winUIExe      = appbundle.WinUIBinaryName
 )
 
 // winKnownExes is every Windows binary shipped from the same release

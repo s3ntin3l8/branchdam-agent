@@ -162,6 +162,16 @@ type Settings interface {
 	// running tray. ok is false when the operator dismissed the dialog --
 	// distinct from err, which means the dialog itself failed to render or
 	// the change failed to save.
+	//
+	// No production code calls this anymore as of issue #211: it existed
+	// for settingsmenu.go's own free-text menu items, all of which moved to
+	// the Wails Settings window's SetString-backed form fields instead (see
+	// that file's own doc comment). Left in the interface rather than
+	// removed -- deleting it means also deleting SettingsField,
+	// configSettings.PromptAndSet, and the dialog-subprocess plumbing it
+	// alone needs in cmd/branchdam-agent/settings.go, which is a bigger,
+	// separate change than #211's menu-slimming scope. Tracked as issue
+	// #217.
 	PromptAndSet(field SettingsField) (ok bool, err error)
 
 	// PromptAndSetIntegrationPath is PromptAndSet's counterpart for a
@@ -170,6 +180,11 @@ type Settings interface {
 	// #46, ...), matching SettingsField's own design note: a single enum
 	// plus one method beats N near-identical ones. Same ok/err contract as
 	// PromptAndSet.
+	//
+	// Same post-#211 status as PromptAndSet above: integrationsmenu.go's
+	// own catalog-path menu item (its only caller) is gone, replaced by
+	// the Wails window's SetIntegrationPath-backed field. Tracked in the
+	// same issue #217.
 	PromptAndSetIntegrationPath(id IntegrationID) (ok bool, err error)
 
 	// SetIntegrationPath is PromptAndSetIntegrationPath's non-interactive
@@ -180,6 +195,8 @@ type Settings interface {
 	// PromptAndSetIntegrationRewrites prompts for path rewrite rules
 	// (from:to pairs) for the given integration. Only meaningful for
 	// integrations that have a pathRewrites config field (Resolve).
+	//
+	// Same post-#211 status as PromptAndSet above -- issue #217.
 	PromptAndSetIntegrationRewrites(id IntegrationID) (ok bool, err error)
 
 	// SetIntegrationRewrites is PromptAndSetIntegrationRewrites's

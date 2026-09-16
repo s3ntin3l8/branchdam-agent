@@ -38,6 +38,21 @@ const BinaryName = "branchdam-agent"
 // on the name go-selfupdate looks for inside the release tarball.
 const UIBinaryName = "branchdam-agent-ui"
 
+// WinUIBinaryName is UIBinaryName's Windows counterpart -- cmd/branchdam-
+// agent-ui's built binary name with the platform's own .exe extension.
+// Exported from this package (rather than living only in
+// internal/selfupdate, which already has an unexported winUIExe of its
+// own) so internal/tray's "Open branchDAM" menu item (run_supported.go's
+// launchUIBinary) can resolve the same name without importing
+// internal/selfupdate -- SelfUpdater's own doc comment (internal/tray/
+// tray.go) already established that import is unwanted (it pulls in
+// golang.org/x/crypto/openpgp transitively). A Hermes review finding on
+// PR #218: internal/tray had re-spelled this as a third independent
+// literal, which could silently drift from internal/selfupdate's own copy
+// if the binary were ever renamed -- the exact class of bug UIBinaryName's
+// own doc comment above already guards against on the macOS side.
+const WinUIBinaryName = "branchdam-agent-ui.exe"
+
 // DisplayName is CFBundleName/CFBundleDisplayName -- what Finder and (were
 // LSUIElement not set) the Dock would show.
 const DisplayName = "branchDAM Agent"
