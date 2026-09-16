@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.9.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.8.0...v1.9.0) (2026-09-16)
+
+
+### Features
+
+* **resolve:** reconcile complete database snapshots ([#213](https://github.com/s3ntin3l8/branchdam-agent/issues/213)) ([d200128](https://github.com/s3ntin3l8/branchdam-agent/commit/d200128ca98d88ab919ff7e410a66e13ef8232d1))
+
+
+### Bug Fixes
+
+* repair v1.8.0 Wails UI, tray duplicate menu entry, and release asset naming ([9b8ca6e](https://github.com/s3ntin3l8/branchdam-agent/commit/9b8ca6ed0607c2c232c9750a7e21d4f7c2163014))
+
 ## [1.8.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.7.0...v1.8.0) (2026-09-16)
 
 
