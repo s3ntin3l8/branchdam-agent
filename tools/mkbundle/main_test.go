@@ -28,3 +28,24 @@ func TestRunWritesBundle(t *testing.T) {
 		t.Errorf("Info.plist not written: %v", err)
 	}
 }
+
+func TestRunWritesBundleWithUIBinary(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "src-binary")
+	if err := os.WriteFile(bin, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uiBin := filepath.Join(dir, "src-ui-binary")
+	if err := os.WriteFile(uiBin, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	appDir := filepath.Join(dir, "branchdam-agent.app")
+
+	got := run([]string{"-app", appDir, "-binary", bin, "-ui-binary", uiBin, "-version", "v1.2.3"})
+	if got != 0 {
+		t.Fatalf("run() = %d, want 0", got)
+	}
+	if _, err := os.Stat(filepath.Join(appDir, "Contents", "MacOS", "branchdam-agent-ui")); err != nil {
+		t.Errorf("UI binary not written: %v", err)
+	}
+}

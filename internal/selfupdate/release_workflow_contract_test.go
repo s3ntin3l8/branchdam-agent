@@ -88,8 +88,8 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 		t.Fatal("release workflow is missing build-windows job")
 	}
 	packageStep, _ := workflowStep(t, windows, "Package")
-	if !strings.Contains(packageStep.Run, "zip -j branchdam-agent-windows-amd64.zip branchdam-agent.exe branchdam-agent-tray.exe") {
-		t.Error("Windows package must contain both console and tray executables")
+	if !strings.Contains(packageStep.Run, "zip -j branchdam-agent-windows-amd64.zip branchdam-agent.exe branchdam-agent-tray.exe branchdam-agent-ui.exe") {
+		t.Error("Windows package must contain the console, tray, and UI executables")
 	}
 	windowsArtifact := workflowUses(t, windows, "actions/upload-artifact")
 	if !strings.Contains(fmt.Sprint(windowsArtifact.With["path"]), "dist/branchdam-agent-windows-amd64.zip") {

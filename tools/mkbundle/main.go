@@ -22,6 +22,7 @@ func run(args []string) int {
 	fs := flag.NewFlagSet("mkbundle", flag.ContinueOnError)
 	appDir := fs.String("app", "", "output bundle path, e.g. dist/branchdam-agent.app")
 	binPath := fs.String("binary", "", "path to the built branchdam-agent binary to bundle")
+	uiBinPath := fs.String("ui-binary", "", "path to the built branchdam-agent-ui binary to bundle (optional)")
 	ver := fs.String("version", "dev", "version string to render into Info.plist")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -32,7 +33,7 @@ func run(args []string) int {
 		return 2
 	}
 
-	if err := appbundle.Write(*appDir, *binPath, *ver); err != nil {
+	if err := appbundle.Write(*appDir, *binPath, *uiBinPath, *ver); err != nil {
 		fmt.Fprintf(os.Stderr, "mkbundle: %v\n", err)
 		return 1
 	}

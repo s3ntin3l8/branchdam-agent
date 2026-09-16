@@ -17,7 +17,8 @@ import (
 // resignTimeout bounds the codesign subprocess so a wedged codesign can't
 // hang Apply/Rollback indefinitely -- the same rationale as this repo's
 // existing subprocess bound, dialogTimeout (cmd/branchdam-agent/bootstrap.go),
-// though shorter: codesign on this bundle's single ~29 MB executable is fast,
+// though shorter: codesign on this bundle's ~29 MB tray executable (plus the
+// smaller UI binary now shipping alongside it) is fast,
 // and this runs unattended mid-update, where a long hang is worse than a
 // failed resign that logs and continues. Neither call site has a natural ctx
 // to thread through here (Apply's is scoped to the whole multi-target

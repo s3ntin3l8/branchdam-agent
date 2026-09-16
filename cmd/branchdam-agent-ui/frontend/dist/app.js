@@ -207,8 +207,33 @@ function table(rows) {
     .join("")}</table>`;
 }
 
+// uiVersion is this window's OWN binary version (App.Version), distinct
+// from view.version below (the AGENT's own reported version) -- fetched
+// once at startup, not on the status poll, since it can't change during a
+// window's lifetime. The two normally match (they ship together), but can
+// briefly disagree if a self-update fails partway -- see main.go's
+// version var doc comment.
+let uiVersion = null;
+
+async function loadUIVersion() {
+  const app = getApp();
+  if (!app) {
+    setTimeout(loadUIVersion, 500);
+    return;
+  }
+  try {
+    uiVersion = await app.Version();
+  } catch {
+    // Cosmetic only -- an older UI binary predating this method, or any
+    // other failure, shouldn't block the rest of the page from rendering.
+  }
+}
+loadUIVersion();
+
 function render(view) {
-  byId("version").textContent = view.version ? `v${view.version}` : "";
+  const agentVersion = view.version ? `agent v${view.version}` : "";
+  const shownUIVersion = uiVersion && uiVersion !== view.version ? `UI v${uiVersion}` : "";
+  byId("version").textContent = [agentVersion, shownUIVersion].filter(Boolean).join(" · ");
   const status = view.status ?? {};
   renderServer(status);
   renderIngest(status);
