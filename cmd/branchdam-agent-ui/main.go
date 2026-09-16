@@ -12,10 +12,27 @@
 // commands -- Wails' binding glue (window.go.main.App.* in
 // frontend/dist/app.js) is injected by this package's own wails.Run at
 // window-load time via runtime reflection over Bind, not generated ahead
-// of time, so a plain `go build` produces a fully working binary. The
-// generated TypeScript types the CLI would otherwise produce under
-// frontend/wailsjs/ are an IDE convenience this hand-written vanilla-JS
-// frontend has no use for.
+// of time. The generated TypeScript types the CLI would otherwise produce
+// under frontend/wailsjs/ are an IDE convenience this hand-written
+// vanilla-JS frontend has no use for.
+//
+// EVERY build of this package MUST pass -tags production. Without it,
+// wails v2.16.0's own `//go:build !dev && !production && !bindings` guard
+// (internal/app/app_default_windows.go / app_default_unix.go) substitutes
+// a stub CreateApp: on Windows that pops a "Wails applications will not
+// build without the correct build tags" MessageBox; on macOS it returns an
+// error that surfaces only as this file's own `println` below, to a
+// stdout nobody reads, so the window silently never appears. The tag is
+// self-contained -- wails embeds its production runtime JS
+// (internal/frontend/runtime/runtime_prod_desktop.go) from the module
+// itself, so no `wails` CLI and no npm step are required, and it is
+// CGO-neutral (the Windows leg still cross-compiles with
+// CGO_ENABLED=0). The five sites that must carry it: Makefile's
+// build-windows and build-darwin-app targets, release-binaries.yml's
+// build-windows and build-darwin jobs, and ci-cd.yml's build-darwin-full
+// job (which exists solely to typecheck this build on a real macOS host
+// before release, since darwin has no visible failure mode to catch a
+// missing tag in the field).
 package main
 
 import (

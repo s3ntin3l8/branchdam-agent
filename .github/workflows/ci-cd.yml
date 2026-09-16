@@ -132,3 +132,15 @@ jobs:
           go-version-file: go.mod
       - run: go test ./...
       - run: go build ./...
+      # go build ./... above compiles cmd/branchdam-agent-ui WITHOUT
+      # -tags production, so it only proves the package's import graph and
+      # function bodies typecheck under wails' stub app_default_unix.go --
+      # not under the real one. Without this step, nothing in CI catches a
+      # missing -tags production on the darwin UI build before release; the
+      # failure mode is silent on macOS (app_default_unix.go's CreateApp
+      # returns an error that surfaces only as a println nobody reads, so
+      # the window just never appears -- see cmd/branchdam-agent-ui/main.go's
+      # doc comment). The Windows leg is covered for free by
+      # `make check` -> `build-windows`, which already cross-compiles the
+      # UI with the tag; this step is darwin's equivalent guard.
+      - run: go build -tags production ./cmd/branchdam-agent-ui
