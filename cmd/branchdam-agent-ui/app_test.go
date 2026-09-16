@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -500,54 +501,226 @@ func TestIntegrationBlockRendersFriendlyTitle(t *testing.T) {
 	}
 }
 
-// TestSettingsSectionsPrecedeLiveSections pins decision 2 of the tray/window
-// UX rethink ("settings order also confusing, integration status before
-// setup"): every config-zone section (id ending "-config") must appear in
-// index.html before every live-status section (id ending "-body"), so
-// first-run configuration is the first thing an operator sees, not buried
-// below status that can't populate until configuration is done.
-func TestSettingsSectionsPrecedeLiveSections(t *testing.T) {
+// TestCategoryPanelsGroupSettingsWithTheirStatus is the nav-pane-era
+// successor to the tray/window UX rethink's original
+// TestSettingsSectionsPrecedeLiveSections: that test's premise -- one global
+// "every config section before every live-status section" ordering -- died
+// the moment settings and status paired up per category (the operator's own
+// request: "setting and status should go together for their corresponding
+// sections"). The underlying concern it existed for survives in a form that
+// fits the new structure instead: within EACH panel, that panel's own
+// settings subsection must still precede its own live-status subsection(s),
+// so configuring a category is always the first thing an operator sees
+// inside it, never buried below status that can't populate until
+// configuration is done.
+func TestCategoryPanelsGroupSettingsWithTheirStatus(t *testing.T) {
 	src, err := os.ReadFile("frontend/dist/index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := string(src)
 
-	configIDs := []string{
-		"settings-server-config",
-		"settings-storage-config",
-		"settings-behavior-config",
-		"settings-selfupdate-config",
-		"settings-integrations-config",
-	}
-	liveIDs := []string{
-		"server-body",
-		"ingest-body",
-		"queue-body",
-		"watch-body",
-		"integrations-body",
-		"hooks-body",
-		"selfupdate-body",
+	categories := []struct {
+		panel  string
+		config string
+		live   []string
+	}{
+		{"panel-server", "settings-server-config", []string{"server-body"}},
+		{"panel-storage", "settings-storage-config", []string{"ingest-body", "queue-body", "watch-body"}},
+		{"panel-integrations", "settings-integrations-config", []string{"integrations-body", "hooks-body"}},
+		{"panel-behavior", "settings-behavior-config", nil},
+		{"panel-selfupdate", "settings-selfupdate-config", []string{"selfupdate-body"}},
 	}
 
-	lastConfigIdx := -1
-	for _, id := range configIDs {
+	mainEnd := strings.Index(body, "</main>")
+	if mainEnd == -1 {
+		t.Fatal(`index.html missing "</main>" -- can't bound the last panel's span`)
+	}
+
+	panelStart := func(id string) int {
 		idx := strings.Index(body, `id="`+id+`"`)
 		if idx == -1 {
-			t.Fatalf("index.html missing config container %q", id)
+			t.Fatalf("index.html missing panel %q", id)
 		}
-		if idx > lastConfigIdx {
-			lastConfigIdx = idx
+		return idx
+	}
+
+	for i, c := range categories {
+		start := panelStart(c.panel)
+		end := mainEnd
+		if i+1 < len(categories) {
+			end = panelStart(categories[i+1].panel)
+		}
+		if start >= end {
+			t.Fatalf("panel %q's span is empty or inverted (start=%d, end=%d)", c.panel, start, end)
+		}
+
+		configIdx := strings.Index(body, `id="`+c.config+`"`)
+		if configIdx == -1 {
+			t.Fatalf("index.html missing config container %q", c.config)
+		}
+		if configIdx < start || configIdx >= end {
+			t.Errorf("config container %q (byte %d) is outside panel %q's span [%d, %d)", c.config, configIdx, c.panel, start, end)
+		}
+
+		for _, liveID := range c.live {
+			liveIdx := strings.Index(body, `id="`+liveID+`"`)
+			if liveIdx == -1 {
+				t.Fatalf("index.html missing live-status container %q", liveID)
+			}
+			if liveIdx < start || liveIdx >= end {
+				t.Errorf("live-status container %q (byte %d) is outside panel %q's span [%d, %d)", liveID, liveIdx, c.panel, start, end)
+			}
+			if liveIdx < configIdx {
+				t.Errorf("live-status container %q (byte %d) precedes its own panel's config container %q (byte %d) -- settings must come first within a panel", liveID, liveIdx, c.config, configIdx)
+			}
 		}
 	}
-	for _, id := range liveIDs {
-		idx := strings.Index(body, `id="`+id+`"`)
-		if idx == -1 {
-			t.Fatalf("index.html missing live-status container %q", id)
+}
+
+// TestNavItemsAndPanelsCorrespond guards the nav/panel wiring itself: every
+// nav button's data-panel must name a panel that actually exists, and every
+// panel must be reachable from some nav button -- either failure mode is
+// silent in the running window (a dead click, or permanently hidden
+// content), so this is checked mechanically instead. Depends on the same
+// attribute-order convention index.html documents: "class" before
+// "data-panel" on nav buttons, "class" before "id" on panels.
+func TestNavItemsAndPanelsCorrespond(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	navRe := regexp.MustCompile(`class="nav-item[^"]*"\s+data-panel="([^"]+)"`)
+	panelRe := regexp.MustCompile(`class="panel[^"]*"\s+id="([^"]+)"`)
+
+	navIDs := map[string]int{}
+	for _, m := range navRe.FindAllStringSubmatch(body, -1) {
+		navIDs[m[1]]++
+	}
+	panelIDs := map[string]int{}
+	for _, m := range panelRe.FindAllStringSubmatch(body, -1) {
+		panelIDs[m[1]]++
+	}
+
+	if len(navIDs) == 0 {
+		t.Fatal("no nav buttons found -- regex or markup drifted")
+	}
+	if len(panelIDs) == 0 {
+		t.Fatal("no panels found -- regex or markup drifted")
+	}
+
+	for id, n := range navIDs {
+		if n > 1 {
+			t.Errorf("nav button targeting %q appears %d times, want 1", id, n)
 		}
-		if idx < lastConfigIdx {
-			t.Errorf("live-status container %q (byte %d) appears before the last config container (byte %d) -- settings must come first", id, idx, lastConfigIdx)
+		if panelIDs[id] == 0 {
+			t.Errorf("nav button targets %q, but no panel with that id exists", id)
 		}
+	}
+	for id, n := range panelIDs {
+		if n > 1 {
+			t.Errorf("panel %q appears %d times, want 1", id, n)
+		}
+		if navIDs[id] == 0 {
+			t.Errorf("panel %q exists but no nav button targets it -- unreachable content", id)
+		}
+	}
+}
+
+// TestExactlyOneDefaultPanel pins the operator's own decision: the window
+// always opens on the Server panel, with no persistence of the
+// last-viewed category across reopens (simpler, and keeps steering a
+// first-run operator back to setup rather than wherever they last
+// clicked). Exactly one panel/nav-item may start "active", and it must be
+// panel-server -- two active panels would show overlapping content, zero
+// would show a blank content pane, and the wrong one would silently
+// contradict this decision on every window open.
+func TestExactlyOneDefaultPanel(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	if n := strings.Count(body, `class="panel active"`); n != 1 {
+		t.Errorf(`got %d occurrences of class="panel active", want exactly 1`, n)
+	}
+	if n := strings.Count(body, `class="nav-item active"`); n != 1 {
+		t.Errorf(`got %d occurrences of class="nav-item active", want exactly 1`, n)
+	}
+
+	activePanelRe := regexp.MustCompile(`class="panel active"\s+id="([^"]+)"`)
+	m := activePanelRe.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatal(`no panel matches class="panel active" id="..."`)
+	}
+	if m[1] != "panel-server" {
+		t.Errorf("default active panel is %q, want %q", m[1], "panel-server")
+	}
+
+	activeNavRe := regexp.MustCompile(`class="nav-item active"\s+data-panel="([^"]+)"`)
+	nm := activeNavRe.FindStringSubmatch(body)
+	if nm == nil {
+		t.Fatal(`no nav button matches class="nav-item active" data-panel="..."`)
+	}
+	if nm[1] != m[1] {
+		t.Errorf("active nav button targets %q, but active panel is %q -- they must agree", nm[1], m[1])
+	}
+}
+
+// TestCategorySwitchingNeverRerenders is showCategory's own sibling to
+// TestStatusPollNeverRebuildsSettingsContainers: switching categories must
+// only toggle CSS visibility, never re-render a panel's contents. If
+// showCategory (or initNav) ever called renderSettingsForm,
+// renderIntegrationBlock, or rebuilt a container via innerHTML, an
+// operator's mid-typing settings edit could be silently wiped out by
+// clicking a nav item -- the same failure class the poll-clobber test
+// exists to catch, reintroduced through a second door. Mirrors that test's
+// own extraction mechanism exactly, including failing loudly (not
+// vacuously) if either anchor goes missing.
+func TestCategorySwitchingNeverRerenders(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	start := strings.Index(body, "function showCategory(")
+	if start == -1 {
+		t.Fatal("app.js: could not find `function showCategory(`")
+	}
+	end := strings.Index(body[start:], "\nfunction initNav(")
+	if end == -1 {
+		t.Fatal("app.js: could not find the end of showCategory (expected `function initNav(` to follow it)")
+	}
+	navBody := body[start : start+end]
+
+	for _, bad := range []string{"-config", "renderSettingsForm", "renderIntegrationBlock", "innerHTML"} {
+		if strings.Contains(navBody, bad) {
+			t.Errorf("showCategory must never reference %q -- category switching must only toggle CSS visibility, never re-render a panel", bad)
+		}
+	}
+}
+
+// TestInactivePanelsAreHiddenByCSS guards the one CSS rule the whole nav
+// depends on: without it, every panel renders simultaneously (back to the
+// original one-long-page layout) and clicking a nav item does nothing
+// visible -- a silent no-op, not an error, which is why this is pinned
+// mechanically rather than left to a human noticing.
+func TestInactivePanelsAreHiddenByCSS(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join(strings.Fields(string(src)), "")
+
+	if !strings.Contains(body, ".panel{display:none") {
+		t.Error(`style.css missing ".panel { display: none }" -- panels are not hidden by default`)
+	}
+	if !strings.Contains(body, ".panel.active{display:") {
+		t.Error(`style.css missing ".panel.active { display: ... }" -- the active panel has no override to become visible`)
 	}
 }
 

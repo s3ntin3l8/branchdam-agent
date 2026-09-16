@@ -449,6 +449,50 @@ async function poll() {
 poll();
 setInterval(poll, POLL_INTERVAL_MS);
 
+// --- Category navigation ---------------------------------------------
+//
+// The nav shows one category panel at a time by toggling a CSS class.
+// Every panel stays in the DOM at all times, hidden or not -- that is
+// load-bearing, not incidental: render(view) (5s poll, above) and
+// renderSettingsForm (once, at load, below) keep writing into their
+// containers exactly as before, with no awareness of which panel is on
+// screen.
+//
+// Nothing here may ever re-render a panel's contents. "Only render the
+// visible panel" would mean calling renderSettingsForm on every category
+// switch -- precisely the mid-typing-clobber bug
+// TestStatusPollNeverRebuildsSettingsContainers exists to prevent,
+// reintroduced through a second door. TestCategorySwitchingNeverRerenders
+// keeps that door shut too.
+function showCategory(panelId) {
+  const panel = byId(panelId);
+  if (!panel) return; // a nav button naming a nonexistent panel must not blank the window
+  for (const p of document.querySelectorAll("#content .panel")) {
+    p.classList.toggle("active", p === panel);
+  }
+  for (const b of document.querySelectorAll("#nav .nav-item")) {
+    const on = b.dataset.panel === panelId;
+    b.classList.toggle("active", on);
+    if (on) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  }
+  byId("content").scrollTop = 0;
+}
+
+function initNav() {
+  // Real addEventListener, not inline onclick: Wails' default CSP blocks
+  // inline handlers -- same reason actionButtonRow/renderTextField build
+  // real DOM nodes instead.
+  for (const b of document.querySelectorAll("#nav .nav-item")) {
+    b.addEventListener("click", () => showCategory(b.dataset.panel));
+  }
+  // No persistence across window reopens -- always defaults to whichever
+  // panel index.html marks "active" (Server). Operator's own call: simpler,
+  // and keeps steering a first-run operator back to setup rather than
+  // wherever they last clicked.
+}
+initNav();
+
 // --- Settings form ---------------------------------------------------
 //
 // Track 3d: every free-text field the tray's zenity-backed PromptAndSet

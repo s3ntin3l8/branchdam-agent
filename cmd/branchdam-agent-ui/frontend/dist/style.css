@@ -6,6 +6,7 @@
   --border: #ddd;
   --ok: #1a7f37;
   --bad: #b3261e;
+  --sel: #e8e8e8;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -14,6 +15,7 @@
     --bg: #1e1e1e;
     --muted: #9a9a9a;
     --border: #3a3a3a;
+    --sel: #2c2c2c;
   }
 }
 
@@ -21,7 +23,10 @@
 
 body {
   margin: 0;
-  padding: 16px 20px 32px;
+  padding: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
   font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
   font-size: 13px;
   color: var(--fg);
@@ -32,6 +37,8 @@ h1 { font-size: 16px; margin: 0 0 4px; }
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 20px 0 6px; }
 
 #version { color: var(--muted); font-size: 12px; }
+
+#app-header { flex: 0 0 auto; padding: 16px 20px 8px; }
 
 #error-banner {
   display: none;
@@ -44,6 +51,49 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: 
 }
 #error-banner.visible { display: block; }
 
+/* Nav pane / content shell. #layout is the flex row (nav + content);
+   #content is what scrolls -- min-height/min-width: 0 below are both
+   load-bearing overrides of flexbox's default "auto", not decoration --
+   see their own comments. */
+#layout {
+  flex: 1 1 auto;
+  min-height: 0; /* without this #layout never shrinks below its content and #content can't scroll */
+  display: flex;
+  gap: 14px;
+  padding: 0 20px 20px;
+}
+
+#nav {
+  flex: 0 0 150px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.nav-item {
+  text-align: left;
+  font: inherit;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.nav-item:hover { border-color: var(--border); }
+.nav-item.active { background: var(--sel); border-color: var(--border); font-weight: 600; }
+.nav-item:focus-visible { outline: 2px solid var(--border); outline-offset: 1px; }
+
+#content {
+  flex: 1 1 auto;
+  min-width: 0; /* flex items default to min-width:auto -- one long unwrapped path in a <td> would otherwise widen this past the window */
+  overflow-y: auto;
+}
+
+.panel { display: none; }
+.panel.active { display: block; }
+
 section {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -52,7 +102,7 @@ section {
 }
 
 table { width: 100%; border-collapse: collapse; }
-td { padding: 2px 6px 2px 0; vertical-align: top; }
+td { padding: 2px 6px 2px 0; vertical-align: top; overflow-wrap: anywhere; }
 td.label { color: var(--muted); white-space: nowrap; width: 1%; }
 
 ul { margin: 4px 0; padding-left: 18px; }
@@ -85,6 +135,7 @@ ul { margin: 4px 0; padding-left: 18px; }
 .field-row input[type="password"],
 .field-row select {
   flex: 1;
+  min-width: 0; /* inputs have an intrinsic ~20ch min width that can overflow a narrow row -- see the nav's own width comment above */
   background: transparent;
   color: var(--fg);
   border: 1px solid var(--border);
@@ -121,4 +172,14 @@ ul { margin: 4px 0; padding-left: 18px; }
 .integration-block h3 {
   font-size: 12px;
   margin: 0 0 4px;
+}
+
+/* main.go's Wails MinWidth is 640 -- 40px of body/#layout padding leaves
+   600, narrow enough that the nav's default 150px flex-basis starts eating
+   noticeably into .field-row's own 160px label width. Shrink both down
+   together rather than letting the content column get squeezed first. */
+@media (max-width: 760px) {
+  #nav { flex-basis: 116px; }
+  .field-row label { min-width: 120px; }
+  .field-row .field-status { min-width: 0; }
 }

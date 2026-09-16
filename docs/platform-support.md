@@ -245,15 +245,45 @@ page" above) and its per-integration/per-hook submenus are gone too (see the sec
 tray itself is reduced to detection, ingest/drain/prune triggers, and the "Advanced" (config-file)
 and "Open branchDAM" items.
 
-**Config zone, then live zone (`index.html`).** The window opens on five grouped settings
-sections -- Server & identity, Storage & naming, Behavior, Self-update settings, Integration
-settings -- followed by the seven live-status sections (Server connection, Ingest, Queue, Watch
-directories, Integrations, Hooks, Self-update). This ordering (settings first) is deliberate: the
-previous layout put live status, which can't populate until configuration is done, ahead of the
-configuration itself -- an operator's own complaint ("settings order also confusing, integration
-status before setup"). The five config sections carry the `-settings` qualifier
-(`Integration settings`, `Self-update settings`) specifically to avoid colliding with the live
-`Integrations`/`Self-update` sections' plain-noun headings below them.
+**A left-hand nav pane, five categories (`index.html`).** The window opens on a fixed sidebar --
+Server, Storage & ingest, Integrations, Behavior, Self-update -- with exactly one category's panel
+visible at a time; clicking a nav item toggles which panel shows via a CSS class (`.panel.active`),
+never a re-render. This replaced an earlier single-long-scroll layout (five settings cards, then
+seven live-status cards, stacked top to bottom) that the operator found still hard to navigate even
+after grouping: "I was thinking we have a navpane for categories... not everything in one long
+list." Each category pairs its settings subsection with its own corresponding live-status
+subsection(s) -- the operator's own framing, "setting and status should go together for their
+corresponding sections... e.g. server, integrations" -- rather than keeping Settings and Status as
+two separate top-level groups:
+
+| Category | Settings | Live status |
+|---|---|---|
+| Server | Server & identity | Server connection |
+| Storage & ingest | Storage & naming | Ingest, Queue, Watch directories |
+| Integrations | Integration settings | Integrations, Hooks |
+| Behavior | Behavior | *(none)* |
+| Self-update | Self-update settings | Self-update |
+
+Two groupings worth explaining: the offline queue has no form field anywhere (config-file only),
+and its backlog counts are ingest-pipeline state, not server reachability, so it joins Storage &
+ingest rather than Server. Hooks folds into the Integrations panel but keeps its own `<h2>Hooks</h2>`
+heading rather than merging into one list -- `internal/tray/registry_test.go`'s own doc comment
+explains that `Integrations()` and `HookDescriptors()` legitimately both title an entry "DaVinci
+Resolve," safe only because each renders under its own separately-headed section; merging them here
+would reconstruct the exact unheaded-siblings bug (#187) that motivated that registry test in the
+first place.
+
+The window always opens on the Server panel, with no persistence of the last-viewed category across
+reopens -- simpler, and it keeps steering a first-run operator back to setup rather than wherever
+they last clicked (an explicit operator decision, not a default nobody considered). Settings-before-
+status ordering *within* a panel is still enforced, just per-panel now instead of globally:
+`TestCategoryPanelsGroupSettingsWithTheirStatus` (`cmd/branchdam-agent-ui/app_test.go`) is the
+nav-era successor to the original two-zone ordering test, whose whole premise (one global
+settings-then-status split) stopped applying once settings and status paired up by category.
+`TestNavItemsAndPanelsCorrespond` and `TestExactlyOneDefaultPanel` guard the nav/panel wiring and the
+default-panel decision, respectively; `TestInactivePanelsAreHiddenByCSS` guards the one CSS rule
+(`.panel { display: none }` / `.panel.active { display: ... }`) the whole scheme depends on --
+without it every panel renders simultaneously and clicking a nav item does nothing visible.
 
 **The poll/settings split is a hard invariant, not just a layout choice.** The window polls
 `GET /api/status` every 5 seconds and rebuilds each live-status container's DOM from scratch

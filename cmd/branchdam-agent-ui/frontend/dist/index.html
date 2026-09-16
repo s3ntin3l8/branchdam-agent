@@ -6,74 +6,116 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <h1>branchDAM <span id="version"></span></h1>
-  <div id="error-banner"></div>
-
-  <!-- Config zone: first-run setup, in the order an operator fills it in.
-       Loaded once by loadSettings() -- never touched by the 5s status
-       poll (see render() below). Every container id here ends "-config"
-       for exactly that reason; see app.js's own comment on the split. -->
-  <section id="sec-settings-server">
-    <h2>Server &amp; identity</h2>
+  <header id="app-header">
+    <h1>branchDAM <span id="version"></span></h1>
+    <div id="error-banner"></div>
+    <!-- Hoisted here (out of any one panel) because loadSettings() fills
+         all five config panels from a single fetch -- a load failure needs
+         to be visible no matter which category the operator has open. -->
     <div id="settings-error"></div>
-    <div id="settings-server-config"></div>
-  </section>
+  </header>
 
-  <section id="sec-settings-storage">
-    <h2>Storage &amp; naming</h2>
-    <div id="settings-storage-config"></div>
-  </section>
+  <div id="layout">
+    <!-- Static, fixed five-entry nav -- not JS-generated, so it renders
+         correctly before Wails' bindings land and stays plain-text
+         greppable by app_test.go. class before data-panel on every button,
+         and class before id on every panel below: app_test.go's
+         correspondence/ordering checks depend on that attribute order. -->
+    <nav id="nav" aria-label="Categories">
+      <button type="button" class="nav-item active" data-panel="panel-server" aria-current="page">Server</button>
+      <button type="button" class="nav-item" data-panel="panel-storage">Storage &amp; ingest</button>
+      <button type="button" class="nav-item" data-panel="panel-integrations">Integrations</button>
+      <button type="button" class="nav-item" data-panel="panel-behavior">Behavior</button>
+      <button type="button" class="nav-item" data-panel="panel-selfupdate">Self-update</button>
+    </nav>
 
-  <section id="sec-settings-behavior">
-    <h2>Behavior</h2>
-    <div id="settings-behavior-config"></div>
-  </section>
+    <!-- Every panel stays in the DOM at all times (app.js's showCategory
+         only toggles the "active" class) -- render(view)'s 5s poll and
+         loadSettings()'s one-time fill both write into these containers by
+         id regardless of which panel is visible. Panel-server starts
+         "active" so exactly one panel is visible before any script runs;
+         there is no persistence across window reopens -- it always resets
+         here (operator's own call: simpler, and keeps steering a
+         first-run operator back to setup). -->
+    <main id="content">
+      <div class="panel active" id="panel-server">
+        <section id="sec-settings-server">
+          <h2>Server &amp; identity</h2>
+          <div id="settings-server-config"></div>
+        </section>
 
-  <section id="sec-settings-selfupdate">
-    <h2>Self-update settings</h2>
-    <div id="settings-selfupdate-config"></div>
-  </section>
+        <section id="sec-server">
+          <h2>Server connection</h2>
+          <div id="server-body"></div>
+        </section>
+      </div>
 
-  <section id="sec-settings-integrations">
-    <h2>Integration settings</h2>
-    <div id="settings-integrations-config"></div>
-  </section>
+      <div class="panel" id="panel-storage">
+        <section id="sec-settings-storage">
+          <h2>Storage &amp; naming</h2>
+          <div id="settings-storage-config"></div>
+        </section>
 
-  <!-- Live zone: read-only status, rebuilt on every 5s poll. -->
-  <section id="sec-server">
-    <h2>Server connection</h2>
-    <div id="server-body"></div>
-  </section>
+        <section id="sec-ingest">
+          <h2>Ingest</h2>
+          <div id="ingest-body"></div>
+        </section>
 
-  <section id="sec-ingest">
-    <h2>Ingest</h2>
-    <div id="ingest-body"></div>
-  </section>
+        <section id="sec-queue">
+          <h2>Queue</h2>
+          <div id="queue-body"></div>
+        </section>
 
-  <section id="sec-queue">
-    <h2>Queue</h2>
-    <div id="queue-body"></div>
-  </section>
+        <section id="sec-watch">
+          <h2>Watch directories</h2>
+          <div id="watch-body"></div>
+        </section>
+      </div>
 
-  <section id="sec-watch">
-    <h2>Watch directories</h2>
-    <div id="watch-body"></div>
-  </section>
+      <div class="panel" id="panel-integrations">
+        <section id="sec-settings-integrations">
+          <h2>Integration settings</h2>
+          <div id="settings-integrations-config"></div>
+        </section>
 
-  <section id="sec-integrations">
-    <h2>Integrations</h2>
-    <div id="integrations-body"></div>
-  </section>
+        <section id="sec-integrations">
+          <h2>Integrations</h2>
+          <div id="integrations-body"></div>
+        </section>
 
-  <section id="sec-hooks">
-    <h2>Hooks</h2>
-    <div id="hooks-body"></div>
-  </section>
+        <!-- Kept separately headed from Integrations above, not merged into
+             one list -- internal/tray/registry_test.go's own doc comment:
+             "DaVinci Resolve" legitimately titles both a catalog-sync
+             integration and a render-hook installer, and that's only safe
+             because each renders under its own heading. Interleaving them
+             here would reconstruct the exact unheaded-siblings bug (#187)
+             this repo already fixed once. -->
+        <section id="sec-hooks">
+          <h2>Hooks</h2>
+          <div id="hooks-body"></div>
+        </section>
+      </div>
 
-  <section id="sec-selfupdate">
-    <h2>Self-update</h2>
-    <div id="selfupdate-body"></div>
-  </section>
+      <div class="panel" id="panel-behavior">
+        <section id="sec-settings-behavior">
+          <h2>Behavior</h2>
+          <div id="settings-behavior-config"></div>
+        </section>
+      </div>
+
+      <div class="panel" id="panel-selfupdate">
+        <section id="sec-settings-selfupdate">
+          <h2>Self-update settings</h2>
+          <div id="settings-selfupdate-config"></div>
+        </section>
+
+        <section id="sec-selfupdate">
+          <h2>Self-update</h2>
+          <div id="selfupdate-body"></div>
+        </section>
+      </div>
+    </main>
+  </div>
 
   <script src="app.js"></script>
 </body>
