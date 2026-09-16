@@ -1234,11 +1234,10 @@ func (r *Runner) TriggerHookInstall(ctx context.Context, id HookID) (state HookS
 
 // RevealHook opens id's Scripts folder via its registered HookInstaller --
 // a fire-and-forget OS shell-out, same "no meaningful error surface"
-// precedent as run_supported.go's own openBrowser (used for "Open status
-// page"): Reveal never mutates hook state, so unlike TriggerHookInstall it
-// needs neither hookInFlight tracking nor a SetHookState cache update, and
-// a caller is free to discard the error the same way openBrowser's own
-// caller does.
+// pattern as cmd/branchdam-agent/settings.go's openWithDefaultApp: Reveal
+// never mutates hook state, so unlike TriggerHookInstall it needs neither
+// hookInFlight tracking nor a SetHookState cache update, and a caller is
+// free to discard the error the same way that helper's own callers do.
 func (r *Runner) RevealHook(id HookID) error {
 	r.mu.Lock()
 	installer := r.hookInstallers[id]

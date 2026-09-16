@@ -478,8 +478,9 @@ built once, no rebuild path" constraint.
   third-party catalog read).
 - **"Reveal Scripts folder"** -- `Runner.RevealHook`, a fire-and-forget OS shell-out via the
   registered `HookInstaller.Reveal()`. Unlike Install, this needs no done channel or select-loop
-  case at all: it mutates no state any submenu's own `sync()` renders, matching "Open status page"'s
-  own `_ = openBrowser(statusURL)` precedent of silently discarding the result.
+  case at all: it mutates no state any submenu's own `sync()` renders, matching the same
+  "discard the shell-out error" pattern `cmd/branchdam-agent/settings.go`'s `openWithDefaultApp`
+  callers use.
 - **No config-driven items** -- a hook has no `CatalogSyncConfig` and no menu-editable
   `integrations.resolve.scriptsDir` override yet (still config-file-only), so `hookSubmenu` has no
   `dispatch()` goroutine and no shared-`menuActionCh` involvement at all, unlike

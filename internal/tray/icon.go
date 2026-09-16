@@ -32,13 +32,17 @@ const supersample = 4
 // with round caps -- so this file only needs three shape testers, not four.
 //
 // This geometry is hand-duplicated (not generated from a shared source) in
-// two other places, since neither is Go and pulling in a build step just
-// for icon assets would fight this file's whole "no external tool" premise:
-//   - internal/tray/assets/index.html's inline <svg> (the status page header)
+// one other place, since it isn't Go and pulling in a build step just for
+// icon assets would fight this file's whole "no external tool" premise:
 //   - docs/img/logo.svg (the README logo)
 //
+// (A second duplicate, internal/tray/assets/index.html's inline <svg> for
+// the tray's own browsable status page header, was removed along with that
+// page in the tray/window UX rethink -- the Wails window has no equivalent
+// inline mark to keep in sync.)
+//
 // TestBuildTrayIconMatchesExpectedGeometry below is a pixel-sample
-// regression test for *this* file's rendering; it can't catch the other two
+// regression test for *this* file's rendering; it can't catch the other one
 // drifting, so a geometry change here should be mirrored there by hand.
 const (
 	stemCX, stemY1, stemY2, stemSW = 5.25, 4.75, 27.25, 4.5
