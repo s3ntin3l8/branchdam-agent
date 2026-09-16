@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.10.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.9.0...v1.10.0) (2026-09-16)
+
+
+### Features
+
+* rethink the tray and window settings UX ([#223](https://github.com/s3ntin3l8/branchdam-agent/issues/223)) ([39c0f75](https://github.com/s3ntin3l8/branchdam-agent/commit/39c0f75debcd13365f08de841dace9878241d801))
+
+
+### Bug Fixes
+
+* **ui:** render the integration's friendly Title in the Settings form ([#225](https://github.com/s3ntin3l8/branchdam-agent/issues/225)) ([3cfa354](https://github.com/s3ntin3l8/branchdam-agent/commit/3cfa354acdadc6dbbd05853ce85425dc00d791b8)), closes [#221](https://github.com/s3ntin3l8/branchdam-agent/issues/221)
+
 ## [1.9.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.8.0...v1.9.0) (2026-09-16)
 
 
