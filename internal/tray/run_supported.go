@@ -587,7 +587,7 @@ func Run(
 				if res.err != nil {
 					releaseGate()
 					releaseGate = nil
-					installItem.SetTitle("Install and restart (failed -- see status page)")
+					installItem.SetTitle("Install and restart (failed -- see branchDAM window)")
 					installItem.Enable()
 					refresh()
 					if quitRequested {
@@ -659,7 +659,7 @@ func Run(
 				if res.err != nil {
 					releaseGate()
 					releaseGate = nil
-					rollbackItem.SetTitle("Roll back (failed -- see status page)")
+					rollbackItem.SetTitle("Roll back (failed -- see branchDAM window)")
 					rollbackItem.Enable()
 					refresh()
 					if quitRequested {
