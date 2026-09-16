@@ -95,7 +95,7 @@ func (s *Syncer) syncSnapshot(ctx context.Context, clips []TimelineClip) (Stats,
 		legacySeen[id] = true
 	}
 	for _, timelineID := range s.LegacyTimelineIDs {
-		id := VirtualNodeUUID(s.AgentID, timelineID, s.DatabaseURL)
+		id := legacyVirtualNodeUUID(s.AgentID, timelineID, s.DatabaseURL)
 		if !legacySeen[id] {
 			snapshot.LegacyTimelineNodeUUIDs = append(snapshot.LegacyTimelineNodeUUIDs, id)
 			legacySeen[id] = true

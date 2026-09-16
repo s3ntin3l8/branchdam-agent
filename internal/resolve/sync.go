@@ -158,13 +158,33 @@ func (s *Syncer) logger() *slog.Logger {
 // claim the same virtual node. Password rotation therefore cannot create a
 // second node, while separate agents and same-named timelines remain distinct.
 func VirtualNodeUUID(agentID, timelineID, databaseURL string) string {
-	h := sha256.Sum256([]byte(agentID + "\x00" + timelineID + "\x00" + databaseIdentity(databaseURL)))
+	return virtualNodeUUIDFromIdentity(agentID, timelineID, databaseIdentity(databaseURL))
+}
+
+func virtualNodeUUIDFromIdentity(agentID, timelineID, identity string) string {
+	h := sha256.Sum256([]byte(agentID + "\x00" + timelineID + "\x00" + identity))
 	// UUID v4 from first 16 bytes of SHA-256, set version and variant bits.
 	u := h[:16]
 	u[6] = (u[6] & 0x0f) | 0x40 // version 4
 	u[8] = (u[8] & 0x3f) | 0x80 // variant RFC 4122
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
+}
+
+// legacyVirtualNodeUUID reproduces the identity algorithm used by the delta
+// event sync before complete snapshots preserved PostgreSQL database-selecting
+// query parameters. It is used only to claim and retire those old nodes during
+// the first successful snapshot migration.
+func legacyVirtualNodeUUID(agentID, timelineID, databaseURL string) string {
+	u, err := url.Parse(databaseURL)
+	if err != nil {
+		return virtualNodeUUIDFromIdentity(agentID, timelineID, databaseURL)
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return virtualNodeUUIDFromIdentity(agentID, timelineID, u.String())
 }
 
 // virtualFilePath returns a collision-free virtual path for a project node.

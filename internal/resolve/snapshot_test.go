@@ -182,3 +182,15 @@ func TestScopeIDIncludesPostgresQueryDatabaseIdentity(t *testing.T) {
 		t.Fatal("query parameter ordering changed canonical database identity")
 	}
 }
+
+func TestLegacyVirtualNodeUUIDUsesPreSnapshotDatabaseIdentity(t *testing.T) {
+	const databaseURL = "postgres://alice:secret@db.local/?dbname=ResolveA&sslmode=require" // pragma: allowlist secret
+	legacy := legacyVirtualNodeUUID("agent-a", "tl1", databaseURL)
+	wantLegacy := VirtualNodeUUID("agent-a", "tl1", "postgres://db.local/")
+	if legacy != wantLegacy {
+		t.Fatalf("legacy UUID = %q, want pre-snapshot UUID %q", legacy, wantLegacy)
+	}
+	if legacy == VirtualNodeUUID("agent-a", "tl1", databaseURL) {
+		t.Fatal("legacy and current UUID unexpectedly collide for a query-selected database")
+	}
+}
