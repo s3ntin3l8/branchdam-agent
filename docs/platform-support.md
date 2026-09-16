@@ -75,41 +75,37 @@ and in `release-binaries.yml`) rather than cross-compiled.
 
 ## Settings menu
 
-Issue #31: every tray config change used to require hand-editing `config.yaml` and a full restart.
-The tray menu now has a "Settings" submenu, split by what systray itself can render natively
-versus what needs an external dialog:
+**Slimmed by issue #211** (Track 3d's second half): every field this section used to describe --
+start at login, confirm destructive actions, check for updates and its interval, require
+unbuffered verify, require DCIM folder, pause upload on metered connection, auto-eject, server
+URL, API key, agent ID, watch folders, allowed extensions, archive/local edit root, path mappings,
+naming template -- moved to the Wails Settings window instead (`cmd/branchdam-agent-ui`, Track 3d
+below), which reads `GET /api/settings` and writes through `SetBool`/`SetInt`/`SetString`. The
+tray's own "Settings" submenu now has exactly three items, none of them a settings VALUE:
+**Reload config**, **Open config.yaml**, and **Reveal config folder** -- hand-edit-config
+affordances the window has no equivalent for (there is no "reveal this file in Finder/Explorer"
+button in a webview). `PromptAndSet`/`PromptAndSetIntegrationPath`/`PromptAndSetIntegrationRewrites`
+(the zenity-dialog-backed methods every removed menu item used to call) have no remaining
+production caller as of this PR -- left in the `Settings` interface rather than removed in the same
+PR, since deleting them means also deleting `SettingsField` and their `cmd/branchdam-agent`
+implementations, a bigger change than menu-slimming; tracked as issue #217. The `dialog` subcommand
+itself (`github.com/ncruces/zenity`, re-exec'd) is unaffected -- it still backs `trayConfirm`,
+`trayIngestGate`, `trayPickDirectory`, `trayNotifyOS`, and the startup-error notification below,
+none of which this PR touched.
 
-- **Native checkboxes/submenus** (no dialog, no restart): start at login, check for updates, the
-  update check interval (1 hour / 24 hours / never), require unbuffered verify, **Require DCIM
-  folder** (#81, skips volumes without a `DCIM/` subdirectory), **Auto-eject after ingest** (#87,
-  unmounts and ejects the card volume after a verified ingest — gated on the ingest summary
-  being `OK()`), **Pause upload on metered connection** (#84, short-circuits `TriggerDrain` on
-  a hotspot or metered link without blocking the local edit copy), **Pause ingest** (#83,
-  shoot-mode: short-circuits `TriggerIngest` / `TriggerDrain` / `TriggerPrune` and drops detector
-  events; session-only, not persisted).
-- **Free-text fields, via a `github.com/ncruces/zenity` dialog** (re-exec'd through the same hidden
-  `dialog` subcommand issue #30's startup-error notification uses -- see that section below):
-  server URL, API key (a password-style prompt; the current key is never pre-filled or otherwise
-  placed in a subprocess's argv), the archive root and local edit root (folder pickers), the
-  naming template, **Watch folders…** (#78, multi-value directory picker for `ingest.cardRoots`),
-  and **Allowed extensions…** (#81, comma-separated `ingest.allowedExtensions` allow-list).
-- **List-editing dialog** (separate from the free-text dialog because multi-value lists need a
-  different zenity kind) — `ingest.autoImportPaths` (#79, the allow-list that bypasses the
-  confirmation dialog for known card volumes) is edited through the same `SetStringSlice`
-  path the headless `settings.go` exposes.
-- **Hand-edit only, on purpose** -- `pathMappings` remains hand-edit (deliberate: it requires
-  operator judgement about container paths). `ingest.cardRoots` was previously in this category
-  but graduated to the free-text dialog by #78 alongside a live `Runner.ReconfigureDetector`
-  path so changing it does not require a process restart. "Open config.yaml" and "Reveal config
-  folder" menu items remain for any field that ever needs a hand-edit escape hatch.
+**Live-update gap closed alongside the removal.** `tray.confirmDestructive` toggled from the
+Wails window (`SetBool` → `configSettings.reload()`) previously persisted to `config.yaml`
+correctly but never took effect on the running `Runner` until a tray restart -- only
+`settingsmenu.go`'s own (now-removed) checkbox dispatch called `Runner.SetConfirmDestructive`
+directly, alongside its `SetBool` save. `reload()` now re-seeds it the same way it already does
+for `RequireDCIM`/`PauseUploadOnMetered`/`AutoEject`, closing a gap this PR would otherwise have
+made permanent by removing the only path that worked around it.
 
-Every change applies through one mechanism, `Runner.Reconfigure` -- it rebuilds the
-affected components (`branchdam.Client`, `ingest.Engine`) and applies them atomically under a
-mutex lock. A field that requires a restart (`tray.statusAddr` is the only remaining one;
-`ingest.cardRoots` is hot-reloaded by `ReconfigureDetector`) is caught by a snapshot diff in
-`SettingsView`, which shows "Restart now" instead of applying immediately. **Unverified on real
-hardware**, same caveat as issue #30's dialog work below -- the settings dialogs share the same
-re-exec'd `dialog` subcommand.
+`ingest.autoImportPaths` remains a headless-only setting (`SetStringSlice`, no menu or window
+field) -- see `docs/tray-settings-inventory.md`. `pathMappings` and the fields listed in
+`settings.go`'s own audit comment block (`ingest.pollIntervalSecs`, `prune.*`, `offline.*`,
+`selfUpdate.repo`, `tray.statusAddr`, `ingest.exiftoolPath`) remain hand-edit only, unchanged by
+this PR.
 
 The embedded status page (still the `<meta http-equiv="refresh">` HTML page from issue #3, no JS) now
 also renders an "Integrations" section (per-integration enabled/dry-run config state joined by ID
@@ -126,28 +122,30 @@ ingested and on the status page under the same busy-card header. See
 
 ## Integrations menu
 
-A separate top-level menu, not nested under Settings: one item per catalog integration
-(`internal/tray.Integrations()`'s compile-time registry -- Luminar Neo and the Resolve database
-sync today), plus a shared "Node index…" item. Each integration's own submenu -- Enabled, Dry
-run, its catalog/database location, "Sync every" (its own
-nested submenu: 15 min / 60 min default / manual-only), "Sync now" -- keeps every leaf at depth 3
-(`Luminar Neo ▸ Sync every ▸ 15 minutes`), matching the deepest tree this repo has actually shipped
-(`Settings ▸ Check every ▸ 1 hour`) rather than nesting a fourth level under a wrapper "Integrations"
-item.
+**Slimmed by issue #211**, same reasoning as the Settings menu above: Enabled, Dry run, the
+catalog path/database URL, "Sync every", and Resolve's path rewrites all moved to the Wails
+window's own `renderIntegrationBlock` (Track 3d/#210). What remains here, one top-level item per
+catalog integration (`internal/tray.Integrations()`'s compile-time registry -- Luminar Neo and the
+Resolve database sync today): the read-only status line, **Sync timeout** (30s / 1m / 5m / 10m --
+the one per-integration field the window has no control for at all, a genuine gap rather than a
+deliberate hand-edit-only one), and **Sync now**. The shared top-level "Node index…" item is gone
+entirely -- `integrations.nodeIndexPath` now lives in the Wails window's `FREE_TEXT_FIELDS`
+instead.
 
 The DaVinci Resolve database entry reads timeline membership and, in live mode, creates
 deterministic virtual project nodes and `PROJECT_SIDECAR` lineage edges from indexed media to those
-nodes. Its database URL prompt is hidden and never prefilled so embedded credentials cannot appear
-in process arguments or on the status page. `file:`, `postgres://`, and `postgresql://` URLs are
-supported; path rewrites can be edited in its submenu or YAML. Dry-run mode logs the virtual nodes
-and edges it would create without contacting the server.
+nodes. `file:`, `postgres://`, and `postgresql://` URLs are supported. Dry-run mode logs the
+virtual nodes and edges it would create without contacting the server.
 
 **Different mechanism from Settings.** Settings changes apply through `Runner.Reconfigure`;
 integration changes apply through the separate `Runner.SetIntegrationSyncers` (rebuilt on every
 reload, same staleness class of fix as the offline-queue drainer/pruner rebuild). "Sync now" is a
 `Runner` action (like "Drain queue now"), not a Settings mutation -- it goes through
 `Runner.TriggerSync` directly from `run_supported.go`'s own select loop, one worker goroutine per
-registry entry.
+registry entry. The Wails window (Track 3e below) also has its own "Sync now" button hitting the
+same `Runner.TriggerSync` through `POST /api/actions/sync` -- the two surfaces trigger the
+identical action and can't disagree about whether a pass is running, since `TriggerSync`'s own
+in-flight tracking is keyed by integration ID, not by which caller asked.
 
 **Shared error-reporting channel, split lastErr.** Settings and Integrations share one worker
 goroutine/channel (`menuActionCh`/`menuDoneCh` in `run_supported.go`) since both do blocking I/O and
@@ -159,14 +157,11 @@ shared and size-1, so a Settings click and an Integrations click landing in the 
 one is dropped -- the same "drop rather than queue" semantics every other menu action in this file
 already has.
 
-**Unverified on real hardware**, same caveat as the Settings menu above and issue #30's dialog work
-below: the catalog/node-index file picker (`-kind file` in the `dialog` subcommand) has never
-rendered on a real Win32 message pump or via `osascript`, and the four-registry-entry-worth of new
-systray items (one top-level item, three checkboxes, one file prompt, one nested "Sync every"
-submenu, one action, per integration) have never been clicked through on either target platform.
-native Windows and macOS CI jobs compile and test this code, while `make build-darwin` explicitly
-excludes both `internal/tray` and `cmd/branchdam-agent` (`Makefile:47`). Rendering and clicks remain
-real-hardware checks.
+**Unverified on real hardware**, same caveat as the Settings menu above: native Windows and macOS
+CI jobs compile and test this code, while `make build-darwin` explicitly excludes both
+`internal/tray` and `cmd/branchdam-agent` (`Makefile:47`). Whether the slimmed menus actually
+render and click correctly, and whether "Open branchDAM" (below) actually launches and focuses the
+window, remain real-hardware checks -- see the hardware checklist's new items.
 
 ## Status page (issue #61)
 
@@ -247,13 +242,16 @@ methods rather than an HTML `<input type="file">`. This PR (Track 3d) already in
 integration's own config fields in the Settings section (`renderIntegrationBlock`: enabled, dry
 run, catalog path/database URL, path rewrites for Resolve, sync interval) -- what it did NOT
 include, and what Track 3e (below) adds, is any way to actually *run* a sync or hook action from
-this window. The tray's own Settings/Integrations menus are also untouched here on purpose -- this
-PR is additive only, so there is no window where a field is reachable from neither surface (see
-Track 3d's "backend, then window, then tray-slimming" sequencing note in the plan) -- the tray menu
-items this window now duplicates get removed in a follow-up PR once this window is confirmed working
-on real hardware. **Packaging (Track 3f) has since landed** -- see "Packaging (Track 3f)" below --
-so the binary now ships as an installed sibling on both platforms; only the tray's own "Open
-branchDAM" menu wiring (issue #211) remains outstanding.
+this window. The tray's own Settings/Integrations menus were left untouched by this PR on purpose
+-- it was additive only, so there was no window where a field was reachable from neither surface
+(see Track 3d's "backend, then window, then tray-slimming" sequencing note in the plan). **Both
+Packaging (Track 3f) and the tray-slimming half (issue #211) have since landed** -- see "Packaging
+(Track 3f)" below for the former; the latter removed every tray menu item this window duplicates
+and wired "Open branchDAM" (see the Settings menu / Integrations menu sections above, and
+`run_supported.go`'s `launchUIBinary`). Issue #211's own original hardware-verification gate
+(items 13/14 below passing on real Windows/macOS hardware before slimming) was explicitly waived
+by the user for this pass -- see that issue for the full reasoning; this is a personal test
+environment, not a production rollout.
 
 ### Integrations/hooks actions (Track 3e)
 
@@ -323,8 +321,8 @@ rather than a separate pipeline:
   `Contents/MacOS/` alongside the tray via `tools/mkbundle`'s new `-ui-binary` flag
   (`internal/appbundle.Write`'s new `uiBinPath` parameter, `appbundle.UIBinaryName` for the name).
   `CFBundleExecutable` stays the tray -- the UI binary is a second file in the bundle, launched by
-  full path from the tray's future "Open branchDAM" menu item, never by Finder double-click, so
-  there's no second declared entry point. Neither the "Ad-hoc sign bundle" step nor the "Package"
+  full path from the tray's own "Open branchDAM" menu item (issue #211, `run_supported.go`'s
+  `launchUIBinary`), never by Finder double-click, so there's no second declared entry point. Neither the "Ad-hoc sign bundle" step nor the "Package"
   (tar) / "Build DMG" steps needed changes: `codesign --force --sign -` re-signs/re-hashes the whole
   `Contents/` tree (including the new file) since it runs *after* `mkbundle` assembles the bundle,
   and `tar`/`cp -R` both already operate on the whole `.app` directory rather than naming individual
@@ -721,14 +719,18 @@ A live-refresh via TUF is the proper long-term answer but is out of scope here.
   `zenity` call -- but nothing here has exercised a real Win32 dialog or a real launchd-spawned
   `osascript` call. The durable log file (`internal/agentlog`) is independent of this and does not
   share the gap.
-- **The settings menu's dialogs (issue #31) share the startup-error dialog's exact unverified
-  status**, for the same reason -- they go through the same re-exec'd `dialog` subcommand. What's
-  additionally unverified: whether a Win32 dialog renders correctly while systray's own message
-  pump is *already running* (the startup-error dialog fires before `systray.Run` starts;
-  settings dialogs fire from a running tray's click handler -- a materially different scenario the
-  original design doc flagged and this PR did not spike separately). `configSettings`'s own logic
-  (persistence, reload, restart-required diffing) is pinned by tests substituting a fake
-  `dialogRunner`; the dialogs' actual rendering is not.
+- **The settings menu's dialogs (issue #31) -- RETIRED by issue #211.** Every free-text/checkbox
+  field that used to fire a zenity dialog from the Settings/Integrations menus moved to the Wails
+  Settings window instead (see the Settings menu / Integrations menu sections above); the tray's
+  own remaining Settings items (Reload config, Open config.yaml, Reveal config folder) don't go
+  through the `dialog` subcommand at all -- `OpenConfigFile`/`RevealConfigFolder` shell out to the
+  OS's own "open with default app" command directly (`cmd/branchdam-agent/settings.go`'s
+  `openWithDefaultApp`), and `Reload` is a pure config re-read with no UI of its own. The
+  equivalent "does this actually render on real hardware, from a running tray's click handler"
+  concern this bullet used to name now lives with the Wails window instead -- see "Native app UI"
+  above and the hardware checklist's items 11/13/15/16 (Windows) and 13/14/16 (macOS). The
+  startup-error dialog bullet immediately above is UNAFFECTED by this retirement: it's a different
+  dialog, fired before `systray.Run` even starts, still real and still unverified.
 - **Tray queue status has no live rate/ETA or in-progress-transfer readout (issue #32, closed
   by #85 for ingest; drain ETA still pending).** The status page and menu show a real
   `internal/queue.Store.Counts` snapshot (pending, permanently failed, done) plus the last
@@ -796,10 +798,16 @@ to say "verified."
    unexpanded `${VAR}` in `server.apiKey`), launch `branchdam-agent-tray.exe` -- confirm an error
    dialog appears (before systray's own message pump has started) naming the log path at
    `%LOCALAPPDATA%\branchDAM\logs\agent.log`.
-3. Settings menu dialogs: with a config already in place, open the tray's Settings submenu and
-   trigger each free-text prompt (server URL, API key, naming template, the two folder pickers) --
-   confirm each renders correctly while systray's own message pump is *already running* (a
-   materially different scenario from item 2's pre-`systray.Run` dialog).
+3. Settings menu (slimmed by issue #211): with a config already in place, open the tray's
+   Settings submenu -- confirm it shows exactly three items (Reload config, Open config.yaml,
+   Reveal config folder), click each, and confirm "Reload config" picks up a hand-edit made to
+   `config.yaml` while the tray is running (e.g. change `ingest.pollIntervalSecs`) without a
+   restart. Every free-text/checkbox field this item used to test (server URL, API key, naming
+   template, folder pickers, start-on-login, confirm-destructive, self-update interval, etc.) is
+   now covered by item 13's Settings-form checks in the native window instead -- confirm changing
+   one of them there (e.g. "Confirm destructive actions") and then triggering a destructive tray
+   action (Drain/Prune) shows the confirmation dialog with NO tray restart in between, verifying
+   the reload()-driven live-update fix issue #211 made alongside the menu removal.
 4. Full self-update cycle: publish (or point `selfUpdate.repo` at) a test release one patch version
    above the running build, click "Install and restart" -- confirm both `branchdam-agent.exe` and
    `branchdam-agent-tray.exe` end up at the new version, the tray relaunches cleanly, and
@@ -812,16 +820,18 @@ to say "verified."
    offline, then let the tray's own drain/prune timers run (or use "Drain queue now"/"Prune now")
    -- confirm the status page's queue counts update and a card ingest started while a drain/prune
    pass is in flight is never blocked or corrupted.
-7. Integrations menu: open the top-level "Luminar Neo" item (a sibling of Settings, not nested
-   under it) -- confirm the "Catalog…" and "Node index…" file pickers render (`-kind file` in the
-   `dialog` subcommand) while systray's message pump is already running, that ticking "Enabled"
-   with no catalog path set yet shows the "not fully configured" status line rather than a crash or
-   a silent no-op, and that toggling "Dry run" off and clicking "Sync now" against a real catalog
-   actually reaches the configured `server.baseUrl` (check the audit queue for the emitted edge --
-   confirm the status page's own Integrations section shows the same emitted count with no
-   "(dry run — nothing was emitted)" marker once it's off). Also confirm a Settings-menu click and
-   an Integrations-menu click issued back-to-back never cross-contaminate each other's "last change
-   failed" title.
+7. Integrations menu (slimmed by issue #211): open the top-level "Luminar Neo" item (a sibling of
+   Settings, not nested under it) -- confirm it shows only the read-only status line, "Sync
+   timeout" (30s/1m/5m/10m), and "Sync now" (Enabled/Dry run/Catalog path/Sync every/Path rewrites
+   moved to the Wails window's own per-integration block -- covered by item 13/15 instead). Set
+   "Enabled" and "Catalog path" via the window, leave "Dry run" on, then click the tray's own
+   "Sync now" -- confirm it reaches the configured `server.baseUrl` (check the audit queue for the
+   emitted edge; confirm the status page's own Integrations section shows the same emitted count
+   with no "(dry run — nothing was emitted)" marker once Dry run is off from the window). Also
+   confirm a Settings-menu click and an Integrations-menu click issued back-to-back never
+   cross-contaminate each other's "last change failed" title, and that clicking "Sync now" from
+   BOTH the tray and the Wails window (item 15) in quick succession shows "Skipped -- already
+   running" on whichever one lands second, never a concurrent double sync.
 8. Timer-driven sync: set `integrations.luminar.syncIntervalMinutes: 1` and leave the tray running
    with "Dry run" on -- confirm a sync pass fires on its own (no menu click) roughly once a minute,
    the status page's "last sync" timestamp advances each time, and the `(dry run)` marker is present
@@ -888,6 +898,15 @@ to say "verified."
     confirm the row transitions to "up to date" without a tray restart, then click "Reveal" and
     confirm Explorer opens the correct Scripts folder -- confirm Reveal does NOT change the row's
     install-state pill (it never mutates `HookState`).
+16. Tray "Open branchDAM" wiring (issue #211): with no window open, click the tray's own "Open
+    branchDAM" item (a sibling of "Open status page") -- confirm the native window opens within a
+    couple seconds, showing live status. Click it again while the window is still open -- confirm
+    Wails' `SingleInstanceLock` brings the existing window forward (focus/restore) rather than
+    opening a second one; `launchUIBinary` itself has no "already running" check of its own, so
+    this is entirely Wails' behavior to verify. Rename or delete `branchdam-agent-ui.exe` from
+    `$INSTDIR` (simulating an install predating Track 3f, or a broken install) and click "Open
+    branchDAM" again -- confirm the menu item's own title grows a "(failed: ...)" suffix naming the
+    missing path, rather than doing nothing with no feedback at all.
 
 **macOS (Apple Silicon):**
 
@@ -959,6 +978,12 @@ to say "verified."
     section's "Packaging (Track 3f)" for why). Trigger a self-update and confirm both binaries in
     the bundle end up on the new version together.
 16. Native app UI integrations/hooks actions: same as Windows item 15.
+17. Tray "Open branchDAM" wiring: same as Windows item 16 -- additionally confirm launching the UI
+    binary by its full `Contents/MacOS/branchdam-agent-ui` path (never via `open -a` or a Finder
+    double-click, since it's not the bundle's `CFBundleExecutable`) doesn't hit a Gatekeeper
+    "damaged" dead end the way an unsigned bundle download used to -- this is the same open
+    question Track 3f's own Packaging item (15 above) already flags, now exercised through the
+    tray's own click path instead of a manual `exec` from a terminal.
 
 ### M5 additions (epic #77, #78–#88)
 
@@ -967,30 +992,29 @@ unit tests but whose rendering / OS-integration paths have never been exercised
 on real hardware. Add these checks to the Windows and macOS lists above as
 appropriate:
 
-11. **Settings menu — M5 dialogs (#78, #79, #81):** with a config already in
-    place, open the tray's Settings submenu and trigger each of the new M5
-    items -- "Watch folders…" (comma-separated text entry for `cardRoots`; the
-    dialog kind is "entry", not a native directory picker, because
-    `cardRoots` is a multi-value list, not a single folder), "Allowed
-    extensions…" (comma-separated text for the extension allow-list), and the
-    autoImportPaths list-editing dialog (reached via the card-detection
-    confirmation flow's "Always auto-import"). Confirm each dialog renders
-    correctly while systray's own message pump is already running (the
-    materially-different scenario from item 2's pre-`systray.Run` startup
-    dialog). Also: trigger a card detection with the dialog path, click
-    "Skip this time" -- confirm a re-insert re-shows the dialog; click
-    "Always auto-import" -- confirm the volume is now in the allow-list and
-    re-insert bypasses the dialog.
-12. **Settings menu — M5 native checkboxes (#81, #83, #84, #87):** with the
-    same config in place, toggle "Require DCIM folder" (insert a USB stick
-    with no DCIM folder -- confirm not detected), "Auto-eject after ingest"
-    (insert a card -- confirm a successful ingest unmounts/ejects the volume
-    and surfaces an OS notification; induce an ingest error -- confirm the
-    card is NOT ejected on partial ingest), "Pause upload on metered
-    connection" (toggle on, then on a real hotspot/iPhone-tethered network
-    confirm queue drain is skipped and the local edit copy still proceeds),
-    and "Pause ingest" (toggle on, insert a card -- confirm no ingest starts
-    AND no dialog appears; toggle off, confirm a re-insert triggers the
+11. **Settings — M5 fields (#78, #79, #81), now in the Wails window (issue #211 moved these out of
+    the tray's Settings submenu):** with a config already in place, open the native window (item
+    11 in the main Windows/macOS lists above) and edit "Watch folders" and "Allowed extensions" in
+    the Settings section -- both round-trip as a JSON array of strings (`SetStringSlice`), not the
+    comma-separated dialog text the tray version used to. Confirm each saves and shows
+    "Saving…"/"Saved" correctly. Separately, the autoImportPaths list-editing dialog is UNCHANGED
+    by #211 (it was never part of `settingsmenu.go` -- it's reached via the card-detection
+    confirmation flow's "Always auto-import", `trayIngestGate`, still a zenity dialog): trigger a
+    card detection with the dialog path, click "Skip this time" -- confirm a re-insert re-shows the
+    dialog; click "Always auto-import" -- confirm the volume is now in the allow-list and re-insert
+    bypasses the dialog.
+12. **Settings — M5 checkboxes (#81, #83, #84, #87), now in the Wails window:** open the native
+    window and toggle "Require DCIM folder" (insert a USB stick with no DCIM folder -- confirm not
+    detected), "Auto-eject after successful ingest" (insert a card -- confirm a successful ingest
+    unmounts/ejects the volume and surfaces an OS notification; induce an ingest error -- confirm
+    the card is NOT ejected on partial ingest), and "Pause upload on metered connection" (toggle
+    on, then on a real hotspot/iPhone-tethered network confirm queue drain is skipped and the local
+    edit copy still proceeds) -- confirm each saves from the window and takes live effect with no
+    tray restart (all three already flow through `Runner.Reconfigure`'s existing hot-reload path,
+    unaffected by issue #211's `confirmDestructive`-specific fix). "Pause ingest" is unrelated and
+    unmoved -- it's a session-only, top-level tray item (never in the Settings submenu, not
+    persisted, no window equivalent by design): toggle it on, insert a card -- confirm no ingest
+    starts AND no dialog appears; toggle off, confirm a re-insert triggers the
     dialog again).
 13. **Live ingest progress in tooltip + status page (#85):** insert a card,
     open the tray menu -- confirm the tooltip updates within one tick with

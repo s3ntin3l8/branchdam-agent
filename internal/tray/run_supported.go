@@ -21,12 +21,15 @@ import (
 	"fmt"
 	"image/color"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 
 	"fyne.io/systray"
 
+	"github.com/s3ntin3l8/branchdam-agent/internal/appbundle"
 	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
 )
 
@@ -159,6 +162,7 @@ func Run(
 		statusItem := systray.AddMenuItem("Status: starting...", "Current tray status")
 		statusItem.Disable()
 		openStatus := systray.AddMenuItem("Open status page", statusURL)
+		openUI := systray.AddMenuItem("Open branchDAM", "Open the native branchDAM window (issue #211)")
 		systray.AddSeparator()
 
 		updateItem := systray.AddMenuItem("Self-update: checking...", "Self-update status")
@@ -213,7 +217,7 @@ func Run(
 		hm := newHooksMenu()
 		systray.AddSeparator()
 
-		sm := newSettingsMenu(settings, menuActionCh, r)
+		sm := newSettingsMenu(settings, menuActionCh)
 		restartNowItem := sm.parent.AddSubMenuItem("Restart now", "Apply a change that needs a restart (status address)")
 		restartNowItem.Hide()
 		systray.AddSeparator()
@@ -577,6 +581,16 @@ func Run(
 				return
 			case <-openStatus.ClickedCh:
 				_ = openBrowser(statusURL)
+			case <-openUI.ClickedCh:
+				// No focus-existing-window logic needed here: Wails'
+				// SingleInstanceLock (cmd/branchdam-agent-ui/main.go) already
+				// brings a running window forward on a second launch, so
+				// this always just starts the binary and lets Wails decide.
+				if err := launchUIBinary(); err != nil {
+					openUI.SetTitle(fmt.Sprintf("Open branchDAM (failed: %v)", err))
+				} else {
+					openUI.SetTitle("Open branchDAM")
+				}
 			case <-pauseItem.ClickedCh:
 				r.SetPaused(!r.Paused())
 			case <-ingestNow.ClickedCh:
@@ -879,6 +893,74 @@ func plural(n int) string {
 		return "y"
 	}
 	return "ies"
+}
+
+// uiBinaryName is cmd/branchdam-agent-ui's built binary's platform-specific
+// basename. The macOS half imports internal/appbundle.UIBinaryName rather
+// than re-spelling it as a literal -- appbundle is a lightweight, pure-Go
+// leaf package (fmt/io/os/path/filepath/regexp only), and Hermes' review of
+// PR #214 already made exactly this case for internal/selfupdate's own
+// macOSUISibling ("appbundle.UIBinaryName is the single source of truth...
+// so the packages can't disagree on the name"). The same argument applies
+// here -- a rename in appbundle.UIBinaryName must never leave this package
+// silently disagreeing with what mkbundle actually wrote into
+// Contents/MacOS/. The Windows half stays a literal because there IS no
+// equivalent exported constant to import: internal/selfupdate's winUIExe
+// is unexported, and SelfUpdater's own doc comment above already
+// established that internal/selfupdate is deliberately NOT imported into
+// this package (it pulls in golang.org/x/crypto/openpgp transitively) --
+// that reason doesn't apply to appbundle, which is why only Windows
+// duplicates a literal here.
+func uiBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return "branchdam-agent-ui.exe"
+	}
+	return appbundle.UIBinaryName
+}
+
+// launchUIBinary starts cmd/branchdam-agent-ui as a detached, non-blocking
+// process (issue #211). It never checks whether one is already running --
+// Wails' own SingleInstanceLock (cmd/branchdam-agent-ui/main.go) already
+// handles that: a second launch focuses the existing window instead of
+// opening a duplicate.
+func launchUIBinary() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve own executable path: %w", err)
+	}
+	uiPath, err := resolveUIBinaryPath(exe)
+	if err != nil {
+		return err
+	}
+	return exec.Command(uiPath).Start()
+}
+
+// resolveUIBinaryPath resolves execPath (the running tray's own executable
+// path, i.e. os.Executable()'s result) through symlinks and returns its
+// sibling UI binary's path -- split out from launchUIBinary so this
+// resolution logic is unit-testable against a synthetic execPath, without
+// needing to fake os.Executable() itself, mirroring
+// internal/selfupdate.DetectLayout's own execPath-as-parameter shape for
+// exactly the same reason.
+//
+// The UI binary is expected as a sibling of execPath in the same directory
+// -- true for both the Windows installer's $INSTDIR (all three .exe's
+// alongside each other) and the macOS .app bundle's Contents/MacOS/
+// (Track 3f's packaging PR put it there on both platforms; see
+// internal/appbundle.Write's uiBinPath parameter and
+// installer/windows/branchdam-agent.nsi's own File command). An install
+// predating Track 3f, or a dev build with no UI binary at all, reports a
+// clear error instead of silently doing nothing.
+func resolveUIBinaryPath(execPath string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve own executable path: %w", err)
+	}
+	uiPath := filepath.Join(filepath.Dir(resolved), uiBinaryName())
+	if _, err := os.Stat(uiPath); err != nil {
+		return "", fmt.Errorf("not found at %s (install predates packaging, or a dev build?)", uiPath)
+	}
+	return uiPath, nil
 }
 
 // openBrowser shells out to the platform's own "open a URL" command. This

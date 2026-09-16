@@ -148,6 +148,39 @@ func TestConfigSettingsSetBoolPauseUploadOnMeteredPersistsAndReloads(t *testing.
 	}
 }
 
+func TestConfigSettingsSetBoolConfirmDestructivePersistsAndReloads(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner, nil)
+
+	if runner.ConfirmDestructive() {
+		t.Error("expected default ConfirmDestructive=false")
+	}
+
+	if err := s.SetBool("tray.confirmDestructive", true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+
+	if !s.Snapshot().ConfirmDestructive {
+		t.Error("expected Snapshot to reflect ConfirmDestructive=true immediately")
+	}
+	// Regression test for issue #211: this used to only happen via
+	// settingsmenu.go's own dispatch calling SetConfirmDestructive directly
+	// alongside the SetBool save -- a path the Wails Settings window (which
+	// only ever calls SetBool) never had. reload() now re-seeds the live
+	// Runner the same way every other live-tunable setting already does.
+	if !runner.ConfirmDestructive() {
+		t.Error("expected runner to be updated with ConfirmDestructive=true")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Tray.ConfirmDestructive {
+		t.Error("expected ConfirmDestructive=true to be persisted to disk")
+	}
+}
+
 func TestConfigSettingsSetIntPersistsAndReloads(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner, nil)
