@@ -18,15 +18,16 @@ import (
 // directly -- so a test can inject a fake without constructing a real
 // Runner's watch dirs, gates, and queue reader. *Runner already satisfies
 // this with no changes: TriggerIngest/TriggerDrain/TriggerPrune/
-// TriggerSync/TriggerHookInstall/Paused/SetPaused are all already safe to
-// call concurrently from an HTTP handler goroutine (see each method's own
-// doc comment for its serialization mechanism).
+// TriggerSync/TriggerHookInstall/RevealHook/Paused/SetPaused are all
+// already safe to call concurrently from an HTTP handler goroutine (see
+// each method's own doc comment for its serialization mechanism).
 type ActionRunner interface {
 	TriggerIngest(ctx context.Context, cardPath string) IngestSummary
 	TriggerDrain(ctx context.Context) (DrainSummary, bool)
 	TriggerPrune(ctx context.Context) (PruneSummary, bool)
 	TriggerSync(ctx context.Context, id IntegrationID) (SyncSummary, bool)
 	TriggerHookInstall(ctx context.Context, id HookID) (HookState, bool)
+	RevealHook(id HookID) error
 	Paused() bool
 	SetPaused(v bool)
 }
@@ -136,6 +137,7 @@ func (s *StatusServer) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/actions/prune", s.withAPIAuth(s.handleActionPrune))
 	mux.HandleFunc("POST /api/actions/sync", s.withAPIAuth(s.handleActionSync))
 	mux.HandleFunc("POST /api/actions/hook-install", s.withAPIAuth(s.handleActionHookInstall))
+	mux.HandleFunc("POST /api/actions/hook-reveal", s.withAPIAuth(s.handleActionHookReveal))
 	mux.HandleFunc("POST /api/actions/pause", s.withAPIAuth(s.handleActionPause))
 }
 
@@ -524,6 +526,37 @@ func (s *StatusServer) handleActionHookInstall(w http.ResponseWriter, r *http.Re
 	}
 	state, ran := s.Actions.TriggerHookInstall(context.WithoutCancel(r.Context()), HookID(req.ID))
 	s.writeJSON(w, http.StatusOK, newHookInstallActionResult(state, ran))
+}
+
+// hookRevealActionResult is deliberately just an Err field -- RevealHook
+// itself returns nothing to report on success (see its own doc comment:
+// "fire-and-forget", no state mutation), so there is no summary shape to
+// mirror the way newHookInstallActionResult mirrors HookState.
+type hookRevealActionResult struct {
+	Err string `json:"err,omitempty"`
+}
+
+// handleActionHookReveal has no context.WithoutCancel call, unlike every
+// other action handler in this file: RevealHook takes no ctx parameter at
+// all (it's a synchronous, near-instant OS shell-out -- see its own doc
+// comment), so there is nothing here for a canceled request context to cut
+// short in the first place.
+func (s *StatusServer) handleActionHookReveal(w http.ResponseWriter, r *http.Request) {
+	if s.Actions == nil {
+		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req idActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	err := s.Actions.RevealHook(HookID(req.ID))
+	s.writeJSON(w, http.StatusOK, hookRevealActionResult{Err: errString(err)})
 }
 
 // pauseActionRequest/-Result drive the SESSION-ONLY pause gate

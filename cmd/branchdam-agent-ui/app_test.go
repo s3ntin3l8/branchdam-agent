@@ -296,6 +296,111 @@ func TestSetIntegrationRewritesPostsIDAndValue(t *testing.T) {
 	}
 }
 
+func TestTriggerSyncPostsID(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/actions/sync" {
+			t.Errorf("method/path = %s %s, want POST /api/actions/sync", r.Method, r.URL.Path)
+		}
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"Ran":true,"Emitted":3}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	got, err := a.TriggerSync("luminar")
+	if err != nil {
+		t.Fatalf("TriggerSync: %v", err)
+	}
+	if !strings.Contains(string(gotBody), `"id":"luminar"`) {
+		t.Errorf("request body = %s, want id field", gotBody)
+	}
+	if !strings.Contains(got, `"Emitted":3`) {
+		t.Errorf("TriggerSync() = %q, want the agent's raw response body passed through", got)
+	}
+}
+
+func TestTriggerHookInstallPostsID(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/actions/hook-install" {
+			t.Errorf("method/path = %s %s, want POST /api/actions/hook-install", r.Method, r.URL.Path)
+		}
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"Installed":true}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	got, err := a.TriggerHookInstall("resolve")
+	if err != nil {
+		t.Fatalf("TriggerHookInstall: %v", err)
+	}
+	if !strings.Contains(string(gotBody), `"id":"resolve"`) {
+		t.Errorf("request body = %s, want id field", gotBody)
+	}
+	if !strings.Contains(got, `"Installed":true`) {
+		t.Errorf("TriggerHookInstall() = %q, want the agent's raw response body passed through", got)
+	}
+}
+
+func TestRevealHookPostsIDAndReturnsNilOnSuccess(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/actions/hook-reveal" {
+			t.Errorf("method/path = %s %s, want POST /api/actions/hook-reveal", r.Method, r.URL.Path)
+		}
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	if err := a.RevealHook("resolve"); err != nil {
+		t.Fatalf("RevealHook: %v", err)
+	}
+	if !strings.Contains(string(gotBody), `"id":"resolve"`) {
+		t.Errorf("request body = %s, want id field", gotBody)
+	}
+}
+
+func TestRevealHookSurfacesAgentErrField(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"err":"no Scripts folder found"}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	err := a.RevealHook("resolve")
+	if err == nil || !strings.Contains(err.Error(), "no Scripts folder found") {
+		t.Errorf("RevealHook() error = %v, want it to surface the agent's err field", err)
+	}
+}
+
 func TestPickDirectoryBeforeStartupErrors(t *testing.T) {
 	a := NewApp() // Startup never called -- a.ctx stays nil
 	if _, err := a.PickDirectory("Pick a folder"); err == nil {
