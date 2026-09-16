@@ -224,6 +224,21 @@ func (a *App) TestConnection() (string, error) {
 	return string(body), nil
 }
 
+// CheckForUpdate runs one on-demand self-update check right now --
+// POST /api/actions/check-update's counterpart, the same no-request-body
+// shape as TestConnection above. Read-only (never touches the installed
+// binary), so unlike an eventual Apply/Rollback exposure this needs no
+// idle-lock reasoning on the agent side. Returns the raw
+// checkUpdateActionResult JSON (internal/tray/statusapi.go) as-is, same
+// "never drifts out of sync" reasoning as every other action method here.
+func (a *App) CheckForUpdate() (string, error) {
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/check-update", nil)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
 // TriggerHookInstall installs (or reinstalls) id's render hook right now --
 // POST /api/actions/hook-install's counterpart, mirroring
 // internal/tray/hooksmenu.go's own "Install / update render hook" item.

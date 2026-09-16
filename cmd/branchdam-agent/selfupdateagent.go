@@ -26,6 +26,13 @@ type selfUpdateAgent struct {
 
 	mu sync.Mutex
 	st tray.UpdateStatus
+
+	// checkMu serializes check() calls -- Run's own interval ticker and a
+	// manual CheckNow (the Settings window's "Check for updates" button)
+	// can both fire around the same time, and both ultimately hit the
+	// same GitHub API; checkOnce's TryLock makes a concurrent call a
+	// harmless no-op (ran=false) rather than two overlapping requests.
+	checkMu sync.Mutex
 }
 
 // newSelfUpdateAgent builds an agent from cfg -- Run and ApplyLatest are
@@ -68,7 +75,7 @@ func (a *selfUpdateAgent) Run(ctx context.Context) {
 		return
 	}
 
-	if a.check(ctx) {
+	if unavailable, _ := a.checkOnce(ctx); unavailable {
 		return
 	}
 	if a.interval <= 0 {
@@ -82,17 +89,33 @@ func (a *selfUpdateAgent) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if a.check(ctx) {
+			if unavailable, _ := a.checkOnce(ctx); unavailable {
 				return
 			}
 		}
 	}
 }
 
+// checkOnce runs check under checkMu, so Run's own ticker and a manual
+// CheckNow (below) can never run check concurrently against the same
+// GitHub API. ran is false when another check is already in flight --
+// callers must treat that as "nothing happened," not as unavailable or an
+// error; TryLock failing has nothing to do with the running build being
+// non-semver.
+func (a *selfUpdateAgent) checkOnce(ctx context.Context) (unavailable, ran bool) {
+	if !a.checkMu.TryLock() {
+		return false, false
+	}
+	defer a.checkMu.Unlock()
+	return a.check(ctx), true
+}
+
 // check runs one Check call and stores the result. Returns true when the
 // running version is not semver (ErrVersionNotSemver) -- re-checking can
 // never succeed for such a build, so the caller stops ticking rather than
-// hitting GitHub on every interval forever.
+// hitting GitHub on every interval forever. Callers other than checkOnce
+// must not call this directly -- it does not itself guard against
+// concurrent use of a.up.
 func (a *selfUpdateAgent) check(ctx context.Context) (unavailable bool) {
 	result, err := a.up.Check(ctx, a.version)
 
@@ -113,6 +136,26 @@ func (a *selfUpdateAgent) check(ctx context.Context) (unavailable bool) {
 	a.st.LatestVersion = result.LatestVersion
 	a.st.UpdateFound = result.UpdateFound
 	return false
+}
+
+// CheckNow implements tray.UpdateChecker for the Settings window's
+// on-demand "Check for updates" button. The !a.enabled || a.up == nil
+// guard runs BEFORE ever reaching checkOnce/check: check() dereferences
+// a.up with no nil check of its own (Run's own callers above already
+// guard that before ever calling checkOnce), so skipping this guard would
+// let a disabled agent's -- or a construction-failure's -- manual check
+// panic inside an HTTP handler goroutine. ran=false covers three non-error
+// outcomes a caller must not surface as a failure: disabled, a non-semver
+// build, and a check already in flight (Run's ticker firing at the same
+// moment).
+func (a *selfUpdateAgent) CheckNow(ctx context.Context) (tray.UpdateStatus, bool) {
+	if !a.enabled || a.up == nil {
+		return a.Status(), false
+	}
+	if _, ran := a.checkOnce(ctx); !ran {
+		return a.Status(), false
+	}
+	return a.Status(), true
 }
 
 // RollbackAvailable reports whether a previously applied version can be

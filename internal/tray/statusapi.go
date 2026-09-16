@@ -33,6 +33,19 @@ type ActionRunner interface {
 	SetPaused(v bool)
 }
 
+// UpdateChecker is the one-method subset of the self-update subsystem the
+// status API's on-demand check drives -- StatusServer.Updates' own doc
+// comment explains why this is a narrow interface separate from
+// tray.SelfUpdater (the tray menu's contract for ApplyLatest/Rollback)
+// rather than a new method on that one. CheckNow runs (or reports it
+// couldn't run) a self-update check right now and returns the resulting
+// UpdateStatus either way -- ran=false means "nothing changed": disabled,
+// a non-semver build, or a check already in flight, none of which are
+// errors.
+type UpdateChecker interface {
+	CheckNow(ctx context.Context) (status UpdateStatus, ran bool)
+}
+
 // isLoopbackHost reports whether addr's host resolves to the loopback
 // interface. Used once, at route-registration time in Serve, to decide
 // whether the /api/* routes get registered at all -- see Serve's own
@@ -142,6 +155,7 @@ func (s *StatusServer) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/actions/hook-reveal", s.withAPIAuth(s.handleActionHookReveal))
 	mux.HandleFunc("POST /api/actions/pause", s.withAPIAuth(s.handleActionPause))
 	mux.HandleFunc("POST /api/actions/test-connection", s.withAPIAuth(s.handleActionTestConnection))
+	mux.HandleFunc("POST /api/actions/check-update", s.withAPIAuth(s.handleActionCheckUpdate))
 }
 
 func (s *StatusServer) writeJSON(w http.ResponseWriter, status int, v any) {
@@ -481,6 +495,32 @@ func (s *StatusServer) handleActionTestConnection(w http.ResponseWriter, r *http
 	}
 	result, ran := s.Actions.TriggerServerProbe(context.WithoutCancel(r.Context()))
 	s.writeJSON(w, http.StatusOK, newTestConnectionActionResult(result, ran))
+}
+
+// checkUpdateActionResult wraps UpdateStatus's own JSON shape (its
+// MarshalJSON already renders Err as a string) rather than defining a
+// parallel set of fields -- the Wails window's app.js already reads
+// UpdateFound/LatestVersion/Err/etc. off status.selfUpdate, so this
+// response parses with the exact same code on the frontend.
+type checkUpdateActionResult struct {
+	Ran    bool         `json:"ran"`
+	Status UpdateStatus `json:"status"`
+}
+
+// handleActionCheckUpdate runs (or reports it couldn't run) an on-demand
+// self-update check -- read-only (no Runner.TryLockIdle the way
+// ApplyLatest needs, since this never touches the installed binary), so
+// no request body and no "actions not configured" 503 depends on
+// s.Actions at all, only s.Updates. ran=false is not an error: a disabled
+// agent, a non-semver build, and a check already in flight all report
+// ran=false with the CURRENT UpdateStatus, not a 4xx/5xx.
+func (s *StatusServer) handleActionCheckUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.Updates == nil {
+		http.Error(w, "self-update not configured", http.StatusServiceUnavailable)
+		return
+	}
+	status, ran := s.Updates.CheckNow(context.WithoutCancel(r.Context()))
+	s.writeJSON(w, http.StatusOK, checkUpdateActionResult{Ran: ran, Status: status})
 }
 
 type pruneActionResult struct {

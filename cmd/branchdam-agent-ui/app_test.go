@@ -407,6 +407,31 @@ func TestTestConnectionPostsToActionRoute(t *testing.T) {
 	}
 }
 
+func TestCheckForUpdatePostsToActionRoute(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/actions/check-update" {
+			t.Errorf("method/path = %s %s, want POST /api/actions/check-update", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"ran":true,"status":{"UpdateFound":true,"LatestVersion":"1.12.0"}}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	got, err := a.CheckForUpdate()
+	if err != nil {
+		t.Fatalf("CheckForUpdate: %v", err)
+	}
+	if !strings.Contains(got, `"LatestVersion":"1.12.0"`) {
+		t.Errorf("CheckForUpdate() = %q, want the agent's raw response body passed through", got)
+	}
+}
+
 func TestTriggerHookInstallPostsID(t *testing.T) {
 	withTempAgentDir(t)
 	if _, err := sessiontoken.Generate(); err != nil {

@@ -492,12 +492,13 @@ function renderHooks(status) {
 
 function renderSelfUpdate(status) {
   const su = status.selfUpdate;
+  const container = byId("selfupdate-body");
   if (!su) {
-    byId("selfupdate-body").innerHTML = `<p class="empty">No status available.</p>`;
+    container.innerHTML = `<p class="empty">No status available.</p>`;
     return;
   }
   if (!su.Enabled) {
-    byId("selfupdate-body").innerHTML = `<p>${pill("disabled", "neutral")}</p>`;
+    container.innerHTML = `<p>${pill("disabled", "neutral")}</p>`;
     return;
   }
   const rows = [["Current version", su.CurrentVersion]];
@@ -510,7 +511,55 @@ function renderSelfUpdate(status) {
   }
   if (su.Applied) rows.push(["Applied this session", su.Applied]);
   if (su.Err) rows.push(["Error", raw(pill(su.Err, "bad"))]);
-  byId("selfupdate-body").innerHTML = table(rows);
+  container.innerHTML = table(rows);
+
+  // A non-semver dev build (su.Unavailable) can never check successfully
+  // -- the button stays visible (Enabled is still true) but disabled, so
+  // the reason is explained by the "unavailable" pill above rather than
+  // by hiding the control outright.
+  container.appendChild(
+    actionButtonRow("Update check", "", [
+      {
+        label: "Check now",
+        busyText: "Checking…",
+        disabled: !!su.Unavailable,
+        busy: inFlightActions.has("checkUpdate"),
+        run: async (statusEl) => {
+          const app = getApp();
+          if (!app) return;
+          // Same inFlightActions bookkeeping as renderServer's own "Test
+          // connection" -- cleared before branching, not in a finally
+          // around the whole handler, so the success path's poll() below
+          // never sees this action as still in flight.
+          inFlightActions.add("checkUpdate");
+          let result;
+          try {
+            result = JSON.parse(await app.CheckForUpdate());
+          } finally {
+            inFlightActions.delete("checkUpdate");
+          }
+          if (!result.ran) {
+            // Disabled, a non-semver build, or a check already in flight
+            // (the interval ticker firing at the same moment) -- none are
+            // errors, and poll() would just rebuild this row from the
+            // unchanged status with nothing new to show, so leave this
+            // message standing instead.
+            setFieldStatus(statusEl, "Check already running or self-update is off", "error");
+            return;
+          }
+          const s = result.status;
+          if (s.Err) {
+            setFieldStatus(statusEl, s.Err, "error");
+          } else if (s.UpdateFound) {
+            setFieldStatus(statusEl, `Update available: ${s.LatestVersion}`, "saved");
+          } else {
+            setFieldStatus(statusEl, "Up to date", "saved");
+          }
+          await poll(); // refresh the table above immediately, rather than waiting up to POLL_INTERVAL_MS
+        },
+      },
+    ]),
+  );
 }
 
 function table(rows) {
