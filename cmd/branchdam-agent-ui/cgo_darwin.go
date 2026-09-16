@@ -24,14 +24,17 @@ package main
 // own code.
 //
 // cgo LDFLAGS are cumulative across every package that goes into one
-// final link, so declaring the missing framework here -- in this
-// repo's own package, not the vendored module -- closes the gap without
-// patching go.sum. No actual C symbol is used from this file; its only
-// job is to carry the #cgo LDFLAGS line below into the link.
+// final link, so this package declares the missing framework itself
+// rather than patching the vendored module. No C symbol is referenced
+// here; the only job of the cgo preamble immediately below is carrying
+// the #cgo LDFLAGS line into the link -- it is a SEPARATE comment block
+// from this one (a blank line breaks cgo's preamble association), since
+// cgo feeds everything in the comment directly touching `import "C"` to
+// the C compiler as literal source, not as documentation.
 //
 // Re-check whether this is still necessary the next time
 // github.com/wailsapp/wails/v2 is upgraded past v2.16.0, and consider
 // reporting it upstream if it hasn't been already.
-//
+
 // #cgo LDFLAGS: -framework UniformTypeIdentifiers
 import "C"
