@@ -250,3 +250,416 @@ async function poll() {
 
 poll();
 setInterval(poll, POLL_INTERVAL_MS);
+
+// --- Settings form ---------------------------------------------------
+//
+// Track 3d: every free-text field the tray's zenity-backed PromptAndSet
+// dialog used to own becomes a plain form field here, saved via
+// app.SetSetting/SetIntegrationPath/SetIntegrationRewrites -- see this
+// package's app.go for why those are bound Go methods rather than plain
+// fetch() calls (the agent's session token never reaches this JS context
+// at all).
+//
+// Loaded once at startup, not on the 5s status poll: re-rendering the
+// whole form on every poll tick would blow away whatever an operator is
+// mid-typing. No field re-fetches from the agent on save -- a text field
+// keeps whatever was typed either way, so a rejected save can be corrected
+// and resubmitted without retyping; a checkbox or <select>, which has no
+// "keep editing" state, instead reverts to its pre-change value on a
+// failed save (renderCheckboxField/renderSelectField) rather than staying
+// visibly flipped until the window reloads.
+
+// FREE_TEXT_FIELDS mirrors internal/tray/settingsmenu.go's own free-text
+// items exactly, one row per PromptAndSet(FieldX) call there. `list: true`
+// means the value round-trips as a JSON array of strings (SetStringSlice,
+// the canonical wire shape for a list per statusapi.go's settingsPatchRequest
+// doc comment), not a comma-separated string.
+const FREE_TEXT_FIELDS = [
+  { key: "server.baseUrl", label: "Server URL", get: (sv) => sv.ServerBaseURL },
+  {
+    key: "server.apiKey",
+    label: "API key",
+    password: true,
+    get: () => "",
+    placeholder: (sv) => (sv.ServerAPIKeySet ? "(configured — leave blank to keep)" : "(not set)"),
+  },
+  { key: "agentId", label: "Agent ID", get: (sv) => sv.AgentID },
+  { key: "ingest.archiveRoot", label: "Archive root", get: (sv) => sv.ArchiveRoot, browseDir: true },
+  { key: "ingest.localEditRoot", label: "Local edit root", get: (sv) => sv.LocalEditRoot, browseDir: true },
+  {
+    key: "ingest.cardRoots",
+    label: "Watch folders",
+    get: () => "",
+    placeholder: () => "comma-separated -- current value not shown, enter to replace",
+    list: true,
+  },
+  {
+    key: "ingest.allowedExtensions",
+    label: "Allowed extensions",
+    get: (sv) => (sv.AllowedExtensions ?? []).join(", "),
+    list: true,
+  },
+  { key: "ingest.pathTemplate", label: "Naming template", get: (sv) => sv.NamingTemplate },
+  { key: "pathMappings", label: "Path mappings", get: (sv) => sv.PathMappings },
+  { key: "integrations.nodeIndexPath", label: "Node index path", get: (sv) => sv.NodeIndexPath, browseFile: ["*.json"] },
+];
+
+const CHECKBOX_FIELDS = [
+  { key: "tray.startOnLogin", label: "Start on login", get: (sv) => sv.StartOnLogin },
+  { key: "tray.confirmDestructive", label: "Confirm destructive actions", get: (sv) => sv.ConfirmDestructive },
+  { key: "ingest.requireUnbuffered", label: "Require unbuffered writes", get: (sv) => sv.RequireUnbuffered },
+  { key: "ingest.requireDCIM", label: "Require DCIM folder", get: (sv) => sv.RequireDCIM },
+  { key: "ingest.pauseUploadOnMetered", label: "Pause upload on metered connection", get: (sv) => sv.PauseUploadOnMetered },
+  { key: "ingest.autoEject", label: "Auto-eject after successful ingest", get: (sv) => sv.AutoEject },
+];
+
+function setFieldStatus(el, text, kind) {
+  el.textContent = text;
+  el.className = "field-status" + (kind ? " " + kind : "");
+  if (kind === "saved") {
+    setTimeout(() => {
+      if (el.textContent === text) {
+        el.textContent = "";
+        el.className = "field-status";
+      }
+    }, 2000);
+  }
+}
+
+// saveSetting drives the common "save one key, re-render nothing but this
+// field's own status" path every plain (non-integration) field uses.
+// saveSetting returns whether the save actually succeeded -- callers that
+// need to react differently on failure (clearing a password field only on
+// success, reverting a checkbox/select to its prior value on failure)
+// check this instead of assuming the call always "took."
+async function saveSetting(key, value, statusEl) {
+  const app = getApp();
+  if (!app) return false;
+  setFieldStatus(statusEl, "Saving…");
+  try {
+    await app.SetSetting(key, value);
+    setFieldStatus(statusEl, "Saved", "saved");
+    return true;
+  } catch (err) {
+    setFieldStatus(statusEl, String(err), "error");
+    return false;
+  }
+}
+
+function splitCommaList(s) {
+  return s
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+}
+
+function renderTextField(f, sv) {
+  const row = document.createElement("div");
+  row.className = "field-row";
+
+  const label = document.createElement("label");
+  label.textContent = f.label;
+  row.appendChild(label);
+
+  const input = document.createElement("input");
+  input.type = f.password ? "password" : "text";
+  input.value = f.get(sv) ?? "";
+  if (f.placeholder) input.placeholder = f.placeholder(sv);
+  row.appendChild(input);
+
+  const status = document.createElement("span");
+  status.className = "field-status";
+
+  if (f.browseDir || f.browseFile) {
+    const browse = document.createElement("button");
+    browse.type = "button";
+    browse.textContent = "Browse…";
+    browse.addEventListener("click", async () => {
+      const app = getApp();
+      if (!app) return;
+      try {
+        const picked = f.browseDir ? await app.PickDirectory(f.label) : await app.PickFile(f.label, f.browseFile);
+        if (picked) input.value = picked;
+      } catch (err) {
+        setFieldStatus(status, String(err), "error");
+      }
+    });
+    row.appendChild(browse);
+  }
+
+  input.addEventListener("change", () => {
+    if (f.password && input.value === "") return; // blank means "leave unchanged"
+    const value = f.list ? splitCommaList(input.value) : input.value;
+    saveSetting(f.key, value, status).then((ok) => {
+      // Only clear a typed secret once it's actually saved -- a rejected
+      // save must leave it in the field, or retrying means retyping the
+      // whole key from scratch (Hermes review finding on this PR).
+      if (f.password && ok) {
+        input.value = "";
+        // The placeholder was computed once at render time from the
+        // load-time snapshot; after a successful save the "set" state it
+        // reflects is stale until the window reloads (Hermes review
+        // finding on this PR). A password field that just saved
+        // successfully has necessarily transitioned to "set" -- recompute
+        // from a minimal synthetic snapshot instead of a full reload.
+        if (f.placeholder) input.placeholder = f.placeholder({ ServerAPIKeySet: true });
+      }
+    });
+  });
+
+  row.appendChild(status);
+  return row;
+}
+
+function renderCheckboxField(f, sv) {
+  const row = document.createElement("div");
+  row.className = "field-row checkbox-row";
+
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = !!f.get(sv);
+
+  const label = document.createElement("label");
+  label.textContent = f.label;
+
+  const status = document.createElement("span");
+  status.className = "field-status";
+
+  input.addEventListener("change", async () => {
+    // A checkbox has no "keep editing" state the way a text field does --
+    // a failed save must revert the visible toggle, or it stays flipped
+    // and misrepresents the real config until the window reloads (Hermes
+    // review finding on this PR).
+    const previous = !input.checked;
+    const ok = await saveSetting(f.key, input.checked, status);
+    if (!ok) input.checked = previous;
+  });
+
+  row.appendChild(input);
+  row.appendChild(label);
+  row.appendChild(status);
+  return row;
+}
+
+function renderSelectField(label, options, current, onChange) {
+  const row = document.createElement("div");
+  row.className = "field-row";
+
+  const labelEl = document.createElement("label");
+  labelEl.textContent = label;
+  row.appendChild(labelEl);
+
+  const select = document.createElement("select");
+  const currentStr = String(current);
+  // A hand-edited config.yaml can set a value none of the fixed options
+  // represent (e.g. syncIntervalMinutes: 30) -- setting select.value to a
+  // non-matching string leaves nothing truly selected, but the control
+  // still visibly displays the first option, misrepresenting the real
+  // value (Hermes review finding on this PR). A synthetic leading option
+  // carrying the raw value makes that state visible instead of hidden.
+  const knownValues = options.map(([v]) => v);
+  const optionList = knownValues.includes(currentStr) ? options : [[currentStr, `Current: ${current} (hand-configured)`], ...options];
+  for (const [val, text] of optionList) {
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = text;
+    select.appendChild(opt);
+  }
+  select.value = currentStr;
+  row.appendChild(select);
+
+  const status = document.createElement("span");
+  status.className = "field-status";
+  let lastGood = select.value;
+  select.addEventListener("change", async () => {
+    // A select has no "keep editing" state -- a failed save must revert
+    // the visible choice, the same reasoning as renderCheckboxField's own
+    // revert-on-failure (Hermes review finding on this PR).
+    const ok = await onChange(select.value, status);
+    if (ok) {
+      lastGood = select.value;
+    } else {
+      select.value = lastGood;
+    }
+  });
+  row.appendChild(status);
+
+  return row;
+}
+
+// renderIntegrationBlock renders one Integrations() registry entry's own
+// enabled/dry-run/path/rewrites/interval fields, mirroring
+// internal/tray/integrationsmenu.go's own per-integration submenu.
+// "resolvedb" (tray.IntegrationResolveDB) is the one integration with a
+// database URL instead of a catalog file path, and the only one with
+// path rewrites -- both special-cased here the same way
+// PromptAndSetIntegrationPath/PromptAndSetIntegrationRewrites special-case
+// it server-side.
+function renderIntegrationBlock(iv) {
+  const isResolve = iv.ID === "resolvedb";
+  const block = document.createElement("div");
+  block.className = "integration-block";
+
+  const h3 = document.createElement("h3");
+  h3.textContent = iv.ID;
+  block.appendChild(h3);
+
+  // renderCheckboxField's second argument is the "sv" a top-level
+  // CHECKBOX_FIELDS descriptor's own get(sv) reads from; these two
+  // descriptors close over iv directly instead (there is no top-level
+  // settings snapshot to hand them), so {} is deliberately unused here.
+  block.appendChild(renderCheckboxField({ key: `integrations.${iv.ID}.enabled`, label: "Enabled", get: () => iv.Enabled }, {}));
+  block.appendChild(
+    renderCheckboxField({ key: `integrations.${iv.ID}.dryRun`, label: "Dry run (log only)", get: () => iv.DryRun }, {}),
+  );
+
+  const pathRow = document.createElement("div");
+  pathRow.className = "field-row";
+  const pathLabel = document.createElement("label");
+  pathLabel.textContent = isResolve ? "Database URL" : "Catalog path";
+  pathRow.appendChild(pathLabel);
+  const pathInput = document.createElement("input");
+  pathInput.type = isResolve ? "password" : "text";
+  pathInput.value = isResolve ? "" : (iv.CatalogPath ?? "");
+  if (isResolve) pathInput.placeholder = iv.CatalogPathSet ? "(configured — leave blank to keep)" : "(not set)";
+  pathRow.appendChild(pathInput);
+  const pathStatus = document.createElement("span");
+  pathStatus.className = "field-status";
+  if (!isResolve) {
+    const browse = document.createElement("button");
+    browse.type = "button";
+    browse.textContent = "Browse…";
+    browse.addEventListener("click", async () => {
+      const app = getApp();
+      if (!app) return;
+      try {
+        // Deliberately unfiltered (no patterns): IntegrationBuilder.
+        // CatalogFilePatterns (server-side only, e.g. Luminar's
+        // "*.db"/"*.catalog"/"*") isn't part of the settings JSON payload
+        // today, so this picker can't apply the same filter the tray's
+        // PromptAndSetIntegrationPath dialog does. Follow-up if this is
+        // worth closing before the tray-slimming PR removes the filtered
+        // one.
+        const picked = await app.PickFile(pathLabel.textContent, []);
+        if (picked) pathInput.value = picked;
+      } catch (err) {
+        setFieldStatus(pathStatus, String(err), "error");
+      }
+    });
+    pathRow.appendChild(browse);
+  }
+  pathInput.addEventListener("change", async () => {
+    if (isResolve && pathInput.value === "") return; // blank means "leave unchanged"
+    const app = getApp();
+    if (!app) return;
+    setFieldStatus(pathStatus, "Saving…");
+    try {
+      await app.SetIntegrationPath(iv.ID, pathInput.value);
+      setFieldStatus(pathStatus, "Saved", "saved");
+      if (isResolve) pathInput.value = "";
+    } catch (err) {
+      setFieldStatus(pathStatus, String(err), "error");
+    }
+  });
+  pathRow.appendChild(pathStatus);
+  block.appendChild(pathRow);
+
+  if (isResolve) {
+    const rewriteRow = document.createElement("div");
+    rewriteRow.className = "field-row";
+    const rwLabel = document.createElement("label");
+    rwLabel.textContent = "Path rewrites";
+    rewriteRow.appendChild(rwLabel);
+    const rwInput = document.createElement("input");
+    rwInput.type = "text";
+    rwInput.value = iv.PathRewrites ?? "";
+    rewriteRow.appendChild(rwInput);
+    const rwStatus = document.createElement("span");
+    rwStatus.className = "field-status";
+    rwInput.addEventListener("change", async () => {
+      const app = getApp();
+      if (!app) return;
+      setFieldStatus(rwStatus, "Saving…");
+      try {
+        await app.SetIntegrationRewrites(iv.ID, rwInput.value);
+        setFieldStatus(rwStatus, "Saved", "saved");
+      } catch (err) {
+        setFieldStatus(rwStatus, String(err), "error");
+      }
+    });
+    rewriteRow.appendChild(rwStatus);
+    block.appendChild(rewriteRow);
+  }
+
+  block.appendChild(
+    renderSelectField(
+      "Sync every",
+      [
+        ["15", "15 minutes"],
+        ["60", "60 minutes (default)"],
+        ["-1", "Never (manual only)"],
+      ],
+      iv.SyncIntervalMinutes || 60,
+      (val, status) => saveSetting(`integrations.${iv.ID}.syncIntervalMinutes`, Number(val), status),
+    ),
+  );
+
+  return block;
+}
+
+function renderSettingsForm(sv) {
+  const container = byId("settings-body");
+  container.innerHTML = "";
+
+  for (const f of FREE_TEXT_FIELDS) container.appendChild(renderTextField(f, sv));
+  for (const f of CHECKBOX_FIELDS) container.appendChild(renderCheckboxField(f, sv));
+
+  container.appendChild(
+    renderCheckboxField({ key: "selfUpdate.enabled", label: "Enable self-update checks", get: (s) => s.SelfUpdateEnabled }, sv),
+  );
+  container.appendChild(
+    renderSelectField(
+      "Check for updates",
+      [
+        ["1", "Every hour"],
+        ["24", "Every 24 hours (default)"],
+        ["-1", "Never (check once at startup only)"],
+      ],
+      sv.SelfUpdateCheckIntervalHrs || 24,
+      (val, status) => saveSetting("selfUpdate.checkIntervalHours", Number(val), status),
+    ),
+  );
+
+  const integrations = sv.Integrations ?? [];
+  if (integrations.length) {
+    const h3 = document.createElement("h3");
+    h3.textContent = "Integrations";
+    container.appendChild(h3);
+    for (const iv of integrations) container.appendChild(renderIntegrationBlock(iv));
+  }
+}
+
+async function loadSettings() {
+  const app = getApp();
+  if (!app) {
+    setTimeout(loadSettings, 500);
+    return;
+  }
+  try {
+    const sv = JSON.parse(await app.SettingsJSON());
+    byId("settings-error").textContent = "";
+    renderSettingsForm(sv);
+  } catch (err) {
+    // Retry at the same cadence as the status poll rather than leaving a
+    // dead error: the agent may not be running yet when this window
+    // opens, or may still be restarting -- both normal cases (see
+    // app.go's StatusJSON doc comment), and the status section already
+    // self-heals the same way. Once a load succeeds, this stops
+    // rescheduling itself -- the settings form is still loaded once, not
+    // on a timer, so an in-progress edit is never overwritten.
+    byId("settings-error").textContent = String(err);
+    setTimeout(loadSettings, POLL_INTERVAL_MS);
+  }
+}
+
+loadSettings();
