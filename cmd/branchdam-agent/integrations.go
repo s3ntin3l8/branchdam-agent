@@ -27,10 +27,11 @@ import (
 type IntegrationBuilder struct {
 	ID tray.IntegrationID
 	// Title must match the corresponding tray.Integrations() entry's own
-	// Title exactly -- TestRegistryCompleteness asserts this. Used by the
-	// Settings/dialog wiring (settings.go) for dialog titles and error
-	// messages; the menu itself (internal/tray) reads Title from its own
-	// registry, never from here.
+	// Title exactly -- TestRegistryCompleteness asserts this. Used by
+	// settings.go's Snapshot() to populate tray.IntegrationView.Title for
+	// the Settings form's per-integration heading (issue #221); the
+	// live-status side (internal/tray) reads Title from its own registry,
+	// never from here.
 	Title string
 
 	// Current extracts this integration's own CatalogSyncConfig out of

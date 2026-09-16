@@ -97,10 +97,22 @@ type SettingsView struct {
 // CatalogPathSet is a bool alongside the path itself for the same reason
 // ServerAPIKeySet exists on SettingsView: the menu's title only ever needs
 // "(configured)" vs. "(not set)", and the path itself is still pre-filled
-// into the file picker via PromptAndSetIntegrationPath's own
-// defaultValue-style lookup, not read from here.
+// into the Wails window's file picker via its own SetIntegrationPath-backed
+// form field, not read from here.
 type IntegrationView struct {
-	ID             IntegrationID
+	ID IntegrationID
+	// Title is the friendly display name ("Luminar Neo", "DaVinci Resolve")
+	// -- IntegrationStatus's own Title/DisplayName counterpart (see that
+	// struct's doc comment), but no DisplayName method here: unlike
+	// IntegrationStatus, no Go code renders an IntegrationView directly --
+	// it's built by Snapshot() and serialized straight to JSON, untagged
+	// (this struct carries no json: tags at all, matching SettingsView), so
+	// the Settings form's own JS falls back to iv.Title || iv.ID exactly
+	// the way renderIntegrations/renderHooks already do for the live-status
+	// side (app.js). Empty for an IntegrationView built directly in a test
+	// literal, same fallback-on-empty convention as Title elsewhere in this
+	// package.
+	Title          string
 	Enabled        bool
 	DryRun         bool
 	CatalogPath    string

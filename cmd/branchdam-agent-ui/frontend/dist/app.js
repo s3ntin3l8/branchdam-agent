@@ -714,7 +714,11 @@ function renderIntegrationBlock(iv) {
   block.className = "integration-block";
 
   const h3 = document.createElement("h3");
-  h3.textContent = iv.ID;
+  // iv.Title || iv.ID: same fallback renderIntegrations/renderHooks use
+  // for the live-status side (i.Title || i.ID / h.Title || h.ID below) --
+  // untagged Go field, so a Title-less snapshot (older agent, test
+  // literal) still renders the raw ID instead of going blank (issue #221).
+  h3.textContent = iv.Title || iv.ID;
   block.appendChild(h3);
 
   // renderCheckboxField's second argument is the "sv" a top-level
