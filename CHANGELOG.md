@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.10.0...v1.11.0) (2026-09-16)
+
+
+### Features
+
+* restructure the window into a nav-pane of paired settings/status categories ([#227](https://github.com/s3ntin3l8/branchdam-agent/issues/227)) ([009f0fc](https://github.com/s3ntin3l8/branchdam-agent/commit/009f0fc3c5ec6b4da4f6645cf04e9a3e2790f76c))
+* **tray,ui:** surface missing setup fields and add server connection check ([#228](https://github.com/s3ntin3l8/branchdam-agent/issues/228)) ([add59f2](https://github.com/s3ntin3l8/branchdam-agent/commit/add59f229267ac9e028da7c1db60fcd18ee3475b))
+
 ## [1.10.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.9.0...v1.10.0) (2026-09-16)
 
 
