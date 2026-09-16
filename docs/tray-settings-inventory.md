@@ -23,7 +23,7 @@ now owns only `Reload`/`OpenConfigFile`/`RevealConfigFolder` --
 hand-edit-config affordances with no settings VALUE and therefore nothing
 to graduate.
 
-**v1.8.1 update:** `internal/tray/integrationsmenu.go` and
+**v1.9.0 update:** `internal/tray/integrationsmenu.go` and
 `internal/tray/hooksmenu.go` are gone entirely, not just slimmed -- the
 Wails window's `renderIntegrations`/`renderHooks` (live status, "Sync
 now"/"Install"/"Reveal" actions) and `renderIntegrationBlock` (config
@@ -32,9 +32,14 @@ one field the window didn't yet have when the note above was written, is
 now `renderIntegrationBlock`'s own "Sync timeout" select, writing the same
 `integrations.<id>.timeoutSecs` key the tray always did -- so there is no
 longer a per-integration value reachable ONLY from the tray. The tray's
-remaining surface is `Settings` (`Reload config` / `Open config.yaml` /
-`Reveal config folder`, plus a hidden `Restart now`) -- config-file
-affordances with no settings VALUE of their own, same as before.
+remaining surface is `Advanced` (`Reload config` / `Open config.yaml` /
+`Reveal config folder`, plus a hidden `Restart now`; renamed from
+`Settings` in the tray/window UX rethink since it no longer leads to any
+actual setting) -- config-file affordances with no settings VALUE of their
+own, same as before. The tray's own browsable status page (`Open status
+page`) is gone in the same rethink -- the Wails window is now the only
+settings/status surface; `/`, `/status`, and `/status.json` still serve
+plain JSON for anyone who wants to `curl` them.
 
 ## Fields the issue already enumerates
 
@@ -60,7 +65,7 @@ These are in the audit comment block in [`internal/tray/settings.go`](../interna
 - **`prune.*` (config.go:148-165)** — `enabled`, `minAgeHours`, `intervalMinutes`. Destructive subcommand gating; the hand-edit gate is the audit trail. A stray click on "Enable prune" with a wrong `minAgeHours` would be a one-step path to deleting verified archive mirrors.
 - **`offline.*` (config.go:103-125)** — `queueDbPath`, `tier0ContainerRoot`, `drainIntervalSecs`. Changing the SQLite path or the staging container root mid-run breaks in-flight drain state; `drainIntervalSecs` is a tuning knob operators rarely touch.
 - **`selfUpdate.repo` (config.go:211)** — a typo in the `owner/name` slug makes the next update check fetch from a non-existent or wrong repo. The hand-edit gate (plus a `selfupdate` log line that names the resolved repo on every check) is the safety net.
-- **`tray.statusAddr` (config.go:190)** — loopback bind address. A non-loopback value exposes the unauthenticated status page on the network. Restart-only and intentionally hand-edit.
+- **`tray.statusAddr` (config.go:190)** — loopback bind address. A non-loopback value exposes the unauthenticated status/settings JSON endpoints on the network. Restart-only and intentionally hand-edit.
 - **`ingest.exiftoolPath`** — overrides which exiftool binary `internal/exiftool.Pool` invokes; empty (the default) resolves `exiftool` through PATH. Added alongside the exiftool `-stay_open` pooling refactor (#104), not part of this issue's original enumeration. A rarely-touched operator override, not worth a menu slot.
 
 ## Graduation workflow

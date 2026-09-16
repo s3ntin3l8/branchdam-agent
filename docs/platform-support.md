@@ -73,7 +73,7 @@ stub for every other `GOOS`, including Linux, where CI actually builds/tests/lin
 and why the darwin binary is built natively on `macos-26` (both in CI's `build-darwin-full` job
 and in `release-binaries.yml`) rather than cross-compiled.
 
-## Settings menu
+## Advanced menu (formerly "Settings")
 
 **Slimmed by issue #211** (Track 3d's second half): every field this section used to describe --
 start at login, confirm destructive actions, check for updates and its interval, require
@@ -81,10 +81,11 @@ unbuffered verify, require DCIM folder, pause upload on metered connection, auto
 URL, API key, agent ID, watch folders, allowed extensions, archive/local edit root, path mappings,
 naming template -- moved to the Wails Settings window instead (`cmd/branchdam-agent-ui`, Track 3d
 below), which reads `GET /api/settings` and writes through `SetBool`/`SetInt`/`SetString`. The
-tray's own "Settings" submenu now has exactly three items, none of them a settings VALUE:
-**Reload config**, **Open config.yaml**, and **Reveal config folder** -- hand-edit-config
-affordances the window has no equivalent for (there is no "reveal this file in Finder/Explorer"
-button in a webview). `PromptAndSet`/`PromptAndSetIntegrationPath`/`PromptAndSetIntegrationRewrites`
+tray's own submenu (named **"Settings"** through v1.9.0; renamed **"Advanced"** in the tray/window
+UX rethink, since it no longer led to any actual setting -- see "Native app UI" below) now has
+exactly three items, none of them a settings VALUE: **Reload config**, **Open config.yaml**, and
+**Reveal config folder** -- hand-edit-config affordances the window has no equivalent for (there is
+no "reveal this file in Finder/Explorer" button in a webview). `PromptAndSet`/`PromptAndSetIntegrationPath`/`PromptAndSetIntegrationRewrites`
 (the zenity-dialog-backed methods every removed menu item used to call) have no remaining
 production caller as of this PR -- left in the `Settings` interface rather than removed in the same
 PR, since deleting them means also deleting `SettingsField` and their `cmd/branchdam-agent`
@@ -107,27 +108,24 @@ field) -- see `docs/tray-settings-inventory.md`. `pathMappings` and the fields l
 `selfUpdate.repo`, `tray.statusAddr`, `ingest.exiftoolPath`) remain hand-edit only, unchanged by
 this PR.
 
-The embedded status page (still the `<meta http-equiv="refresh">` HTML page from issue #3, no JS) now
-also renders an "Integrations" section (per-integration enabled/dry-run config state joined by ID
-against the last sync summary -- see the `integrationView` template func in
-`internal/tray/statusserver.go`) and a "DaVinci Resolve render hook" section (issue #60/#61) -- see
-the Status page section below. `/status.json` has since shipped (`statusserver.go`'s
-`handleStatusJSON`, also reachable via `Accept: application/json` on `/` itself); a smoother
-live-refresh loop is still deferred to issue #32's own tray-timer work. Live per-file ingest progress
+The embedded status page used to also render an "Integrations" section (per-integration
+enabled/dry-run config state joined by ID against the last sync summary) and a "DaVinci Resolve
+render hook" section (issue #60/#61) -- both HTML-page-only sections, since removed alongside the
+whole browsable page. See "Status page" below for what replaced it. Live per-file ingest progress
 (per-file path, bytes done / total, phase, and elapsed time) is already
 shipped by #85: it renders in the tray tooltip while a card is being
-ingested and on the status page under the same busy-card header. See
+ingested and in the Wails window under the same busy-card header. See
 `internal/ingest/progress.go`'s `ProgressEvent` and `internal/tray/tooltip.go`'s
 `FormatIngestProgress`.
 
-## Integrations menu (removed in v1.8.1)
+## Integrations menu (removed in v1.9.0)
 
-**Deleted entirely in v1.8.1** (`internal/tray/integrationsmenu.go`), not merely slimmed further.
+**Deleted entirely in v1.9.0** (`internal/tray/integrationsmenu.go`), not merely slimmed further.
 The paragraphs below describe issue #211's slimming as it shipped in v1.8.0 -- kept as history for
 why the menu looked the way it did, but the code no longer exists. Two things forced the deletion
 rather than a further trim: (1) `Sync timeout`, the one field this section calls out below as "the
 one per-integration field the window has no control for at all", moved into
-`renderIntegrationBlock` as a `Sync timeout` select once v1.8.1 closed that gap, leaving nothing in
+`renderIntegrationBlock` as a `Sync timeout` select once v1.9.0 closed that gap, leaving nothing in
 this menu the Wails window didn't already cover; (2) a separate, independent registry
 (`internal/tray/hooks.go`'s `HookDescriptors()`) built its OWN top-level `DaVinci Resolve` item
 (see "DaVinci Resolve hook installer" below, also removed) with the identical title as this menu's
@@ -135,16 +133,16 @@ own `DaVinci Resolve` catalog-sync item -- two indistinguishable flat top-level 
 regression that slipped past CI because every menu-building file in `internal/tray` is
 `//go:build windows || darwin` and never compiles on the Linux required check. Both the status
 line and the "Sync now" action this section used to describe now live only in the Wails window's
-`renderIntegrations`/status page (see "Status page" and "Native app UI" below); the friendly
+`renderIntegrations` (see "Status page" and "Native app UI" below); the friendly
 "Luminar Neo"/"DaVinci Resolve" names those surfaces render come from a new
 `IntegrationStatus.Title`/`HookStatus.Title` (populated from the same `Integrations()`/
 `HookDescriptors()` registries this section references) with a `DisplayName()` fallback to the raw
 ID, guarded by `internal/tray/registry_test.go`'s `TestRegistryTitlesAreUnique` (asserted per
 registry, not across their union -- see that test's own doc comment for why "DaVinci Resolve"
-legitimately appearing in both a separately-headed "Integrations" and "Render hooks" section is not
+legitimately appearing in both a separately-headed "Integrations" and "Hooks" section is not
 the bug #211/this note describes).
 
-**Slimmed by issue #211**, same reasoning as the Settings menu above: Enabled, Dry run, the
+**Slimmed by issue #211**, same reasoning as the Advanced menu above: Enabled, Dry run, the
 catalog path/database URL, "Sync every", and Resolve's path rewrites all moved to the Wails
 window's own `renderIntegrationBlock` (Track 3d/#210). What remains here, one top-level item per
 catalog integration (`internal/tray.Integrations()`'s compile-time registry -- Luminar Neo and the
@@ -179,111 +177,121 @@ shared and size-1, so a Settings click and an Integrations click landing in the 
 one is dropped -- the same "drop rather than queue" semantics every other menu action in this file
 already has.
 
-**Unverified on real hardware**, same caveat as the Settings menu above: native Windows and macOS
+**Unverified on real hardware**, same caveat as the Advanced menu above: native Windows and macOS
 CI jobs compile and test this code, while `make build-darwin` explicitly excludes both
 `internal/tray` and `cmd/branchdam-agent` (`Makefile:47`). Whether the slimmed menus actually
 render and click correctly, and whether "Open branchDAM" (below) actually launches and focuses the
 window, remain real-hardware checks -- see the hardware checklist's new items.
 
-## Status page (issue #61)
+## Status page (issue #61, HTML removed in the tray/window UX rethink)
 
-The embedded status page's "Integrations" section joins two independent sources at render time,
-by ID, via a `integrationView` template func (`text/template` can only call a method that returns
-one value, or two where the second is `error` -- `SettingsView.Integration`/`Status.Integration`'s
-`(T, bool)` return doesn't qualify, hence the func):
+**The browsable HTML page is gone.** Through v1.9.0 this was a plain `<meta http-equiv="refresh">`
+HTML page (`internal/tray/assets/index.html`, rendered by a `html/template`) reachable via the
+tray's "Open status page" item, showing the same "Integrations"/"DaVinci Resolve render hook"/queue/
+watch-directory sections the Wails window renders. It had no consumer of its own -- the window uses
+the authenticated `/api/*` surface below, not this page -- and duplicated the window's rendering in
+a second templating language for anyone who happened to open it in a browser. The operator's own
+report ("we still have the status webpage, why?") is what prompted removing it: the Wails window is
+now the single settings/status surface, full stop.
 
-- **Config state** (enabled, dry run, catalog path) from `Settings.Snapshot()` -- `Runner.Status()`
-  deliberately never reads config (see `Status.Integrations`'s own doc comment), so `StatusServer`
-  now also takes a `SettingsFunc func() SettingsView`, called once per request alongside
-  `StatusFunc`. `SettingsFunc` is nil-tolerant (renders an empty `SettingsView`) since several
-  existing tests construct a bare `StatusServer{StatusFunc: ...}` literal with no settings source.
-- **Runtime state** (last sync time/counts/error) from `Status.Integrations[].LastSync`.
+**`/`, `/status`, and `/status.json` now all serve the same JSON `statusPageView`**
+(`internal/tray/statusserver.go`'s `handleStatusJSON`, registered via Go's exact-root `/{$}`
+pattern for `/`) -- there is no HTML rendering path left in `internal/tray` at all. This is
+unauthenticated and loopback-only, same as before, for anyone who wants to `curl` it; the tray's
+"Open status page" menu item is gone along with the page it opened.
 
-The `(dry run — nothing was emitted)` marker is driven by `SyncSummary.DryRun` -- the flag as it
-was **at the time that pass ran** -- not by the config's current dry-run checkbox. Those can
-disagree (a pass runs under dry-run, the operator unticks it immediately after); rendering off the
-config value instead would make the marker disappear from a stale `Emitted` count that never
-actually reached the server, which is the exact "actively misleading" failure mode the issue called
-out.
+**A separate, authenticated `/api/*` surface exists alongside the plain JSON routes above**
+(`internal/tray/statusapi.go`), built for the native app UI (Track 3 of the distribution/UX plan):
+`GET /api/status`, `GET`/`POST /api/settings`, `POST /api/settings/integration-path`,
+`POST /api/settings/integration-rewrites`, and
+`POST /api/actions/{ingest,drain,prune,sync,hook-install,pause}`. `POST /api/settings`'s value
+selects the setter by JSON type -- boolean, number, string, or array of strings -- so a free-text
+field (server URL, agent ID, the two ingest roots, `pathMappings`, ...) is reachable
+non-interactively via `Settings.SetString`. Per-integration catalog paths and Resolve's path
+rewrites need the two dedicated routes above instead, since a raw dotted key alone can't
+disambiguate `catalogPath` from `databaseUrl`, and rewrites parse into a structured value the
+generic string path never handles. Every request must present `Authorization: Bearer <token>`,
+where `<token>` is a fresh value `internal/sessiontoken.Generate` writes 0600 beside `agent.log` on
+each tray start (never persisted across restarts, never passed as an argument). The routes are
+registered at all only when the status server's own bind address resolves to loopback -- an
+operator-widened `tray.statusAddr` gets a 404 on every `/api/*` route, not a 403 that would still
+confirm they exist -- and every request is also checked against `Origin`/`Sec-Fetch-Site` to reject
+the classic loopback-CSRF shape (a page loaded from elsewhere issuing a same-machine POST via a
+browser's fetch). See Known gaps for what this surface does not yet do. `internal/sessiontoken` is
+a package of its own, separate from `internal/tray`, specifically so `cmd/branchdam-agent-ui`
+(below) can read the token without pulling in `fyne.io/systray` -- a process with no tray menu has
+no business depending on it.
 
-A "DaVinci Resolve render hook" section renders the same cached `HookState` the tray's own hook
-installer maintains (`Runner.SetHookState`, seeded once via `resolvehook.Detect` at startup --
-never recomputed on the status page's own refresh, for the same reason `statusQueueReadTimeout`
-exists for queue counts). **Installed**, **up to date**, and **modified/out of date** are rendered
-as distinct states since a hand-edited copy and a stale shipped version are the same SHA-256
-mismatch, indistinguishable by design -- see `HookState`'s own doc comment.
-
-**The legacy page (`/`, `/status`, `/status.json`) stays read-only.** Neither section is itself
-interactive -- both are plain `<meta http-equiv="refresh">` HTML, no JS, no auth, matching this
-page's original issue #3/#61 shape. As of v1.8.1, the actions themselves live only in the Wails
-window (`cmd/branchdam-agent-ui`): catalog sync via `renderIntegrations`' "Sync now" (or its
-background timer), and the Resolve hook via `renderHooks`' "Install"/"Reveal" -- the tray's own
+**The catalog-sync and Resolve-hook actions live only in the Wails window** (`renderIntegrations`'
+"Sync now" or its background timer, `renderHooks`' "Install"/"Reveal") -- the tray's own
 "Integrations menu"/"DaVinci Resolve hook installer" menus that used to offer the same actions are
-gone (see those sections above). `branchdam-agent resolve-hook -install` remains available
-headlessly, for a workstation that never runs the tray or the window at all.
-
-**A separate, authenticated `/api/*` surface now exists alongside the legacy page**
-(`internal/tray/statusapi.go`), built for the upcoming native app UI (Track 3 of the
-distribution/UX plan) rather than for the status page itself: `GET /api/status`, `GET`/`POST
-/api/settings`, `POST /api/settings/integration-path`, `POST /api/settings/integration-rewrites`,
-and `POST /api/actions/{ingest,drain,prune,sync,hook-install,pause}`. `POST /api/settings`'s value
-selects the setter by JSON type -- boolean, number, string, or array of strings -- so, unlike at
-#206 landing, a free-text field (server URL, agent ID, the two ingest roots, `pathMappings`, ...) is
-now reachable non-interactively via `Settings.SetString`, not just through the tray's zenity-backed
-dialog. Per-integration catalog paths and Resolve's path rewrites need the two dedicated routes
-above instead, since a raw dotted key alone can't disambiguate `catalogPath` from `databaseUrl`, and
-rewrites parse into a structured value the generic string path never handles. Every request
-must present `Authorization: Bearer <token>`, where `<token>` is a fresh value
-`internal/sessiontoken.Generate` writes 0600 beside `agent.log` on each tray start (never persisted
-across restarts, never passed as an argument). The routes are registered at all only when the status
-server's own bind address resolves to loopback -- an operator-widened `tray.statusAddr` gets a 404
-on every `/api/*` route, not a 403 that would still confirm they exist -- and every request is also
-checked against `Origin`/`Sec-Fetch-Site` to reject the classic loopback-CSRF shape (a page loaded
-from elsewhere issuing a same-machine POST via a browser's fetch). See Known gaps for what this
-surface does not yet do. `internal/sessiontoken` is a package of its own, separate from
-`internal/tray`, specifically so `cmd/branchdam-agent-ui` (below) can read the token without pulling
-in `fyne.io/systray` -- a process with no tray menu has no business depending on it.
+gone (see those sections above), and so is the HTML page that used to render their read-only
+mirror. `branchdam-agent resolve-hook -install` remains available headlessly, for a workstation
+that never runs the tray or the window at all. The `(dry run — nothing was emitted)` marker
+`renderIntegrations` shows is driven by `SyncSummary.DryRun` -- the flag as it was **at the time
+that pass ran** -- not by the config's current dry-run checkbox, for the same "actively misleading"
+reason issue #61 originally called out: those two can disagree (a pass runs under dry-run, the
+operator unticks it immediately after), and rendering off the config value instead would make the
+marker disappear from a stale `Emitted` count that never actually reached the server.
 
 ## Native app UI (`cmd/branchdam-agent-ui`, Track 3c)
 
 A second GUI binary, a status-and-settings window built on Wails v2, sitting alongside the tray
 rather than inside it: on macOS both `fyne.io/systray` and Wails need to own the platform's
 `NSApplication` main run loop, and only one process can hold that loop, so the window talks to the
-tray over the loopback `/api/*` surface above instead of sharing a process with it. The window polls
-`GET /api/status` every 5 seconds and renders it, at rough parity with the embedded status page's own
-sections, plus a Settings section (Track 3d) that reads `GET /api/settings` once at load and writes
-through `App.SetSetting`/`SetIntegrationPath`/`SetIntegrationRewrites` -- see those methods' own doc
-comments in `app.go`. The settings form deliberately does **not** re-poll on the 5-second status
-timer: re-rendering every field on every tick would overwrite whatever an operator is mid-typing, and
-no field re-fetches on save either -- a text field keeps what was typed on a rejected save so it can
-be corrected and resubmitted, while a checkbox or `<select>` (no "keep editing" state) reverts to its
-pre-change value instead of staying visibly flipped until the window reloads. Two native
-folder/file pickers (`App.PickDirectory`/`PickFile`, wrapping Wails' `runtime.OpenDirectoryDialog`/
-`OpenFileDialog`) back the archive root, local edit root, and node-index path fields -- these are only
-reachable from Go code running inside this process's own window context, which is why they are bound
-methods rather than an HTML `<input type="file">`. This PR (Track 3d) already included each
-integration's own config fields in the Settings section (`renderIntegrationBlock`: enabled, dry
-run, catalog path/database URL, path rewrites for Resolve, sync interval) -- what it did NOT
-include, and what Track 3e (below) adds, is any way to actually *run* a sync or hook action from
-this window. The tray's own Settings/Integrations menus were left untouched by this PR on purpose
--- it was additive only, so there was no window where a field was reachable from neither surface
-(see Track 3d's "backend, then window, then tray-slimming" sequencing note in the plan). **Both
-Packaging (Track 3f) and the tray-slimming half (issue #211) have since landed** -- see "Packaging
-(Track 3f)" below for the former; the latter removed every tray menu item this window duplicates
-and wired "Open branchDAM" (see the Settings menu / Integrations menu sections above, and
-`run_supported.go`'s `launchUIBinary`). Issue #211's own original hardware-verification gate
-(items 13/14 below passing on real Windows/macOS hardware before slimming) was explicitly waived
-by the user for this pass -- see that issue for the full reasoning; this is a personal test
-environment, not a production rollout.
+tray over the loopback `/api/*` surface above instead of sharing a process with it. **This window is
+now the sole settings/status surface** -- the tray's own browsable status page is gone (see "Status
+page" above) and its per-integration/per-hook submenus are gone too (see the sections above); the
+tray itself is reduced to detection, ingest/drain/prune triggers, and the "Advanced" (config-file)
+and "Open branchDAM" items.
+
+**Config zone, then live zone (`index.html`).** The window opens on five grouped settings
+sections -- Server & identity, Storage & naming, Behavior, Self-update settings, Integration
+settings -- followed by the seven live-status sections (Server connection, Ingest, Queue, Watch
+directories, Integrations, Hooks, Self-update). This ordering (settings first) is deliberate: the
+previous layout put live status, which can't populate until configuration is done, ahead of the
+configuration itself -- an operator's own complaint ("settings order also confusing, integration
+status before setup"). The five config sections carry the `-settings` qualifier
+(`Integration settings`, `Self-update settings`) specifically to avoid colliding with the live
+`Integrations`/`Self-update` sections' plain-noun headings below them.
+
+**The poll/settings split is a hard invariant, not just a layout choice.** The window polls
+`GET /api/status` every 5 seconds and rebuilds each live-status container's DOM from scratch
+(`render(view)` in `app.js`); the five settings containers are loaded exactly once, by
+`loadSettings()`, and `render(view)` never touches them. Every settings container's `id` ends
+`-config` for exactly this reason -- `TestStatusPollNeverRebuildsSettingsContainers`
+(`cmd/branchdam-agent-ui/app_test.go`) mechanically asserts `render(view)`'s own function body
+never mentions a `-config` id or calls `renderSettingsForm`. Breaking this would silently wipe out
+whatever an operator is mid-typing on the next poll tick, with no error and no crash -- the reason
+this is pinned by a test rather than left to code review alone.
+
+`renderSettingsForm` (Track 3d) reads `GET /api/settings` once at load and writes through
+`App.SetSetting`/`SetIntegrationPath`/`SetIntegrationRewrites` -- see those methods' own doc
+comments in `app.go`. No field re-fetches on save either -- a text field keeps what was typed on a
+rejected save so it can be corrected and resubmitted, while a checkbox or `<select>` (no "keep
+editing" state) reverts to its pre-change value instead of staying visibly flipped until the window
+reloads. Two native folder/file pickers (`App.PickDirectory`/`PickFile`, wrapping Wails'
+`runtime.OpenDirectoryDialog`/`OpenFileDialog`) back the archive root, local edit root, and
+node-index path fields -- these are only reachable from Go code running inside this process's own
+window context, which is why they are bound methods rather than an HTML `<input type="file">`. Each
+integration's own config fields (`renderIntegrationBlock`: enabled, dry run, catalog path/database
+URL, path rewrites for Resolve, sync interval, sync timeout) render inside the "Integration
+settings" section. **Both Packaging (Track 3f) and the tray-slimming half (issue #211) have since
+landed** -- see "Packaging (Track 3f)" below for the former; the latter removed every tray menu
+item this window duplicates and wired "Open branchDAM" (see the Advanced menu / Integrations menu
+sections above, and `run_supported.go`'s `launchUIBinary`). Issue #211's own original
+hardware-verification gate (items 13/14 below passing on real Windows/macOS hardware before
+slimming) was explicitly waived by the user for that pass -- see that issue for the full reasoning;
+this is a personal test environment, not a production rollout.
 
 ### Integrations/hooks actions (Track 3e)
 
-The Settings section's `renderIntegrationBlock` (Track 3d, above) covers *configuring* an
-integration; it has no way to run one. This adds the missing action surface, in the read-only
-status view rather than the settings form -- these are Runner actions with a live result to show
-(a `SyncSummary`/`HookState`), not a config value to persist, matching how
-`internal/tray/integrationsmenu.go`'s own "Sync now" is a menu action wired straight into
-`run_supported.go`'s select loop rather than a `Settings` mutation.
+The "Integration settings" section's `renderIntegrationBlock` (Track 3d, above) covers
+*configuring* an integration; it has no way to run one. This adds the missing action surface, in
+the read-only live-status "Integrations"/"Hooks" sections rather than the settings form -- these
+are Runner actions with a live result to show (a `SyncSummary`/`HookState`), not a config value to
+persist, matching how `internal/tray/integrationsmenu.go`'s own "Sync now" is a menu action wired
+straight into `run_supported.go`'s select loop rather than a `Settings` mutation.
 
 - **`renderIntegrations`/`renderHooks`** (`app.js`) were rebuilt from innerHTML table strings into
   real DOM (`actionButtonRow`), matching the settings form's own `renderTextField`/
@@ -336,7 +344,7 @@ rather than a separate pipeline:
   `resource.syso` generated into `cmd/branchdam-agent-ui/`'s own package directory, since Go only
   auto-links one present in the *same* directory as what's being built; the tray's `resource.syso`
   from the same job doesn't carry over. Added to `branchdam-agent-<version>-windows-amd64.zip` (the
-  self-update payload -- the outer archive name carries the release version since v1.8.1, but the
+  self-update payload -- the outer archive name carries the release version since v1.9.0, but the
   exe members inside it stay unversioned, see "Release asset filenames" below) alongside the other
   two exes, and to `installer/windows/branchdam-agent.nsi` as a third
   `File`/`CheckExeNotRunning` pair, with its own Start Menu shortcut ("Open branchDAM.lnk") and the
@@ -429,7 +437,7 @@ tray)`'s `go test ./...`/`go build ./...` on `macos-26` both exercise the packag
 Windows free coverage from any host; and `build-darwin-full`'s own `go build -tags production
 ./cmd/branchdam-agent-ui` step, added specifically because darwin has no CI signal otherwise --
 there's no way to see the runtime failure from a `go build`/`go test` pass, only from actually
-launching the binary (see the "Wails smoke test" step in the v1.8.1 fix's own verification
+launching the binary (see the "Wails smoke test" step in the v1.9.0 fix's own verification
 procedure).
 
 **Token handling is per-request, not cached.** `App.StatusJSON` re-reads both `config.yaml` (for the
@@ -447,9 +455,9 @@ had it installed via any other app is a real, untested failure mode, not just an
 Also unverified: whether `SingleInstanceLock`'s second-launch window-focus behavior actually works
 as documented.
 
-## DaVinci Resolve hook menu (issue #68, removed in v1.8.1)
+## DaVinci Resolve hook menu (issue #68, removed in v1.9.0)
 
-**Deleted entirely in v1.8.1** (`internal/tray/hooksmenu.go`), for the same reason as the
+**Deleted entirely in v1.9.0** (`internal/tray/hooksmenu.go`), for the same reason as the
 Integrations menu above: the Wails window's `renderHooks` already covered "Install"/"Reveal", and
 this menu's own top-level item -- titled "DaVinci Resolve", same as the Integrations menu's own
 Resolve entry two paragraphs below -- was one half of the #187 duplicate-title regression that
@@ -539,8 +547,8 @@ the `.dmg` instead of the `.tar.gz` -- checked against the vendored source
 which does not include `.dmg` -- an asset ending `-arm64.dmg` cannot match. Re-check this if
 go-selfupdate is ever upgraded past v1.6.0.
 
-**Release asset filenames (v1.8.1).** Every release asset's outer filename gained a
-`<version>` infix (e.g. `branchdam-agent-v1.8.1-darwin-arm64.dmg`) so downloads from different
+**Release asset filenames (v1.9.0).** Every release asset's outer filename gained a
+`<version>` infix (e.g. `branchdam-agent-v1.9.0-darwin-arm64.dmg`) so downloads from different
 releases stop colliding in `~/Downloads` -- v1.8.0 shipped without one. This is safe for
 already-installed clients precisely because of the closed-suffix-set matching documented in the
 paragraph above: `getSuffixes`' own `assetMatchSuffixes` (detect.go) selects an asset by
@@ -784,8 +792,8 @@ A live-refresh via TUF is the proper long-term answer but is out of scope here.
   share the gap.
 - **The settings menu's dialogs (issue #31) -- RETIRED by issue #211.** Every free-text/checkbox
   field that used to fire a zenity dialog from the Settings/Integrations menus moved to the Wails
-  Settings window instead (see the Settings menu / Integrations menu sections above); the tray's
-  own remaining Settings items (Reload config, Open config.yaml, Reveal config folder) don't go
+  Settings window instead (see the Advanced menu / Integrations menu sections above); the tray's
+  own remaining Advanced items (Reload config, Open config.yaml, Reveal config folder) don't go
   through the `dialog` subcommand at all -- `OpenConfigFile`/`RevealConfigFolder` shell out to the
   OS's own "open with default app" command directly (`cmd/branchdam-agent/settings.go`'s
   `openWithDefaultApp`), and `Reload` is a pure config re-read with no UI of its own. The
@@ -795,19 +803,19 @@ A live-refresh via TUF is the proper long-term answer but is out of scope here.
   startup-error dialog bullet immediately above is UNAFFECTED by this retirement: it's a different
   dialog, fired before `systray.Run` even starts, still real and still unverified.
 - **Tray queue status has no live rate/ETA or in-progress-transfer readout (issue #32, closed
-  by #85 for ingest; drain ETA still pending).** The status page and menu show a real
+  by #85 for ingest; drain ETA still pending).** The Wails window and tray tooltip show a real
   `internal/queue.Store.Counts` snapshot (pending, permanently failed, done) plus the last
   completed drain/prune pass's summary. Live per-file ingest progress (path, bytes done / total,
   phase, elapsed time) is shipped by #85: `internal/ingest/progress.go`'s `ProgressEvent` is
   emitted by `DualWrite`, `WriteLocal`, `Verify`, `CopyToArchive`, and `Drain`'s archive copy,
-  rendered in the tray tooltip via `internal/tray/tooltip.go`'s `FormatIngestProgress` and on
-  the status page (`TestHandleIndexRendersIngestProgress`,
+  rendered in the tray tooltip via `internal/tray/tooltip.go`'s `FormatIngestProgress` and in
+  the Wails window's Ingest section (`TestHandleStatusJSON`,
   `TestRunnerIngestProgressRecordedAndCleared`). What remains open: a bytes/sec rate / ETA for
   drain's archive copy (the bytes/sec signal exists per-file but is not yet aggregated across
   the concurrent copy + verify pipeline). `offline.drainIntervalSecs`/`prune.intervalMinutes`
-  are also config-file-only for now -- not yet exposed in the tray's settings menu. Note also
+  are also config-file-only for now -- not yet exposed in the window's settings form. Note also
   that `Runner.Status()` performs a real `queue.Store.Counts` read on every call -- the tray's
-  5s menu-refresh tick and every status-page request -- bounded to 5s (`statusQueueReadTimeout`)
+  5s menu-refresh tick and every status/`/api/status` request -- bounded to 5s (`statusQueueReadTimeout`)
   so a wedged read can't hang the whole tray menu, but still a real query against `queue.db`
   each time; this is more impactful the larger or more NAS-backed-network-latency-prone
   `offline.queueDbPath`'s storage is.
@@ -861,8 +869,8 @@ to say "verified."
    unexpanded `${VAR}` in `server.apiKey`), launch `branchdam-agent-tray.exe` -- confirm an error
    dialog appears (before systray's own message pump has started) naming the log path at
    `%LOCALAPPDATA%\branchDAM\logs\agent.log`.
-3. Settings menu (slimmed by issue #211): with a config already in place, open the tray's
-   Settings submenu -- confirm it shows exactly three items (Reload config, Open config.yaml,
+3. Advanced menu (slimmed by issue #211): with a config already in place, open the tray's
+   Advanced submenu -- confirm it shows exactly three items (Reload config, Open config.yaml,
    Reveal config folder), click each, and confirm "Reload config" picks up a hand-edit made to
    `config.yaml` while the tray is running (e.g. change `ingest.pollIntervalSecs`) without a
    restart. Every free-text/checkbox field this item used to test (server URL, API key, naming
@@ -881,7 +889,7 @@ to say "verified."
    to roll back to.
 6. Tray-driven queue: with `offline.queueDbPath` and `prune.enabled: true` set, ingest a card
    offline, then let the tray's own drain/prune timers run (or use "Drain queue now"/"Prune now")
-   -- confirm the status page's queue counts update and a card ingest started while a drain/prune
+   -- confirm the Wails window's queue counts update and a card ingest started while a drain/prune
    pass is in flight is never blocked or corrupted.
 7. Integrations menu (slimmed by issue #211): open the top-level "Luminar Neo" item (a sibling of
    Settings, not nested under it) -- confirm it shows only the read-only status line, "Sync
@@ -889,7 +897,7 @@ to say "verified."
    moved to the Wails window's own per-integration block -- covered by item 13/15 instead). Set
    "Enabled" and "Catalog path" via the window, leave "Dry run" on, then click the tray's own
    "Sync now" -- confirm it reaches the configured `server.baseUrl` (check the audit queue for the
-   emitted edge; confirm the status page's own Integrations section shows the same emitted count
+   emitted edge; confirm the Wails window's own Integrations section shows the same emitted count
    with no "(dry run — nothing was emitted)" marker once Dry run is off from the window). Also
    confirm a Settings-menu click and an Integrations-menu click issued back-to-back never
    cross-contaminate each other's "last change failed" title, and that clicking "Sync now" from
@@ -897,7 +905,7 @@ to say "verified."
    running" on whichever one lands second, never a concurrent double sync.
 8. Timer-driven sync: set `integrations.luminar.syncIntervalMinutes: 1` and leave the tray running
    with "Dry run" on -- confirm a sync pass fires on its own (no menu click) roughly once a minute,
-   the status page's "last sync" timestamp advances each time, and the `(dry run)` marker is present
+   the Wails window's "last sync" timestamp advances each time, and the `(dry run)` marker is present
    throughout since no real POST should ever leave the workstation.
 9. Resolve hook install, headless: run `branchdam-agent resolve-hook -install` with no `-dir`
    override -- confirm it installs into
@@ -949,7 +957,7 @@ to say "verified."
 15. Native app UI integrations/hooks actions (Track 3e): in the same window as item 11, with a
     catalog integration configured and enabled, click "Sync now" in the Integrations section --
     confirm the button disables and shows "Syncing…", the row updates with the real emitted count
-    once it completes, and the tray's own status page (if open) shows the identical result (both
+    once it completes, and the Wails window (if open) shows the identical result (both
     read the same `Runner` state). `actionButtonRow` disables its own button for the duration, so a
     second click on the SAME button can't race the first -- instead, start the tray's own
     `integrations.luminar.syncIntervalMinutes: 1` timer (item 8) or click the tray menu's own "Sync
@@ -962,7 +970,7 @@ to say "verified."
     confirm Explorer opens the correct Scripts folder -- confirm Reveal does NOT change the row's
     install-state pill (it never mutates `HookState`).
 16. Tray "Open branchDAM" wiring (issue #211): with no window open, click the tray's own "Open
-    branchDAM" item (a sibling of "Open status page") -- confirm the native window opens within a
+    branchDAM" item (the only "show me things" item left in the tray) -- confirm the native window opens within a
     couple seconds, showing live status. Click it again while the window is still open -- confirm
     Wails' `SingleInstanceLock` brings the existing window forward (focus/restore) rather than
     opening a second one; `launchUIBinary` itself has no "already running" check of its own, so
@@ -1056,7 +1064,7 @@ on real hardware. Add these checks to the Windows and macOS lists above as
 appropriate:
 
 11. **Settings — M5 fields (#78, #79, #81), now in the Wails window (issue #211 moved these out of
-    the tray's Settings submenu):** with a config already in place, open the native window (item
+    the tray's Advanced submenu):** with a config already in place, open the native window (item
     11 in the main Windows/macOS lists above) and edit "Watch folders" and "Allowed extensions" in
     the Settings section -- both round-trip as a JSON array of strings (`SetStringSlice`), not the
     comma-separated dialog text the tray version used to. Confirm each saves and shows
@@ -1075,14 +1083,14 @@ appropriate:
     edit copy still proceeds) -- confirm each saves from the window and takes live effect with no
     tray restart (all three already flow through `Runner.Reconfigure`'s existing hot-reload path,
     unaffected by issue #211's `confirmDestructive`-specific fix). "Pause ingest" is unrelated and
-    unmoved -- it's a session-only, top-level tray item (never in the Settings submenu, not
+    unmoved -- it's a session-only, top-level tray item (never in the Advanced submenu, not
     persisted, no window equivalent by design): toggle it on, insert a card -- confirm no ingest
     starts AND no dialog appears; toggle off, confirm a re-insert triggers the
     dialog again).
-13. **Live ingest progress in tooltip + status page (#85):** insert a card,
+13. **Live ingest progress in tooltip + Wails window (#85):** insert a card,
     open the tray menu -- confirm the tooltip updates within one tick with
     the per-file line rendered by `FormatIngestProgress` (filename, bytes
-    done / total, percentage, speed, ETA); the status page renders the same
+    done / total, percentage, speed, ETA); the Wails window renders the same
     data plus the `phase` field under the busy-card header. Confirm the
     tooltip clears (reverts to the default "branchDAM agent" string) within
     one tick of ingest completion.

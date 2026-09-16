@@ -27,7 +27,7 @@ const (
 
 // winKnownExes is every Windows binary shipped from the same release
 // archive (branchdam-agent-<version>-windows-amd64.zip -- the archive's
-// own outer filename carries the release version since v1.8.1, but the
+// own outer filename carries the release version since v1.9.0, but the
 // three members inside it are deliberately unversioned, since these
 // constants are what identify them: self-update extracts by basename, and
 // a version-stamped member name would break that match on every release).
