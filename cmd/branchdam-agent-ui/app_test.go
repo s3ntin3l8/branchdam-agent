@@ -468,4 +468,99 @@ func TestIntegrationBlockWritesSyncTimeoutKey(t *testing.T) {
 	if !strings.Contains(body, "`integrations.${iv.ID}.timeoutSecs`") {
 		t.Error("frontend/dist/app.js's Sync timeout field doesn't write the `integrations.${iv.ID}.timeoutSecs` key")
 	}
+	// The UX rethink moved renderIntegrationBlock's loop into the
+	// "Integration settings" config section (index.html's own <h2> now
+	// supplies that heading) and deleted the bare <h3>Integrations</h3>
+	// renderSettingsForm used to prepend -- two identically-worded
+	// headings one below the other would have been worse than the
+	// duplicate-tray-menu bug this whole rethink started from.
+	if strings.Contains(body, `h3.textContent = "Integrations"`) {
+		t.Error("frontend/dist/app.js still renders a bare <h3>Integrations</h3> above the integration blocks -- the section <h2> now supplies that heading")
+	}
+}
+
+// TestSettingsSectionsPrecedeLiveSections pins decision 2 of the tray/window
+// UX rethink ("settings order also confusing, integration status before
+// setup"): every config-zone section (id ending "-config") must appear in
+// index.html before every live-status section (id ending "-body"), so
+// first-run configuration is the first thing an operator sees, not buried
+// below status that can't populate until configuration is done.
+func TestSettingsSectionsPrecedeLiveSections(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	configIDs := []string{
+		"settings-server-config",
+		"settings-storage-config",
+		"settings-behavior-config",
+		"settings-selfupdate-config",
+		"settings-integrations-config",
+	}
+	liveIDs := []string{
+		"server-body",
+		"ingest-body",
+		"queue-body",
+		"watch-body",
+		"integrations-body",
+		"hooks-body",
+		"selfupdate-body",
+	}
+
+	lastConfigIdx := -1
+	for _, id := range configIDs {
+		idx := strings.Index(body, `id="`+id+`"`)
+		if idx == -1 {
+			t.Fatalf("index.html missing config container %q", id)
+		}
+		if idx > lastConfigIdx {
+			lastConfigIdx = idx
+		}
+	}
+	for _, id := range liveIDs {
+		idx := strings.Index(body, `id="`+id+`"`)
+		if idx == -1 {
+			t.Fatalf("index.html missing live-status container %q", id)
+		}
+		if idx < lastConfigIdx {
+			t.Errorf("live-status container %q (byte %d) appears before the last config container (byte %d) -- settings must come first", id, idx, lastConfigIdx)
+		}
+	}
+}
+
+// TestStatusPollNeverRebuildsSettingsContainers is the load-bearing test for
+// the config-zone/live-zone split: render(view) runs on every 5s status
+// poll and rebuilds each live-status container's DOM via innerHTML. If it
+// were ever changed to also touch a "-config" container (or to call
+// renderSettingsForm), an operator mid-typing into a settings field would
+// have their edit silently wiped out on the next poll tick -- a failure
+// mode with no error, no crash, just lost input. This mechanically pins
+// that render()'s own function body never mentions a "-config" id or
+// renderSettingsForm; loadSettings() -- which does both -- is called
+// exactly once, outside render()'s call graph, and must stay that way.
+func TestStatusPollNeverRebuildsSettingsContainers(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	start := strings.Index(body, "function render(view) {")
+	if start == -1 {
+		t.Fatal("app.js: could not find `function render(view) {`")
+	}
+	end := strings.Index(body[start:], "\nfunction showError(")
+	if end == -1 {
+		t.Fatal("app.js: could not find the end of render(view) (expected `function showError(` to follow it)")
+	}
+	renderBody := body[start : start+end]
+
+	if strings.Contains(renderBody, "-config") {
+		t.Error("render(view) must never reference a \"-config\" container -- that's the settings poll-clobber bug this test exists to catch")
+	}
+	if strings.Contains(renderBody, "renderSettingsForm") {
+		t.Error("render(view) must never call renderSettingsForm -- settings load exactly once, via loadSettings(), never on the status poll")
+	}
 }

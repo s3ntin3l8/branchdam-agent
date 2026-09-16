@@ -9,6 +9,37 @@
   <h1>branchDAM <span id="version"></span></h1>
   <div id="error-banner"></div>
 
+  <!-- Config zone: first-run setup, in the order an operator fills it in.
+       Loaded once by loadSettings() -- never touched by the 5s status
+       poll (see render() below). Every container id here ends "-config"
+       for exactly that reason; see app.js's own comment on the split. -->
+  <section id="sec-settings-server">
+    <h2>Server &amp; identity</h2>
+    <div id="settings-error"></div>
+    <div id="settings-server-config"></div>
+  </section>
+
+  <section id="sec-settings-storage">
+    <h2>Storage &amp; naming</h2>
+    <div id="settings-storage-config"></div>
+  </section>
+
+  <section id="sec-settings-behavior">
+    <h2>Behavior</h2>
+    <div id="settings-behavior-config"></div>
+  </section>
+
+  <section id="sec-settings-selfupdate">
+    <h2>Self-update settings</h2>
+    <div id="settings-selfupdate-config"></div>
+  </section>
+
+  <section id="sec-settings-integrations">
+    <h2>Integration settings</h2>
+    <div id="settings-integrations-config"></div>
+  </section>
+
+  <!-- Live zone: read-only status, rebuilt on every 5s poll. -->
   <section id="sec-server">
     <h2>Server connection</h2>
     <div id="server-body"></div>
@@ -42,12 +73,6 @@
   <section id="sec-selfupdate">
     <h2>Self-update</h2>
     <div id="selfupdate-body"></div>
-  </section>
-
-  <section id="sec-settings">
-    <h2>Settings</h2>
-    <div id="settings-error"></div>
-    <div id="settings-body"></div>
   </section>
 
   <script src="app.js"></script>

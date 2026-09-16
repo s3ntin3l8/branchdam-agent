@@ -467,12 +467,16 @@ setInterval(poll, POLL_INTERVAL_MS);
 // failed save (renderCheckboxField/renderSelectField) rather than staying
 // visibly flipped until the window reloads.
 
-// FREE_TEXT_FIELDS mirrors internal/tray/settingsmenu.go's own free-text
-// items exactly, one row per PromptAndSet(FieldX) call there. `list: true`
-// means the value round-trips as a JSON array of strings (SetStringSlice,
-// the canonical wire shape for a list per statusapi.go's settingsPatchRequest
-// doc comment), not a comma-separated string.
-const FREE_TEXT_FIELDS = [
+// The settings form used to be one flat list under a single "Settings"
+// section, dead last in the window (issue: "settings menu is flat...
+// confusing" / "settings order also confusing"). It's now split into
+// named groups, each its own top-level section ahead of live status --
+// see index.html's config zone. The field descriptors themselves are
+// unchanged; only their grouping and target containers moved.
+
+// SERVER_IDENTITY_FIELDS: how this agent reaches the branchDAM server and
+// identifies itself.
+const SERVER_IDENTITY_FIELDS = [
   { key: "server.baseUrl", label: "Server URL", get: (sv) => sv.ServerBaseURL },
   {
     key: "server.apiKey",
@@ -482,6 +486,13 @@ const FREE_TEXT_FIELDS = [
     placeholder: (sv) => (sv.ServerAPIKeySet ? "(configured — leave blank to keep)" : "(not set)"),
   },
   { key: "agentId", label: "Agent ID", get: (sv) => sv.AgentID },
+];
+
+// STORAGE_NAMING_FIELDS: where files land and how they're named. `list:
+// true` means the value round-trips as a JSON array of strings
+// (SetStringSlice, the canonical wire shape for a list per statusapi.go's
+// settingsPatchRequest doc comment), not a comma-separated string.
+const STORAGE_NAMING_FIELDS = [
   { key: "ingest.archiveRoot", label: "Archive root", get: (sv) => sv.ArchiveRoot, browseDir: true },
   { key: "ingest.localEditRoot", label: "Local edit root", get: (sv) => sv.LocalEditRoot, browseDir: true },
   {
@@ -502,7 +513,9 @@ const FREE_TEXT_FIELDS = [
   { key: "integrations.nodeIndexPath", label: "Node index path", get: (sv) => sv.NodeIndexPath, browseFile: ["*.json"] },
 ];
 
-const CHECKBOX_FIELDS = [
+// BEHAVIOR_FIELDS: toggles that change how the agent acts, not what it
+// connects to or where it writes.
+const BEHAVIOR_FIELDS = [
   { key: "tray.startOnLogin", label: "Start on login", get: (sv) => sv.StartOnLogin },
   { key: "tray.confirmDestructive", label: "Confirm destructive actions", get: (sv) => sv.ConfirmDestructive },
   { key: "ingest.requireUnbuffered", label: "Require unbuffered writes", get: (sv) => sv.RequireUnbuffered },
@@ -705,7 +718,7 @@ function renderIntegrationBlock(iv) {
   block.appendChild(h3);
 
   // renderCheckboxField's second argument is the "sv" a top-level
-  // CHECKBOX_FIELDS descriptor's own get(sv) reads from; these two
+  // BEHAVIOR_FIELDS descriptor's own get(sv) reads from; these two
   // descriptors close over iv directly instead (there is no top-level
   // settings snapshot to hand them), so {} is deliberately unused here.
   block.appendChild(renderCheckboxField({ key: `integrations.${iv.ID}.enabled`, label: "Enabled", get: () => iv.Enabled }, {}));
@@ -827,17 +840,31 @@ function renderIntegrationBlock(iv) {
   return block;
 }
 
+// renderSettingsForm fills the five config-zone containers (see index.html)
+// from one SettingsView snapshot. Called ONLY from loadSettings(), once --
+// never from the 5s status poll (render(), below) -- or an operator's
+// mid-typing edit would be wiped out from under them. Every container id
+// this function writes into ends "-config"; TestStatusPollNeverRebuildsSettingsContainers
+// (app_test.go) pins that render()'s call graph never touches one.
 function renderSettingsForm(sv) {
-  const container = byId("settings-body");
-  container.innerHTML = "";
+  const serverContainer = byId("settings-server-config");
+  serverContainer.innerHTML = "";
+  for (const f of SERVER_IDENTITY_FIELDS) serverContainer.appendChild(renderTextField(f, sv));
 
-  for (const f of FREE_TEXT_FIELDS) container.appendChild(renderTextField(f, sv));
-  for (const f of CHECKBOX_FIELDS) container.appendChild(renderCheckboxField(f, sv));
+  const storageContainer = byId("settings-storage-config");
+  storageContainer.innerHTML = "";
+  for (const f of STORAGE_NAMING_FIELDS) storageContainer.appendChild(renderTextField(f, sv));
 
-  container.appendChild(
+  const behaviorContainer = byId("settings-behavior-config");
+  behaviorContainer.innerHTML = "";
+  for (const f of BEHAVIOR_FIELDS) behaviorContainer.appendChild(renderCheckboxField(f, sv));
+
+  const selfUpdateContainer = byId("settings-selfupdate-config");
+  selfUpdateContainer.innerHTML = "";
+  selfUpdateContainer.appendChild(
     renderCheckboxField({ key: "selfUpdate.enabled", label: "Enable self-update checks", get: (s) => s.SelfUpdateEnabled }, sv),
   );
-  container.appendChild(
+  selfUpdateContainer.appendChild(
     renderSelectField(
       "Check for updates",
       [
@@ -850,13 +877,14 @@ function renderSettingsForm(sv) {
     ),
   );
 
+  const integrationsContainer = byId("settings-integrations-config");
+  integrationsContainer.innerHTML = "";
   const integrations = sv.Integrations ?? [];
-  if (integrations.length) {
-    const h3 = document.createElement("h3");
-    h3.textContent = "Integrations";
-    container.appendChild(h3);
-    for (const iv of integrations) container.appendChild(renderIntegrationBlock(iv));
+  if (!integrations.length) {
+    integrationsContainer.innerHTML = `<p class="empty">No integrations registered.</p>`;
+    return;
   }
+  for (const iv of integrations) integrationsContainer.appendChild(renderIntegrationBlock(iv));
 }
 
 async function loadSettings() {
