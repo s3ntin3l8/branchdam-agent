@@ -185,14 +185,15 @@ integrations:
     # internal/resolvehook.CandidateDirs.
     scriptsDir: ""
 
-  # Read-only Resolve Project Server/local database integration. A live pass
-  # creates a virtual project node per timeline and PROJECT_SIDECAR edges from
-  # indexed media to those nodes. Keep dryRun on until its mappings are checked.
+  # Resolve Project Server/local database integration. Connections are
+  # forced read-only. A live pass synchronously reconciles one complete
+  # timeline snapshot; removed unreviewed edges become inactive for audit.
+  # Upgrade the branchDAM server first. Keep dryRun on until mappings are checked.
   resolvedb:
     enabled: false
     # PostgreSQL may use ${RESOLVE_DATABASE_URL} once that environment
-    # variable is available to the tray process. SQLite accepts a read-only
-    # URI such as file:/path/to/project.db?mode=ro; percent-encode literal
+    # variable is available to the tray process. SQLite accepts a file URI
+    # such as file:/path/to/project.db; mode=ro is enforced. Percent-encode literal
     # '?' or '#' characters in the filesystem path so they are not parsed as
     # URI syntax.
     databaseUrl: ""

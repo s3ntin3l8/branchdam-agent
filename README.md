@@ -302,10 +302,14 @@ The tray also runs each enabled integration's sync on its own background timer
 pass never blocks a card ingest and vice versa -- see `config.example.yaml`'s `integrations:` block
 for every field. Every menu-driven change applies immediately, no restart required.
 
-Resolve database sync reads a configured `file:` or PostgreSQL database, creates deterministic
-virtual project nodes for timelines, and emits `PROJECT_SIDECAR` edges from indexed media to those
-nodes. Its database URL is entered through a hidden, non-prefilled prompt so embedded credentials
-do not appear in process arguments or the status page.
+Resolve database sync reads a configured or auto-discovered SQLite database, or a configured
+PostgreSQL Project Server, using read-only connections. Each successful pass sends the full
+timeline snapshot to the server's synchronous `/api/v1/agent/resolve-snapshot` endpoint: indexed
+media edges are created/refreshed and removed memberships make unreviewed edges inactive (retained
+for audit). Human-reviewed edges remain untouched and are flagged for manual resolution. A server
+without this endpoint returns an actionable sync error; there is no legacy event fallback. The
+database URL prompt is hidden and non-prefilled so credentials do not appear in process arguments
+or the status page. See [Resolve validation](docs/resolve-projectdb.md) before live deployment.
 
 **DaVinci Resolve render hook.** An installer, not a sync integration, since the hook itself runs
 inside Resolve's own Python interpreter and takes no config beyond an optional

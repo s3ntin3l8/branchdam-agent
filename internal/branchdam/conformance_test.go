@@ -245,6 +245,31 @@ func TestConformanceRebaseRequestResponse(t *testing.T) {
 	checkGolden(t, "rebase_response.golden.json", marshalIndent(t, resp))
 }
 
+func TestConformanceResolveSnapshotRequestResponse(t *testing.T) {
+	req := ResolveSnapshot{
+		AgentID: "workstation-01", ScopeID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Timelines: []ResolveSnapshotTimeline{{
+			TimelineID: "timeline-1", NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f61",
+			FilePath: "/virtual/resolve/0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f61", DisplayName: "Resolve: Master",
+			EvidenceJSON: json.RawMessage(`{"timelineName":"Master"}`),
+		}},
+		Memberships: []ResolveSnapshotMembership{
+			{
+				TimelineID: "timeline-1", MediaFilePath: `D:\Videos\clip.mov`,
+				SourceNodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
+				EvidenceJSON:   json.RawMessage(`{"timelineId":"timeline-1","mediaFilePath":"D:\\Videos\\clip.mov"}`),
+			},
+			{TimelineID: "timeline-1", MediaFilePath: `D:\Videos\unresolved.mov`},
+		},
+		LegacyTimelineNodeUUIDs: []string{"0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f62"},
+		RetireScopeID:           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+	checkGolden(t, "resolve_snapshot_request.golden.json", marshalIndent(t, req))
+
+	resp := ResolveSnapshotResponse{Created: 1, Refreshed: 2, Removed: 3, Unchanged: 4, Unresolved: 5, ReviewedConflicts: 6}
+	checkGolden(t, "resolve_snapshot_response.golden.json", marshalIndent(t, resp))
+}
+
 // TestHelloVsHandshakeFieldNamesDiffer is the regression test for the
 // single most likely copy-paste bug in this client: hello returns "version",
 // handshake returns "serverVersion" for the same concept. A shared struct

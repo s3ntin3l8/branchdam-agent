@@ -24,7 +24,7 @@ import (
 // Bump this whenever DefaultTimelineQuery changes in a way that could
 // change which clips get emitted — it is what lets a future data-correction
 // migration find every edge a particular schema-mapping version produced.
-const SchemaMappingVersion = "resolve-projectdb-1"
+const SchemaMappingVersion = "resolve-projectdb-2"
 
 // Tier, Confidence, and Resolver are the plan's values for a Resolve-sourced
 // edge — Tier 1 (Deterministic), Confidence 1.00 (the database is the
@@ -46,6 +46,11 @@ type EdgeAttacher interface {
 // create virtual project nodes for integration timelines.
 type VirtualNodeEmitter interface {
 	PostVirtualNodeCreated(ctx context.Context, agentID string, payload branchdam.VirtualNodeCreated) (*branchdam.EventResponse, error)
+}
+
+// SnapshotSubmitter confirms graph reconciliation before Sync returns.
+type SnapshotSubmitter interface {
+	PostResolveSnapshot(ctx context.Context, snapshot branchdam.ResolveSnapshot) (*branchdam.ResolveSnapshotResponse, error)
 }
 
 // PathRewrite maps a Windows path prefix to a NAS/container path prefix.
@@ -78,10 +83,12 @@ type Stats struct {
 	EdgesAttached int // PROJECT_SIDECAR edges emitted
 	EvidenceOnly  int // clips whose evidence was logged but no edge emitted (dry run mode)
 	// Delta detection fields (populated when PrevMemberships is set):
-	NewMemberships int // memberships in current query but not PrevMemberships
-	Unchanged      int // memberships present in both passes (edges skipped)
-	Removed        int // memberships in PrevMemberships but not current pass
-	FileMissing    int // clips in current query whose rewritten path doesn't exist on disk
+	NewMemberships    int // memberships in current query but not PrevMemberships
+	Unchanged         int // memberships present in both passes (edges skipped)
+	Removed           int // memberships in PrevMemberships but not current pass
+	FileMissing       int // clips in current query whose rewritten path doesn't exist on disk
+	Refreshed         int // existing unreviewed edges whose evidence changed
+	ReviewedConflicts int // human-reviewed edges requiring manual reconciliation
 }
 
 // evidence is the evidenceJson object stamped onto every emitted edge.
@@ -106,6 +113,8 @@ type Syncer struct {
 	DB             *DB
 	Index          nodeindex.Resolver
 	Client         EdgeAttacher
+	SnapshotClient SnapshotSubmitter
+	UseSnapshot    bool // production and dry-run path; legacy path is test-only
 	VirtualEmitter VirtualNodeEmitter
 	AgentID        string
 	DatabaseURL    string
@@ -128,7 +137,11 @@ type Syncer struct {
 	// the runtime state file for the next pass's delta detection.
 	// Called after r.mu.Unlock() semantics: slow saves must not block
 	// the sync pass's return. Nil means no persistence (dry run or test).
-	OnSaveMemberships func(entries []MembershipEntry) error
+	OnSaveMemberships       func(entries []MembershipEntry) error
+	LegacyTimelineNodeUUIDs []string
+	LegacyTimelineIDs       []string // derive UUID after resolving effective AgentID
+	RetireScopeID           string
+	OnSuccessfulSnapshot    func(scopeID string) error
 }
 
 func (s *Syncer) logger() *slog.Logger {
@@ -145,13 +158,33 @@ func (s *Syncer) logger() *slog.Logger {
 // claim the same virtual node. Password rotation therefore cannot create a
 // second node, while separate agents and same-named timelines remain distinct.
 func VirtualNodeUUID(agentID, timelineID, databaseURL string) string {
-	h := sha256.Sum256([]byte(agentID + "\x00" + timelineID + "\x00" + databaseIdentity(databaseURL)))
+	return virtualNodeUUIDFromIdentity(agentID, timelineID, databaseIdentity(databaseURL))
+}
+
+func virtualNodeUUIDFromIdentity(agentID, timelineID, identity string) string {
+	h := sha256.Sum256([]byte(agentID + "\x00" + timelineID + "\x00" + identity))
 	// UUID v4 from first 16 bytes of SHA-256, set version and variant bits.
 	u := h[:16]
 	u[6] = (u[6] & 0x0f) | 0x40 // version 4
 	u[8] = (u[8] & 0x3f) | 0x80 // variant RFC 4122
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
+}
+
+// legacyVirtualNodeUUID reproduces the identity algorithm used by the delta
+// event sync before complete snapshots preserved PostgreSQL database-selecting
+// query parameters. It is used only to claim and retire those old nodes during
+// the first successful snapshot migration.
+func legacyVirtualNodeUUID(agentID, timelineID, databaseURL string) string {
+	u, err := url.Parse(databaseURL)
+	if err != nil {
+		return virtualNodeUUIDFromIdentity(agentID, timelineID, databaseURL)
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return virtualNodeUUIDFromIdentity(agentID, timelineID, u.String())
 }
 
 // virtualFilePath returns a collision-free virtual path for a project node.
@@ -219,10 +252,18 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 		}
 		s.AgentID = id
 	}
+	if s.Query == "" {
+		if err := s.DB.CheckSchema(ctx); err != nil {
+			return Stats{}, err
+		}
+	}
 
 	clips, err := s.DB.TimelineClips(ctx, query)
 	if err != nil {
 		return Stats{}, fmt.Errorf("resolve: read timeline clips: %w", err)
+	}
+	if s.UseSnapshot {
+		return s.syncSnapshot(ctx, clips)
 	}
 
 	// Deduplicate repeated uses within one timeline, but retain a membership
@@ -516,25 +557,61 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	return stats, nil
 }
 
-// databaseIdentity removes credentials and connection-only query parameters
-// from a DSN before it participates in persistent virtual-node identity.
-// Host/path (or a file URL's opaque path) still distinguish databases.
+// databaseIdentity removes credentials and transport-only query parameters
+// before a DSN participates in persistent virtual-node identity. PostgreSQL
+// identity-bearing parameters such as dbname, service, host, port, and
+// search_path are retained and canonicalized; SQLite connection parameters
+// do not identify a different catalog file.
 func databaseIdentity(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return rawURL
 	}
 	u.User = nil
-	u.RawQuery = ""
-	u.ForceQuery = false
+	if u.Scheme == "postgres" || u.Scheme == "postgresql" {
+		q, queryErr := url.ParseQuery(u.RawQuery)
+		if queryErr != nil {
+			u.Fragment = ""
+			return u.String()
+		}
+		for key := range q {
+			if databaseQueryParameterIsCredential(key) || databaseQueryParameterIsTransportOnly(key) {
+				q.Del(key)
+			}
+		}
+		u.RawQuery = q.Encode()
+		u.ForceQuery = false
+	} else {
+		u.RawQuery = ""
+		u.ForceQuery = false
+	}
 	u.Fragment = ""
 	return u.String()
 }
 
-// StripCredentials removes userinfo from a database URL so it can be
-// safely logged or included in evidence JSON persisted server-side.
-// Returns the original string if parsing fails or no credentials are
-// present.
+func databaseQueryParameterIsCredential(key string) bool {
+	switch strings.ToLower(key) {
+	case "user", "password", "passfile", "sslpassword", "sslcert", "sslkey", "sslrootcert", "sslcrl", "sslcrldir":
+		return true
+	default:
+		return false
+	}
+}
+
+func databaseQueryParameterIsTransportOnly(key string) bool {
+	switch strings.ToLower(key) {
+	case "sslmode", "channel_binding", "connect_timeout", "application_name", "fallback_application_name",
+		"keepalives", "keepalives_idle", "keepalives_interval", "keepalives_count", "tcp_user_timeout",
+		"krbsrvname", "gsslib":
+		return true
+	default:
+		return false
+	}
+}
+
+// StripCredentials removes userinfo and credential-bearing query parameters
+// from a database URL so it can be safely logged. A malformed URL is never
+// echoed because it may contain an unparseable secret.
 //
 // Exported because cmd/branchdam-agent's auto-detect logging path needs
 // to render a discovered URL without leaking its userinfo. PR #196
@@ -543,10 +620,21 @@ func databaseIdentity(rawURL string) string {
 // preferable to a byte-identical second copy in cmd/ that would drift.
 func StripCredentials(rawURL string) string {
 	u, err := url.Parse(rawURL)
-	if err != nil || u.User == nil {
-		return rawURL
+	if err != nil {
+		return "<redacted-database-url>"
 	}
 	u.User = nil
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return "<redacted-database-url>"
+	}
+	for key := range q {
+		if databaseQueryParameterIsCredential(key) {
+			q.Del(key)
+		}
+	}
+	u.RawQuery = q.Encode()
+	u.ForceQuery = false
 	return u.String()
 }
 

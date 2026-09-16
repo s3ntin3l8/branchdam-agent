@@ -217,17 +217,21 @@ var integrationBuilders = []IntegrationBuilder{
 
 			var edgeClient resolve.EdgeAttacher
 			var vEmitter resolve.VirtualNodeEmitter
-			if !r.DryRun {
+			var snapshotClient resolve.SnapshotSubmitter
+			if !r.DryRun && client != nil {
 				edgeClient = client
 				vEmitter = client
+				snapshotClient = client
 			}
 			rewrites := make([]resolve.PathRewrite, len(r.PathRewrites))
 			for i, rw := range r.PathRewrites {
 				rewrites[i] = resolve.PathRewrite{From: rw.From, To: rw.To}
 			}
 			return &resolveDBSyncer{
+				useSnapshot:    true,
 				client:         edgeClient,
 				virtualEmitter: vEmitter,
+				snapshotClient: snapshotClient,
 				agentID:        cfg.AgentID,
 				databaseURL:    databaseURL,
 				nodeIndexPath:  cfg.Integrations.NodeIndexPath,
@@ -443,8 +447,10 @@ func (emptyNodeIndex) Resolve(_ string) (string, bool, error) { return "", false
 // restart. client is nil in dry-run mode, mirroring luminarSyncer's own
 // treatment.
 type resolveDBSyncer struct {
+	useSnapshot    bool
 	client         resolve.EdgeAttacher
 	virtualEmitter resolve.VirtualNodeEmitter
+	snapshotClient resolve.SnapshotSubmitter
 	agentID        string
 	databaseURL    string
 	nodeIndexPath  string
@@ -459,6 +465,8 @@ type resolveDBSyncer struct {
 	// onSaveMemberships persists the current pass's emitted membership
 	// set to runtime.json. Nil means no persistence (test).
 	onSaveMemberships func(entries []tray.SyncMembershipEntry) error
+	previousScopeID   string
+	onSaveScope       func(scopeID string) error
 }
 
 func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
@@ -513,6 +521,8 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 		Index:           index,
 		Client:          s.client,
 		VirtualEmitter:  s.virtualEmitter,
+		SnapshotClient:  s.snapshotClient,
+		UseSnapshot:     s.useSnapshot,
 		AgentID:         s.agentID,
 		DatabaseURL:     databaseURL,
 		DryRun:          s.dryRun,
@@ -534,15 +544,41 @@ func (s *resolveDBSyncer) Sync(ctx context.Context) (tray.SyncSummary, error) {
 			}
 			return nil
 		},
+		RetireScopeID: s.previousScopeID,
+		OnSuccessfulSnapshot: func(scopeID string) error {
+			s.previousScopeID = scopeID
+			if s.onSaveScope != nil {
+				return s.onSaveScope(scopeID)
+			}
+			return nil
+		},
+	}
+	if s.previousScopeID == "" && len(s.prevMemberships) > 0 {
+		seen := make(map[string]bool)
+		for _, m := range s.prevMemberships {
+			if m.TimelineID != "" {
+				seen[m.TimelineID] = true
+			}
+		}
+		for id := range seen {
+			syncer.LegacyTimelineIDs = append(syncer.LegacyTimelineIDs, id)
+		}
+	}
+	if s.previousScopeID == resolve.ScopeID(databaseURL) {
+		syncer.RetireScopeID = ""
 	}
 
 	stats, err := syncer.Sync(ctx)
 	summary := tray.SyncSummary{
-		DryRun:        s.dryRun,
-		PairsFound:    stats.ClipsFound,
-		Emitted:       stats.Emitted,
-		Skipped:       stats.Unresolved + stats.NoRewrite,
-		Errors:        stats.Errors,
+		DryRun:     s.dryRun,
+		PairsFound: stats.ClipsFound,
+		Emitted:    stats.Emitted,
+		// Source-less members still reach the server to protect an existing
+		// edge; the Resolve UI labels this count "unresolved", not "skipped".
+		Skipped: stats.Unresolved + stats.NoRewrite,
+		Errors:  stats.Errors + stats.ReviewedConflicts,
+		// Reviewed edges remain intact but need operator attention.
+		// Surface them in the tray's existing error count.
 		VirtualNodes:  stats.VirtualNodes,
 		EdgesAttached: stats.EdgesAttached,
 		Removed:       stats.Removed,

@@ -1,8 +1,7 @@
 // Package resolve reads DaVinci Resolve's project database (PostgreSQL
-// Project Server or local SQLite disk database) to recover timeline→clip
-// relationships and logs evidence metadata. v2 will emit
-// EVENT_EDGE_ATTACHED events once proper PROJECT_SIDECAR edges
-// (media → virtual project node) are supported (issue #184).
+// Project Server or local SQLite disk database) to recover timeline-to-clip
+// relationships. Production sync sends a complete snapshot to branchDAM's
+// synchronous Resolve reconciliation endpoint (issue #184).
 //
 // The schema was reverse-engineered from a live DaVinci Resolve 19 Project
 // Server instance (PostgreSQL 13, using the Resolve 19 Project Server defaults;
@@ -22,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strings"
 
 	// PostgreSQL driver — the Project Server is PostgreSQL 13.
@@ -32,7 +32,8 @@ import (
 
 // DB is a read-only handle on a DaVinci Resolve project database.
 type DB struct {
-	db *sql.DB
+	db   *sql.DB
+	conn *sql.Conn // pinned read-only session; avoids reconnecting writable
 }
 
 // Open opens a PostgreSQL or SQLite connection based on databaseURL's scheme.
@@ -40,8 +41,9 @@ type DB struct {
 // PostgreSQL: "postgres://user:pass@host:5432/dbname" or "postgresql://..."
 // SQLite:     "file:/path/to/project.db?mode=ro"
 //
-// The connection is always read-only, single-connection
-// (SetMaxOpenConns(1)), matching the Luminar catalog convention.
+// Disk SQLite connections are forced into mode=ro. PostgreSQL uses a
+// pinned session with default_transaction_read_only=on. Both drivers use
+// SetMaxOpenConns(1), matching the Luminar catalog convention.
 func Open(ctx context.Context, databaseURL string) (*DB, error) {
 	driver, dsn, err := parseURL(databaseURL)
 	if err != nil {
@@ -53,16 +55,43 @@ func Open(ctx context.Context, databaseURL string) (*DB, error) {
 		return nil, fmt.Errorf("resolve: open %s: %w", StripCredentials(databaseURL), err)
 	}
 	db.SetMaxOpenConns(1)
+	if driver == "sqlite" {
+		// SQLite's mode=ro lives in the DSN and applies to every future
+		// connection. Pinning one connection would deadlock callers that
+		// use the DB handle to seed an in-memory test database.
+		if err := db.PingContext(ctx); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("resolve: ping %s: %w", StripCredentials(databaseURL), err)
+		}
+		return &DB{db: db}, nil
+	}
 
-	if err := db.PingContext(ctx); err != nil {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("resolve: connect %s: %w", StripCredentials(databaseURL), err)
+	}
+	if err := conn.PingContext(ctx); err != nil {
+		_ = conn.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("resolve: ping %s: %w", StripCredentials(databaseURL), err)
 	}
-	return &DB{db: db}, nil
+	if _, err := conn.ExecContext(ctx, "SET default_transaction_read_only = on"); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("resolve: enforce PostgreSQL read-only session: %w", err)
+	}
+	return &DB{db: db, conn: conn}, nil
 }
 
 // Close releases the underlying connection.
 func (d *DB) Close() error {
+	if d.conn != nil {
+		if err := d.conn.Close(); err != nil {
+			_ = d.db.Close()
+			return err
+		}
+	}
 	return d.db.Close()
 }
 
@@ -72,9 +101,20 @@ func parseURL(databaseURL string) (driver, dsn string, err error) {
 	case strings.HasPrefix(databaseURL, "postgres://") || strings.HasPrefix(databaseURL, "postgresql://"):
 		return "postgres", databaseURL, nil
 	case strings.HasPrefix(databaseURL, "file:"):
-		// SQLite file: URI — pass through as-is. mode=ro is the caller's
-		// responsibility (same convention as internal/luminar.Open).
-		return "sqlite", databaseURL, nil
+		if strings.HasPrefix(databaseURL, "file::memory:") {
+			// In-memory databases are test fixtures, not Resolve disk
+			// catalogs; they must remain writable to seed schema/rows.
+			return "sqlite", databaseURL, nil
+		}
+		// Enforce read-only even when an explicit URL contains mode=rw.
+		u, parseErr := url.Parse(databaseURL)
+		if parseErr != nil {
+			return "", "", fmt.Errorf("resolve: invalid SQLite URL: %w", parseErr)
+		}
+		q := u.Query()
+		q.Set("mode", "ro")
+		u.RawQuery = q.Encode()
+		return "sqlite", u.String(), nil
 	default:
 		return "", "", fmt.Errorf("resolve: unsupported database URL scheme: %s (expected postgres://... or file:...)", StripCredentials(databaseURL))
 	}
@@ -85,7 +125,13 @@ func parseURL(databaseURL string) (driver, dsn string, err error) {
 // DefaultTimelineQuery documents: timeline_name, clip_name, media_file_path,
 // in_point, start_frame, duration, item_id, timeline_id.
 func (d *DB) TimelineClips(ctx context.Context, query string) ([]TimelineClip, error) {
-	rows, err := d.db.QueryContext(ctx, query)
+	var rows *sql.Rows
+	var err error
+	if d.conn != nil {
+		rows, err = d.conn.QueryContext(ctx, query)
+	} else {
+		rows, err = d.db.QueryContext(ctx, query)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve: run timeline query: %w", err)
 	}
@@ -123,4 +169,22 @@ func (d *DB) TimelineClips(ctx context.Context, query string) ([]TimelineClip, e
 		return nil, fmt.Errorf("resolve: iterate timeline rows: %w", err)
 	}
 	return out, nil
+}
+
+// CheckSchema verifies the Resolve 19 relationship-chain tables/columns
+// without reading data. It is a capability check rather than a guessed
+// Resolve version number: incompatible schemas fail before reconciliation.
+func (d *DB) CheckSchema(ctx context.Context) error {
+	query := DefaultTimelineQuery + " LIMIT 0"
+	var rows *sql.Rows
+	var err error
+	if d.conn != nil {
+		rows, err = d.conn.QueryContext(ctx, query)
+	} else {
+		rows, err = d.db.QueryContext(ctx, query)
+	}
+	if err != nil {
+		return fmt.Errorf("resolve: schema incompatible with Resolve 19 timeline mapping: %w", err)
+	}
+	return rows.Close()
 }

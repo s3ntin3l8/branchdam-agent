@@ -15,6 +15,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
+	"github.com/s3ntin3l8/branchdam-agent/internal/resolve"
 	runtimeState "github.com/s3ntin3l8/branchdam-agent/internal/runtime"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
@@ -321,7 +322,7 @@ func TestWireResolveSyncerWiresDeltaDetectionCallbacks(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 
 	cfg := config.Config{
-		Server:  config.ServerConfig{BaseURL: "http://localhost:8080", APIKey: "0123456789abcdef0123456789abcdef"},
+		Server:  config.ServerConfig{BaseURL: "http://localhost:8080", APIKey: "testtesttesttesttesttesttesttest"},
 		AgentID: "test-agent",
 		Integrations: config.IntegrationsConfig{
 			NodeIndexPath: "/dev/null/non-existent-but-Ready-only-checks-string",
@@ -337,6 +338,7 @@ func TestWireResolveSyncerWiresDeltaDetectionCallbacks(t *testing.T) {
 	if syncer == nil {
 		t.Fatal("buildIntegrationDeps returned nil syncer for an enabled ResolveDB config")
 	}
+	syncer.useSnapshot = false // exercise the historical membership bridge
 	if _, ok := deps[tray.IntegrationResolveDB]; !ok {
 		t.Fatal("ResolveDB not in built deps map")
 	}
@@ -551,6 +553,7 @@ func TestResolveDBSyncerAdvancesPrevMembershipsAcrossPasses(t *testing.T) {
 	if syncer == nil {
 		t.Fatal("buildIntegrationDeps returned nil syncer for an enabled ResolveDB config")
 	}
+	syncer.useSnapshot = false // exercise the historical membership bridge
 	// Inject a fake client so PostEdgeAttached returns success without
 	// a real branchDAM server. Required because DryRun=false needs a
 	// working client to exercise the OnSaveMemberships bridge.
@@ -665,4 +668,119 @@ func indexJSON(entries map[string]string) []byte {
 	}
 	buf = append(buf, '}')
 	return buf
+}
+
+func TestConcurrentHandshakeAndResolveScopeSavePreservesBoth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime.json")
+	ops := runtimeStateOps{Load: runtimeState.Load, Save: runtimeState.Save}
+	handshake := handshakeSaveCallback(ops, path)
+	scopeSave := wireResolveScopeCallback(path)
+	for i := 0; i < 50; i++ {
+		if err := runtimeState.Save(path, runtimeState.State{}); err != nil {
+			t.Fatal(err)
+		}
+		stamp := time.Date(2026, 9, 15, 12, 0, i, 0, time.UTC)
+		scope := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		start := make(chan struct{})
+		results := make(chan error, 2)
+		go func() { <-start; results <- handshake(stamp) }()
+		go func() { <-start; results <- scopeSave(scope) }()
+		close(start)
+		for n := 0; n < 2; n++ {
+			if err := <-results; err != nil {
+				t.Fatalf("concurrent save %d: %v", i, err)
+			}
+		}
+		state, err := runtimeState.Load(path)
+		if err != nil || !state.LastHandshakeAt.Equal(stamp) || state.ResolveScopeID != scope {
+			t.Fatalf("save %d lost a field: state=%+v err=%v", i, state, err)
+		}
+	}
+}
+
+func TestWireResolveSnapshotMigratesLegacyMembershipState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path, err := runtimeState.Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	if err := runtimeState.Save(path, runtimeState.State{
+		LastHandshakeAt:           stamp,
+		ResolveEmittedMemberships: []runtimeState.MembershipEntry{{MediaPath: "D:\\a.mov", TimelineID: "tl1"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	syncer := &resolveDBSyncer{useSnapshot: true}
+	wireResolveSyncer(nil, syncer)
+	if syncer.onSaveScope == nil || len(syncer.prevMemberships) != 1 || syncer.previousScopeID != "" {
+		t.Fatalf("wiring = %+v", syncer)
+	}
+	scope := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if err := syncer.onSaveScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	state, err := runtimeState.Load(path)
+	if err != nil || state.ResolveScopeID != scope || len(state.ResolveEmittedMemberships) != 0 || !state.LastHandshakeAt.Equal(stamp) {
+		t.Fatalf("migrated state = %+v, err = %v", state, err)
+	}
+}
+
+type recordingSnapshotClient struct {
+	requests []branchdam.ResolveSnapshot
+	err      error
+}
+
+func (f *recordingSnapshotClient) PostResolveSnapshot(_ context.Context, snapshot branchdam.ResolveSnapshot) (*branchdam.ResolveSnapshotResponse, error) {
+	f.requests = append(f.requests, snapshot)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &branchdam.ResolveSnapshotResponse{Created: 1}, nil
+}
+
+func TestResolveDBSyncerScopeRetirementHandshake(t *testing.T) {
+	dbPath := buildTestResolveDB(t, "tl-1", "seq-1", "trk-1", "item-1", `D:\Videos\clip1.mp4`)
+	nextDBPath := buildTestResolveDB(t, "tl-1", "seq-1", "trk-1", "item-1", `D:\Videos\clip1.mp4`)
+	indexPath := filepath.Join(t.TempDir(), "node-index.json")
+	if err := os.WriteFile(indexPath, indexJSON(map[string]string{
+		"/storage/videos/clip1.mp4": "018f0000-0000-7000-8000-000000000101",
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &recordingSnapshotClient{}
+	const oldScope = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	savedScopes := []string{}
+	syncer := &resolveDBSyncer{
+		useSnapshot: true, snapshotClient: client, agentID: "agent-a",
+		databaseURL: "file:" + dbPath + "?mode=ro", nodeIndexPath: indexPath,
+		pathRewrites: []resolve.PathRewrite{{From: `D:\Videos\`, To: "/storage/videos/"}},
+		virtualRoot:  "/virtual/resolve", timeout: 5 * time.Second, previousScopeID: oldScope,
+		onSaveScope: func(scope string) error { savedScopes = append(savedScopes, scope); return nil },
+	}
+	if _, err := syncer.Sync(context.Background()); err != nil {
+		t.Fatalf("database switch snapshot: %v", err)
+	}
+	currentScope := resolve.ScopeID(syncer.databaseURL)
+	if len(client.requests) != 1 || client.requests[0].RetireScopeID != oldScope || syncer.previousScopeID != currentScope {
+		t.Fatalf("switch handshake = requests=%+v previous=%q", client.requests, syncer.previousScopeID)
+	}
+	if _, err := syncer.Sync(context.Background()); err != nil {
+		t.Fatalf("same-scope snapshot: %v", err)
+	}
+	if len(client.requests) != 2 || client.requests[1].RetireScopeID != "" {
+		t.Fatalf("same-scope snapshot retired scope: %+v", client.requests)
+	}
+	syncer.databaseURL = "file:" + nextDBPath + "?mode=ro"
+	client.err = errors.New("server rollback")
+	if _, err := syncer.Sync(context.Background()); err == nil {
+		t.Fatal("failed scope-switch snapshot unexpectedly succeeded")
+	}
+	if len(client.requests) != 3 || client.requests[2].RetireScopeID != currentScope {
+		t.Fatalf("failed switch did not carry current scope: %+v", client.requests)
+	}
+	if syncer.previousScopeID != currentScope || len(savedScopes) != 2 {
+		t.Fatalf("failed switch advanced scope: previous=%q saves=%+v", syncer.previousScopeID, savedScopes)
+	}
 }

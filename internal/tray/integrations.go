@@ -59,7 +59,7 @@ type SyncSummary struct {
 	DryRun        bool
 	PairsFound    int
 	Emitted       int // posted, or -- in a dry run -- that WOULD have been posted
-	Skipped       int // candidates skipped because an endpoint had no node-index entry
+	Skipped       int // candidates without a resolvable endpoint; snapshot sync may still transmit them as protected unresolved memberships
 	Errors        int // per-edge POST failures; the pass itself still completed
 	VirtualNodes  int // virtual project nodes created (or, in a dry run, that would have been)
 	EdgesAttached int // PROJECT_SIDECAR edges emitted (or, in a dry run, that would have been)

@@ -576,8 +576,8 @@ func TestStateJSONRoundTripExplicit(t *testing.T) {
 
 func TestStateJSONResolveFieldsRoundTrip(t *testing.T) {
 	st := State{
-		LastHandshakeAt:         time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC),
-		ResolveLastChangeCursor: 12345,
+		LastHandshakeAt: time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC),
+		ResolveScopeID:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		ResolveEmittedMemberships: []MembershipEntry{
 			{MediaPath: "/storage/videos/clip1.mp4", TimelineID: "tl-001"},
 			{MediaPath: "/storage/videos/clip2.mp4", TimelineID: "tl-001"},
@@ -594,8 +594,8 @@ func TestStateJSONResolveFieldsRoundTrip(t *testing.T) {
 	if back.LastHandshakeAt != st.LastHandshakeAt {
 		t.Errorf("LastHandshakeAt = %v, want %v", back.LastHandshakeAt, st.LastHandshakeAt)
 	}
-	if back.ResolveLastChangeCursor != 12345 {
-		t.Errorf("ResolveLastChangeCursor = %d, want 12345", back.ResolveLastChangeCursor)
+	if back.ResolveScopeID != st.ResolveScopeID {
+		t.Errorf("ResolveScopeID = %q, want %q", back.ResolveScopeID, st.ResolveScopeID)
 	}
 	if len(back.ResolveEmittedMemberships) != 2 {
 		t.Fatalf("ResolveEmittedMemberships len = %d, want 2", len(back.ResolveEmittedMemberships))
@@ -632,7 +632,6 @@ func TestStateJSONZeroMarshalIsEmptyObject(t *testing.T) {
 
 func TestStateJSONMembershipCapReached(t *testing.T) {
 	st := State{
-		ResolveLastChangeCursor:     999,
 		ResolveMembershipCapReached: true,
 		ResolveEmittedMemberships: []MembershipEntry{
 			{MediaPath: "/storage/clip.mp4", TimelineID: "tl-1"},
