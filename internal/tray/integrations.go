@@ -27,9 +27,10 @@ const (
 // static and never config-driven; adding a new integration means appending
 // an entry here, not touching menu-building code.
 type IntegrationDescriptor struct {
-	ID          IntegrationID
-	Title       string // e.g. "Luminar Neo"
-	ConfigLabel string // e.g. "Catalog" or "Database URL"
+	ID           IntegrationID
+	Title        string // e.g. "Luminar Neo"
+	ConfigLabel  string // e.g. "Catalog" or "Database URL"
+	SkippedLabel string // e.g. "skipped" or "unresolved"
 }
 
 // Integrations is the compile-time registry every catalog-sync integration
@@ -43,8 +44,8 @@ type IntegrationDescriptor struct {
 // installer, not a sync integration, and gets its own seam in issue #60.
 func Integrations() []IntegrationDescriptor {
 	return []IntegrationDescriptor{
-		{ID: IntegrationLuminar, Title: "Luminar Neo", ConfigLabel: "Catalog"},
-		{ID: IntegrationResolveDB, Title: "DaVinci Resolve", ConfigLabel: "Database URL"},
+		{ID: IntegrationLuminar, Title: "Luminar Neo", ConfigLabel: "Catalog", SkippedLabel: "skipped"},
+		{ID: IntegrationResolveDB, Title: "DaVinci Resolve", ConfigLabel: "Database URL", SkippedLabel: "unresolved"},
 	}
 }
 

@@ -37,6 +37,9 @@ func TestRegistryCompleteness(t *testing.T) {
 		if d.ConfigLabel == "" {
 			t.Errorf("tray.Integrations()[%d] (%q) has no ConfigLabel", i, d.ID)
 		}
+		if d.SkippedLabel == "" {
+			t.Errorf("tray.Integrations()[%d] (%q) has no SkippedLabel", i, d.ID)
+		}
 		if b.Ready == nil || b.New == nil || b.Interval == nil || b.Current == nil || b.Apply == nil {
 			t.Errorf("integrationBuilders[%d] (%q) is missing Ready/New/Interval/Current/Apply", i, b.ID)
 		}

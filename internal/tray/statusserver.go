@@ -36,6 +36,15 @@ var statusPageTmpl = template.Must(template.New("index.html").Funcs(template.Fun
 		iv, _ := sv.Integration(id)
 		return iv
 	},
+	"integrationDescriptor": func(id IntegrationID) IntegrationDescriptor {
+		for _, descriptor := range Integrations() {
+			if descriptor.ID == id {
+				return descriptor
+			}
+		}
+		return IntegrationDescriptor{ConfigLabel: "Catalog", SkippedLabel: "skipped"}
+	},
+	"lower": strings.ToLower,
 }).ParseFS(statusPageFS, "assets/index.html"))
 
 // statusPageView is what statusPageTmpl renders -- deliberately a superset

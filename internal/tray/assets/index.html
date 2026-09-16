@@ -128,11 +128,11 @@
     <h2>Integrations</h2>
     {{if not .Status.Integrations}}
     <p>No catalog integrations registered.</p>
-    {{else}}
+      {{else}}
     <ul>
       {{range .Status.Integrations}}
-      {{$integration := .}}
       {{$cfg := integrationView $.Settings .ID}}
+      {{$descriptor := integrationDescriptor .ID}}
       <li>
         <strong>{{.ID}}</strong>:
         {{if not .Registered}}
@@ -140,7 +140,7 @@
         {{else}}
         {{if $cfg.Enabled}}enabled{{else}}disabled{{end}},
         {{if $cfg.DryRun}}dry run{{else}}live{{end}},
-        {{if eq .ID "resolvedb"}}database URL{{else}}catalog{{end}} {{if $cfg.CatalogPathSet}}<code>{{$cfg.CatalogPath}}</code>{{else}}<span class="stub">not set</span>{{end}}
+        {{lower $descriptor.ConfigLabel}} {{if $cfg.CatalogPathSet}}<code>{{$cfg.CatalogPath}}</code>{{else}}<span class="stub">not set</span>{{end}}
         {{end}}
         {{with .LastSync}}
         <br>
@@ -148,7 +148,7 @@
         {{if .Err}}
         <span class="fail">failed: {{.Err}}</span>
         {{else}}
-        {{.PairsFound}} pairs found, {{.Emitted}} emitted{{if .DryRun}} <em>(dry run &mdash; nothing was emitted)</em>{{end}}{{if gt .EvidenceOnly 0}}, {{.EvidenceOnly}} evidence-only{{end}}, {{.Skipped}} {{if eq $integration.ID "resolvedb"}}unresolved{{else}}skipped{{end}}{{if gt .Errors 0}}, <span class="fail">{{.Errors}} errors</span>{{end}}
+        {{.PairsFound}} pairs found, {{.Emitted}} emitted{{if .DryRun}} <em>(dry run &mdash; nothing was emitted)</em>{{end}}{{if gt .EvidenceOnly 0}}, {{.EvidenceOnly}} evidence-only{{end}}, {{.Skipped}} {{$descriptor.SkippedLabel}}{{if gt .Errors 0}}, <span class="fail">{{.Errors}} errors</span>{{end}}
         {{end}}
         {{end}}
       </li>
