@@ -4,7 +4,7 @@ Issue: #110 (part of #92 E3 — Tray reliability & UX, audit finding F-14).
 Source audit: `docs/audit/2026-09-01-comprehensive-audit.md` (2026-09-01 audit, Section 3, F-14).
 The audit doc is gitignored (`/docs/audit/` in `.gitignore`) and is local-only working material; this document and the audit comment block in [`internal/tray/settings.go`](../internal/tray/settings.go) are the canonical record.
 
-This is an **inventory** issue, not a code change. Each field below is a sub-task that graduates to `SettingsView` (and the matching `SettingsField` / `SettingsView` field, plus a `SetBool` / `SetInt` / `SetString` / `PromptAndSet` wiring where needed) as its M5 / E3 sub-issue ships. One small PR per field — this document and the audit comment block in `settings.go` are updated in the same PR that adds the field, so the two never disagree.
+This is an **inventory** issue, not a code change. Each field below is a sub-task that graduates to `SettingsView` (and the matching `SetBool` / `SetInt` / `SetString` wiring where needed) as its M5 / E3 sub-issue ships. One small PR per field — this document and the audit comment block in `settings.go` are updated in the same PR that adds the field, so the two never disagree.
 
 **Post-#211 note:** every "Graduated" row below originally pointed at a
 tray systray menu item (`internal/tray/settingsmenu.go` /
@@ -41,6 +41,19 @@ page`) is gone in the same rethink -- the Wails window is now the only
 settings/status surface; `/`, `/status`, and `/status.json` still serve
 plain JSON for anyone who wants to `curl` them.
 
+**Post-#217 note:** `PromptAndSet`/`PromptAndSetIntegrationPath`/
+`PromptAndSetIntegrationRewrites` and the `SettingsField` enum -- cited
+below as the graduation mechanism for several rows, back when the tray's
+own menu items were their only caller -- were removed once issue #211's
+menu-slimming left them with no production caller at all. Every
+`SettingsView` field and `Config` key those rows describe as "graduated"
+is still graduated and still live; only the setter each row cites is
+gone. Read every `PromptAndSet`/`FieldXxx` reference below as **historical**
+(what wired the field at the time), not as a current API -- the live
+mutators are `SetBool`/`SetInt`/`SetString`/`SetStringSlice`/
+`SetIntegrationPath`/`SetIntegrationRewrites`, same as the Post-#211 note
+above already established for the menu-item line numbers.
+
 ## Fields the issue already enumerates
 
 The issue body lists the graduation candidates in its acceptance-criteria checklist. The table below re-states each with (a) whether the field already exists in the `Config` struct today, (b) the M5 / E3 sub-issue that introduces the field if it does not, and (c) where in `SettingsView` / `SettingsField` the field lands once it does.
@@ -75,14 +88,14 @@ When an M5 / E3 sub-issue lands:
 1. Land the M5 / E3 sub-issue's own PR (adding the field to `Config` + implementing the runtime side of the feature).
 2. Open a follow-up PR that:
    - Adds the field to `SettingsView`.
-   - Wires the matching `SetBool` / `SetInt` / `PromptAndSet` (or a new list-editing method for `AllowedExtensions` / `AutoImportPaths`).
+   - Wires the matching `SetBool` / `SetInt` / `SetString` (or a new list-editing method for `AllowedExtensions` / `AutoImportPaths`).
    - Updates the audit comment block in `settings.go` (removes graduated fields, keeps the deliberately-hand-edit list intact).
    - Updates the table in this doc (moves the row from "to graduate" to the "deliberately hand-edit only" section, or to a new "graduated" section).
    - Closes the matching sub-task on #110.
-3. `make check` must pass for the follow-up PR; `Settings.PromptAndSet` for any new free-text field is the same test surface as the existing `FieldServerBaseURL` / `FieldServerAPIKey` cases.
+3. `make check` must pass for the follow-up PR; `Settings.SetString` for any new free-text field is the same test surface as the existing `server.baseUrl` / `server.apiKey` cases.
 
 ## Related context
 
-- The existing `FieldNamingTemplate` / `SettingsView.NamingTemplate` pair (settings.go:16, 58) maps to `IngestConfig.PathTemplate` (config.go:416) and is already wired through `PromptAndSet` — the M5 #86 row above is for a *separate* server-controlled field, not a re-implementation of the existing one.
-- `Settings.Snapshot`'s `RestartRequired` flag (settings.go:60) is the existing mechanism for fields that cannot be hot-reloaded — M5 #78's "live `Detector` restart" graduation path is what makes `ingest.cardRoots` a non-restart edit.
-- `Settings.PromptAndSetIntegrationPath` (settings.go:143) is the model for any new per-list dialog (`PromptAndSetList` or similar) — a single parameterised method plus a `SettingsField` enum value, matching `PromptAndSet`'s own design.
+- The existing `SettingsView.NamingTemplate` field (settings.go:64) maps to `IngestConfig.PathTemplate` (config.go:416) and is wired through `SetString("ingest.pathTemplate", ...)` — the M5 #86 row above is for a *separate* server-controlled field, not a re-implementation of the existing one.
+- `Settings.Snapshot`'s `RestartRequired` flag is the existing mechanism for fields that cannot be hot-reloaded — M5 #78's "live `Detector` restart" graduation path is what makes `ingest.cardRoots` a non-restart edit.
+- `Settings.SetIntegrationPath` (settings.go) is the model for any new per-integration field — a single parameterised method keyed by `IntegrationID`, rather than one method per integration.

@@ -37,7 +37,7 @@ type IntegrationBuilder struct {
 	// Current extracts this integration's own CatalogSyncConfig out of
 	// the whole Config -- the ONE place cfg.Integrations.Luminar (or a
 	// future .Lrcat/.ApplePhotos) is read by name, so every other piece
-	// of the Settings/dialog wiring (Snapshot, PromptAndSetIntegrationPath,
+	// of the Settings wiring (Snapshot, SetIntegrationPath,
 	// applyIntegration*Change) stays ID-generic instead of switching on ID.
 	Current func(cfg config.Config) config.CatalogSyncConfig
 	// Apply is Current's write-side counterpart -- Go has no generic way
@@ -46,16 +46,9 @@ type IntegrationBuilder struct {
 	// rather than reflection.
 	Apply func(cfg *config.Config, c config.CatalogSyncConfig)
 
-	// CatalogFilePatterns are the file-picker filter patterns for this
-	// integration's catalog file (e.g. {"*.db", "*.catalog", "*"} for
-	// Luminar) -- the trailing "*" is deliberate: the real on-disk
-	// extension isn't documented to be stable across catalog-app
-	// versions, and a picker that can't select an unexpected extension is
-	// worse than an unfiltered one.
-	CatalogFilePatterns []string
-	// DatabaseURL marks a credential-bearing database connection string.
-	// Its settings dialog is a hidden text entry with no argv-visible
-	// default, rather than a filesystem picker.
+	// DatabaseURL marks a credential-bearing database connection string --
+	// Snapshot() masks its display value (databaseURLDisplay) rather than
+	// showing the raw catalog path a filesystem picker would.
 	DatabaseURL bool
 
 	// Ready reports whether cfg has everything this integration needs to
@@ -132,7 +125,6 @@ var integrationBuilders = []IntegrationBuilder{
 		Apply: func(cfg *config.Config, c config.CatalogSyncConfig) {
 			cfg.Integrations.Luminar = c
 		},
-		CatalogFilePatterns: []string{"*.db", "*.catalog", "*"},
 		Ready: func(cfg config.Config) bool {
 			l := cfg.Integrations.Luminar
 			if !l.Enabled || l.CatalogPath == "" {

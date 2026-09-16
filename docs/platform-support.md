@@ -86,13 +86,13 @@ UX rethink, since it no longer led to any actual setting -- see "Native app UI" 
 exactly three items, none of them a settings VALUE: **Reload config**, **Open config.yaml**, and
 **Reveal config folder** -- hand-edit-config affordances the window has no equivalent for (there is
 no "reveal this file in Finder/Explorer" button in a webview). `PromptAndSet`/`PromptAndSetIntegrationPath`/`PromptAndSetIntegrationRewrites`
-(the zenity-dialog-backed methods every removed menu item used to call) have no remaining
-production caller as of this PR -- left in the `Settings` interface rather than removed in the same
-PR, since deleting them means also deleting `SettingsField` and their `cmd/branchdam-agent`
-implementations, a bigger change than menu-slimming; tracked as issue #217. The `dialog` subcommand
-itself (`github.com/ncruces/zenity`, re-exec'd) is unaffected -- it still backs `trayConfirm`,
+(the zenity-dialog-backed methods every removed menu item used to call) were removed from the
+`Settings` interface once issue #217 landed, along with `SettingsField` and their
+`cmd/branchdam-agent` implementations -- `SetBool`/`SetInt`/`SetString`/`SetIntegrationPath`/
+`SetIntegrationRewrites` are the only mutators left. The `dialog` subcommand itself
+(`github.com/ncruces/zenity`, re-exec'd) is unaffected -- it still backs `trayConfirm`,
 `trayIngestGate`, `trayPickDirectory`, `trayNotifyOS`, and the startup-error notification below,
-none of which this PR touched.
+none of which that PR touched.
 
 **Live-update gap closed alongside the removal.** `tray.confirmDestructive` toggled from the
 Wails window (`SetBool` → `configSettings.reload()`) previously persisted to `config.yaml`

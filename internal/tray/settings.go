@@ -1,43 +1,9 @@
 package tray
 
-// SettingsField identifies one free-text configuration field the settings
-// menu edits via an external dialog (cmd/branchdam-agent's zenity-backed
-// prompt) rather than a native checkbox/submenu -- server URL, API key,
-// the two ingest roots, and the naming template. A single enum plus one
-// Settings.PromptAndSet method, rather than five near-identical
-// PromptServerURL/PromptAPIKey/... methods.
-type SettingsField int
-
-const (
-	FieldServerBaseURL SettingsField = iota
-	FieldServerAPIKey
-	FieldArchiveRoot
-	FieldLocalEditRoot
-	FieldNamingTemplate
-	// FieldNodeIndexPath is appended, not inserted -- these are iota
-	// constants, so inserting in the middle would silently renumber the
-	// five above. It's a single field (unlike per-integration catalog
-	// paths, which go through PromptAndSetIntegrationPath instead)
-	// because the node index is shared by every catalog-reading
-	// integration -- see config.IntegrationsConfig.NodeIndexPath's own
-	// doc comment.
-	FieldNodeIndexPath
-	FieldCardRoots
-	FieldAllowedExtensions
-	// FieldAgentID is the self-asserted identity this agent reports to
-	// the server. Defaults to the hostname; editable from the Settings
-	// menu after install.
-	FieldAgentID
-	// FieldPathMappings is the workstation-path → container-path rewrite
-	// rules. Edited as a comma-separated list of
-	// "workstationPath:containerPath" pairs.
-	FieldPathMappings
-)
-
 // SettingsView is a read-only snapshot of the on-disk configuration
 // fields the settings menu renders. Booleans/enums render as native
-// checkboxes/submenus directly from these fields; the free-text
-// fields are edited via Settings.PromptAndSet instead.
+// checkboxes/submenus directly from these fields; the free-text fields
+// are edited via Settings.SetString instead.
 type SettingsView struct {
 	ConfigPath string
 
@@ -160,65 +126,28 @@ type Settings interface {
 	SetStringSlice(key string, v []string) error
 
 	// SetString is SetBool/SetInt's counterpart for a free-text value --
-	// PromptAndSet's non-interactive twin, for a caller with no dialog
-	// backend of its own (the loopback API's POST /api/settings, and
-	// eventually a Wails-bound settings form). Same dotted-key/validate/
-	// patch/reload path as PromptAndSet, just without the dialog
-	// round-trip. Not every free-text field reaches this: per-integration
-	// path rewrites parse into a structured value the generic string path
-	// never handles, so they go through SetIntegrationRewrites instead.
+	// for a caller with no dialog backend (the loopback API's
+	// POST /api/settings, and the Wails-bound Settings window). Not every
+	// free-text field reaches this: per-integration path rewrites parse
+	// into a structured value the generic string path never handles, so
+	// they go through SetIntegrationRewrites instead.
 	SetString(key, value string) error
 
-	// PromptAndSet shows whatever dialog backend the implementation uses
-	// for field, applies the answer if one was given, and reconfigures the
-	// running tray. ok is false when the operator dismissed the dialog --
-	// distinct from err, which means the dialog itself failed to render or
-	// the change failed to save.
-	//
-	// No production code calls this anymore as of issue #211: it existed
-	// for settingsmenu.go's own free-text menu items, all of which moved to
-	// the Wails Settings window's SetString-backed form fields instead (see
-	// that file's own doc comment). Left in the interface rather than
-	// removed -- deleting it means also deleting SettingsField,
-	// configSettings.PromptAndSet, and the dialog-subprocess plumbing it
-	// alone needs in cmd/branchdam-agent/settings.go, which is a bigger,
-	// separate change than #211's menu-slimming scope. Tracked as issue
-	// #217.
-	PromptAndSet(field SettingsField) (ok bool, err error)
-
-	// PromptAndSetIntegrationPath is PromptAndSet's counterpart for a
-	// per-integration catalog path -- a parameterized method rather than
-	// one SettingsField enum value per integration (lrcat #47, applephotos
-	// #46, ...), matching SettingsField's own design note: a single enum
-	// plus one method beats N near-identical ones. Same ok/err contract as
-	// PromptAndSet.
-	//
-	// Same post-#211 status as PromptAndSet above: integrationsmenu.go's
-	// own catalog-path menu item (its only caller) is gone, replaced by
-	// the Wails window's SetIntegrationPath-backed field. Tracked in the
-	// same issue #217.
-	PromptAndSetIntegrationPath(id IntegrationID) (ok bool, err error)
-
-	// SetIntegrationPath is PromptAndSetIntegrationPath's non-interactive
-	// counterpart -- same catalogPath/databaseUrl key resolution, no
-	// dialog.
+	// SetIntegrationPath sets a per-integration catalog path -- a
+	// parameterized method rather than one key per integration (lrcat #47,
+	// applephotos #46, ...). Same catalogPath/databaseUrl key resolution
+	// for every integration, no dialog.
 	SetIntegrationPath(id IntegrationID, value string) error
 
-	// PromptAndSetIntegrationRewrites prompts for path rewrite rules
-	// (from:to pairs) for the given integration. Only meaningful for
-	// integrations that have a pathRewrites config field (Resolve).
-	//
-	// Same post-#211 status as PromptAndSet above -- issue #217.
-	PromptAndSetIntegrationRewrites(id IntegrationID) (ok bool, err error)
-
-	// SetIntegrationRewrites is PromptAndSetIntegrationRewrites's
-	// non-interactive counterpart.
+	// SetIntegrationRewrites sets path rewrite rules (from:to pairs) for
+	// the given integration. Only meaningful for integrations that have a
+	// pathRewrites config field (Resolve).
 	SetIntegrationRewrites(id IntegrationID, value string) error
 
 	// Reload re-reads config.yaml from disk and reconfigures the running
 	// tray -- the same path a hand-edit followed by "Reload config" takes,
-	// and what every SetBool/SetInt/PromptAndSet call does internally
-	// after persisting.
+	// and what every SetBool/SetInt/SetString call does internally after
+	// persisting.
 	Reload() error
 
 	// OpenConfigFile and RevealConfigFolder shell out to the OS's own

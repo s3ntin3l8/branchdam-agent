@@ -243,16 +243,9 @@ func (s *spySettings) SetString(key, v string) error {
 	s.lastStringKey, s.lastStringVal = key, v
 	return s.setErr
 }
-func (s *spySettings) PromptAndSet(_ SettingsField) (bool, error) { return false, nil }
-func (s *spySettings) PromptAndSetIntegrationPath(_ IntegrationID) (bool, error) {
-	return false, nil
-}
 func (s *spySettings) SetIntegrationPath(id IntegrationID, v string) error {
 	s.lastPathID, s.lastPathVal = id, v
 	return s.setErr
-}
-func (s *spySettings) PromptAndSetIntegrationRewrites(_ IntegrationID) (bool, error) {
-	return false, nil
 }
 func (s *spySettings) SetIntegrationRewrites(id IntegrationID, v string) error {
 	s.lastRewriteID, s.lastRewriteVal = id, v

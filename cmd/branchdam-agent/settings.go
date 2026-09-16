@@ -22,16 +22,14 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
-// configSettings implements tray.Settings over config.Patch/config.Load
-// plus a dialogRunner for the five free-text fields -- the concrete
-// wiring cmd/branchdam-agent owns (internal/tray itself never imports
-// internal/config or knows about zenity, matching Ingester/SelfUpdater's
-// existing pattern of interfaces defined where they're consumed, not
-// where they're implemented).
+// configSettings implements tray.Settings over config.Patch/config.Load --
+// the concrete wiring cmd/branchdam-agent owns (internal/tray itself never
+// imports internal/config, matching Ingester/SelfUpdater's existing
+// pattern of interfaces defined where they're consumed, not where they're
+// implemented).
 type configSettings struct {
 	path   string
 	runner *tray.Runner
-	dialog dialogRunner
 
 	// resolveInstaller is the DaVinci Resolve render-hook installer
 	// (issue #60) registered on Runner at startup. reload() calls
@@ -74,12 +72,11 @@ type configSettings struct {
 // newConfigSettings builds a configSettings over the already-loaded cfg
 // (runTrayCmd's own startup load -- avoids reading config.yaml twice
 // before anything has changed).
-func newConfigSettings(path string, cfg config.Config, runner *tray.Runner, dialog dialogRunner) *configSettings {
+func newConfigSettings(path string, cfg config.Config, runner *tray.Runner) *configSettings {
 	return &configSettings{
 		path:              path,
 		cfg:               cfg,
 		runner:            runner,
-		dialog:            dialog,
 		appliedStatusAddr: cfg.Tray.StatusAddrOrDefault(),
 	}
 }
@@ -386,7 +383,7 @@ func firstValidateProblem(cfg config.Config) error {
 // firstBlockingProblem returns the first Validate() Problem that should
 // block a settings-driven config mutation or reload -- i.e. a structural
 // failure, not a Problem marked Advisory(). Used by firstValidateProblem
-// (SetBool/SetInt/PromptAndSet path) and reload (Reload config / Restart
+// (SetBool/SetInt/SetString path) and reload (Reload config / Restart
 // Required path), so they share one definition of "blocking" instead of
 // each diverging independently (Hermes review finding on the PR that
 // introduced SeverityWarning, issue #96).
@@ -518,93 +515,10 @@ func applyServerPathMappings(cfg *config.Config, hs branchdam.HandshakeResponse,
 	}
 }
 
-// settingsPrompt describes one PromptAndSet field's dialog.
-type settingsPrompt struct {
-	key     string
-	kind    string // dialog.go's -kind: "entry", "password", "directory", or "file"
-	title   string
-	message string
-	// defaultValue pre-fills an "entry" or "file" dialog with the current
-	// value -- never used for "password" (a secret has no business
-	// appearing, even partially, in a process's argv) or "directory".
-	defaultValue func(cfg config.Config) string
-	// patterns is -kind file's filename filter (e.g. {"*.json"}); unused
-	// for every other kind.
-	patterns []string
-}
-
-func settingsPromptFor(field tray.SettingsField) (settingsPrompt, error) {
-	switch field {
-	case tray.FieldServerBaseURL:
-		return settingsPrompt{
-			key: "server.baseUrl", kind: "entry", title: "branchDAM Server URL",
-			message:      "branchDAM server URL:",
-			defaultValue: func(cfg config.Config) string { return cfg.Server.BaseURL },
-		}, nil
-	case tray.FieldServerAPIKey:
-		return settingsPrompt{
-			key: "server.apiKey", kind: "password", title: "branchDAM Agent API Key",
-			message: "Agent API key (from your branchDAM server, 32+ characters):",
-		}, nil
-	case tray.FieldArchiveRoot:
-		return settingsPrompt{
-			key: "ingest.archiveRoot", kind: "directory", title: "Select the archive (NAS) folder",
-		}, nil
-	case tray.FieldLocalEditRoot:
-		return settingsPrompt{
-			key: "ingest.localEditRoot", kind: "directory", title: "Select the local edit (scratch) folder",
-		}, nil
-	case tray.FieldCardRoots:
-		return settingsPrompt{
-			key: "ingest.cardRoots", kind: "entry", title: "Watch Folders",
-			message: "Directories polled for mounted camera cards (comma-separated):",
-			defaultValue: func(cfg config.Config) string {
-				return strings.Join(cfg.Ingest.CardRoots, ", ")
-			},
-		}, nil
-	case tray.FieldAllowedExtensions:
-		return settingsPrompt{
-			key: "ingest.allowedExtensions", kind: "entry", title: "Allowed Extensions",
-			message: "File extensions to ingest (comma-separated, e.g. .arw, .jpg, or empty for all):",
-			defaultValue: func(cfg config.Config) string {
-				return strings.Join(cfg.Ingest.AllowedExtensions, ", ")
-			},
-		}, nil
-	case tray.FieldNamingTemplate:
-		return settingsPrompt{
-			key: "ingest.pathTemplate", kind: "entry", title: "Naming Template",
-			message:      "Destination path template ({yyyy}/{mm}/{dd}/{camera_model}/{original_name}):",
-			defaultValue: func(cfg config.Config) string { return cfg.Ingest.PathTemplate },
-		}, nil
-	case tray.FieldNodeIndexPath:
-		return settingsPrompt{
-			key: "integrations.nodeIndexPath", kind: "file", title: "Select the node-index JSON file",
-			patterns:     []string{"*.json"},
-			defaultValue: func(cfg config.Config) string { return cfg.Integrations.NodeIndexPath },
-		}, nil
-	case tray.FieldAgentID:
-		return settingsPrompt{
-			key: "agentId", kind: "entry", title: "Agent ID",
-			message:      "Self-asserted identity for this workstation:",
-			defaultValue: func(cfg config.Config) string { return cfg.AgentID },
-		}, nil
-	case tray.FieldPathMappings:
-		return settingsPrompt{
-			key: "pathMappings", kind: "entry", title: "Path Mappings",
-			message:      "Workstation-to-container path mappings (comma-separated, e.g. /mnt/nas:/storage/archive):",
-			defaultValue: func(cfg config.Config) string { return formatPathMappings(cfg.PathMappings) },
-		}, nil
-	default:
-		return settingsPrompt{}, fmt.Errorf("settings: unknown field %v", field)
-	}
-}
-
 // patchValueForStringKey converts a raw string value into the shape
 // config.Patch expects for the keys validateStringChange treats specially
 // (comma-separated lists, path mappings) -- every other key patches the
-// string value verbatim. Shared by PromptAndSet and SetString so the
-// interactive and non-interactive entry points can never diverge on what
-// a given key's on-disk representation looks like.
+// string value verbatim.
 func patchValueForStringKey(key, value string) (any, error) {
 	switch key {
 	case "ingest.cardRoots":
@@ -625,9 +539,8 @@ func patchValueForStringKey(key, value string) (any, error) {
 }
 
 // validateAndPatchString runs validateStringChange then patches key's
-// on-disk value, without reloading -- the piece PromptAndSet and
-// SetString share; each calls s.reload() itself exactly once after this
-// succeeds.
+// on-disk value, without reloading -- SetString calls s.reload() itself
+// exactly once after this succeeds.
 func (s *configSettings) validateAndPatchString(key, value string) error {
 	if err := s.validateStringChange(key, value); err != nil {
 		return err
@@ -642,8 +555,8 @@ func (s *configSettings) validateAndPatchString(key, value string) error {
 	return nil
 }
 
-// SetString is PromptAndSet's non-interactive counterpart -- see
-// tray.Settings.SetString's own doc comment.
+// SetString persists one dotted config key -- see tray.Settings.SetString's
+// own doc comment.
 func (s *configSettings) SetString(key, value string) error {
 	if err := s.validateAndPatchString(key, value); err != nil {
 		return err
@@ -651,8 +564,8 @@ func (s *configSettings) SetString(key, value string) error {
 	return s.reload()
 }
 
-// SetIntegrationPath is PromptAndSetIntegrationPath's non-interactive
-// counterpart -- same catalogPath/databaseUrl key resolution, no dialog.
+// SetIntegrationPath sets a per-integration catalog path -- same
+// catalogPath/databaseUrl key resolution for every integration, no dialog.
 func (s *configSettings) SetIntegrationPath(id tray.IntegrationID, value string) error {
 	b, ok := builderFor(id)
 	if !ok {
@@ -669,10 +582,7 @@ func (s *configSettings) SetIntegrationPath(id tray.IntegrationID, value string)
 // validates the result against cfg's own copy (applying the parsed rules
 // to Integrations.ResolveDB.PathRewrites before running
 // firstBlockingProblem, so validation sees the post-change state, not the
-// stale snapshot) -- shared by PromptAndSetIntegrationRewrites and
-// SetIntegrationRewrites so the interactive and non-interactive paths can
-// never diverge on how a rewrite string is parsed or validated (Hermes
-// review suggestion on this PR).
+// stale snapshot) -- used by SetIntegrationRewrites.
 func parseAndValidateRewrites(cfg config.Config, value string) ([]config.ResolvePathRewrite, error) {
 	rewrites, err := parseResolvePathRewrites(value)
 	if err != nil {
@@ -686,11 +596,11 @@ func parseAndValidateRewrites(cfg config.Config, value string) ([]config.Resolve
 	return rewrites, nil
 }
 
-// SetIntegrationRewrites is PromptAndSetIntegrationRewrites's
-// non-interactive counterpart. Path rewrites are not reachable through
+// SetIntegrationRewrites sets path rewrite rules for the given
+// integration. Path rewrites are not reachable through
 // SetString/validateStringChange at all (applyIntegrationStringChange only
-// handles catalogPath/databaseUrl), so this shares parseAndValidateRewrites
-// with the interactive path instead.
+// handles catalogPath/databaseUrl), so this uses parseAndValidateRewrites
+// directly instead.
 func (s *configSettings) SetIntegrationRewrites(id tray.IntegrationID, value string) error {
 	b, ok := builderFor(id)
 	if !ok || b.ApplyRewrites == nil {
@@ -712,160 +622,6 @@ func (s *configSettings) SetIntegrationRewrites(id tray.IntegrationID, value str
 	return s.reload()
 }
 
-func (s *configSettings) PromptAndSet(field tray.SettingsField) (bool, error) {
-	prompt, err := settingsPromptFor(field)
-	if err != nil {
-		return false, err
-	}
-
-	args := []string{"-kind", prompt.kind, "-title", prompt.title}
-	if prompt.message != "" {
-		args = append(args, "-message", prompt.message)
-	}
-	if prompt.defaultValue != nil {
-		s.mu.Lock()
-		cfg := s.cfg
-		s.mu.Unlock()
-		if def := prompt.defaultValue(cfg); def != "" {
-			args = append(args, "-default", def)
-		}
-	}
-	if len(prompt.patterns) > 0 {
-		args = append(args, "-patterns", strings.Join(prompt.patterns, ","))
-	}
-
-	value, exitCode, err := s.dialog(context.Background(), args...)
-	if err != nil {
-		return false, fmt.Errorf("run settings dialog for %s: %w", prompt.key, err)
-	}
-	switch exitCode {
-	case dialogExitCanceled:
-		return false, nil
-	case dialogExitOK:
-		// fall through
-	default:
-		return false, fmt.Errorf("settings dialog for %s failed (exit %d)", prompt.key, exitCode)
-	}
-
-	if err := s.validateAndPatchString(prompt.key, value); err != nil {
-		return false, err
-	}
-	return true, s.reload()
-}
-
-// PromptAndSetIntegrationPath is PromptAndSet's counterpart for a
-// per-integration catalog path (see tray.Settings.PromptAndSetIntegrationPath's
-// own doc comment for why this is a parameterized method rather than one
-// SettingsField enum value per integration). Mirrors PromptAndSet's own
-// dialog/validate/patch/reload shape closely, differing only in how the
-// dotted key and dialog metadata are derived (from integrationBuilders via
-// id, rather than settingsPromptFor via a SettingsField).
-func (s *configSettings) PromptAndSetIntegrationPath(id tray.IntegrationID) (bool, error) {
-	b, ok := builderFor(id)
-	if !ok {
-		return false, fmt.Errorf("settings: unknown integration %q", id)
-	}
-
-	s.mu.Lock()
-	cfg := s.cfg
-	s.mu.Unlock()
-
-	args := []string{"-kind", "file", "-title", "Select the " + b.Title + " catalog file"}
-	if b.DatabaseURL {
-		args = []string{
-			"-kind", "password",
-			"-title", b.Title + " database URL",
-			"-message", "Read-only database URL (file:, postgres://, or postgresql://):",
-		}
-	} else {
-		if def := b.Current(cfg).CatalogPath; def != "" {
-			args = append(args, "-default", def)
-		}
-		if len(b.CatalogFilePatterns) > 0 {
-			args = append(args, "-patterns", strings.Join(b.CatalogFilePatterns, ","))
-		}
-	}
-
-	value, exitCode, err := s.dialog(context.Background(), args...)
-	// The config key differs per integration: "catalogPath" for most, but
-	// "databaseUrl" for resolveDb (which maps through CatalogPath in
-	// Current/Apply).
-	pathKey := "catalogPath"
-	if b.ID == tray.IntegrationResolveDB {
-		pathKey = "databaseUrl"
-	}
-	key := b.ConfigKey(pathKey)
-	if err != nil {
-		return false, fmt.Errorf("run settings dialog for %s: %w", key, err)
-	}
-	switch exitCode {
-	case dialogExitCanceled:
-		return false, nil
-	case dialogExitOK:
-		// fall through
-	default:
-		return false, fmt.Errorf("settings dialog for %s failed (exit %d)", key, exitCode)
-	}
-
-	if err := s.validateStringChange(key, value); err != nil {
-		return false, err
-	}
-	if err := config.Patch(s.path, map[string]any{key: value}); err != nil {
-		return false, fmt.Errorf("save %s: %w", key, err)
-	}
-	return true, s.reload()
-}
-
-// PromptAndSetIntegrationRewrites is PromptAndSetIntegrationPath's counterpart
-// for path rewrite rules. Only meaningful for integrations that have a
-// pathRewrites config field (Resolve).
-func (s *configSettings) PromptAndSetIntegrationRewrites(id tray.IntegrationID) (bool, error) {
-	b, ok := builderFor(id)
-	if !ok || b.ApplyRewrites == nil {
-		return false, fmt.Errorf("settings: integration %q does not support path rewrites", id)
-	}
-
-	s.mu.Lock()
-	cfg := s.cfg
-	s.mu.Unlock()
-
-	current := b.CurrentRewrites(cfg)
-	args := []string{
-		"-kind", "entry",
-		"-title", b.Title + " path rewrites",
-		"-message", "Path rewrites (one \"from:to\" pair per comma):\nExample: D:\\Videos\\:/storage/archive/videos/",
-	}
-	if current != "" {
-		args = append(args, "-default", current)
-	}
-
-	value, exitCode, err := s.dialog(context.Background(), args...)
-	key := b.ConfigKey("pathRewrites")
-	if err != nil {
-		return false, fmt.Errorf("run path rewrites dialog for %s: %w", key, err)
-	}
-	switch exitCode {
-	case dialogExitCanceled:
-		return false, nil
-	case dialogExitOK:
-		// fall through
-	default:
-		return false, fmt.Errorf("path rewrites dialog for %s failed (exit %d)", key, exitCode)
-	}
-
-	rewrites, err := parseAndValidateRewrites(cfg, value)
-	if err != nil {
-		return false, err
-	}
-
-	// Persist the parsed slice (not the formatted string) so YAML gets
-	// a proper list-of-maps structure.
-	if err := config.Patch(s.path, map[string]any{key: rewrites}); err != nil {
-		return false, fmt.Errorf("save %s: %w", key, err)
-	}
-	return true, s.reload()
-}
-
 // reload re-reads config.yaml, rebuilds the branchdam.Client and
 // ingest.Engine it feeds, applies them via Runner.Reconfigure, and --
 // when SetQueueStore wired a queue.db handle -- also rebuilds
@@ -885,7 +641,7 @@ func (s *configSettings) PromptAndSetIntegrationRewrites(id tray.IntegrationID) 
 // typo could hit, and this is a live config-mutation path specifically
 // trying to keep bad values out -- a Hermes review finding on this PR.
 // This is really a backstop for a hand-edited config.yaml reaching
-// "Reload config": SetBool/SetInt/PromptAndSet already validate their
+// "Reload config": SetBool/SetInt/SetString already validate their
 // specific change before ever calling config.Patch, so a menu-driven
 // change should never reach this rejection in practice.
 //
