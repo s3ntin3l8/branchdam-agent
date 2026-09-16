@@ -10,7 +10,11 @@ pass, and configure `integrations.nodeIndexPath` plus `pathRewrites` from
 Resolve's original media paths to branchDAM container paths. An empty
 `databaseUrl` probes the standard local paths on Windows, macOS, and Linux;
 an explicit `file:` or `postgres://` URL overrides discovery. The connection
-is forced read-only even if a SQLite URL requests a writable mode.
+is forced read-only even if a SQLite URL requests a writable mode. PostgreSQL
+scope identity retains database-selecting query parameters such as `dbname`,
+`service`, `host`, `port`, and `search_path`, while credentials and transport
+settings are excluded. Logged connection URLs redact userinfo and sensitive
+query parameters such as `password`, `passfile`, and TLS key/certificate paths.
 
 ## Live acceptance checklist
 
@@ -28,7 +32,9 @@ Server when both are available:
    edges or evidence changes.
 4. Edit a clip's in-point/start/duration, rename a timeline, and use the
    same media file twice in one timeline. Confirm refreshed evidence holds
-   both placements and the current timeline name.
+   both placements and the current timeline name. If two Resolve path spellings
+   map to the same node UUID, confirm they produce one edge with both aliases
+   and placements in its evidence.
 5. Remove a clip from a timeline. Confirm its automatic edge remains in
    the database for audit with `is_active=0` but disappears from lineage.
    A human `CONFIRMED`/`REJECTED` edge must remain and produce a warning.

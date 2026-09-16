@@ -122,10 +122,63 @@ func TestSnapshotStatsOriginalPathNotContainerPath(t *testing.T) {
 	}
 }
 
-func TestScopeIDIgnoresCredentialsAndQuery(t *testing.T) {
+func TestSnapshotMergesPathAliasesResolvedToSameNode(t *testing.T) {
+	clipRows := []struct {
+		timelineID, timelineName, seqID, trackID, itemID, name, mediaPath, inPoint, start, duration string
+	}{
+		{"tl1", "Master", "seq1", "track1", "item-a", "upper", `D:\Videos\A.mov`, "", "10", "20"},
+		{"tl1", "Master", "seq1", "track1", "item-b", "lower", `D:\Videos\a.mov`, "", "30", "20"},
+	}
+	db := openTestDBForSyncWithClips(t, clipRows)
+	defer func() { _ = db.Close() }()
+	client := &fakeSnapshotSubmitter{}
+	s := &Syncer{
+		DB: db, AgentID: "agent-a", DatabaseURL: "file:/tmp/resolve.db", UseSnapshot: true, SnapshotClient: client,
+		Index: &fakeIndex{entries: map[string]string{
+			"/storage/A.mov": "018f0000-0000-7000-8000-000000000101",
+			"/storage/a.mov": "018f0000-0000-7000-8000-000000000101",
+		}},
+		PathRewrites: []PathRewrite{{From: `D:\Videos\`, To: "/storage/"}},
+	}
+	if _, err := s.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.calls) != 1 || len(client.calls[0].Memberships) != 1 {
+		t.Fatalf("alias memberships were not merged: %+v", client.calls)
+	}
+	member := client.calls[0].Memberships[0]
+	var ev snapshotEvidence
+	if err := json.Unmarshal(member.EvidenceJSON, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if member.MediaFilePath != `D:\Videos\A.mov` || len(ev.MediaFilePaths) != 2 || len(ev.Placements) != 2 {
+		t.Fatalf("merged alias evidence = member=%+v evidence=%+v", member, ev)
+	}
+}
+
+func TestScopeIDIgnoresCredentialsAndTransportQuery(t *testing.T) {
 	a := ScopeID("postgres://alice:secret@db.local/Projects?sslmode=disable")
 	b := ScopeID("postgres://bob:new@db.local/Projects?sslmode=require")
 	if a != b || len(a) != 64 {
-		t.Fatalf("scope identity changed with credentials/query: %q %q", a, b)
+		t.Fatalf("scope identity changed with credentials/transport query: %q %q", a, b)
+	}
+}
+
+func TestScopeIDIncludesPostgresQueryDatabaseIdentity(t *testing.T) {
+	cases := [][2]string{
+		{"postgres://db.local/?dbname=ResolveA", "postgres://db.local/?dbname=ResolveB"},
+		{"postgres://db.local/?service=resolve-a", "postgres://db.local/?service=resolve-b"},
+		{"postgres:///?host=db-a&port=5432", "postgres:///?host=db-b&port=5433"},
+		{"postgres://db.local/resolve?search_path=project_a", "postgres://db.local/resolve?search_path=project_b"},
+	}
+	for _, pair := range cases {
+		if ScopeID(pair[0]) == ScopeID(pair[1]) {
+			t.Fatalf("distinct PostgreSQL identities collided: %q and %q", pair[0], pair[1])
+		}
+	}
+	a := ScopeID("postgres://db.local/?search_path=project&dbname=resolve")
+	b := ScopeID("postgres://db.local/?dbname=resolve&search_path=project")
+	if a != b {
+		t.Fatal("query parameter ordering changed canonical database identity")
 	}
 }

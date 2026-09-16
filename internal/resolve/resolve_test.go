@@ -378,9 +378,13 @@ func TestStripCredentials(t *testing.T) {
 		{"postgres with creds", "postgres://admin:REDACTED@localhost:5432/resolve", "postgres://localhost:5432/resolve"},
 		{"postgres no creds", "postgres://localhost:5432/resolve", "postgres://localhost:5432/resolve"},
 		{"postgresql with creds", "postgresql://user:REDACTED@host/db", "postgresql://host/db"},
+		{"query password", "postgres://host/db?dbname=resolve&password=REDACTED", "postgres://host/db?dbname=resolve"}, // pragma: allowlist secret
+		{"query credential paths", "postgres://host/db?passfile=%2Fsecret%2Fpgpass&sslcert=%2Fsecret%2Fclient.crt&sslkey=%2Fsecret%2Fclient.key&sslrootcert=%2Fsecret%2Fca.crt&sslmode=verify-full", "postgres://host/db?sslmode=verify-full"},
+		{"query user case insensitive", "postgres://host/db?USER=admin&PASSWORD=REDACTED&service=resolve", "postgres://host/db?service=resolve"}, // pragma: allowlist secret
 		{"file URI", "file:/path/to/db?mode=ro", "file:/path/to/db?mode=ro"},
 		{"empty", "", ""},
 		{"unparseable", "not-a-url", "not-a-url"},
+		{"malformed is not echoed", "postgres://host/db?password=%", "<redacted-database-url>"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -29,13 +29,26 @@ type snapshotPlacement struct {
 }
 
 type snapshotEvidence struct {
-	SchemaMapping string              `json:"schemaMapping"`
-	DatabaseURL   string              `json:"databaseUrl"`
-	TimelineID    string              `json:"timelineId"`
-	TimelineName  string              `json:"timelineName"`
-	MediaFilePath string              `json:"mediaFilePath"`
-	RewrittenPath string              `json:"rewrittenPath"`
-	Placements    []snapshotPlacement `json:"placements"`
+	SchemaMapping  string              `json:"schemaMapping"`
+	DatabaseURL    string              `json:"databaseUrl"`
+	TimelineID     string              `json:"timelineId"`
+	TimelineName   string              `json:"timelineName"`
+	MediaFilePath  string              `json:"mediaFilePath"`
+	RewrittenPath  string              `json:"rewrittenPath"`
+	MediaFilePaths []string            `json:"mediaFilePaths,omitempty"`
+	RewrittenPaths []string            `json:"rewrittenPaths,omitempty"`
+	Placements     []snapshotPlacement `json:"placements"`
+}
+
+type resolvedSnapshotKey struct {
+	timelineID     string
+	sourceNodeUUID string
+}
+
+type resolvedSnapshotMembership struct {
+	mediaFilePaths []string
+	rewrittenPaths []string
+	placements     []snapshotPlacement
 }
 
 // ScopeID is a credential-free, stable hash of the database identity used
@@ -121,6 +134,7 @@ func (s *Syncer) syncSnapshot(ctx context.Context, clips []TimelineClip) (Stats,
 		}
 		return keys[i].path < keys[j].path
 	})
+	resolved := make(map[resolvedSnapshotKey]*resolvedSnapshotMembership)
 	for _, key := range keys {
 		member := branchdam.ResolveSnapshotMembership{TimelineID: key.timelineID, MediaFilePath: key.path}
 		// Resolve's original path is a workstation-native path only on
@@ -152,20 +166,51 @@ func (s *Syncer) syncSnapshot(ctx context.Context, clips []TimelineClip) (Stats,
 			snapshot.Memberships = append(snapshot.Memberships, member)
 			continue
 		}
-		member.SourceNodeUUID = nodeUUID
-		placements := make([]snapshotPlacement, 0, len(groups[key]))
+		resolvedKey := resolvedSnapshotKey{timelineID: key.timelineID, sourceNodeUUID: nodeUUID}
+		group := resolved[resolvedKey]
+		if group == nil {
+			group = &resolvedSnapshotMembership{}
+			resolved[resolvedKey] = group
+		}
+		group.mediaFilePaths = append(group.mediaFilePaths, key.path)
+		group.rewrittenPaths = append(group.rewrittenPaths, rewritten)
 		for _, clip := range groups[key] {
-			placements = append(placements, snapshotPlacement{
+			group.placements = append(group.placements, snapshotPlacement{
 				ItemID: clip.ItemID, ClipName: clip.ClipName,
 				InPoint: clip.InPoint.String, StartFrame: clip.StartFrame.String,
 				Duration: clip.Duration.String,
 			})
 		}
-		sort.Slice(placements, func(i, j int) bool { return placements[i].ItemID < placements[j].ItemID })
+	}
+	resolvedKeys := make([]resolvedSnapshotKey, 0, len(resolved))
+	for key := range resolved {
+		resolvedKeys = append(resolvedKeys, key)
+	}
+	sort.Slice(resolvedKeys, func(i, j int) bool {
+		if resolvedKeys[i].timelineID != resolvedKeys[j].timelineID {
+			return resolvedKeys[i].timelineID < resolvedKeys[j].timelineID
+		}
+		return resolvedKeys[i].sourceNodeUUID < resolvedKeys[j].sourceNodeUUID
+	})
+	for _, key := range resolvedKeys {
+		group := resolved[key]
+		// The source groups were traversed in timeline/path order, so aliases
+		// are already deterministic and each rewritten path remains paired by
+		// index with its workstation-native media path.
+		sort.Slice(group.placements, func(i, j int) bool {
+			a, b := group.placements[i], group.placements[j]
+			return a.ItemID+"\x00"+a.ClipName+"\x00"+a.InPoint+"\x00"+a.StartFrame+"\x00"+a.Duration <
+				b.ItemID+"\x00"+b.ClipName+"\x00"+b.InPoint+"\x00"+b.StartFrame+"\x00"+b.Duration
+		})
+		member := branchdam.ResolveSnapshotMembership{
+			TimelineID: key.timelineID, MediaFilePath: group.mediaFilePaths[0], SourceNodeUUID: key.sourceNodeUUID,
+		}
 		ev, err := json.Marshal(snapshotEvidence{
 			SchemaMapping: SchemaMappingVersion, DatabaseURL: schemeOnly(s.DatabaseURL),
 			TimelineID: key.timelineID, TimelineName: timelineNames[key.timelineID],
-			MediaFilePath: key.path, RewrittenPath: rewritten, Placements: placements,
+			MediaFilePath: group.mediaFilePaths[0], RewrittenPath: group.rewrittenPaths[0],
+			MediaFilePaths: group.mediaFilePaths, RewrittenPaths: group.rewrittenPaths,
+			Placements: group.placements,
 		})
 		if err != nil {
 			return stats, err
@@ -173,6 +218,15 @@ func (s *Syncer) syncSnapshot(ctx context.Context, clips []TimelineClip) (Stats,
 		member.EvidenceJSON = ev
 		snapshot.Memberships = append(snapshot.Memberships, member)
 	}
+	sort.Slice(snapshot.Memberships, func(i, j int) bool {
+		if snapshot.Memberships[i].TimelineID != snapshot.Memberships[j].TimelineID {
+			return snapshot.Memberships[i].TimelineID < snapshot.Memberships[j].TimelineID
+		}
+		if snapshot.Memberships[i].MediaFilePath != snapshot.Memberships[j].MediaFilePath {
+			return snapshot.Memberships[i].MediaFilePath < snapshot.Memberships[j].MediaFilePath
+		}
+		return snapshot.Memberships[i].SourceNodeUUID < snapshot.Memberships[j].SourceNodeUUID
+	})
 	if s.DryRun {
 		stats.Emitted = len(snapshot.Memberships) - stats.Unresolved - stats.NoRewrite
 		stats.EvidenceOnly = stats.Emitted

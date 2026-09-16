@@ -537,25 +537,61 @@ func (s *Syncer) Sync(ctx context.Context) (Stats, error) {
 	return stats, nil
 }
 
-// databaseIdentity removes credentials and connection-only query parameters
-// from a DSN before it participates in persistent virtual-node identity.
-// Host/path (or a file URL's opaque path) still distinguish databases.
+// databaseIdentity removes credentials and transport-only query parameters
+// before a DSN participates in persistent virtual-node identity. PostgreSQL
+// identity-bearing parameters such as dbname, service, host, port, and
+// search_path are retained and canonicalized; SQLite connection parameters
+// do not identify a different catalog file.
 func databaseIdentity(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return rawURL
 	}
 	u.User = nil
-	u.RawQuery = ""
-	u.ForceQuery = false
+	if u.Scheme == "postgres" || u.Scheme == "postgresql" {
+		q, queryErr := url.ParseQuery(u.RawQuery)
+		if queryErr != nil {
+			u.Fragment = ""
+			return u.String()
+		}
+		for key := range q {
+			if databaseQueryParameterIsCredential(key) || databaseQueryParameterIsTransportOnly(key) {
+				q.Del(key)
+			}
+		}
+		u.RawQuery = q.Encode()
+		u.ForceQuery = false
+	} else {
+		u.RawQuery = ""
+		u.ForceQuery = false
+	}
 	u.Fragment = ""
 	return u.String()
 }
 
-// StripCredentials removes userinfo from a database URL so it can be
-// safely logged or included in evidence JSON persisted server-side.
-// Returns the original string if parsing fails or no credentials are
-// present.
+func databaseQueryParameterIsCredential(key string) bool {
+	switch strings.ToLower(key) {
+	case "user", "password", "passfile", "sslpassword", "sslcert", "sslkey", "sslrootcert", "sslcrl", "sslcrldir":
+		return true
+	default:
+		return false
+	}
+}
+
+func databaseQueryParameterIsTransportOnly(key string) bool {
+	switch strings.ToLower(key) {
+	case "sslmode", "channel_binding", "connect_timeout", "application_name", "fallback_application_name",
+		"keepalives", "keepalives_idle", "keepalives_interval", "keepalives_count", "tcp_user_timeout",
+		"krbsrvname", "gsslib":
+		return true
+	default:
+		return false
+	}
+}
+
+// StripCredentials removes userinfo and credential-bearing query parameters
+// from a database URL so it can be safely logged. A malformed URL is never
+// echoed because it may contain an unparseable secret.
 //
 // Exported because cmd/branchdam-agent's auto-detect logging path needs
 // to render a discovered URL without leaking its userinfo. PR #196
@@ -564,10 +600,21 @@ func databaseIdentity(rawURL string) string {
 // preferable to a byte-identical second copy in cmd/ that would drift.
 func StripCredentials(rawURL string) string {
 	u, err := url.Parse(rawURL)
-	if err != nil || u.User == nil {
-		return rawURL
+	if err != nil {
+		return "<redacted-database-url>"
 	}
 	u.User = nil
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return "<redacted-database-url>"
+	}
+	for key := range q {
+		if databaseQueryParameterIsCredential(key) {
+			q.Del(key)
+		}
+	}
+	u.RawQuery = q.Encode()
+	u.ForceQuery = false
 	return u.String()
 }
 
