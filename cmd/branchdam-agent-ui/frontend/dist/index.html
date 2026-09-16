@@ -9,6 +9,14 @@
   <header id="app-header">
     <h1>branchDAM <span id="version"></span></h1>
     <div id="error-banner"></div>
+    <!-- Rebuilt on every 5s status poll from Status.missingFields/
+         configIncomplete (renderSetupBanner in app.js), not "-config" --
+         so it stays outside loadSettings()'s once-only render, same as
+         every live-status container below. Lives in the header (not a
+         panel) for the same reason #settings-error does: missing fields
+         can span multiple categories, so this needs to stay visible no
+         matter which one the operator has open. -->
+    <div id="setup-banner"></div>
     <!-- Hoisted here (out of any one panel) because loadSettings() fills
          all five config panels from a single fetch -- a load failure needs
          to be visible no matter which category the operator has open. -->

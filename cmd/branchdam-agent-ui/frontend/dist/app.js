@@ -65,19 +65,117 @@ function pill(text, kind) {
   return `<span class="pill ${kind}">${escapeHtml(text)}</span>`;
 }
 
+// FIELD_LABELS gives every dotted config key missingRequiredFields
+// (cmd/branchdam-agent/settings.go) can produce a human label, for
+// renderSetupBanner below and for the "required" markers on the Settings
+// form fields further down this file. Kept as one map, not scattered
+// across SERVER_IDENTITY_FIELDS/STORAGE_NAMING_FIELDS' own `label`s, since
+// renderSetupBanner needs it before those field descriptors are declared.
+const FIELD_LABELS = {
+  "server.baseUrl": "Server URL",
+  "server.apiKey": "API key", // pragma: allowlist secret -- a UI label, not a credential
+  agentId: "Agent ID",
+  "ingest.localEditRoot": "Local edit root",
+  "ingest.archiveRoot": "Archive root",
+  pathMappings: "Path mappings",
+};
+
+// renderSetupBanner names exactly which config fields are still missing --
+// status.missingFields is the same list cmd/branchdam-agent/tray.go's
+// startup log line already prints to agent.log, surfaced here instead of
+// making the operator go find that file. Rebuilt on every 5s poll like
+// every other render* function below (NOT "-config": see
+// TestStatusPollNeverRebuildsSettingsContainers, which pins that render()
+// must never touch a settings container the once-only loadSettings() owns).
+function renderSetupBanner(status) {
+  const el = byId("setup-banner");
+  if (!status.configIncomplete || !(status.missingFields ?? []).length) {
+    el.innerHTML = "";
+    el.classList.remove("visible");
+    return;
+  }
+  const items = status.missingFields
+    .map((f) => `<li>${escapeHtml(FIELD_LABELS[f] ?? f)} <code>${escapeHtml(f)}</code></li>`)
+    .join("");
+  el.innerHTML = `<p>Setup isn't finished yet — the sections below still need:</p><ul>${items}</ul>`;
+  el.classList.add("visible");
+}
+
+// renderServer keys the Status pill on status.serverProbe -- an on-demand
+// (and, per cmd/branchdam-agent's startup/60s-timer wiring, automatic)
+// POST /api/v1/agent/hello check -- rather than the OLD status.hasDrained/
+// handshakeOk pair, which could only ever become true once
+// offline.queueDbPath was ALSO configured (a real drain pass is the only
+// thing that ever set them). That's the "unknown — never drained" bug this
+// exists to fix: a config with server.baseUrl/apiKey/agentId set and no
+// offline queue at all used to show a permanently-unknown Server card.
+//
+// Deliberately NOT gated on status.configIncomplete the same way
+// TriggerServerProbe itself deliberately isn't (see that method's own doc
+// comment): an operator who has filled in the server fields but not yet
+// ingest.localEditRoot/archiveRoot is still configIncomplete=true, and
+// hiding a real "reachable" behind a blanket "not configured" here would
+// undo the exact fix TriggerServerProbe's independence from the offline
+// queue was for.
 function renderServer(status) {
   const rows = [];
-  if (!status.hasDrained) {
-    rows.push(["Status", raw(pill("unknown — never drained", "neutral"))]);
-  } else if (status.handshakeOk) {
+  const probe = status.serverProbe;
+  if (!probe) {
+    const needsServerFields = (status.missingFields ?? []).some((f) => f.startsWith("server.") || f === "agentId");
+    const hint = needsServerFields ? "not checked — set Server URL, API key and Agent ID" : "not checked yet";
+    rows.push(["Status", raw(pill(hint, "neutral"))]);
+  } else if (probe.ok) {
     rows.push(["Status", raw(pill("reachable", "ok"))]);
+    if (probe.version) rows.push(["Server version", probe.version]);
   } else {
     rows.push(["Status", raw(pill("unreachable", "bad"))]);
+    if (probe.err) rows.push(["Error", raw(pill(probe.err, "bad"))]);
   }
   const lastHandshake = fmtTime(status.lastHandshakeAt);
   if (lastHandshake) rows.push(["Last successful handshake", lastHandshake]);
   rows.push(["Paused", raw(status.paused ? pill("yes", "bad") : pill("no", "ok"))]);
-  byId("server-body").innerHTML = table(rows);
+
+  const container = byId("server-body");
+  container.innerHTML = table(rows);
+  container.appendChild(
+    actionButtonRow("Connection check", "", [
+      {
+        label: "Test connection",
+        busyText: "Checking…",
+        busy: inFlightActions.has("testConnection"),
+        run: async (statusEl) => {
+          const app = getApp();
+          if (!app) return;
+          // Same inFlightActions bookkeeping as renderIntegrations' own
+          // "Sync now" -- cleared before branching, not in a finally
+          // around the whole handler, so the success path's poll() below
+          // never sees this action as still in flight.
+          inFlightActions.add("testConnection");
+          let result;
+          try {
+            result = JSON.parse(await app.TestConnection());
+          } finally {
+            inFlightActions.delete("testConnection");
+          }
+          if (!result.ran) {
+            // No ServerProbe wired at all (server.baseUrl/apiKey/agentId
+            // still incomplete) -- poll() would rebuild this row from the
+            // same nil status.serverProbe and erase this message with
+            // nothing to replace it, so leave it standing.
+            setFieldStatus(statusEl, "Set Server URL, API key and Agent ID first", "error");
+            return;
+          }
+          if (!result.ok) {
+            setFieldStatus(statusEl, result.err || "unreachable", "error");
+            await poll();
+            return;
+          }
+          setFieldStatus(statusEl, result.version ? `Reachable (v${result.version})` : "Reachable", "saved");
+          await poll(); // refresh the Status pill above immediately, rather than waiting up to POLL_INTERVAL_MS
+        },
+      },
+    ]),
+  );
 }
 
 function renderIngest(status) {
@@ -408,6 +506,7 @@ function render(view) {
   const shownUIVersion = uiVersion && uiVersion !== view.version ? `UI v${uiVersion}` : "";
   byId("version").textContent = [agentVersion, shownUIVersion].filter(Boolean).join(" · ");
   const status = view.status ?? {};
+  renderSetupBanner(status);
   renderServer(status);
   renderIngest(status);
   renderQueue(status);
@@ -521,24 +620,37 @@ initNav();
 // SERVER_IDENTITY_FIELDS: how this agent reaches the branchDAM server and
 // identifies itself.
 const SERVER_IDENTITY_FIELDS = [
-  { key: "server.baseUrl", label: "Server URL", get: (sv) => sv.ServerBaseURL },
+  { key: "server.baseUrl", label: "Server URL", get: (sv) => sv.ServerBaseURL, required: true },
   {
     key: "server.apiKey",
     label: "API key",
     password: true,
     get: () => "",
     placeholder: (sv) => (sv.ServerAPIKeySet ? "(configured — leave blank to keep)" : "(not set)"),
+    required: true,
   },
-  { key: "agentId", label: "Agent ID", get: (sv) => sv.AgentID },
+  { key: "agentId", label: "Agent ID", get: (sv) => sv.AgentID, required: true },
 ];
 
 // STORAGE_NAMING_FIELDS: where files land and how they're named. `list:
 // true` means the value round-trips as a JSON array of strings
 // (SetStringSlice, the canonical wire shape for a list per statusapi.go's
 // settingsPatchRequest doc comment), not a comma-separated string.
+
+// requiredUnlessDirectUpload documents the one conditional requirement
+// missingRequiredFields (cmd/branchdam-agent/settings.go) actually applies:
+// ingest.archiveRoot and pathMappings are only required when
+// ingest.uploadStream is false, or when it's true but an offline queue is
+// also configured -- see config.example.yaml's own ingest.uploadStream
+// comment. Neither of those two conditions is visible to this window today
+// (uploadStream/offline.queueDbPath are both hand-edit-only config keys,
+// per docs/tray-settings-inventory.md), so the marker states the rule
+// rather than evaluating it live.
+const requiredUnlessDirectUpload = "required unless direct-upload mode is on with no offline queue";
+
 const STORAGE_NAMING_FIELDS = [
-  { key: "ingest.archiveRoot", label: "Archive root", get: (sv) => sv.ArchiveRoot, browseDir: true },
-  { key: "ingest.localEditRoot", label: "Local edit root", get: (sv) => sv.LocalEditRoot, browseDir: true },
+  { key: "ingest.archiveRoot", label: "Archive root", get: (sv) => sv.ArchiveRoot, browseDir: true, requiredNote: requiredUnlessDirectUpload },
+  { key: "ingest.localEditRoot", label: "Local edit root", get: (sv) => sv.LocalEditRoot, browseDir: true, required: true },
   {
     key: "ingest.cardRoots",
     label: "Watch folders",
@@ -553,7 +665,7 @@ const STORAGE_NAMING_FIELDS = [
     list: true,
   },
   { key: "ingest.pathTemplate", label: "Naming template", get: (sv) => sv.NamingTemplate },
-  { key: "pathMappings", label: "Path mappings", get: (sv) => sv.PathMappings },
+  { key: "pathMappings", label: "Path mappings", get: (sv) => sv.PathMappings, requiredNote: requiredUnlessDirectUpload },
   { key: "integrations.nodeIndexPath", label: "Node index path", get: (sv) => sv.NodeIndexPath, browseFile: ["*.json"] },
 ];
 
@@ -615,6 +727,21 @@ function renderTextField(f, sv) {
   const label = document.createElement("label");
   label.textContent = f.label;
   row.appendChild(label);
+
+  // f.required (always) vs. f.requiredNote (conditionally, e.g.
+  // ingest.archiveRoot's "unless direct-upload mode..." -- see
+  // requiredUnlessDirectUpload above) are both surfaced the same way: a
+  // "*" marker whose title carries the exact condition, so a static
+  // render (this form loads once via loadSettings(), see its own doc
+  // comment) still communicates the conditional case without evaluating
+  // uploadStream/offline.queueDbPath live.
+  if (f.required || f.requiredNote) {
+    const marker = document.createElement("span");
+    marker.className = "req";
+    marker.textContent = "*";
+    marker.title = f.requiredNote ?? "required";
+    row.appendChild(marker);
+  }
 
   const input = document.createElement("input");
   input.type = f.password ? "password" : "text";

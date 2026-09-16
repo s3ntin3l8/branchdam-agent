@@ -176,6 +176,24 @@ func (a *App) TriggerSync(id string) (string, error) {
 	return string(body), nil
 }
 
+// TestConnection runs one on-demand server-reachability check right now --
+// POST /api/actions/test-connection's counterpart, mirroring TriggerSync's
+// own shape above: no request body, and the raw testConnectionActionResult
+// JSON (internal/tray/statusapi.go) returned as-is so the frontend can
+// render ok/version/err without a matching struct duplicated here. Unlike
+// TriggerDrain, this check is meaningful with no offline queue configured
+// at all -- see tray.ServerProbe's own doc comment -- which is the whole
+// reason the Server card needs its own button rather than reusing a
+// "Drain queue now" affordance the window never exposed in the first
+// place.
+func (a *App) TestConnection() (string, error) {
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/test-connection", nil)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
 // TriggerHookInstall installs (or reinstalls) id's render hook right now --
 // POST /api/actions/hook-install's counterpart, mirroring
 // internal/tray/hooksmenu.go's own "Install / update render hook" item.
