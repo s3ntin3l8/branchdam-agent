@@ -120,7 +120,29 @@ ingested and on the status page under the same busy-card header. See
 `internal/ingest/progress.go`'s `ProgressEvent` and `internal/tray/tooltip.go`'s
 `FormatIngestProgress`.
 
-## Integrations menu
+## Integrations menu (removed in v1.8.1)
+
+**Deleted entirely in v1.8.1** (`internal/tray/integrationsmenu.go`), not merely slimmed further.
+The paragraphs below describe issue #211's slimming as it shipped in v1.8.0 -- kept as history for
+why the menu looked the way it did, but the code no longer exists. Two things forced the deletion
+rather than a further trim: (1) `Sync timeout`, the one field this section calls out below as "the
+one per-integration field the window has no control for at all", moved into
+`renderIntegrationBlock` as a `Sync timeout` select once v1.8.1 closed that gap, leaving nothing in
+this menu the Wails window didn't already cover; (2) a separate, independent registry
+(`internal/tray/hooks.go`'s `HookDescriptors()`) built its OWN top-level `DaVinci Resolve` item
+(see "DaVinci Resolve hook installer" below, also removed) with the identical title as this menu's
+own `DaVinci Resolve` catalog-sync item -- two indistinguishable flat top-level siblings, a
+regression that slipped past CI because every menu-building file in `internal/tray` is
+`//go:build windows || darwin` and never compiles on the Linux required check. Both the status
+line and the "Sync now" action this section used to describe now live only in the Wails window's
+`renderIntegrations`/status page (see "Status page" and "Native app UI" below); the friendly
+"Luminar Neo"/"DaVinci Resolve" names those surfaces render come from a new
+`IntegrationStatus.Title`/`HookStatus.Title` (populated from the same `Integrations()`/
+`HookDescriptors()` registries this section references) with a `DisplayName()` fallback to the raw
+ID, guarded by `internal/tray/registry_test.go`'s `TestRegistryTitlesAreUnique` (asserted per
+registry, not across their union -- see that test's own doc comment for why "DaVinci Resolve"
+legitimately appearing in both a separately-headed "Integrations" and "Render hooks" section is not
+the bug #211/this note describes).
 
 **Slimmed by issue #211**, same reasoning as the Settings menu above: Enabled, Dry run, the
 catalog path/database URL, "Sync every", and Resolve's path rewrites all moved to the Wails
@@ -193,11 +215,12 @@ mismatch, indistinguishable by design -- see `HookState`'s own doc comment.
 
 **The legacy page (`/`, `/status`, `/status.json`) stays read-only.** Neither section is itself
 interactive -- both are plain `<meta http-equiv="refresh">` HTML, no JS, no auth, matching this
-page's original issue #3/#61 shape. The actions themselves live one level up, in the tray menu:
-catalog sync via the Integrations menu's "Sync now" (or its background timer), and the Resolve hook
-via the "DaVinci Resolve" menu's "Install / update render hook" (issue #68) -- see that section
-below. `branchdam-agent resolve-hook -install` remains available headlessly, for a workstation that
-never runs the tray at all.
+page's original issue #3/#61 shape. As of v1.8.1, the actions themselves live only in the Wails
+window (`cmd/branchdam-agent-ui`): catalog sync via `renderIntegrations`' "Sync now" (or its
+background timer), and the Resolve hook via `renderHooks`' "Install"/"Reveal" -- the tray's own
+"Integrations menu"/"DaVinci Resolve hook installer" menus that used to offer the same actions are
+gone (see those sections above). `branchdam-agent resolve-hook -install` remains available
+headlessly, for a workstation that never runs the tray or the window at all.
 
 **A separate, authenticated `/api/*` surface now exists alongside the legacy page**
 (`internal/tray/statusapi.go`), built for the upcoming native app UI (Track 3 of the
@@ -307,12 +330,15 @@ inside the macOS bundle, built and packaged alongside the tray in the same relea
 rather than a separate pipeline:
 
 - **Windows** (`build-windows` job): built with the same `CGO_ENABLED=0` cross-compile posture as
-  the tray/console binaries (confirmed empirically, see "Cross-compile posture" below), `-H
+  the tray/console binaries (confirmed empirically, see "Cross-compile posture" below), `-tags
+  production` (see that section -- required, not optional; its absence shipped a broken v1.8.0), `-H
   windowsgui` (no console window), and its own icon resource -- `goversioninfo` needs a fresh
   `resource.syso` generated into `cmd/branchdam-agent-ui/`'s own package directory, since Go only
   auto-links one present in the *same* directory as what's being built; the tray's `resource.syso`
-  from the same job doesn't carry over. Added to `branchdam-agent-windows-amd64.zip` (the self-update
-  payload) alongside the other two exes, and to `installer/windows/branchdam-agent.nsi` as a third
+  from the same job doesn't carry over. Added to `branchdam-agent-<version>-windows-amd64.zip` (the
+  self-update payload -- the outer archive name carries the release version since v1.8.1, but the
+  exe members inside it stay unversioned, see "Release asset filenames" below) alongside the other
+  two exes, and to `installer/windows/branchdam-agent.nsi` as a third
   `File`/`CheckExeNotRunning` pair, with its own Start Menu shortcut ("Open branchDAM.lnk") and the
   matching uninstall-section deletes (including the `.previous`/`.previous.version` self-update
   sidecar files, following the existing two-binary precedent).
@@ -385,10 +411,26 @@ build-darwin`'s `go list ./...`-based exclusion of `internal/tray`/`cmd/branchda
 change for this new package: it lists under the *host's* GOOS (Linux, no `GOOS` override on that
 specific step), where `cmd/branchdam-agent-ui`'s `//go:build windows || darwin`-tagged files already
 resolve to zero matching files and the package is invisible to `go list ./...` before `GOOS=darwin`
-is ever applied to the subsequent build. The existing CI matrix validates this binary natively for
-free, with no new job added in this PR: `test (windows/amd64, native)`'s `go test ./...` on
-`windows-latest` compiles and tests it on real Windows, and `build (darwin/arm64, full, incl.
-tray)`'s `go test ./...`/`go build ./...` on the `macos-26` runner does the same on real macOS.
+is ever applied to the subsequent build. `-tags production` is CGO-neutral -- it doesn't change any
+of the above, including the `CGO_ENABLED=0` cross-compile posture on the Windows leg.
+
+**`-tags production` is required on every build of this package, and CI catches a missing tag on
+only one of the two platforms.** Without it, wails v2.16.0's own `//go:build !dev && !production &&
+!bindings` guard substitutes a stub `CreateApp` (`internal/app/app_default_windows.go` /
+`app_default_unix.go`): on Windows that pops a "Wails applications will not build without the
+correct build tags" MessageBox at runtime; on **macOS it fails silently** -- the stub returns an
+error that surfaces only as `main.go`'s own `println` to a stdout nobody reads, so the window simply
+never appears. This is how v1.8.0 shipped broken on both platforms with a green CI run: the existing
+CI matrix compiles the **untagged** variant and validates nothing about the tag. `test
+(windows/amd64, native)`'s `go test ./...` on `windows-latest` and `build (darwin/arm64, full, incl.
+tray)`'s `go test ./...`/`go build ./...` on `macos-26` both exercise the package, just not under
+`-tags production` -- a missing tag compiles and tests clean on both. The actual guards are:
+`make check` -> `build-windows` (Makefile), which cross-compiles the UI binary with the tag, giving
+Windows free coverage from any host; and `build-darwin-full`'s own `go build -tags production
+./cmd/branchdam-agent-ui` step, added specifically because darwin has no CI signal otherwise --
+there's no way to see the runtime failure from a `go build`/`go test` pass, only from actually
+launching the binary (see the "Wails smoke test" step in the v1.8.1 fix's own verification
+procedure).
 
 **Token handling is per-request, not cached.** `App.StatusJSON` re-reads both `config.yaml` (for the
 status server's address) and the session token on every call rather than once at startup -- the tray
@@ -405,7 +447,14 @@ had it installed via any other app is a real, untested failure mode, not just an
 Also unverified: whether `SingleInstanceLock`'s second-launch window-focus behavior actually works
 as documented.
 
-## DaVinci Resolve hook menu (issue #68)
+## DaVinci Resolve hook menu (issue #68, removed in v1.8.1)
+
+**Deleted entirely in v1.8.1** (`internal/tray/hooksmenu.go`), for the same reason as the
+Integrations menu above: the Wails window's `renderHooks` already covered "Install"/"Reveal", and
+this menu's own top-level item -- titled "DaVinci Resolve", same as the Integrations menu's own
+Resolve entry two paragraphs below -- was one half of the #187 duplicate-title regression that
+motivated removing both menus rather than continuing to slim them independently. The paragraphs
+below describe the menu as it shipped through v1.8.0; kept as history.
 
 A separate top-level menu, sibling to the Integrations menu's own top-level items rather than
 nested under it: `internal/tray.HookDescriptors()`'s compile-time registry (DaVinci Resolve's
@@ -477,9 +526,9 @@ tests that run on Linux; the platform-tagged write paths are proven by the
 `release-binaries.yml`'s `build-darwin` job assembles `branchdam-agent.app` around the built
 binary via `tools/mkbundle` (a thin CLI wrapper over `internal/appbundle`, the package that
 actually renders `Info.plist` and lays out `Contents/MacOS/branchdam-agent`), ad-hoc signs the
-bundle, then packages it two ways: `branchdam-agent-darwin-arm64.tar.gz` (the self-update
+bundle, then packages it two ways: `branchdam-agent-<version>-darwin-arm64.tar.gz` (the self-update
 payload -- see Self-update below for why it must stay a bare-bundle tarball) and
-`branchdam-agent-darwin-arm64.dmg` (the user-facing manual-install download, with an
+`branchdam-agent-<version>-darwin-arm64.dmg` (the user-facing manual-install download, with an
 `/Applications` symlink alongside the app so drag-to-install is the obvious gesture -- see
 Gatekeeper/quarantine/translocation below for why this is the download the README points at).
 Shipping a second darwin asset raised the obvious question of whether go-selfupdate might pick
@@ -489,6 +538,20 @@ the `.dmg` instead of the `.tar.gz` -- checked against the vendored source
 (`.zip`, `.tar.gz`, `.tgz`, `.gzip`, `.gz`, `.tar.xz`, `.xz`, `.bz2`, or no extension at all),
 which does not include `.dmg` -- an asset ending `-arm64.dmg` cannot match. Re-check this if
 go-selfupdate is ever upgraded past v1.6.0.
+
+**Release asset filenames (v1.8.1).** Every release asset's outer filename gained a
+`<version>` infix (e.g. `branchdam-agent-v1.8.1-darwin-arm64.dmg`) so downloads from different
+releases stop colliding in `~/Downloads` -- v1.8.0 shipped without one. This is safe for
+already-installed clients precisely because of the closed-suffix-set matching documented in the
+paragraph above: `getSuffixes`' own `assetMatchSuffixes` (detect.go) selects an asset by
+`strings.HasSuffix`, not equality and not a prefix match, so a version segment inserted BEFORE the
+`<os>-<arch><ext>` tail leaves that tail -- and the match -- untouched. `SHA256SUMS.txt` is the one
+exception, and deliberately kept that way: `internal/selfupdate.ChecksumAsset` is matched by exact
+name (`findValidationAsset`, same source file), so it must never carry the version --
+`TestReleaseWorkflowChecksumAssetIsNeverVersioned` (`internal/selfupdate/
+release_workflow_contract_test.go`) pins that. Re-check this reasoning at the same time as the
+`.dmg` suffix check above if go-selfupdate is ever upgraded.
+
 `LSUIElement=1` is what's meant to keep the tray out of the Dock and Cmd-Tab switcher; **this is
 unverified on real hardware** -- no macOS host has been used interactively to confirm it. Verify
 before relying on the macOS tray for day-to-day use.
@@ -915,7 +978,7 @@ to say "verified."
    LaunchAgent (`tray.startOnLogin: true`, which execs the bundle's inner binary rather than
    opening the bundle -- confirm AppKit's Dock-suppression still applies in that path too).
 2. Gatekeeper/quarantine, the recommended `.dmg` path: download
-   `branchdam-agent-darwin-arm64.dmg` via a browser (not `curl`), open it -- confirm the disk
+   `branchdam-agent-<version>-darwin-arm64.dmg` via a browser (not `curl`), open it -- confirm the disk
    image mounts, `branchdam-agent.app` and an `Applications` symlink both appear in the window,
    and the icon renders correctly in both Finder (the DMG window) and the icon itself (not a
    generic document icon). Drag the app onto `Applications`, eject, and launch from

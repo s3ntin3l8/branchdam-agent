@@ -12,19 +12,44 @@
 // commands -- Wails' binding glue (window.go.main.App.* in
 // frontend/dist/app.js) is injected by this package's own wails.Run at
 // window-load time via runtime reflection over Bind, not generated ahead
-// of time, so a plain `go build` produces a fully working binary. The
-// generated TypeScript types the CLI would otherwise produce under
-// frontend/wailsjs/ are an IDE convenience this hand-written vanilla-JS
-// frontend has no use for.
+// of time. The generated TypeScript types the CLI would otherwise produce
+// under frontend/wailsjs/ are an IDE convenience this hand-written
+// vanilla-JS frontend has no use for.
+//
+// EVERY build of this package MUST pass -tags production. Without it,
+// wails v2.16.0's own `//go:build !dev && !production && !bindings` guard
+// (internal/app/app_default_windows.go / app_default_unix.go) substitutes
+// a stub CreateApp: on Windows that pops a "Wails applications will not
+// build without the correct build tags" MessageBox; on macOS it returns an
+// error that main below now logs via agentlog (see main's own comment for
+// why that replaced a bare println), so the window still silently never
+// appears on screen, but the failure is at least diagnosable after the
+// fact. The tag is
+// self-contained -- wails embeds its production runtime JS
+// (internal/frontend/runtime/runtime_prod_desktop.go) from the module
+// itself, so no `wails` CLI and no npm step are required, and it is
+// CGO-neutral (the Windows leg still cross-compiles with
+// CGO_ENABLED=0). The five sites that must carry it: Makefile's
+// build-windows and build-darwin-app targets, release-binaries.yml's
+// build-windows and build-darwin jobs, and ci-cd.yml's build-darwin-full
+// job (which exists solely to typecheck this build on a real macOS host
+// before release, since darwin has no visible failure mode to catch a
+// missing tag in the field). Turning the tag on for the first time on a
+// real macOS host surfaced a separate, genuine upstream gap in wails
+// v2.16.0's own darwin cgo linking -- see cgo_darwin.go's own doc
+// comment.
 package main
 
 import (
 	"embed"
+	"log/slog"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/agentlog"
 )
 
 //go:embed all:frontend/dist
@@ -48,6 +73,25 @@ const singleInstanceID = "com.branchdam.agent.ui"
 var version = "dev"
 
 func main() {
+	// A Hermes review finding on this PR: the missing-build-tag failure
+	// this file's own doc comment above describes (wails' stub CreateApp
+	// returning an error on macOS) had no trace anywhere a user could
+	// find it -- println writes to a stdout nobody reads for a
+	// double-clicked .app or a launchd-started process. agentlog.Setup
+	// installs the same durable-log-file-plus-stderr default logger
+	// cmd/branchdam-agent's tray.go uses (internal/agentlog's own doc
+	// comment: built specifically for "a `-H windowsgui`-linked tray or a
+	// macOS `.app` launched by launchd, neither of which has anywhere for
+	// stderr to go"), so a mis-tagged build now leaves a diagnosable
+	// footprint on the user's machine, not just in CI.
+	_, closeLog, logErr := agentlog.Setup()
+	defer func() { _ = closeLog() }()
+	if logErr != nil {
+		// Non-fatal, matching tray.go's own precedent: agentlog.Setup
+		// already fell back to an stderr-only default logger.
+		slog.Warn("could not set up durable logging", "err", logErr)
+	}
+
 	app := NewApp()
 	err := wails.Run(&options.App{
 		Title:       "branchDAM (" + version + ")",
@@ -76,6 +120,6 @@ func main() {
 		},
 	})
 	if err != nil {
-		println("branchdam-agent-ui: " + err.Error())
+		slog.Error("branchdam-agent-ui exited with an error", "err", err)
 	}
 }

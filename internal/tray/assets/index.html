@@ -134,7 +134,7 @@
       {{$cfg := integrationView $.Settings .ID}}
       {{$labels := integrationStatusLabels .ID}}
       <li>
-        <strong>{{.ID}}</strong>:
+        <strong>{{.DisplayName}}</strong>:
         {{if not .Registered}}
         <span class="stub">not configured</span>
         {{else}}
@@ -158,14 +158,14 @@
   </section>
 
   <section>
-    <h2>DaVinci Resolve render hook</h2>
+    <h2>Render hooks</h2>
     {{if not .Status.Hooks}}
     <p>No hooks registered.</p>
     {{else}}
     <ul>
       {{range .Status.Hooks}}
       <li>
-        <strong>{{.ID}}</strong>:
+        <strong>{{.DisplayName}}</strong>:
         {{if not .Registered}}
         <span class="stub">not configured</span>
         {{else if not .State}}

@@ -88,6 +88,14 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
+      # go test ./... above tests cmd/branchdam-agent-ui WITHOUT -tags
+      # production, same gap ci-cd.yml's build-darwin-full job had before
+      # this PR -- it proves the package compiles and its tests pass
+      # under wails' stub app_default_windows.go, not under the real one
+      # that ships. A Hermes review finding on this PR: without this
+      # step, Windows had a build-time guard (make check -> build-windows)
+      # but no TEST-time guard exercising the tagged configuration.
+      - run: go test -tags production ./cmd/branchdam-agent-ui
 
   # darwin/arm64 build-only check, EXCLUDING internal/tray and
   # cmd/branchdam-agent (which imports it). Verified locally: Go's linker
@@ -132,3 +140,15 @@ jobs:
           go-version-file: go.mod
       - run: go test ./...
       - run: go build ./...
+      # go build ./... above compiles cmd/branchdam-agent-ui WITHOUT
+      # -tags production, so it only proves the package's import graph and
+      # function bodies typecheck under wails' stub app_default_unix.go --
+      # not under the real one. Without this step, nothing in CI catches a
+      # missing -tags production on the darwin UI build before release; the
+      # failure mode is silent on macOS (app_default_unix.go's CreateApp
+      # returns an error that surfaces only as a println nobody reads, so
+      # the window just never appears -- see cmd/branchdam-agent-ui/main.go's
+      # doc comment). The Windows leg is covered for free by
+      # `make check` -> `build-windows`, which already cross-compiles the
+      # UI with the tag; this step is darwin's equivalent guard.
+      - run: go build -tags production ./cmd/branchdam-agent-ui

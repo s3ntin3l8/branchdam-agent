@@ -137,7 +137,7 @@ build-windows: ## Cross-compile the Windows binaries (from any host) -- see READ
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-X main.version=$(VERSION) -H windowsgui" -o dist/branchdam-agent-tray.exe ./cmd/branchdam-agent
 	rm -f cmd/branchdam-agent/resource.syso
 	$$(go env GOPATH)/bin/goversioninfo -icon=dist/icon.ico -skip-versioninfo -o=cmd/branchdam-agent-ui/resource.syso
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-X main.version=$(VERSION) -H windowsgui" -o dist/branchdam-agent-ui.exe ./cmd/branchdam-agent-ui
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -tags production -ldflags="-X main.version=$(VERSION) -H windowsgui" -o dist/branchdam-agent-ui.exe ./cmd/branchdam-agent-ui
 	rm -f cmd/branchdam-agent-ui/resource.syso
 
 build-darwin: ## Build-only check for darwin/arm64, EXCLUDING internal/tray and cmd/branchdam-agent -- see README
@@ -146,7 +146,7 @@ build-darwin: ## Build-only check for darwin/arm64, EXCLUDING internal/tray and 
 build-darwin-app: ## Build + assemble the .app bundle -- macOS host only (internal/tray needs cgo on darwin, so this isn't cross-compilable)
 	mkdir -p dist
 	go build -ldflags="-X main.version=$(VERSION)" -o dist/branchdam-agent ./cmd/branchdam-agent
-	go build -ldflags="-X main.version=$(VERSION)" -o dist/branchdam-agent-ui ./cmd/branchdam-agent-ui
+	go build -tags production -ldflags="-X main.version=$(VERSION)" -o dist/branchdam-agent-ui ./cmd/branchdam-agent-ui
 	go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -ui-binary dist/branchdam-agent-ui -version "$(VERSION)"
 
 check: build vet test vulncheck build-windows build-darwin ## One-shot pre-PR gate: build + vet + test + vulncheck + cross-build checks (does not require pre-commit -- see `lint`)
