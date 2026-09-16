@@ -1,21 +1,57 @@
+/* Semantic tokens, ported from the branchDAM server web app's own
+   theme.css (React + Tailwind v4) so this window reads as the same
+   product -- but only the SEMANTIC layer (surface/border/text/brand), not
+   that file's neutral-ladder-inversion trick, which exists purely to
+   re-point Tailwind utility classes this window doesn't have.
+
+   --fg/--bg/--muted/--border/--sel are kept as aliases onto the new names
+   so the many existing references below don't all need to change in the
+   same pass that introduces the tokens. */
 :root {
   color-scheme: light dark;
-  --fg: #1a1a1a;
-  --bg: #fafafa;
-  --muted: #6b6b6b;
-  --border: #ddd;
+  --surface-canvas: #fafafa;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f5f5f5;
+  --surface-selected: #e5e5e5;
+  --border-subtle: #e5e5e5;
+  --text-primary: #171717;
+  --text-secondary: #404040;
+  --text-muted: #737373;
+  --text-faint: #a3a3a3;
+  --color-brand: #6366f1; /* indigo-500 -- focus rings */
+  --color-brand-solid: #4f46e5; /* indigo-600 -- button fill */
+  --color-brand-hover: #6366f1; /* indigo-500 -- button hover */
+  --color-brand-contrast: #ffffff;
   --ok: #1a7f37;
   --bad: #b3261e;
-  --sel: #e8e8e8;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --field-label-w: 160px;
+
+  /* aliases -- see doc comment above */
+  --fg: var(--text-primary);
+  --bg: var(--surface-canvas);
+  --muted: var(--text-muted);
+  --border: var(--border-subtle);
+  --sel: var(--surface-selected);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --fg: #eaeaea;
-    --bg: #1e1e1e;
-    --muted: #9a9a9a;
-    --border: #3a3a3a;
-    --sel: #2c2c2c;
+    --surface-canvas: #0a0a0a;
+    --surface-raised: #171717;
+    --surface-sunken: #0a0a0a;
+    --surface-selected: #262626;
+    --border-subtle: #262626;
+    --text-primary: #f5f5f5;
+    --text-secondary: #d4d4d4;
+    --text-muted: #a3a3a3;
+    --text-faint: #737373;
+    /* --ok/--bad deliberately NOT overridden here: .pill.ok/.pill.bad and
+       the error/setup banners below pair them with hardcoded PALE
+       backgrounds (#dafbe1, #fdecea, #fff8e1) -- brightening only the
+       foreground would put light text on a light fill. Tokenizing those
+       backgrounds too is a worthwhile follow-up, but touches every status
+       surface, not just the settings form this PR is about. */
   }
 }
 
@@ -99,7 +135,7 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: 
 }
 .nav-item:hover { border-color: var(--border); }
 .nav-item.active { background: var(--sel); border-color: var(--border); font-weight: 600; }
-.nav-item:focus-visible { outline: 2px solid var(--border); outline-offset: 1px; }
+.nav-item:focus-visible { outline: 2px solid var(--color-brand); outline-offset: 1px; }
 
 #content {
   flex: 1 1 auto;
@@ -111,6 +147,7 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: 
 .panel.active { display: block; }
 
 section {
+  background: var(--surface-raised);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 14px;
@@ -136,21 +173,44 @@ ul { margin: 4px 0; padding-left: 18px; }
 
 .empty { color: var(--muted); font-style: italic; }
 
+/* .field-row is a grid with NAMED, EXPLICIT columns -- every child is
+   placed by its own selector below rather than relying on source order
+   (auto-placement), which is exactly what caused the alignment bug this
+   fixes: the "*" required marker (.req) used to be an extra flex item
+   that only existed on SOME rows, shifting every element after it. The
+   "req" column is always 10px wide whether or not a row has a marker in
+   it, so labels/inputs now start at the same x on every row regardless
+   of whether that row happens to be required or have a Browse button.
+   Used by renderTextField, renderCheckboxField, renderSelectField, and
+   renderIntegrationBlock's hand-built path/rewrite rows -- all of which
+   place a subset of {label, .req, input/select, button, .field-status} as
+   direct children, so no per-caller CSS is needed beyond the modifiers
+   below. actionButtonRow's row shape (label, .row-detail, one-or-more
+   buttons, .field-status) does NOT fit this template -- see .action-row. */
 .field-row {
-  display: flex;
+  display: grid;
+  grid-template-columns:
+    [label] var(--field-label-w) [req] 10px
+    [input] minmax(0, 1fr) [browse] auto [status] minmax(0, 90px);
   align-items: center;
-  gap: 6px;
+  column-gap: 6px;
   margin: 4px 0;
 }
-.field-row label {
+.field-row > label {
+  grid-column: label;
   color: var(--muted);
-  min-width: 160px;
-  flex-shrink: 0;
 }
-.field-row input[type="text"],
-.field-row input[type="password"],
-.field-row select {
-  flex: 1;
+.field-row > .req {
+  grid-column: req;
+  justify-self: start;
+  color: var(--bad);
+  font-weight: 700;
+  cursor: help;
+}
+.field-row > input[type="text"],
+.field-row > input[type="password"],
+.field-row > select {
+  grid-column: input;
   min-width: 0; /* inputs have an intrinsic ~20ch min width that can overflow a narrow row -- see the nav's own width comment above */
   background: transparent;
   color: var(--fg);
@@ -160,16 +220,14 @@ ul { margin: 4px 0; padding-left: 18px; }
   font-size: 12px;
   font-family: inherit;
 }
-.field-row input[type="checkbox"] { margin: 0; }
-.field-row.checkbox-row label { min-width: 0; }
-.field-row .req {
-  color: var(--bad);
-  font-weight: 700;
-  cursor: help;
-  margin-left: -4px;
-}
-.field-row .row-detail { flex: 1; }
-.field-row button {
+.field-row > input[type="checkbox"] { margin: 0; }
+/* Base button look, shared by a .field-row's own direct-child Browse
+   button (renderTextField / renderIntegrationBlock's path rows) and every
+   button nested one level down inside .action-row's .row-actions wrapper
+   (actionButtonRow) -- the grid-column assignment only makes sense for
+   the direct-child case, so it's kept on its own selector below. */
+.field-row > button,
+.row-actions > button {
   border: 1px solid var(--border);
   background: transparent;
   color: var(--fg);
@@ -178,13 +236,66 @@ ul { margin: 4px 0; padding-left: 18px; }
   font-size: 12px;
   cursor: pointer;
 }
-.field-row .field-status {
+.field-row > button { grid-column: browse; }
+.field-row > .field-status {
+  grid-column: status;
   font-size: 11px;
   color: var(--muted);
-  min-width: 60px;
 }
-.field-row .field-status.saved { color: var(--ok); }
-.field-row .field-status.error { color: var(--bad); }
+.field-row > .field-status.saved { color: var(--ok); }
+.field-row > .field-status.error { color: var(--bad); }
+
+/* checkbox-row reverses the source order (input, label, status) and has
+   no marker/browse column of its own -- the checkbox takes the "label"
+   slot and the label text spans the rest of the row up to (not
+   including) the status column, rather than being squeezed into a single
+   160px track. */
+.field-row.checkbox-row > input[type="checkbox"] {
+  grid-column: label;
+  justify-self: start;
+}
+.field-row.checkbox-row > label {
+  grid-column: req / span 3;
+  color: var(--fg);
+}
+
+/* [hidden] is load-bearing, not decoration: once .field-row declares
+   display:grid, the user-agent's own default "[hidden] { display: none }"
+   rule loses the cascade to the more specific .field-row rules above, so
+   without this override, setting an element's `hidden` property would
+   silently do nothing on anything using this class. */
+[hidden] { display: none !important; }
+
+/* actionButtonRow's row shape: a status label, a free-text detail blurb,
+   one or more action buttons, and a status message -- distinct from
+   .field-row's label/marker/input/browse/status shape above, so it gets
+   its own column template rather than trying to force one grid to fit
+   both (renderHooks alone passes two buttons -- Install, Reveal -- into
+   one row, which no single named "browse" column could hold). */
+.action-row {
+  grid-template-columns:
+    [label] var(--field-label-w) [detail] minmax(0, 1fr)
+    [actions] auto [status] minmax(0, 90px);
+}
+.action-row > .row-detail { grid-column: detail; }
+.action-row > .row-actions {
+  grid-column: actions;
+  display: flex;
+  gap: 6px;
+}
+.action-row > .row-actions > button:first-child {
+  background: var(--color-brand-solid);
+  color: var(--color-brand-contrast);
+  border-color: var(--color-brand-solid);
+}
+.action-row > .row-actions > button:first-child:hover:not(:disabled) {
+  background: var(--color-brand-hover);
+  border-color: var(--color-brand-hover);
+}
+.action-row > .row-actions > button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
 
 .integration-block {
   border-top: 1px solid var(--border);
@@ -198,10 +309,9 @@ ul { margin: 4px 0; padding-left: 18px; }
 
 /* main.go's Wails MinWidth is 640 -- 40px of body/#layout padding leaves
    600, narrow enough that the nav's default 150px flex-basis starts eating
-   noticeably into .field-row's own 160px label width. Shrink both down
+   noticeably into .field-row's own label column width. Shrink both down
    together rather than letting the content column get squeezed first. */
 @media (max-width: 760px) {
   #nav { flex-basis: 116px; }
-  .field-row label { min-width: 120px; }
-  .field-row .field-status { min-width: 0; }
+  .field-row, .action-row { --field-label-w: 120px; }
 }
