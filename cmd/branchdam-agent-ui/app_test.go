@@ -298,6 +298,60 @@ func TestSetIntegrationRewritesPostsIDAndValue(t *testing.T) {
 	}
 }
 
+func TestSetPathMappingsPostsStructuredBody(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/settings/path-mappings" {
+			t.Errorf("method/path = %s %s, want POST /api/settings/path-mappings", r.Method, r.URL.Path)
+		}
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	mappings := []PathMappingInput{{WorkstationPath: `D:\Photos\Archive`, ContainerPath: "/storage/archive"}}
+	if _, err := a.SetPathMappings(mappings); err != nil {
+		t.Fatalf("SetPathMappings: %v", err)
+	}
+	if !strings.Contains(string(gotBody), `"workstationPath":"D:\\Photos\\Archive"`) {
+		t.Errorf("request body = %s, want workstationPath field", gotBody)
+	}
+	if !strings.Contains(string(gotBody), `"containerPath":"/storage/archive"`) {
+		t.Errorf("request body = %s, want containerPath field", gotBody)
+	}
+}
+
+// TestPathMappingFieldComparesReturnedAgainstPayload guards a self-review
+// finding on this PR: renderPathMappingField's commit() must diff the
+// server's response against the FILTERED payload it actually sent, not
+// against the raw (possibly still-being-typed, unfiltered) entries array.
+// Comparing against entries would read a normal in-progress row --
+// filtered out of payload because one side is still blank -- as always
+// "changed," triggering an unconditional render() that wipes the row the
+// operator is mid-typing on every blur. There is no JS test harness in
+// this repo (see TestIntegrationBlockWritesSyncTimeoutKey's own doc
+// comment for why this source-grep is the only mechanical check
+// available); a jsdom-based manual smoke test exercising the actual
+// add/edit/save sequence is the real verification for this fix.
+func TestPathMappingFieldComparesReturnedAgainstPayload(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	if !strings.Contains(body, "JSON.stringify(returned) !== JSON.stringify(payload)") {
+		t.Error("renderPathMappingField's commit() must compare the server response against payload, not against entries -- see this test's own doc comment")
+	}
+}
+
 func TestTriggerSyncPostsID(t *testing.T) {
 	withTempAgentDir(t)
 	if _, err := sessiontoken.Generate(); err != nil {

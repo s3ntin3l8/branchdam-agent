@@ -154,6 +154,36 @@ func (a *App) SetIntegrationRewrites(id, value string) (string, error) {
 	return string(body), nil
 }
 
+// PathMappingInput mirrors internal/tray's PathMappingEntry -- duplicated
+// rather than imported, same reasoning as idActionRequest below: this
+// package talks to the agent purely over the loopback HTTP API, never
+// importing internal/tray's Go types directly.
+type PathMappingInput struct {
+	WorkstationPath string `json:"workstationPath"`
+	ContainerPath   string `json:"containerPath"`
+}
+
+// SetPathMappings replaces the whole pathMappings list -- POST
+// /api/settings/path-mappings's counterpart. A separate method from
+// SetSetting for the same reason SetIntegrationRewrites is one: mappings
+// parse into a structured value the generic key/value route never
+// handles, and the comma/colon string route SetSetting("pathMappings", ...)
+// still accepts is lossy for a path containing a comma. A nil or empty
+// mappings clears the list.
+func (a *App) SetPathMappings(mappings []PathMappingInput) (string, error) {
+	reqBody, err := json.Marshal(struct {
+		Mappings []PathMappingInput `json:"mappings"`
+	}{Mappings: mappings})
+	if err != nil {
+		return "", err
+	}
+	body, err := a.agentRequest(http.MethodPost, "/api/settings/path-mappings", reqBody)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
 // TriggerSync runs one catalog-sync pass for integration id right now --
 // POST /api/actions/sync's counterpart, mirroring internal/tray/
 // integrationsmenu.go's own "Sync now" menu item. Returns the raw

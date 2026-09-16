@@ -460,6 +460,121 @@ func TestConfigSettingsSetStringSpecialKeys(t *testing.T) {
 	}
 }
 
+// TestConfigSettingsSnapshotExposesCardRoots confirms CardRoots is
+// populated from cfg.Ingest.CardRoots -- SettingsView had no field for
+// this at all before the structured watch-folders editor needed one to
+// show the current value.
+func TestConfigSettingsSnapshotExposesCardRoots(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner)
+
+	got := s.Snapshot().CardRoots
+	if len(got) != 1 || !strings.HasSuffix(got[0], "cards") {
+		t.Errorf("CardRoots = %v, want one entry ending in \"cards\" (from the fixture's cardRoots)", got)
+	}
+}
+
+// TestConfigSettingsSetPathMappingsRoundTripsCommaAndDriveLetterPaths is
+// the whole point of the structured route: parsePathMappings' comma/colon
+// string format cannot represent a container path containing a comma, but
+// SetPathMappings takes the fields as separate struct members, so it must.
+func TestConfigSettingsSetPathMappingsRoundTripsCommaAndDriveLetterPaths(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner)
+
+	entries := []tray.PathMappingEntry{
+		{WorkstationPath: `C:\Video, B-roll\`, ContainerPath: "/storage/b,roll/"},
+	}
+	if err := s.SetPathMappings(entries); err != nil {
+		t.Fatalf("SetPathMappings: %v", err)
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.PathMappings) != 1 ||
+		reloaded.PathMappings[0].WorkstationPath != `C:\Video, B-roll\` ||
+		reloaded.PathMappings[0].ContainerPath != "/storage/b,roll/" {
+		t.Errorf("persisted pathMappings = %+v, want the comma-containing entry preserved verbatim", reloaded.PathMappings)
+	}
+
+	sv := s.Snapshot()
+	if len(sv.PathMappingEntries) != 1 || sv.PathMappingEntries[0] != tray.PathMappingEntry(entries[0]) {
+		t.Errorf("PathMappingEntries = %+v, want %+v", sv.PathMappingEntries, entries)
+	}
+}
+
+// TestConfigSettingsSetPathMappingsEmptyWritesEmptySequence confirms
+// clearing the list persists an empty YAML sequence ("[]"), not "null" --
+// config.Patch's yaml.Node encoder distinguishes a nil slice from a
+// non-nil empty one, and SetPathMappings must build the latter so a
+// deliberate clear round-trips as "configured empty," not "unset."
+func TestConfigSettingsSetPathMappingsEmptyWritesEmptySequence(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	// This fixture's ingest.uploadStream is false (the zero value), so
+	// pathMappings is a required field -- SetPathMappings must still be
+	// ALLOWED to write an empty list (config.Validate has no minimum-
+	// length rule for it), even though the resulting configIncomplete
+	// state is a separate, expected consequence checked elsewhere.
+	s := newConfigSettings(path, cfg, runner)
+
+	if err := s.SetPathMappings(nil); err != nil {
+		t.Fatalf("SetPathMappings(nil): %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "pathMappings: []") {
+		t.Errorf("config.yaml does not contain \"pathMappings: []\":\n%s", raw)
+	}
+	if got := s.Snapshot().PathMappingEntries; len(got) != 0 {
+		t.Errorf("PathMappingEntries = %v, want empty", got)
+	}
+}
+
+// TestConfigSettingsSetPathMappingsRejectsEmptySide confirms an entry
+// missing either side is rejected before ever reaching config.Patch,
+// mirroring parsePathMappings' own validation for the string form.
+func TestConfigSettingsSetPathMappingsRejectsEmptySide(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner)
+
+	if err := s.SetPathMappings([]tray.PathMappingEntry{{WorkstationPath: "/a"}}); err == nil {
+		t.Fatal("expected an error for a mapping with an empty containerPath")
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.PathMappings) != 0 {
+		t.Errorf("pathMappings = %+v, want unchanged (empty)", reloaded.PathMappings)
+	}
+}
+
+// TestConfigSettingsSetStringSliceRejectsExtensionWithoutLeadingDot
+// confirms the array wire path (what the chip-list editor uses) enforces
+// the same leading-dot rule the string path's splitCommaExtensions
+// already does -- without this, a chip editor could persist "jpg" where
+// the comma-string box would have rejected it.
+func TestConfigSettingsSetStringSliceRejectsExtensionWithoutLeadingDot(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+	s := newConfigSettings(path, cfg, runner)
+
+	if err := s.SetStringSlice("ingest.allowedExtensions", []string{"jpg"}); err == nil {
+		t.Fatal("expected an error for an extension without a leading dot")
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Ingest.AllowedExtensions) != 0 {
+		t.Errorf("allowedExtensions = %v, want unchanged (empty)", reloaded.Ingest.AllowedExtensions)
+	}
+}
+
 func TestConfigSettingsSetIntegrationPathHappyPath(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner)

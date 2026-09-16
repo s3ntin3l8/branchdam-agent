@@ -133,6 +133,7 @@ func (s *StatusServer) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/settings", s.withAPIAuth(s.handleAPISettingsPost))
 	mux.HandleFunc("POST /api/settings/integration-path", s.withAPIAuth(s.handleAPISettingsIntegrationPath))
 	mux.HandleFunc("POST /api/settings/integration-rewrites", s.withAPIAuth(s.handleAPISettingsIntegrationRewrites))
+	mux.HandleFunc("POST /api/settings/path-mappings", s.withAPIAuth(s.handleAPISettingsPathMappings))
 	mux.HandleFunc("POST /api/actions/ingest", s.withAPIAuth(s.handleActionIngest))
 	mux.HandleFunc("POST /api/actions/drain", s.withAPIAuth(s.handleActionDrain))
 	mux.HandleFunc("POST /api/actions/prune", s.withAPIAuth(s.handleActionPrune))
@@ -285,6 +286,43 @@ func (s *StatusServer) handleAPISettingsIntegrationRewrites(w http.ResponseWrite
 		return
 	}
 	if err := s.Settings.SetIntegrationRewrites(IntegrationID(req.ID), req.Value); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, s.Settings.Snapshot())
+}
+
+// pathMappingsSettingsRequest is POST /api/settings/path-mappings' body --
+// a structured array rather than idValueSettingsRequest's single string
+// value, for the same reason SetIntegrationRewrites needed its own route
+// instead of routing through the generic dotted-key one: pathMappings
+// parses into a value the generic route never handles, and (unlike
+// integration rewrites) the comma/colon string form this key also still
+// accepts via POST /api/settings is lossy for a path containing a comma.
+type pathMappingsSettingsRequest struct {
+	Mappings []PathMappingEntry `json:"mappings"`
+}
+
+// handleAPISettingsPathMappings replaces the whole pathMappings list. An
+// absent or empty "mappings" array is a legal request -- it's the only way
+// to clear the list from this route -- so it is passed through to
+// SetPathMappings as an empty (non-nil, per that method's own doc comment)
+// slice rather than rejected.
+func (s *StatusServer) handleAPISettingsPathMappings(w http.ResponseWriter, r *http.Request) {
+	if s.Settings == nil {
+		http.Error(w, "settings not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req pathMappingsSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	mappings := req.Mappings
+	if mappings == nil {
+		mappings = []PathMappingEntry{}
+	}
+	if err := s.Settings.SetPathMappings(mappings); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

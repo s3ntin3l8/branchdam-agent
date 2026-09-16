@@ -172,7 +172,9 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		LocalEditRoot:              cfg.Ingest.LocalEditRoot,
 		NamingTemplate:             cfg.Ingest.PathTemplate,
 		PathMappings:               formatPathMappings(cfg.PathMappings),
+		PathMappingEntries:         toPathMappingEntries(cfg.PathMappings),
 		AllowedExtensions:          cfg.Ingest.AllowedExtensions,
+		CardRoots:                  cfg.Ingest.CardRoots,
 		RestartRequired:            s.restartRequired,
 		NodeIndexPath:              cfg.Integrations.NodeIndexPath,
 		NodeIndexPathSet:           cfg.Integrations.NodeIndexPath != "",
@@ -366,11 +368,88 @@ func (s *configSettings) validateStringSliceChange(key string, v []string) error
 	case "ingest.cardRoots":
 		cfg.Ingest.CardRoots = append([]string(nil), v...)
 	case "ingest.allowedExtensions":
+		// The string form of this same key (validateStringChange, via
+		// splitCommaExtensions) requires a leading dot on every non-empty
+		// extension -- enforce the same rule here so the array wire path
+		// (SetStringSlice, what the chip-list editor uses) can't silently
+		// persist a value ("jpg") the string path would have rejected.
+		for _, ext := range v {
+			if !strings.HasPrefix(ext, ".") || len(ext) == 1 {
+				return fmt.Errorf("extension %q must start with a leading dot (e.g. %q)", ext, "."+strings.TrimPrefix(ext, "."))
+			}
+		}
 		cfg.Ingest.AllowedExtensions = append([]string(nil), v...)
 	default:
 		return fmt.Errorf("settings: %q is not a settable string slice key", key)
 	}
 	return firstValidateProblem(cfg)
+}
+
+// toPathMappingEntries converts a PathMapping slice into the tray-local
+// PathMappingEntry shape the settings API and the Settings window's
+// structured editor both consume -- SettingsView.PathMappingEntries'
+// canonical form, alongside the legacy formatted string PathMappings.
+func toPathMappingEntries(mappings []config.PathMapping) []tray.PathMappingEntry {
+	if len(mappings) == 0 {
+		return nil
+	}
+	out := make([]tray.PathMappingEntry, len(mappings))
+	for i, m := range mappings {
+		out[i] = tray.PathMappingEntry{WorkstationPath: m.WorkstationPath, ContainerPath: m.ContainerPath}
+	}
+	return out
+}
+
+// fromPathMappingEntries is toPathMappingEntries' inverse, used by
+// SetPathMappings to convert the API's structured request body into
+// config.PathMapping before validating/patching.
+func fromPathMappingEntries(entries []tray.PathMappingEntry) []config.PathMapping {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]config.PathMapping, len(entries))
+	for i, e := range entries {
+		out[i] = config.PathMapping{WorkstationPath: e.WorkstationPath, ContainerPath: e.ContainerPath}
+	}
+	return out
+}
+
+// SetPathMappings replaces the whole pathMappings list -- see
+// tray.Settings.SetPathMappings's own doc comment for why this is a
+// separate method from SetString rather than routing through the
+// "workstationPath:containerPath, ..." string format, which is lossy for
+// a path containing a comma. Trims each field and rejects an entry with
+// either side empty, reusing parsePathMappings' own error wording.
+func (s *configSettings) SetPathMappings(entries []tray.PathMappingEntry) error {
+	mappings := make([]config.PathMapping, 0, len(entries))
+	for _, e := range entries {
+		ws := strings.TrimSpace(e.WorkstationPath)
+		cp := strings.TrimSpace(e.ContainerPath)
+		if ws == "" || cp == "" {
+			return fmt.Errorf("path mapping %q must be in format workstationPath:containerPath", ws+":"+cp)
+		}
+		mappings = append(mappings, config.PathMapping{WorkstationPath: ws, ContainerPath: cp})
+	}
+
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	cfg.PathMappings = mappings
+	if err := firstValidateProblem(cfg); err != nil {
+		return err
+	}
+
+	// mappings is built via make/append above, so it is never nil (even
+	// when entries is empty) -- config.Patch's yaml.Node encoder writes an
+	// empty slice as "[]", not "null", only when it isn't nil. An explicit
+	// clear (the operator removing the last row) must round-trip as an
+	// empty list, not accidentally revert to "unset" and let
+	// applyServerPathMappings silently re-supply a server-side value on
+	// the very next reload.
+	if err := config.Patch(s.path, map[string]any{"pathMappings": mappings}); err != nil {
+		return fmt.Errorf("save pathMappings: %w", err)
+	}
+	return s.reload()
 }
 
 func firstValidateProblem(cfg config.Config) error {
