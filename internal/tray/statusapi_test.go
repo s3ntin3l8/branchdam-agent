@@ -171,6 +171,8 @@ type spyActions struct {
 	syncRan       bool
 	hookState     HookState
 	hookRan       bool
+	probeResult   ProbeResult
+	probeRan      bool
 	revealErr     error
 	paused        bool
 
@@ -197,6 +199,9 @@ func (a *spyActions) TriggerSync(_ context.Context, id IntegrationID) (SyncSumma
 func (a *spyActions) TriggerHookInstall(_ context.Context, id HookID) (HookState, bool) {
 	a.lastHookID = id
 	return a.hookState, a.hookRan
+}
+func (a *spyActions) TriggerServerProbe(_ context.Context) (ProbeResult, bool) {
+	return a.probeResult, a.probeRan
 }
 func (a *spyActions) RevealHook(id HookID) error {
 	a.lastRevealID = id
@@ -340,6 +345,75 @@ func TestHandleActionPruneNotRun(t *testing.T) {
 	}
 	if got.Ran {
 		t.Errorf("Ran = true, want false")
+	}
+}
+
+func TestHandleActionTestConnectionReportsOK(t *testing.T) {
+	actions := &spyActions{probeResult: ProbeResult{OK: true, Version: "1.10.0"}, probeRan: true}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Actions: actions}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/test-connection", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got testConnectionActionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Ran || !got.OK || got.Version != "1.10.0" {
+		t.Errorf("got %+v, want Ran=true OK=true Version=1.10.0", got)
+	}
+}
+
+func TestHandleActionTestConnectionReportsErr(t *testing.T) {
+	actions := &spyActions{probeResult: ProbeResult{Err: errors.New("dial tcp: connection refused")}, probeRan: true}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Actions: actions}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/test-connection", nil))
+
+	var got testConnectionActionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Ran || got.OK || got.Err != "dial tcp: connection refused" {
+		t.Errorf("got %+v, want Ran=true OK=false Err set", got)
+	}
+}
+
+func TestHandleActionTestConnectionNotRun(t *testing.T) {
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Actions: &spyActions{probeRan: false}}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/test-connection", nil))
+
+	var got testConnectionActionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Ran {
+		t.Errorf("Ran = true, want false")
+	}
+}
+
+func TestHandleActionTestConnectionRequiresActions(t *testing.T) {
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok"}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/test-connection", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
 }
 

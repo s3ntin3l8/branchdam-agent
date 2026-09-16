@@ -44,6 +44,22 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: 
 }
 #error-banner.visible { display: block; }
 
+#setup-banner {
+  display: none;
+  background: #fff8e1;
+  color: #7a5b00;
+  border: 1px solid #d9a400;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 10px 0;
+}
+@media (prefers-color-scheme: dark) {
+  #setup-banner { background: #3a2f00; color: #f0c94d; border-color: #d9a400; }
+}
+#setup-banner.visible { display: block; }
+#setup-banner p { margin: 0 0 4px; }
+#setup-banner code { font-size: 11px; }
+
 section {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -95,6 +111,12 @@ ul { margin: 4px 0; padding-left: 18px; }
 }
 .field-row input[type="checkbox"] { margin: 0; }
 .field-row.checkbox-row label { min-width: 0; }
+.field-row .req {
+  color: var(--bad);
+  font-weight: 700;
+  cursor: help;
+  margin-left: -4px;
+}
 .field-row .row-detail { flex: 1; }
 .field-row button {
   border: 1px solid var(--border);

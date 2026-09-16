@@ -27,6 +27,7 @@ type ActionRunner interface {
 	TriggerPrune(ctx context.Context) (PruneSummary, bool)
 	TriggerSync(ctx context.Context, id IntegrationID) (SyncSummary, bool)
 	TriggerHookInstall(ctx context.Context, id HookID) (HookState, bool)
+	TriggerServerProbe(ctx context.Context) (ProbeResult, bool)
 	RevealHook(id HookID) error
 	Paused() bool
 	SetPaused(v bool)
@@ -139,6 +140,7 @@ func (s *StatusServer) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/actions/hook-install", s.withAPIAuth(s.handleActionHookInstall))
 	mux.HandleFunc("POST /api/actions/hook-reveal", s.withAPIAuth(s.handleActionHookReveal))
 	mux.HandleFunc("POST /api/actions/pause", s.withAPIAuth(s.handleActionPause))
+	mux.HandleFunc("POST /api/actions/test-connection", s.withAPIAuth(s.handleActionTestConnection))
 }
 
 func (s *StatusServer) writeJSON(w http.ResponseWriter, status int, v any) {
@@ -401,6 +403,46 @@ func (s *StatusServer) handleActionDrain(w http.ResponseWriter, r *http.Request)
 	}
 	summary, ran := s.Actions.TriggerDrain(context.WithoutCancel(r.Context()))
 	s.writeJSON(w, http.StatusOK, newDrainActionResult(summary, ran))
+}
+
+// testConnectionActionResult mirrors drainActionResult's shape -- Ran
+// distinguishes "no ServerProbe wired" (nil client, e.g. server.baseUrl/
+// apiKey/agentId not yet set) from a real probe outcome, the same
+// distinction newDrainActionResult's Ran already draws for a nil Drainer.
+type testConnectionActionResult struct {
+	Ran     bool      `json:"ran"`
+	OK      bool      `json:"ok,omitempty"`
+	At      time.Time `json:"at,omitempty"`
+	Version string    `json:"version,omitempty"`
+	Err     string    `json:"err,omitempty"`
+}
+
+func newTestConnectionActionResult(result ProbeResult, ran bool) testConnectionActionResult {
+	return testConnectionActionResult{
+		Ran:     ran,
+		OK:      result.OK,
+		At:      result.At,
+		Version: result.Version,
+		Err:     errString(result.Err),
+	}
+}
+
+// handleActionTestConnection is the "Test connection" button's endpoint --
+// POST /api/actions/test-connection's counterpart to the tray's own
+// (future) menu item, mirroring handleActionDrain's shape exactly. Unlike
+// /api/actions/drain, this never returns "actions not configured" for a
+// merely-incomplete config -- see TriggerServerProbe's own doc comment for
+// why a server-reachability check is deliberately not gated on
+// ConfigIncomplete: s.Actions itself is only nil when no ActionRunner was
+// wired at all (a StatusServer without a live tray), a different, harder
+// failure than "the operator hasn't finished setup yet."
+func (s *StatusServer) handleActionTestConnection(w http.ResponseWriter, r *http.Request) {
+	if s.Actions == nil {
+		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
+		return
+	}
+	result, ran := s.Actions.TriggerServerProbe(context.WithoutCancel(r.Context()))
+	s.writeJSON(w, http.StatusOK, newTestConnectionActionResult(result, ran))
 }
 
 type pruneActionResult struct {

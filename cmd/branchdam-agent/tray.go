@@ -390,6 +390,26 @@ func runTrayCmd(args []string) int {
 	runner.SetArchiveProber(func(pctx context.Context, root string) bool {
 		return probeArchive(pctx, root, client, cfg.Ingest.UploadStream)
 	})
+
+	// Server reachability check ("Test connection" / the status page's
+	// Server card), wired unconditionally and independent of the offline
+	// queue below -- see helloProbe's own doc comment for why the status
+	// page's Server pill must not depend on offline.queueDbPath being
+	// configured at all (the bug this exists to fix: "unknown -- never
+	// drained" persisting forever on an otherwise-complete config with no
+	// offline queue). serverConfigured mirrors resolveServerConfig's own
+	// gate -- a probe is never dialed against the dummy client that
+	// function builds while server.baseUrl/apiKey/agentId are incomplete.
+	registerServerProbe(runner, client, serverConfigured(cfg))
+	// startPeriodic has no leading tick (its own doc comment), so fire one
+	// probe pass right away too -- otherwise the Server card would show
+	// "not checked" for a full serverProbeInterval after every tray
+	// startup, even on a fully-configured install.
+	go runner.TriggerServerProbe(ctx)
+	go startPeriodic(ctx, serverProbeInterval, serverProbeTimeout, func(pctx context.Context) {
+		runner.TriggerServerProbe(pctx)
+	})
+
 	runner.SetErrorNotifier(func(title, message string) {
 		go func() {
 			if dialog != nil {
