@@ -294,7 +294,13 @@ status view rather than the settings form -- these are Runner actions with a liv
   "Opening…") while its request is in flight**, because `handleActionSync`/
   `handleActionHookInstall` both run synchronously to completion server-side (their own doc
   comments) -- a real sync or hook install pass can take real time, and a double-click during that
-  window must not race a second call.
+  window must not race a second call. This busy state is tracked in a module-level
+  `inFlightActions` set keyed by `"sync:<id>"`/`"hookInstall:<id>"`, not just the clicked button's
+  own DOM node: `renderIntegrations`/`renderHooks` fully rebuild their container on every 5s poll,
+  so a sync slower than 5s would otherwise show a fresh, clickable button on the next tick while the
+  original request was still running server-side (correctness wasn't at risk either way -- the
+  server itself serializes and reports "Skipped -- already running" for a concurrent second call --
+  but the busy indicator vanishing was misleading; a Hermes review suggestion on this PR).
 
 ### Packaging (Track 3f)
 

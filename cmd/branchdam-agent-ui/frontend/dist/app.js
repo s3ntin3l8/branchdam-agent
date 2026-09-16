@@ -140,12 +140,27 @@ function renderWatch(status) {
   byId("watch-body").innerHTML = html;
 }
 
+// inFlightActions holds "kind:id" keys (e.g. "sync:luminar") for every
+// TriggerSync/TriggerHookInstall call still awaiting its response --
+// module-level and shared across renders, not per-row state, because
+// renderIntegrations/renderHooks fully rebuild their container's DOM on
+// EVERY 5s status poll: without this, a sync slower than 5s would show a
+// fresh, clickable "Sync now" button on the next poll tick while the
+// original click's request is still in flight server-side (a Hermes
+// review finding on PR #216 -- correctness survives either way, since the
+// server itself serializes and reports "Skipped -- already running" for a
+// concurrent second call, but the busy indicator vanishing was misleading).
+const inFlightActions = new Set();
+
 // actionButtonRow builds one label/detail/button/status line as real DOM
 // (not an innerHTML string, unlike this file's other render* status
 // functions) -- the "Sync now"/"Install"/"Reveal" buttons below need a real
 // addEventListener, and Wails' default CSP blocks inline onclick handlers,
 // matching the settings form's own renderTextField/renderCheckboxField
-// precedent for exactly the same reason.
+// precedent for exactly the same reason. A button whose `busy` field is
+// already true when the row is (re)built (see inFlightActions above)
+// starts disabled and shows its own busyText immediately, rather than
+// only reacting to a click on this particular DOM instance.
 function actionButtonRow(id, detailHtml, buttons) {
   const row = document.createElement("div");
   row.className = "field-row";
@@ -161,12 +176,14 @@ function actionButtonRow(id, detailHtml, buttons) {
 
   const status = document.createElement("span");
   status.className = "field-status";
+  const alreadyBusy = buttons.find((b) => b.busy);
+  if (alreadyBusy) setFieldStatus(status, alreadyBusy.busyText ?? "Working…");
 
   for (const b of buttons) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.textContent = b.label;
-    if (b.disabled) btn.disabled = true;
+    if (b.disabled || b.busy) btn.disabled = true;
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       setFieldStatus(status, b.busyText ?? "Working…");
@@ -209,16 +226,31 @@ function renderIntegrations(status) {
     } else {
       detail = escapeHtml(detail);
     }
+    const syncKey = `sync:${i.ID}`;
     container.appendChild(
       actionButtonRow(i.ID, `${label} ${detail}`, [
         {
           label: "Sync now",
           busyText: "Syncing…",
           disabled: !i.Registered,
+          busy: inFlightActions.has(syncKey),
           run: async (statusEl) => {
             const app = getApp();
             if (!app) return;
-            const result = JSON.parse(await app.TriggerSync(i.ID));
+            // inFlightActions is cleared as soon as the request itself
+            // resolves (success, "skipped", or a real error), NOT after
+            // the branching below -- the `await poll()` on the success
+            // path must see the key already gone, or the rebuild it
+            // triggers would still find this action "in flight" and
+            // render the fresh row as busy/disabled right after the sync
+            // that just finished.
+            inFlightActions.add(syncKey);
+            let result;
+            try {
+              result = JSON.parse(await app.TriggerSync(i.ID));
+            } finally {
+              inFlightActions.delete(syncKey);
+            }
             if (!result.ran) {
               // poll() would rebuild this row from LastSync, which a
               // skipped pass never updates -- the message would vanish
@@ -260,15 +292,27 @@ function renderHooks(status) {
     let label = pill("not installed", "neutral");
     if (st && st.Installed) label = st.UpToDate ? pill("up to date", "ok") : pill("installed, out of date", "bad");
     if (st && st.Err) label += " " + pill(st.Err, "bad");
+    const installKey = `hookInstall:${h.ID}`;
     container.appendChild(
       actionButtonRow(h.ID, label, [
         {
           label: "Install",
           busyText: "Installing…",
+          busy: inFlightActions.has(installKey),
           run: async (statusEl) => {
             const app = getApp();
             if (!app) return;
-            const result = JSON.parse(await app.TriggerHookInstall(h.ID));
+            // See renderIntegrations' own "Sync now" for why the key is
+            // cleared before branching, not in a finally around the
+            // whole handler -- the success path's poll() must not see
+            // this action as still "in flight".
+            inFlightActions.add(installKey);
+            let result;
+            try {
+              result = JSON.parse(await app.TriggerHookInstall(h.ID));
+            } finally {
+              inFlightActions.delete(installKey);
+            }
             if (!result.ran) {
               // Same reasoning as renderIntegrations' own "Sync now" --
               // poll() rebuilds this row and would erase a message a
