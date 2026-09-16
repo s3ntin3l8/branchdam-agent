@@ -64,11 +64,12 @@ jobs:
             -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" \
             -o dist/branchdam-agent ./cmd/branchdam-agent
       - name: Package
-        run: tar -C dist -czf branchdam-agent-linux-amd64.tar.gz branchdam-agent
+        run: tar -C dist -czf "branchdam-agent-${{ env.RELEASE_VERSION }}-linux-amd64.tar.gz" branchdam-agent
       - uses: actions/upload-artifact@v7
         with:
           name: linux-amd64
-          path: branchdam-agent-linux-amd64.tar.gz
+          path: branchdam-agent-*-linux-amd64.tar.gz
+          if-no-files-found: error
           retention-days: 1
 
   # windows/amd64: cross-compiled from ubuntu-latest -- fyne.io/systray
@@ -124,7 +125,7 @@ jobs:
           # resource.syso here since Go only auto-links one present in the
           # SAME package directory as what's being built.
           "$(go env GOPATH)/bin/goversioninfo" -icon=dist/icon.ico -skip-versioninfo -o=cmd/branchdam-agent-ui/resource.syso
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -tags production \
             -ldflags="-s -w -H windowsgui -X main.version=${{ env.RELEASE_VERSION }}" \
             -o dist/branchdam-agent-ui.exe ./cmd/branchdam-agent-ui
           rm -f cmd/branchdam-agent-ui/resource.syso
@@ -151,17 +152,18 @@ jobs:
         run: |
           cd installer/windows
           makensis -DVERSION="${{ env.INSTALLER_VERSION }}" -DPRODUCT_VERSION_QUAD="${{ env.PRODUCT_VERSION_QUAD }}" branchdam-agent.nsi
-          mv branchdam-agent-setup.exe ../../dist/
+          mv branchdam-agent-setup.exe "../../dist/branchdam-agent-${{ env.RELEASE_VERSION }}-setup.exe"
       - name: Package
         run: |
           cd dist
-          zip -j branchdam-agent-windows-amd64.zip branchdam-agent.exe branchdam-agent-tray.exe branchdam-agent-ui.exe
+          zip -j "branchdam-agent-${{ env.RELEASE_VERSION }}-windows-amd64.zip" branchdam-agent.exe branchdam-agent-tray.exe branchdam-agent-ui.exe
       - uses: actions/upload-artifact@v7
         with:
           name: windows-amd64
           path: |
-            dist/branchdam-agent-windows-amd64.zip
-            dist/branchdam-agent-setup.exe
+            dist/branchdam-agent-*-windows-amd64.zip
+            dist/branchdam-agent-*-setup.exe
+          if-no-files-found: error
           retention-days: 1
 
   # darwin/arm64: requires a real macOS host, same as ci-cd.yml's
@@ -191,7 +193,7 @@ jobs:
           # cmd/branchdam-agent-ui builds natively here (real Cocoa/WebKit
           # cgo, this runner's own GOOS/GOARCH -- no cross-compile trick
           # needed the way build-windows's CGO_ENABLED=0 leg is).
-          go build -trimpath \
+          go build -trimpath -tags production \
             -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" \
             -o dist/branchdam-agent-ui ./cmd/branchdam-agent-ui
       # Assembles dist/branchdam-agent.app around the binary just built,
@@ -232,7 +234,7 @@ jobs:
       # one it reads first (see internal/selfupdate's doc comment and
       # docs/platform-support.md's Self-update section).
       - name: Package
-        run: tar -C dist -czf branchdam-agent-darwin-arm64.tar.gz branchdam-agent.app
+        run: tar -C dist -czf "branchdam-agent-${{ env.RELEASE_VERSION }}-darwin-arm64.tar.gz" branchdam-agent.app
       # The user-facing download: a .dmg with an /Applications symlink so
       # drag-to-install is the obvious gesture. This is what actually
       # resolves App Translocation (internal/selfupdate.DetectLayout's
@@ -246,13 +248,14 @@ jobs:
           cp -R dist/branchdam-agent.app dist/dmg-root/
           ln -s /Applications dist/dmg-root/Applications
           hdiutil create -volname "branchDAM Agent" -srcfolder dist/dmg-root \
-            -ov -format UDZO branchdam-agent-darwin-arm64.dmg
+            -ov -format UDZO "branchdam-agent-${{ env.RELEASE_VERSION }}-darwin-arm64.dmg"
       - uses: actions/upload-artifact@v7
         with:
           name: darwin-arm64
           path: |
-            branchdam-agent-darwin-arm64.tar.gz
-            branchdam-agent-darwin-arm64.dmg
+            branchdam-agent-*-darwin-arm64.tar.gz
+            branchdam-agent-*-darwin-arm64.dmg
+          if-no-files-found: error
           retention-days: 1
 
   # Builds one complete, verified release set before anything is published.
@@ -265,6 +268,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      RELEASE_VERSION: ${{ inputs.release-tag || inputs.version-suffix }}
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -272,11 +277,11 @@ jobs:
       - name: Assemble release set and checksums
         run: |
           mkdir release-assets
-          cp dist/linux-amd64/branchdam-agent-linux-amd64.tar.gz release-assets/
-          cp dist/windows-amd64/branchdam-agent-windows-amd64.zip release-assets/
-          cp dist/windows-amd64/branchdam-agent-setup.exe release-assets/
-          cp dist/darwin-arm64/branchdam-agent-darwin-arm64.tar.gz release-assets/
-          cp dist/darwin-arm64/branchdam-agent-darwin-arm64.dmg release-assets/
+          cp "dist/linux-amd64/branchdam-agent-${{ env.RELEASE_VERSION }}-linux-amd64.tar.gz" release-assets/
+          cp "dist/windows-amd64/branchdam-agent-${{ env.RELEASE_VERSION }}-windows-amd64.zip" release-assets/
+          cp "dist/windows-amd64/branchdam-agent-${{ env.RELEASE_VERSION }}-setup.exe" release-assets/
+          cp "dist/darwin-arm64/branchdam-agent-${{ env.RELEASE_VERSION }}-darwin-arm64.tar.gz" release-assets/
+          cp "dist/darwin-arm64/branchdam-agent-${{ env.RELEASE_VERSION }}-darwin-arm64.dmg" release-assets/
           cd release-assets
           sha256sum branchdam-agent-* | sort -k2 > SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt

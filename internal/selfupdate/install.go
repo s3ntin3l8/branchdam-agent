@@ -26,9 +26,14 @@ const (
 )
 
 // winKnownExes is every Windows binary shipped from the same release
-// archive (branchdam-agent-windows-amd64.zip). windowsSiblings only
-// proceeds for a resolved path whose basename is one of these -- an
-// unknown basename (a renamed exe, a dev build) gets no siblings at all.
+// archive (branchdam-agent-<version>-windows-amd64.zip -- the archive's
+// own outer filename carries the release version since v1.8.1, but the
+// three members inside it are deliberately unversioned, since these
+// constants are what identify them: self-update extracts by basename, and
+// a version-stamped member name would break that match on every release).
+// windowsSiblings only proceeds for a resolved path whose basename is one
+// of these -- an unknown basename (a renamed exe, a dev build) gets no
+// siblings at all.
 var winKnownExes = []string{winConsoleExe, winTrayExe, winUIExe}
 
 // InstallLayout is every file one Apply call touches, derived from the

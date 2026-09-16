@@ -93,23 +93,26 @@ The agent communicates with the branchDAM server via its `/api/v1/agent/*` REST 
 
 Download the archive for your platform from the
 [latest release](https://github.com/s3ntin3l8/branchdam-agent/releases/latest) and verify it
-against the release's `SHA256SUMS.txt`:
+against the release's `SHA256SUMS.txt`. Every asset's filename embeds the release version (e.g.
+`branchdam-agent-v1.8.1-windows-amd64.zip`), so downloads from different releases never collide in
+`~/Downloads`; `SHA256SUMS.txt` keeps this one fixed, unversioned name across every release, since
+self-update matches it by exact filename, not by pattern:
 
 | Platform | Asset | Contains |
 |---|---|---|
-| Linux (amd64) | `branchdam-agent-linux-amd64.tar.gz` | `branchdam-agent` -- headless subcommands only, no tray |
-| Windows (amd64) | `branchdam-agent-setup.exe` | **Recommended.** NSIS installer: extracts binaries, creates shortcuts, writes starter config, adds to Start Menu and Add/Remove Programs |
-| Windows (amd64) | `branchdam-agent-windows-amd64.zip` | Self-update's own download payload (and a manual-extract fallback): `branchdam-agent.exe` (console, for CLI use) + `branchdam-agent-tray.exe` (no console, for the tray/login-item launch path). Not the recommended way to install -- use the installer above. |
-| macOS (Apple Silicon) | `branchdam-agent-darwin-arm64.dmg` | **Recommended.** `branchdam-agent.app` (includes the tray) in a disk image with an `Applications` shortcut for drag-to-install -- see Manual Installation below |
-| macOS (Apple Silicon) | `branchdam-agent-darwin-arm64.tar.gz` | Self-update's own download payload. Not the recommended way to install -- use the `.dmg` above. |
+| Linux (amd64) | `branchdam-agent-<version>-linux-amd64.tar.gz` | `branchdam-agent` -- headless subcommands only, no tray |
+| Windows (amd64) | `branchdam-agent-<version>-setup.exe` | **Recommended.** NSIS installer: extracts binaries, creates shortcuts, writes starter config, adds to Start Menu and Add/Remove Programs |
+| Windows (amd64) | `branchdam-agent-<version>-windows-amd64.zip` | Self-update's own download payload (and a manual-extract fallback): `branchdam-agent.exe` (console, for CLI use) + `branchdam-agent-tray.exe` (no console, for the tray/login-item launch path). Not the recommended way to install -- use the installer above. |
+| macOS (Apple Silicon) | `branchdam-agent-<version>-darwin-arm64.dmg` | **Recommended.** `branchdam-agent.app` (includes the tray) in a disk image with an `Applications` shortcut for drag-to-install -- see Manual Installation below |
+| macOS (Apple Silicon) | `branchdam-agent-<version>-darwin-arm64.tar.gz` | Self-update's own download payload. Not the recommended way to install -- use the `.dmg` above. |
 
 ### Windows Installer (Recommended)
 
-`branchdam-agent-setup.exe` is the supported way to install on Windows -- the
-`branchdam-agent-windows-amd64.zip` on the same release is what self-update itself downloads,
-not a recommended manual-install path.
+`branchdam-agent-<version>-setup.exe` is the supported way to install on Windows -- the
+`branchdam-agent-<version>-windows-amd64.zip` on the same release is what self-update itself
+downloads, not a recommended manual-install path.
 
-1. Download `branchdam-agent-setup.exe` from the latest release
+1. Download `branchdam-agent-<version>-setup.exe` from the latest release
 2. Run the installer - it will:
    - Extract binaries to `%LOCALAPPDATA%\Programs\branchDAM\`
    - Create Start Menu shortcuts
@@ -127,7 +130,7 @@ The installer does not collect any configuration at install time (except the def
 
 ### macOS Installation (Recommended)
 
-1. Download `branchdam-agent-darwin-arm64.dmg` from the latest release and open it
+1. Download `branchdam-agent-<version>-darwin-arm64.dmg` from the latest release and open it
 2. Drag `branchdam-agent.app` onto the `Applications` shortcut in the same window
 3. Eject the disk image, then launch branchDAM Agent from `/Applications`
 4. The bundle is ad-hoc signed (not notarized), so first launch shows macOS's ordinary
@@ -143,8 +146,8 @@ Self-update needs a per-user install location to have write access
 ### Manual Installation
 
 ```sh
-tar -xzf branchdam-agent-<platform>.tar.gz    # linux/darwin/macOS
-sha256sum -c SHA256SUMS.txt                    # verify
+tar -xzf branchdam-agent-<version>-<platform>.tar.gz    # linux/darwin/macOS
+sha256sum -c SHA256SUMS.txt                              # verify
 ```
 
 On Linux and for scripted/headless installs, extract the `.tar.gz` directly. On macOS, prefer
