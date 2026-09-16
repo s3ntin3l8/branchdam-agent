@@ -108,7 +108,7 @@ func TestTrayConfirmForwardsTitleAndBody(t *testing.T) {
 func TestTrayIngestGateImportIsProceed(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{exitCode: dialogExitOK}
-	s := newConfigSettings(path, cfg, runner, dialog.Run)
+	s := newConfigSettings(path, cfg, runner)
 	gate := newTrayIngestGate(dialog.Run, s)
 
 	proceed, err := gate.Confirm(context.Background(), "/media/card/CANON_R5", "CANON_R5")
@@ -125,7 +125,7 @@ func TestTrayIngestGateImportIsProceed(t *testing.T) {
 func TestTrayIngestGateSkipThisTimeIsRefuse(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{exitCode: dialogExitCanceled}
-	s := newConfigSettings(path, cfg, runner, dialog.Run)
+	s := newConfigSettings(path, cfg, runner)
 	gate := newTrayIngestGate(dialog.Run, s)
 
 	proceed, err := gate.Confirm(context.Background(), "/media/card/CANON_R5", "CANON_R5")
@@ -144,7 +144,7 @@ func TestTrayIngestGateSkipThisTimeIsRefuse(t *testing.T) {
 func TestTrayIngestGateAlwaysAutoImportPersistsAndProceeds(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{exitCode: dialogExitExtraButton}
-	s := newConfigSettings(path, cfg, runner, dialog.Run)
+	s := newConfigSettings(path, cfg, runner)
 	gate := newTrayIngestGate(dialog.Run, s)
 
 	proceed, err := gate.Confirm(context.Background(), "/media/card/CANON_R5", "CANON_R5")
@@ -170,7 +170,7 @@ func TestTrayIngestGateAlwaysAutoImportPersistsAndProceeds(t *testing.T) {
 func TestTrayIngestGateAutoImportPathsBypassesDialog(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{exitCode: dialogExitCanceled}
-	s := newConfigSettings(path, cfg, runner, dialog.Run)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetStringSlice("ingest.autoImportPaths", []string{"/media/card/CANON_R5"}); err != nil {
 		t.Fatal(err)
@@ -198,7 +198,7 @@ func TestTrayIngestGateAutoImportPathsBypassesDialog(t *testing.T) {
 func TestTrayIngestGateForwardsLabelsAndVolumeInfo(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{exitCode: dialogExitOK}
-	s := newConfigSettings(path, cfg, runner, dialog.Run)
+	s := newConfigSettings(path, cfg, runner)
 	gate := newTrayIngestGate(dialog.Run, s)
 	gate.lookup = func(_ context.Context, _ string) (string, string) {
 		return "CANON R5", "32 GB"
@@ -247,7 +247,7 @@ func TestTrayIngestGateForwardsLabelsAndVolumeInfo(t *testing.T) {
 func TestTrayIngestGateFailedRenderIsRefuse(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	dialog := &fakeDialogRunner{err: errors.New("no display")}
-	s := newConfigSettings(path, cfg, runner, dialog.Run)
+	s := newConfigSettings(path, cfg, runner)
 	gate := newTrayIngestGate(dialog.Run, s)
 
 	proceed, err := gate.Confirm(context.Background(), "/media/card/CANON_R5", "CANON_R5")

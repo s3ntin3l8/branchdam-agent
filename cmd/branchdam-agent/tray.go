@@ -402,7 +402,7 @@ func runTrayCmd(args []string) int {
 	// wireRuntimeStatePersistence below for the full contract.
 	wireRuntimeStatePersistence(runner)
 
-	settings := newConfigSettings(resolvedPath, cfg, runner, dialog)
+	settings := newConfigSettings(resolvedPath, cfg, runner)
 
 	// Integration syncers (issue #57): started unconditionally, unlike the
 	// conditional prune timer below -- an integration can be enabled from

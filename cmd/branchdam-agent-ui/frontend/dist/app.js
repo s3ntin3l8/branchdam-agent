@@ -706,8 +706,7 @@ function renderSelectField(label, options, current, onChange) {
 // "resolvedb" (tray.IntegrationResolveDB) is the one integration with a
 // database URL instead of a catalog file path, and the only one with
 // path rewrites -- both special-cased here the same way
-// PromptAndSetIntegrationPath/PromptAndSetIntegrationRewrites special-case
-// it server-side.
+// SetIntegrationPath/SetIntegrationRewrites special-case it server-side.
 function renderIntegrationBlock(iv) {
   const isResolve = iv.ID === "resolvedb";
   const block = document.createElement("div");
@@ -750,13 +749,13 @@ function renderIntegrationBlock(iv) {
       const app = getApp();
       if (!app) return;
       try {
-        // Deliberately unfiltered (no patterns): IntegrationBuilder.
-        // CatalogFilePatterns (server-side only, e.g. Luminar's
-        // "*.db"/"*.catalog"/"*") isn't part of the settings JSON payload
-        // today, so this picker can't apply the same filter the tray's
-        // PromptAndSetIntegrationPath dialog does. Follow-up if this is
-        // worth closing before the tray-slimming PR removes the filtered
-        // one.
+        // Deliberately unfiltered (no patterns): the per-integration
+        // catalog-file filter patterns (e.g. Luminar's
+        // "*.db"/"*.catalog"/"*") never crossed into the settings JSON
+        // payload, and the tray's own filtered file-picker dialog they
+        // once backed (IntegrationBuilder.CatalogFilePatterns,
+        // PromptAndSetIntegrationPath) is gone as of issue #217 -- there
+        // is no filtered picker left to match.
         const picked = await app.PickFile(pathLabel.textContent, []);
         if (picked) pathInput.value = picked;
       } catch (err) {

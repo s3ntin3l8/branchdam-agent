@@ -82,7 +82,7 @@ func editConfigFile(t *testing.T, path, old, new string) {
 
 func TestConfigSettingsSnapshot(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	sv := s.Snapshot()
 	if sv.ConfigPath != path {
@@ -101,7 +101,7 @@ func TestConfigSettingsSnapshot(t *testing.T) {
 
 func TestConfigSettingsSetBoolPersistsAndReloads(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetBool("ingest.requireUnbuffered", true); err != nil {
 		t.Fatalf("SetBool: %v", err)
@@ -122,7 +122,7 @@ func TestConfigSettingsSetBoolPersistsAndReloads(t *testing.T) {
 
 func TestConfigSettingsSetBoolPauseUploadOnMeteredPersistsAndReloads(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if s.Snapshot().PauseUploadOnMetered {
 		t.Error("expected default PauseUploadOnMetered=false")
@@ -150,7 +150,7 @@ func TestConfigSettingsSetBoolPauseUploadOnMeteredPersistsAndReloads(t *testing.
 
 func TestConfigSettingsSetBoolConfirmDestructivePersistsAndReloads(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if runner.ConfirmDestructive() {
 		t.Error("expected default ConfirmDestructive=false")
@@ -183,7 +183,7 @@ func TestConfigSettingsSetBoolConfirmDestructivePersistsAndReloads(t *testing.T)
 
 func TestConfigSettingsSetIntPersistsAndReloads(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetInt("selfUpdate.checkIntervalHours", -1); err != nil {
 		t.Fatalf("SetInt: %v", err)
@@ -208,7 +208,7 @@ func TestConfigSettingsSetBoolRejectsUnknownKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetBool("integrations.lumnar.enabled", true); err == nil {
 		t.Fatal("expected SetBool to reject an unrecognized key")
@@ -229,7 +229,7 @@ func TestConfigSettingsSetIntRejectsUnknownKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetInt("integrations.luminar.bogusKey", 45); err == nil {
 		t.Fatal("expected SetInt to reject an unrecognized key")
@@ -248,7 +248,7 @@ func TestConfigSettingsSetIntRejectsUnknownKey(t *testing.T) {
 // key round-trips through SetInt and persists to config.yaml.
 func TestConfigSettingsSetIntTimeoutSecs(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetInt("integrations.luminar.timeoutSecs", 120); err != nil {
 		t.Fatalf("SetInt timeoutSecs: %v", err)
@@ -265,7 +265,7 @@ func TestConfigSettingsSetIntTimeoutSecs(t *testing.T) {
 // TestConfigSettingsSetIntResolveTimeoutSecs covers the Resolve builder.
 func TestConfigSettingsSetIntResolveTimeoutSecs(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetInt("integrations.resolvedb.timeoutSecs", 600); err != nil {
 		t.Fatalf("SetInt timeoutSecs: %v", err)
@@ -280,19 +280,18 @@ func TestConfigSettingsSetIntResolveTimeoutSecs(t *testing.T) {
 }
 
 // TestConfigSettingsValidateStringChangeRejectsUnknownKey exercises
-// validateStringChange's default case directly -- PromptAndSet/
-// PromptAndSetIntegrationPath are the only current callers, and both only
-// ever pass a known key (settingsPromptFor's own keys, or
-// integrationBuilders-derived ones), so there's no way to reach this
-// through the public API today. The switch itself (config.Patch's entire
-// allowlist) still deserves direct coverage independent of that.
+// validateStringChange's default case directly -- SetString/
+// SetIntegrationPath are the only current callers, and both only ever
+// pass a known key, so there's no way to reach this through the public
+// API today. The switch itself (config.Patch's entire allowlist) still
+// deserves direct coverage independent of that.
 // "integrations.lumnar.catalogPath" (note the typo) stands in for a stale
 // key or a handler bug -- "integrations.luminar.catalogPath" (correctly
 // spelled) is now a RECOGNIZED key as of this PR, via
 // applyIntegrationStringChange.
 func TestConfigSettingsValidateStringChangeRejectsUnknownKey(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.validateStringChange("integrations.lumnar.catalogPath", "/x.db"); err == nil {
 		t.Fatal("expected validateStringChange to reject an unrecognized key")
@@ -304,7 +303,7 @@ func TestConfigSettingsValidateStringChangeRejectsUnknownKey(t *testing.T) {
 // have narrowed the four keys that were already accepted before this PR.
 func TestConfigSettingsExistingKeysStillAccepted(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetBool("tray.startOnLogin", true); err != nil {
 		t.Errorf("tray.startOnLogin: %v", err)
@@ -333,82 +332,6 @@ func TestConfigSettingsExistingKeysStillAccepted(t *testing.T) {
 	}
 }
 
-func TestConfigSettingsPromptAndSetHappyPath(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	var gotArgs []string
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		gotArgs = args
-		return "https://branchdam.example.com", dialogExitOK, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
-
-	ok, err := s.PromptAndSet(tray.FieldServerBaseURL)
-	if err != nil {
-		t.Fatalf("PromptAndSet: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	if s.Snapshot().ServerBaseURL != "https://branchdam.example.com" {
-		t.Errorf("ServerBaseURL = %q", s.Snapshot().ServerBaseURL)
-	}
-	if !slices.Contains(gotArgs, "entry") {
-		t.Errorf("expected -kind entry in dialog args, got %v", gotArgs)
-	}
-}
-
-func TestConfigSettingsPromptAndSetCanceled(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		return "", dialogExitCanceled, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
-
-	ok, err := s.PromptAndSet(tray.FieldArchiveRoot)
-	if err != nil {
-		t.Fatalf("expected no error on cancel, got %v", err)
-	}
-	if ok {
-		t.Error("expected ok=false on cancel")
-	}
-	if s.Snapshot().ArchiveRoot != cfg.Ingest.ArchiveRoot {
-		t.Error("expected ArchiveRoot unchanged after a canceled prompt")
-	}
-}
-
-func TestConfigSettingsPromptAndSetDialogFailure(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		return "", dialogExitFailed, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
-
-	ok, err := s.PromptAndSet(tray.FieldNamingTemplate)
-	if err == nil {
-		t.Fatal("expected an error when the dialog fails to render")
-	}
-	if ok {
-		t.Error("expected ok=false on failure")
-	}
-}
-
-func TestConfigSettingsAPIKeyNeverPassedAsDialogDefault(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	var gotArgs []string
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		gotArgs = args
-		return "new-key-value-0123456789abcdef0123456789", dialogExitOK, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
-
-	if _, err := s.PromptAndSet(tray.FieldServerAPIKey); err != nil {
-		t.Fatal(err)
-	}
-	if slices.Contains(gotArgs, "-default") {
-		t.Fatalf("API key prompt must never pass a -default (would put the old secret in argv), got %v", gotArgs)
-	}
-}
-
 func TestConfigSettingsSnapshotIncludesIntegrations(t *testing.T) {
 	path, _, runner := settingsTestFixture(t)
 	editConfigFile(t, path, "tray:\n", "integrations:\n  nodeIndexPath: \"/data/node-index.json\"\n  luminar:\n    enabled: true\n    catalogPath: \"/data/catalog.db\"\n    dryRun: false\n    syncIntervalMinutes: 15\ntray:\n")
@@ -416,7 +339,7 @@ func TestConfigSettingsSnapshotIncludesIntegrations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newConfigSettings(path, reloaded, runner, nil)
+	s := newConfigSettings(path, reloaded, runner)
 
 	sv := s.Snapshot()
 	if sv.NodeIndexPath != "/data/node-index.json" || !sv.NodeIndexPathSet {
@@ -451,7 +374,7 @@ func TestConfigSettingsSnapshotIncludesIntegrations(t *testing.T) {
 
 func TestConfigSettingsSnapshotIntegrationsDefaultsUnconfigured(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	iv, ok := s.Snapshot().Integration(tray.IntegrationLuminar)
 	if !ok {
@@ -469,105 +392,11 @@ func TestConfigSettingsSnapshotIntegrationsDefaultsUnconfigured(t *testing.T) {
 	}
 }
 
-func TestConfigSettingsPromptAndSetIntegrationPathHappyPath(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	var gotArgs []string
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		gotArgs = args
-		return "/data/catalog.db", dialogExitOK, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
-
-	ok, err := s.PromptAndSetIntegrationPath(tray.IntegrationLuminar)
-	if err != nil {
-		t.Fatalf("PromptAndSetIntegrationPath: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	iv, _ := s.Snapshot().Integration(tray.IntegrationLuminar)
-	if iv.CatalogPath != "/data/catalog.db" {
-		t.Errorf("CatalogPath = %q", iv.CatalogPath)
-	}
-	if !slices.Contains(gotArgs, "file") {
-		t.Errorf("expected -kind file in dialog args, got %v", gotArgs)
-	}
-	if !slices.Contains(gotArgs, "-patterns") {
-		t.Errorf("expected -patterns in dialog args (Luminar's CatalogFilePatterns), got %v", gotArgs)
-	}
-}
-
-func TestConfigSettingsPromptAndSetResolveDatabaseURLIsSecretSafe(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	authValue := "fixture-value"
-	databaseURL := "postgres://user:" + authValue + "@localhost:5432/resolve"
-	var gotArgs []string
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		gotArgs = append([]string(nil), args...)
-		return databaseURL, dialogExitOK, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
-
-	ok, err := s.PromptAndSetIntegrationPath(tray.IntegrationResolveDB)
-	if err != nil {
-		t.Fatalf("PromptAndSetIntegrationPath: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	if !slices.Contains(gotArgs, "password") {
-		t.Fatalf("dialog args = %v, want a hidden password entry", gotArgs)
-	}
-	if slices.Contains(gotArgs, "-default") || slices.Contains(gotArgs, databaseURL) {
-		t.Fatalf("database credentials leaked into dialog argv: %v", gotArgs)
-	}
-	reloaded, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := reloaded.Integrations.ResolveDB.DatabaseURL; got != databaseURL {
-		t.Fatalf("databaseUrl = %q, want %q", got, databaseURL)
-	}
-	iv, _ := s.Snapshot().Integration(tray.IntegrationResolveDB)
-	if strings.Contains(iv.CatalogPath, authValue) || iv.CatalogPath != "postgres:…" {
-		t.Fatalf("status display leaked or incorrectly rendered database URL: %q", iv.CatalogPath)
-	}
-}
-
-func TestConfigSettingsPromptAndSetIntegrationPathCanceled(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		return "", dialogExitCanceled, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
-
-	ok, err := s.PromptAndSetIntegrationPath(tray.IntegrationLuminar)
-	if err != nil {
-		t.Fatalf("expected no error on cancel, got %v", err)
-	}
-	if ok {
-		t.Error("expected ok=false on cancel")
-	}
-	iv, _ := s.Snapshot().Integration(tray.IntegrationLuminar)
-	if iv.CatalogPathSet {
-		t.Error("expected CatalogPath unchanged after a canceled prompt")
-	}
-}
-
-func TestConfigSettingsPromptAndSetIntegrationPathUnknownID(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
-
-	if _, err := s.PromptAndSetIntegrationPath("not-a-real-integration"); err == nil {
-		t.Fatal("expected an error for an unknown integration ID")
-	}
-}
-
 // TestConfigSettingsSetStringHappyPath drives SetString's non-interactive
 // validate → patch → reload path directly, without a dialog.
 func TestConfigSettingsSetStringHappyPath(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetString("agentId", "workstation-7"); err != nil {
 		t.Fatalf("SetString: %v", err)
@@ -583,7 +412,7 @@ func TestConfigSettingsSetStringHappyPath(t *testing.T) {
 // one thing and persist as another (Hermes review finding on this PR).
 func TestConfigSettingsSetStringTrimsAgentID(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetString("agentId", "  box  "); err != nil {
 		t.Fatalf("SetString: %v", err)
@@ -597,12 +426,12 @@ func TestConfigSettingsSetStringTrimsAgentID(t *testing.T) {
 	}
 }
 
-// TestConfigSettingsSetStringRejectsInvalid confirms SetString runs the
-// same validateStringChange gate PromptAndSet does -- an empty agentId
-// must be rejected without persisting.
+// TestConfigSettingsSetStringRejectsInvalid confirms SetString runs
+// validateStringChange before persisting -- an empty agentId must be
+// rejected without persisting.
 func TestConfigSettingsSetStringRejectsInvalid(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetString("agentId", "   "); err == nil {
 		t.Fatal("expected an error for a blank agentId")
@@ -617,11 +446,10 @@ func TestConfigSettingsSetStringRejectsInvalid(t *testing.T) {
 }
 
 // TestConfigSettingsSetStringSpecialKeys confirms SetString applies the
-// same comma-separated/path-mapping conversions PromptAndSet's inline
-// switch used to -- both now share patchValueForStringKey.
+// comma-separated/path-mapping conversions patchValueForStringKey owns.
 func TestConfigSettingsSetStringSpecialKeys(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetString("pathMappings", "/mnt/nas:/storage/archive"); err != nil {
 		t.Fatalf("SetString(pathMappings): %v", err)
@@ -632,12 +460,9 @@ func TestConfigSettingsSetStringSpecialKeys(t *testing.T) {
 	}
 }
 
-// TestConfigSettingsSetIntegrationPathHappyPath is
-// TestConfigSettingsPromptAndSetIntegrationPathHappyPath's non-interactive
-// counterpart.
 func TestConfigSettingsSetIntegrationPathHappyPath(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetIntegrationPath(tray.IntegrationLuminar, "/data/catalog.db"); err != nil {
 		t.Fatalf("SetIntegrationPath: %v", err)
@@ -649,12 +474,16 @@ func TestConfigSettingsSetIntegrationPathHappyPath(t *testing.T) {
 }
 
 // TestConfigSettingsSetIntegrationPathResolveUsesDatabaseURLKey confirms
-// SetIntegrationPath resolves the same catalogPath/databaseUrl key
-// PromptAndSetIntegrationPath does, for the one integration (Resolve)
-// where they differ.
+// SetIntegrationPath resolves the databaseUrl key (not catalogPath) for
+// Resolve, the one integration where they differ, and that the Snapshot
+// display value stays redacted -- ported from the deleted
+// TestConfigSettingsPromptAndSetResolveDatabaseURLIsSecretSafe (issue
+// #217): its dialog-argv assertions (no -default, no raw URL in argv)
+// died with the dialog, but its redaction assertions guard
+// databaseURLDisplay independently of any dialog and belong here.
 func TestConfigSettingsSetIntegrationPathResolveUsesDatabaseURLKey(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	authValue := "fixture-value"
 	databaseURL := "postgres://user:" + authValue + "@localhost:5432/resolve"
@@ -668,22 +497,24 @@ func TestConfigSettingsSetIntegrationPathResolveUsesDatabaseURLKey(t *testing.T)
 	if got := reloaded.Integrations.ResolveDB.DatabaseURL; got != databaseURL {
 		t.Errorf("databaseUrl = %q, want %q", got, databaseURL)
 	}
+	iv, _ := s.Snapshot().Integration(tray.IntegrationResolveDB)
+	if strings.Contains(iv.CatalogPath, authValue) || iv.CatalogPath != "postgres:…" {
+		t.Errorf("status display leaked or incorrectly rendered database URL: %q", iv.CatalogPath)
+	}
 }
 
 func TestConfigSettingsSetIntegrationPathUnknownID(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetIntegrationPath("not-a-real-integration", "/x"); err == nil {
 		t.Fatal("expected an error for an unknown integration ID")
 	}
 }
 
-// TestConfigSettingsSetIntegrationRewritesHappyPath is
-// TestPromptAndSetIntegrationRewritesOK's non-interactive counterpart.
 func TestConfigSettingsSetIntegrationRewritesHappyPath(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetIntegrationRewrites(tray.IntegrationResolveDB, `D:\Videos\:/storage/archive/videos/`); err != nil {
 		t.Fatalf("SetIntegrationRewrites: %v", err)
@@ -700,7 +531,7 @@ func TestConfigSettingsSetIntegrationRewritesHappyPath(t *testing.T) {
 
 func TestConfigSettingsSetIntegrationRewritesInvalid(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetIntegrationRewrites(tray.IntegrationResolveDB, "/mnt/nas/videos"); err == nil {
 		t.Fatal("expected error for invalid format")
@@ -716,7 +547,7 @@ func TestConfigSettingsSetIntegrationRewritesInvalid(t *testing.T) {
 
 func TestConfigSettingsSetIntegrationRewritesUnsupported(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetIntegrationRewrites(tray.IntegrationLuminar, "a:b"); err == nil {
 		t.Fatal("expected error for unsupported integration")
@@ -725,9 +556,9 @@ func TestConfigSettingsSetIntegrationRewritesUnsupported(t *testing.T) {
 
 func TestConfigSettingsReloadDetectsRestartRequiredStatusAddr(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
-	// Hand-edit statusAddr directly (bypassing SetBool/SetInt/PromptAndSet
+	// Hand-edit statusAddr directly (bypassing SetBool/SetInt/SetString
 	// entirely -- there is no menu path for this field on purpose, see
 	// Runner.Reconfigure's doc comment) and reload.
 	editConfigFile(t, path, "127.0.0.1:38080", "127.0.0.1:9999")
@@ -744,7 +575,7 @@ func TestConfigSettingsReloadRejectsMissingOfflineTier0ContainerRoot(t *testing.
 	path, cfg, runner := settingsTestFixture(t)
 	editConfigFile(t, path, "tray:\n", "offline:\n  queueDbPath: \""+filepath.Join(t.TempDir(), "queue.db")+"\"\n  tier0ContainerRoot: /storage\ntray:\n")
 	editConfigFile(t, path, "  tier0ContainerRoot: /storage", "  tier0ContainerRoot: ")
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.Reload(); err == nil {
 		t.Fatal("expected Reload to reject an offline queue with an empty tier0ContainerRoot")
@@ -753,7 +584,7 @@ func TestConfigSettingsReloadRejectsMissingOfflineTier0ContainerRoot(t *testing.
 
 func TestConfigSettingsReloadCardRootsDoesNotRequireRestart(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	editConfigFile(t, path, "cardRoots:\n    - "+yamlQuote(cfg.Ingest.CardRoots[0]), "cardRoots:\n    - \"/a-different-path\"")
 
@@ -768,30 +599,23 @@ func TestConfigSettingsReloadCardRootsDoesNotRequireRestart(t *testing.T) {
 	}
 }
 
-func TestConfigSettingsPromptAndSetCardRootsHappyPath(t *testing.T) {
+// TestConfigSettingsSetStringCardRootsHappyPath is the non-interactive
+// counterpart of the deleted TestConfigSettingsPromptAndSetCardRootsHappyPath
+// (issue #217): its dialog-argv assertion died with the dialog, but the
+// WatchDirs()/RestartRequired/persistence assertions guard SetString's
+// own cardRoots handling and have no other coverage.
+func TestConfigSettingsSetStringCardRootsHappyPath(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	var gotArgs []string
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		gotArgs = args
-		return "/media/new1, /media/new2", dialogExitOK, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
+	s := newConfigSettings(path, cfg, runner)
 
-	ok, err := s.PromptAndSet(tray.FieldCardRoots)
-	if err != nil {
-		t.Fatalf("PromptAndSet(FieldCardRoots): %v", err)
-	}
-	if !ok {
-		t.Fatal("expected ok=true")
+	if err := s.SetString("ingest.cardRoots", "/media/new1, /media/new2"); err != nil {
+		t.Fatalf("SetString(ingest.cardRoots): %v", err)
 	}
 	if s.Snapshot().RestartRequired {
-		t.Error("expected RestartRequired=false after PromptAndSet(FieldCardRoots)")
+		t.Error("expected RestartRequired=false after SetString(ingest.cardRoots)")
 	}
 	if got := runner.WatchDirs(); len(got) != 2 || got[0] != "/media/new1" || got[1] != "/media/new2" {
 		t.Errorf("runner.WatchDirs() = %v, want [/media/new1 /media/new2]", got)
-	}
-	if !slices.Contains(gotArgs, "entry") {
-		t.Errorf("expected -kind entry in dialog args, got %v", gotArgs)
 	}
 
 	reloaded, err := config.Load(path)
@@ -803,19 +627,15 @@ func TestConfigSettingsPromptAndSetCardRootsHappyPath(t *testing.T) {
 	}
 }
 
-func TestConfigSettingsPromptAndSetCardRootsEmpty(t *testing.T) {
+// TestConfigSettingsSetStringCardRootsEmpty is the non-interactive
+// counterpart of the deleted TestConfigSettingsPromptAndSetCardRootsEmpty
+// (issue #217).
+func TestConfigSettingsSetStringCardRootsEmpty(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		return "  ", dialogExitOK, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
+	s := newConfigSettings(path, cfg, runner)
 
-	ok, err := s.PromptAndSet(tray.FieldCardRoots)
-	if err != nil {
-		t.Fatalf("PromptAndSet(FieldCardRoots): %v", err)
-	}
-	if !ok {
-		t.Fatal("expected ok=true")
+	if err := s.SetString("ingest.cardRoots", "  "); err != nil {
+		t.Fatalf("SetString(ingest.cardRoots): %v", err)
 	}
 	if got := runner.WatchDirs(); len(got) != 0 {
 		t.Errorf("expected empty WatchDirs(), got %v", got)
@@ -832,7 +652,7 @@ func TestConfigSettingsPromptAndSetCardRootsEmpty(t *testing.T) {
 
 func TestConfigSettingsValidateStringChangeCardRootsRejectsPlaceholder(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.validateStringChange("ingest.cardRoots", "/media/good, ${UNSET_VAR_XYZ}"); err == nil {
 		t.Fatal("expected validateStringChange to reject unexpanded placeholder in cardRoots")
@@ -861,7 +681,7 @@ func TestSplitCommaPaths(t *testing.T) {
 
 func TestConfigSettingsReloadRefusesUnexpandedAPIKeyPlaceholder(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	editConfigFile(t, path, "0123456789abcdef0123456789abcdef", "${TEST_UNSET_VAR_XYZ}")
 
@@ -879,7 +699,7 @@ func TestConfigSettingsReloadRefusesUnexpandedAPIKeyPlaceholder(t *testing.T) {
 // some other way) leaving an unexpanded ${VAR} there must be rejected too.
 func TestConfigSettingsReloadRefusesNonServerPlaceholder(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	editConfigFile(t, path, yamlQuote(cfg.Ingest.ArchiveRoot), yamlQuote("${TEST_UNSET_ARCHIVE_ROOT}"))
 
@@ -900,7 +720,7 @@ func TestConfigSettingsReloadRefusesNonServerPlaceholder(t *testing.T) {
 // has bound.
 func TestConfigSettingsRestartRequiredClearsWhenReverted(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	editConfigFile(t, path, "127.0.0.1:38080", "127.0.0.1:9999")
 	if err := s.Reload(); err != nil {
@@ -919,30 +739,26 @@ func TestConfigSettingsRestartRequiredClearsWhenReverted(t *testing.T) {
 	}
 }
 
-// TestConfigSettingsPromptAndSetRejectsInvalidValueBeforePersisting is a
+// TestConfigSettingsSetStringRejectsInvalidValueBeforePersisting is a
 // regression test for the second Hermes-flagged bug: config.Patch used to
 // run before validation, so a rejected value was still written to disk --
 // this process's in-memory config and config.yaml would then silently
-// diverge. validateStringChange (called from PromptAndSet before
+// diverge. validateStringChange (called from SetString before
 // config.Patch) must reject a too-short API key without ever touching the
-// file.
-func TestConfigSettingsPromptAndSetRejectsInvalidValueBeforePersisting(t *testing.T) {
+// file. Ported from the deleted
+// TestConfigSettingsPromptAndSetRejectsInvalidValueBeforePersisting (issue
+// #217) -- the byte-for-byte-unchanged assertion guards
+// validateAndPatchString's ordering directly and has no other coverage.
+func TestConfigSettingsSetStringRejectsInvalidValueBeforePersisting(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		return "too-short", dialogExitOK, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
+	s := newConfigSettings(path, cfg, runner)
 
-	ok, err := s.PromptAndSet(tray.FieldServerAPIKey)
-	if err == nil {
-		t.Fatal("expected PromptAndSet to reject an under-32-char API key")
-	}
-	if ok {
-		t.Error("expected ok=false when validation rejects the value")
+	if err := s.SetString("server.apiKey", "too-short"); err == nil {
+		t.Fatal("expected SetString to reject an under-32-char API key")
 	}
 
 	after, err := os.ReadFile(path)
@@ -1004,10 +820,7 @@ func TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange(t *testing
 	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
 	queueStore := openTestQueueStore(t)
 
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		return newSrv.URL, dialogExitOK, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
+	s := newConfigSettings(path, cfg, runner)
 	s.SetQueueStore(queueStore)
 	runner.SetQueueDeps(
 		&queueCountsReader{store: queueStore},
@@ -1022,8 +835,8 @@ func TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange(t *testing
 		t.Fatalf("expected the initial drainer to hit the old server, hitOld=%d", hitOld)
 	}
 
-	if _, err := s.PromptAndSet(tray.FieldServerBaseURL); err != nil {
-		t.Fatalf("PromptAndSet: %v", err)
+	if err := s.SetString("server.baseUrl", newSrv.URL); err != nil {
+		t.Fatalf("SetString(server.baseUrl): %v", err)
 	}
 	// reload() itself performs a handshake against the new server to sync NamingTemplate (issue #86)
 	if got := atomic.LoadInt32(&hitNew); got != 1 {
@@ -1043,7 +856,7 @@ func TestConfigSettingsReloadRebuildsQueueDrainerAfterServerURLChange(t *testing
 
 func TestConfigSettingsSetBoolRequireDCIM(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetBool("ingest.requireDCIM", true); err != nil {
 		t.Fatalf("SetBool: %v", err)
@@ -1064,7 +877,7 @@ func TestConfigSettingsSetBoolRequireDCIM(t *testing.T) {
 
 func TestConfigSettingsAllowedExtensionsValidation(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	// Valid cases
 	if err := s.validateStringChange("ingest.allowedExtensions", ".arw, .cr3, .jpg"); err != nil {
@@ -1089,19 +902,17 @@ func TestConfigSettingsAllowedExtensionsValidation(t *testing.T) {
 	}
 }
 
-func TestConfigSettingsPromptAndSetAllowedExtensions(t *testing.T) {
+// TestConfigSettingsSetStringAllowedExtensions is the non-interactive
+// counterpart of the deleted TestConfigSettingsPromptAndSetAllowedExtensions
+// (issue #217): TestConfigSettingsAllowedExtensionsValidation only exercises
+// validateStringChange directly, not the full SetString -> Snapshot ->
+// persisted round trip with comma-separated parsing.
+func TestConfigSettingsSetStringAllowedExtensions(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		return ".arw, .cr3, .jpg", dialogExitOK, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
+	s := newConfigSettings(path, cfg, runner)
 
-	ok, err := s.PromptAndSet(tray.FieldAllowedExtensions)
-	if err != nil {
-		t.Fatalf("PromptAndSet: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected ok=true")
+	if err := s.SetString("ingest.allowedExtensions", ".arw, .cr3, .jpg"); err != nil {
+		t.Fatalf("SetString(ingest.allowedExtensions): %v", err)
 	}
 
 	want := []string{".arw", ".cr3", ".jpg"}
@@ -1120,7 +931,7 @@ func TestConfigSettingsPromptAndSetAllowedExtensions(t *testing.T) {
 
 func TestConfigSettingsSetStringSliceAutoImportPaths(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	paths := []string{"/Volumes/CANON_R5", "/media/user/SONY_A7"}
 	if err := s.SetStringSlice("ingest.autoImportPaths", paths); err != nil {
@@ -1172,7 +983,7 @@ func TestConfigSettingsReloadSyncsNamingTemplateFromServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	// Before reload, Snapshot reflects the initial config
 	if s.Snapshot().NamingTemplate != "{original_name}" {
@@ -1245,7 +1056,7 @@ func TestConfigSettingsReloadAppliesServerPathMappingsAndClearsConfigIncomplete(
 	}
 
 	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
@@ -1373,7 +1184,7 @@ func TestConfigSettingsReloadHandshakeUnreachablePreservesConfigTemplate(t *test
 		t.Fatal(err)
 	}
 	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.Reload(); err != nil {
 		t.Fatalf("Reload should not fail when server is unreachable, got: %v", err)
@@ -1384,7 +1195,11 @@ func TestConfigSettingsReloadHandshakeUnreachablePreservesConfigTemplate(t *test
 	}
 }
 
-func TestConfigSettingsPromptAndSetReSyncsNamingTemplate(t *testing.T) {
+// TestConfigSettingsSetStringReSyncsNamingTemplate is the non-interactive
+// counterpart of the deleted TestConfigSettingsPromptAndSetReSyncsNamingTemplate
+// (issue #217): pins AGENTS.md invariant #17d -- a settings change re-runs
+// the Handshake and re-syncs NamingTemplate.
+func TestConfigSettingsSetStringReSyncsNamingTemplate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -1415,17 +1230,10 @@ func TestConfigSettingsPromptAndSetReSyncsNamingTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := tray.NewRunner(noopIngester{}, nil, cfg.Ingest.LocalEditRoot)
-	dialog := func(_ context.Context, args ...string) (string, int, error) {
-		return filepath.Join(dir, "new-archive"), dialogExitOK, nil
-	}
-	s := newConfigSettings(path, cfg, runner, dialog)
+	s := newConfigSettings(path, cfg, runner)
 
-	ok, err := s.PromptAndSet(tray.FieldArchiveRoot)
-	if err != nil {
-		t.Fatalf("PromptAndSet: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected ok=true")
+	if err := s.SetString("ingest.archiveRoot", filepath.Join(dir, "new-archive")); err != nil {
+		t.Fatalf("SetString(ingest.archiveRoot): %v", err)
 	}
 
 	snap := s.Snapshot()
@@ -1502,7 +1310,7 @@ func TestConfigSettingsReloadRefreshesHookStateOnScriptsDirChange(t *testing.T) 
 		UpToDate:  oldDetect.UpToDate,
 	})
 
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 	s.SetResolveInstaller(resolveInstaller)
 
 	// Sanity: the seeded state reflects /old, with Installed=true.
@@ -1558,7 +1366,7 @@ func TestConfigSettingsReloadRefreshesHookStateOnScriptsDirChange(t *testing.T) 
 
 func TestConfigSettingsSetBoolAutoEject(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
+	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetBool("ingest.autoEject", true); err != nil {
 		t.Fatalf("SetBool ingest.autoEject: %v", err)
@@ -1645,95 +1453,6 @@ func TestParsePathMappings(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestPromptAndSetIntegrationRewritesOK drives the full dialog → parse →
-// persist round-trip for Resolve path rewrites.
-func TestPromptAndSetIntegrationRewritesOK(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	dialog := &fakeDialogRunner{
-		stdout:   `D:\Videos\:/storage/archive/videos/`,
-		exitCode: dialogExitOK,
-	}
-	s := newConfigSettings(path, cfg, runner, dialog.Run)
-
-	ok, err := s.PromptAndSetIntegrationRewrites(tray.IntegrationResolveDB)
-	if err != nil {
-		t.Fatalf("PromptAndSetIntegrationRewrites: %v", err)
-	}
-	if !ok {
-		t.Fatal("expected ok=true for dialogExitOK")
-	}
-
-	reloaded, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := reloaded.Integrations.ResolveDB.PathRewrites
-	if len(got) != 1 || got[0].From != `D:\Videos\` || got[0].To != "/storage/archive/videos/" {
-		t.Errorf("pathRewrites = %v, want [{D:\\Videos\\ /storage/archive/videos/}]", got)
-	}
-}
-
-// TestPromptAndSetIntegrationRewritesCancel verifies that a Cancel click
-// does not modify config.yaml.
-func TestPromptAndSetIntegrationRewritesCancel(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	dialog := &fakeDialogRunner{exitCode: dialogExitCanceled}
-	s := newConfigSettings(path, cfg, runner, dialog.Run)
-
-	ok, err := s.PromptAndSetIntegrationRewrites(tray.IntegrationResolveDB)
-	if err != nil {
-		t.Fatalf("PromptAndSetIntegrationRewrites: %v", err)
-	}
-	if ok {
-		t.Fatal("expected ok=false for cancel")
-	}
-
-	reloaded, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(reloaded.Integrations.ResolveDB.PathRewrites) != 0 {
-		t.Errorf("pathRewrites = %v, want empty", reloaded.Integrations.ResolveDB.PathRewrites)
-	}
-}
-
-// TestPromptAndSetIntegrationRewritesInvalid verifies that an invalid
-// format (no colon) is rejected without persisting.
-func TestPromptAndSetIntegrationRewritesInvalid(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	dialog := &fakeDialogRunner{
-		stdout:   `/mnt/nas/videos`,
-		exitCode: dialogExitOK,
-	}
-	s := newConfigSettings(path, cfg, runner, dialog.Run)
-
-	_, err := s.PromptAndSetIntegrationRewrites(tray.IntegrationResolveDB)
-	if err == nil {
-		t.Fatal("expected error for invalid format")
-	}
-
-	reloaded, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(reloaded.Integrations.ResolveDB.PathRewrites) != 0 {
-		t.Errorf("pathRewrites = %v, want empty (should not persist on invalid input)", reloaded.Integrations.ResolveDB.PathRewrites)
-	}
-}
-
-// TestPromptAndSetIntegrationRewritesUnsupported verifies that calling
-// PromptAndSetIntegrationRewrites for an integration without pathRewrites
-// (Luminar) returns an error.
-func TestPromptAndSetIntegrationRewritesUnsupported(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner, nil)
-
-	_, err := s.PromptAndSetIntegrationRewrites(tray.IntegrationLuminar)
-	if err == nil {
-		t.Fatal("expected error for unsupported integration")
 	}
 }
 
