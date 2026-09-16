@@ -95,6 +95,7 @@ ul { margin: 4px 0; padding-left: 18px; }
 }
 .field-row input[type="checkbox"] { margin: 0; }
 .field-row.checkbox-row label { min-width: 0; }
+.field-row .row-detail { flex: 1; }
 .field-row button {
   border: 1px solid var(--border);
   background: transparent;

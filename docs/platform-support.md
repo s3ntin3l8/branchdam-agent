@@ -243,14 +243,64 @@ pre-change value instead of staying visibly flipped until the window reloads. Tw
 folder/file pickers (`App.PickDirectory`/`PickFile`, wrapping Wails' `runtime.OpenDirectoryDialog`/
 `OpenFileDialog`) back the archive root, local edit root, and node-index path fields -- these are only
 reachable from Go code running inside this process's own window context, which is why they are bound
-methods rather than an HTML `<input type="file">`. Integrations/Resolve-hook views (the plan's Track
-3e) remain out of scope; the tray's own Settings/Integrations menus are also untouched here on
-purpose -- this PR is additive only, so there is no window where a field is reachable from neither
-surface (see Track 3d's "backend, then window, then tray-slimming" sequencing note in the plan) --
-the tray menu items this window now duplicates get removed in a follow-up PR once this window is
-confirmed working on real hardware. **Packaging (Track 3f) has since landed** -- see "Packaging
-(Track 3f)" below -- so the binary now ships as an installed sibling on both platforms; only the
-tray's own "Open branchDAM" menu wiring (issue #211) remains outstanding.
+methods rather than an HTML `<input type="file">`. This PR (Track 3d) already included each
+integration's own config fields in the Settings section (`renderIntegrationBlock`: enabled, dry
+run, catalog path/database URL, path rewrites for Resolve, sync interval) -- what it did NOT
+include, and what Track 3e (below) adds, is any way to actually *run* a sync or hook action from
+this window. The tray's own Settings/Integrations menus are also untouched here on purpose -- this
+PR is additive only, so there is no window where a field is reachable from neither surface (see
+Track 3d's "backend, then window, then tray-slimming" sequencing note in the plan) -- the tray menu
+items this window now duplicates get removed in a follow-up PR once this window is confirmed working
+on real hardware. **Packaging (Track 3f) has since landed** -- see "Packaging (Track 3f)" below --
+so the binary now ships as an installed sibling on both platforms; only the tray's own "Open
+branchDAM" menu wiring (issue #211) remains outstanding.
+
+### Integrations/hooks actions (Track 3e)
+
+The Settings section's `renderIntegrationBlock` (Track 3d, above) covers *configuring* an
+integration; it has no way to run one. This adds the missing action surface, in the read-only
+status view rather than the settings form -- these are Runner actions with a live result to show
+(a `SyncSummary`/`HookState`), not a config value to persist, matching how
+`internal/tray/integrationsmenu.go`'s own "Sync now" is a menu action wired straight into
+`run_supported.go`'s select loop rather than a `Settings` mutation.
+
+- **`renderIntegrations`/`renderHooks`** (`app.js`) were rebuilt from innerHTML table strings into
+  real DOM (`actionButtonRow`), matching the settings form's own `renderTextField`/
+  `renderCheckboxField` precedent -- a button needs a real `addEventListener`, and Wails' default
+  CSP blocks inline `onclick` handlers. Both still re-render on every 5s status poll, same as
+  before.
+- **"Sync now"** (one button per `Integrations()` registry entry, disabled when `!Registered`) calls
+  the new `App.TriggerSync(id)`, which POSTs `/api/actions/sync` (already wired server-side since
+  PR #209/#210's ActionRunner) -- mirrors the tray's own "Sync now" item exactly, including the
+  "skipped -- already running" case (`Ran: false`) surfaced instead of misreported as an empty
+  success.
+- **"Install"** (one button per `HookDescriptors()` entry) calls the new
+  `App.TriggerHookInstall(id)`, POSTing the already-wired `/api/actions/hook-install`.
+- **"Reveal"** calls the new `App.RevealHook(id)`, POSTing a brand-new route,
+  `POST /api/actions/hook-reveal` (`internal/tray/statusapi.go`), backed by the already-existing
+  `Runner.RevealHook` -- the one Runner action with an HTTP-reachable counterpart that had never
+  been wired to a route at all before this PR. `ActionRunner` gained `RevealHook(id HookID) error`
+  accordingly (`*Runner` already satisfied it with zero changes). Unlike Sync/Install, a successful
+  Reveal never mutates any state worth re-polling for (`Runner.RevealHook`'s own doc comment), so
+  its click handler never calls `poll()` at all.
+- **Sync/Install only call `poll()` on a clean success (`Ran: true`, no `Err`)**, to refresh their
+  row immediately rather than waiting up to `POLL_INTERVAL_MS`. A skipped pass (`Ran: false`) or a
+  failed one deliberately do NOT poll: `renderIntegrations`/`renderHooks` fully rebuild their
+  container from the fresh status on every poll, and a skipped pass never updates `LastSync` at
+  all -- polling right after would silently erase the "Skipped -- already running" message with a
+  rebuilt row showing the stale, unchanged prior summary. The message is left standing until the
+  next natural 5s poll tick instead.
+- **Every action button disables itself and shows a busy label ("Syncing…"/"Installing…"/
+  "Opening…") while its request is in flight**, because `handleActionSync`/
+  `handleActionHookInstall` both run synchronously to completion server-side (their own doc
+  comments) -- a real sync or hook install pass can take real time, and a double-click during that
+  window must not race a second call. This busy state is tracked in a module-level
+  `inFlightActions` set keyed by `"sync:<id>"`/`"hookInstall:<id>"`, not just the clicked button's
+  own DOM node: `renderIntegrations`/`renderHooks` fully rebuild their container on every 5s poll,
+  so a sync slower than 5s would otherwise show a fresh, clickable button on the next tick while the
+  original request was still running server-side (correctness wasn't at risk either way -- the
+  server itself serializes and reports "Skipped -- already running" for a concurrent second call --
+  but the busy indicator vanishing was misleading; a Hermes review suggestion on this PR).
 
 ### Packaging (Track 3f)
 
@@ -709,11 +759,13 @@ A live-refresh via TUF is the proper long-term answer but is out of scope here.
   `-query-file` to correct row extraction against a different version, and
   `-derivative-suffixes` to correct the pairing heuristic without a code change.
 - **The hardened `/api/*` surface (see Status page above) has one consumer so far** --
-  `cmd/branchdam-agent-ui`. It now exercises `GET /api/status`, `GET`/`POST /api/settings`, and
-  `POST /api/settings/integration-{path,rewrites}` (the Settings section, Track 3d); the
-  `/api/actions/*` routes remain unexercised by any real UI, since this window has no action
-  buttons yet (Track 3e). None of it has run on real Windows/macOS hardware yet -- see the hardware
-  checklist. Known limitations, by design rather than oversight: `POST
+  `cmd/branchdam-agent-ui`. It now exercises `GET /api/status`, `GET`/`POST /api/settings`,
+  `POST /api/settings/integration-{path,rewrites}` (the Settings section, Track 3d), and
+  `POST /api/actions/{sync,hook-install,hook-reveal}` (the Integrations/hooks action buttons,
+  Track 3e); `POST /api/actions/{ingest,drain,prune,pause}` remain unexercised by any real UI --
+  those four stay tray-only, with no equivalent button in this window. None of it has run on real
+  Windows/macOS hardware yet -- see the hardware checklist. Known limitations, by design rather
+  than oversight: `POST
   /api/actions/ingest` runs synchronously to completion with no server-side timeout (a real card
   ingest can take minutes; the caller should not assume a fast response); there is no rate limiting
   beyond the token check itself; and the only way to revoke a leaked token is a tray restart (no
@@ -821,6 +873,21 @@ to say "verified."
     rather than running a real `Apply` against a real release). Uninstall and confirm
     `branchdam-agent-ui.exe`, its shortcut, and any `.previous`/`.previous.version` sidecar files are
     all gone, matching the existing two-binary cleanup.
+15. Native app UI integrations/hooks actions (Track 3e): in the same window as item 11, with a
+    catalog integration configured and enabled, click "Sync now" in the Integrations section --
+    confirm the button disables and shows "Syncing…", the row updates with the real emitted count
+    once it completes, and the tray's own status page (if open) shows the identical result (both
+    read the same `Runner` state). `actionButtonRow` disables its own button for the duration, so a
+    second click on the SAME button can't race the first -- instead, start the tray's own
+    `integrations.luminar.syncIntervalMinutes: 1` timer (item 8) or click the tray menu's own "Sync
+    now" while the window's click is still in flight, and confirm the window reports "Skipped --
+    already running" and leaves that message on screen (rather than the row silently reverting to
+    the pre-click summary on the next 5s poll -- the skip/error branches deliberately do NOT call
+    `poll()`, since a skipped pass never updates `LastSync` and a rebuilt row would otherwise show
+    nothing changed). In the Hooks section, click "Install" and
+    confirm the row transitions to "up to date" without a tray restart, then click "Reveal" and
+    confirm Explorer opens the correct Scripts folder -- confirm Reveal does NOT change the row's
+    install-state pill (it never mutates `HookState`).
 
 **macOS (Apple Silicon):**
 
@@ -891,6 +958,7 @@ to say "verified."
     genuinely open question this repo can't resolve without a real Mac (see the Native app UI
     section's "Packaging (Track 3f)" for why). Trigger a self-update and confirm both binaries in
     the bundle end up on the new version together.
+16. Native app UI integrations/hooks actions: same as Windows item 15.
 
 ### M5 additions (epic #77, #78–#88)
 
