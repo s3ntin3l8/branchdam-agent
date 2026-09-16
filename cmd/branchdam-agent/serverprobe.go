@@ -76,13 +76,15 @@ func mapProbeError(err error) error {
 	case 401:
 		return errors.New("server rejected the agent API key")
 	case 503:
-		// The one 503 this client can produce a confident diagnosis for --
-		// see config.go's own checkSecretPlaceholder/apiKey-length comment
-		// ("under 32 characters -- the server rejects this with a 503").
-		// Any other 503 cause still surfaces as this message, which is a
-		// reasonable default for "the server is up but authentication
-		// itself is misconfigured."
-		return errors.New("server rejected the agent API key — it must be at least 32 characters")
+		// See config.go's own checkSecretPlaceholder/apiKey-length comment
+		// ("under 32 characters -- the server rejects this with a 503") --
+		// this is the single known cause for THIS server's own 503, but not
+		// the only possible one (a load balancer, reverse proxy, or an
+		// unrelated upstream outage can also 503). Worded as "commonly" so
+		// an operator debugging a real server-side outage is not told with
+		// false certainty that their API key is the problem (Hermes review
+		// on PR #228).
+		return errors.New("server returned 503 — commonly caused by an agent API key under 32 characters, but can also mean the server itself is unavailable")
 	default:
 		return err
 	}

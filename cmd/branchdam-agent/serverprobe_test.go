@@ -20,7 +20,7 @@ func TestMapProbeErrorTranslates401(t *testing.T) {
 
 func TestMapProbeErrorTranslates503(t *testing.T) {
 	err := mapProbeError(&branchdam.HTTPError{StatusCode: 503, Body: "agent authentication is not configured"})
-	want := "server rejected the agent API key — it must be at least 32 characters"
+	want := "server returned 503 — commonly caused by an agent API key under 32 characters, but can also mean the server itself is unavailable"
 	if err == nil || err.Error() != want {
 		t.Errorf("got %v, want %q", err, want)
 	}
