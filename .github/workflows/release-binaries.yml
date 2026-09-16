@@ -116,6 +116,18 @@ jobs:
             -ldflags="-s -w -H windowsgui -X main.version=${{ env.RELEASE_VERSION }}" \
             -o dist/branchdam-agent-tray.exe ./cmd/branchdam-agent
           rm -f cmd/branchdam-agent/resource.syso
+          # cmd/branchdam-agent-ui (Track 3c/3d/3f) cross-compiles clean
+          # from this same ubuntu-latest runner -- Wails' Windows backend
+          # is WebView2-based, no cgo, verified empirically before this
+          # was ever wired into a release (see docs/platform-support.md's
+          # "Cross-compile posture" note). goversioninfo needs its own
+          # resource.syso here since Go only auto-links one present in the
+          # SAME package directory as what's being built.
+          "$(go env GOPATH)/bin/goversioninfo" -icon=dist/icon.ico -skip-versioninfo -o=cmd/branchdam-agent-ui/resource.syso
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+            -ldflags="-s -w -H windowsgui -X main.version=${{ env.RELEASE_VERSION }}" \
+            -o dist/branchdam-agent-ui.exe ./cmd/branchdam-agent-ui
+          rm -f cmd/branchdam-agent-ui/resource.syso
       - name: Install NSIS
         run: sudo apt-get update && sudo apt-get install -y nsis
       # Windows' version-resource format (VIProductVersion) requires a
@@ -143,7 +155,7 @@ jobs:
       - name: Package
         run: |
           cd dist
-          zip -j branchdam-agent-windows-amd64.zip branchdam-agent.exe branchdam-agent-tray.exe
+          zip -j branchdam-agent-windows-amd64.zip branchdam-agent.exe branchdam-agent-tray.exe branchdam-agent-ui.exe
       - uses: actions/upload-artifact@v7
         with:
           name: windows-amd64
@@ -176,14 +188,23 @@ jobs:
           go build -trimpath \
             -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" \
             -o dist/branchdam-agent ./cmd/branchdam-agent
-      # Assembles dist/branchdam-agent.app around the binary just built.
+          # cmd/branchdam-agent-ui builds natively here (real Cocoa/WebKit
+          # cgo, this runner's own GOOS/GOARCH -- no cross-compile trick
+          # needed the way build-windows's CGO_ENABLED=0 leg is).
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=${{ env.RELEASE_VERSION }}" \
+            -o dist/branchdam-agent-ui ./cmd/branchdam-agent-ui
+      # Assembles dist/branchdam-agent.app around the binary just built,
+      # with the UI binary as a second file inside Contents/MacOS/ (Track
+      # 3f) -- CFBundleExecutable stays the tray (see appbundle.UIBinaryName's
+      # own doc comment for why this isn't a second bundle entry point).
       # The CLI subcommands (preflight/ingest/etc.) work fine invoked
       # directly at branchdam-agent.app/Contents/MacOS/branchdam-agent --
       # no separate console binary is needed the way Windows needs one
       # (macOS has no link-time GUI/console split; LSUIElement is a bundle
       # property, not a linker flag).
       - name: Assemble bundle
-        run: go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -version "$RELEASE_VERSION"
+        run: go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -ui-binary dist/branchdam-agent-ui -version "$RELEASE_VERSION"
       # Ad-hoc signs the BUNDLE (not just its inner binary, which Go's
       # darwin/arm64 linker already ad-hoc signs on its own -- confirmed via
       # LC_CODE_SIGNATURE on the built Mach-O). An unsigned bundle is what

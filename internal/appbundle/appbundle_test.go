@@ -53,7 +53,7 @@ func TestWrite(t *testing.T) {
 	}
 
 	appDir := filepath.Join(dir, "branchdam-agent.app")
-	if err := Write(appDir, binPath, "v1.0.0"); err != nil {
+	if err := Write(appDir, binPath, "", "v1.0.0"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -80,7 +80,42 @@ func TestWrite(t *testing.T) {
 		t.Errorf("icon at %s is not a valid .icns file", iconPath)
 	}
 
-	if err := Write(appDir, binPath, "v1.0.0"); err == nil {
+	if err := Write(appDir, binPath, "", "v1.0.0"); err == nil {
 		t.Error("Write over an existing bundle should fail, got nil error")
+	}
+}
+
+// TestWriteWithUIBinary confirms an optional uiBinPath lands at
+// Contents/MacOS/<UIBinaryName>, alongside (not replacing) the tray's own
+// binary -- the packaging PR's whole point is both binaries ship in the
+// same bundle so they self-update together (see
+// internal/selfupdate.macOSUISibling).
+func TestWriteWithUIBinary(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "src-binary")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uiBinPath := filepath.Join(dir, "src-ui-binary")
+	if err := os.WriteFile(uiBinPath, []byte("#!/bin/sh\necho ui\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	appDir := filepath.Join(dir, "branchdam-agent.app")
+	if err := Write(appDir, binPath, uiBinPath, "v1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+
+	innerBin := filepath.Join(appDir, "Contents", "MacOS", BinaryName)
+	if _, err := os.Stat(innerBin); err != nil {
+		t.Errorf("tray binary not written: %v", err)
+	}
+	innerUIBin := filepath.Join(appDir, "Contents", "MacOS", UIBinaryName)
+	info, err := os.Stat(innerUIBin)
+	if err != nil {
+		t.Fatalf("UI binary not written: %v", err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
+		t.Errorf("UI binary not executable: mode %v", info.Mode())
 	}
 }

@@ -244,14 +244,79 @@ folder/file pickers (`App.PickDirectory`/`PickFile`, wrapping Wails' `runtime.Op
 `OpenFileDialog`) back the archive root, local edit root, and node-index path fields -- these are only
 reachable from Go code running inside this process's own window context, which is why they are bound
 methods rather than an HTML `<input type="file">`. Integrations/Resolve-hook views (the plan's Track
-3e) and packaging this binary into the installers (`internal/selfupdate.InstallLayout`, NSIS, the
-macOS bundle -- Track 3f) remain out of scope for this PR; the tray's "Open status page" menu item is
-untouched for the same reason -- retitling it to launch this binary needs a packaged install layout
-to find the binary in, which doesn't exist yet. The tray's own Settings/Integrations menus are also
-untouched here on purpose: this PR is additive only, so there is no window where a field is
-reachable from neither surface (see Track 3d's "backend, then window, then tray-slimming" sequencing
-note in the plan) -- the tray menu items this window now duplicates get removed in a follow-up PR
-once this window is confirmed working on real hardware.
+3e) remain out of scope; the tray's own Settings/Integrations menus are also untouched here on
+purpose -- this PR is additive only, so there is no window where a field is reachable from neither
+surface (see Track 3d's "backend, then window, then tray-slimming" sequencing note in the plan) --
+the tray menu items this window now duplicates get removed in a follow-up PR once this window is
+confirmed working on real hardware. **Packaging (Track 3f) has since landed** -- see "Packaging
+(Track 3f)" below -- so the binary now ships as an installed sibling on both platforms; only the
+tray's own "Open branchDAM" menu wiring (issue #211) remains outstanding.
+
+### Packaging (Track 3f)
+
+`cmd/branchdam-agent-ui`'s binary ships as a third installed file on Windows and a second file
+inside the macOS bundle, built and packaged alongside the tray in the same release-binaries.yml jobs
+rather than a separate pipeline:
+
+- **Windows** (`build-windows` job): built with the same `CGO_ENABLED=0` cross-compile posture as
+  the tray/console binaries (confirmed empirically, see "Cross-compile posture" below), `-H
+  windowsgui` (no console window), and its own icon resource -- `goversioninfo` needs a fresh
+  `resource.syso` generated into `cmd/branchdam-agent-ui/`'s own package directory, since Go only
+  auto-links one present in the *same* directory as what's being built; the tray's `resource.syso`
+  from the same job doesn't carry over. Added to `branchdam-agent-windows-amd64.zip` (the self-update
+  payload) alongside the other two exes, and to `installer/windows/branchdam-agent.nsi` as a third
+  `File`/`CheckExeNotRunning` pair, with its own Start Menu shortcut ("Open branchDAM.lnk") and the
+  matching uninstall-section deletes (including the `.previous`/`.previous.version` self-update
+  sidecar files, following the existing two-binary precedent).
+- **macOS** (`build-darwin` job): built *natively* on the `macos-26` runner (real Cocoa/WebKit cgo,
+  no cross-compile trick needed the way Windows' `CGO_ENABLED=0` leg is), then placed inside
+  `Contents/MacOS/` alongside the tray via `tools/mkbundle`'s new `-ui-binary` flag
+  (`internal/appbundle.Write`'s new `uiBinPath` parameter, `appbundle.UIBinaryName` for the name).
+  `CFBundleExecutable` stays the tray -- the UI binary is a second file in the bundle, launched by
+  full path from the tray's future "Open branchDAM" menu item, never by Finder double-click, so
+  there's no second declared entry point. Neither the "Ad-hoc sign bundle" step nor the "Package"
+  (tar) / "Build DMG" steps needed changes: `codesign --force --sign -` re-signs/re-hashes the whole
+  `Contents/` tree (including the new file) since it runs *after* `mkbundle` assembles the bundle,
+  and `tar`/`cp -R` both already operate on the whole `.app` directory rather than naming individual
+  files inside it.
+- **Self-update parity** (`internal/selfupdate/install.go`): `windowsSiblings` generalized from a
+  hardcoded two-way switch to a loop over `winKnownExes` (all three binaries), so an `Apply` call
+  starting from any one of the three carries the other two along as `Siblings`. `DetectLayout` grew
+  a parallel macOS case (`macOSUISibling`) that adds the UI binary as a `Sibling` whenever `Primary`
+  resolves inside a `.app` bundle and the UI binary is actually present next to it (an install
+  predating this PR silently gets no UI-binary sibling, not an error). Verified against
+  `go-selfupdate`'s own extraction logic (`unzip`/`unarchiveTar` in
+  `github.com/creativeprojects/go-selfupdate`): both match archive entries by *basename only*,
+  regardless of nesting depth, so a flat `branchdam-agent-ui.exe` in the zip and a nested
+  `branchdam-agent.app/Contents/MacOS/branchdam-agent-ui` in the tarball both resolve correctly
+  with zero changes to `Apply`'s shared archive-extraction path.
+- `internal/selfupdate/release_workflow_contract_test.go`'s pinned `zip -j ...` string and
+  `installer/windows/branchdam-agent.nsi`'s own `TestWindowsInstallerDesktopLaunchContract` (the
+  latter untouched -- it only pins the tray's own shortcut/launch strings) both reflect the above.
+- **Own version stamp**: `cmd/branchdam-agent-ui` gained a `version` var (mirroring
+  `cmd/branchdam-agent`'s own, stamped the same way via `-ldflags "-X main.version=..."`), shown in
+  the window's title bar and via a bound `App.Version` method -- `app.js`'s header shows it next to
+  the agent's own reported version only when the two actually differ (a self-update that succeeded
+  for one binary but not the other), keeping the normal-case header uncluttered.
+  - This stamp reaches the title bar and `App.Version()` only. It does **not** reach the Windows
+    VERSIONINFO resource: all three `.exe`s are built with `goversioninfo -skip-versioninfo`
+    (icon-only), so `VS_FIXEDFILEINFO` is present but zeroed -- confirmed with
+    `pefile.PE(...).VS_FIXEDFILEINFO` on a built `branchdam-agent-ui.exe`. Explorer's
+    Properties -> Details and Add/Remove Programs' version column show nothing for any of the
+    three binaries, pre-existing behavior this PR doesn't change. Wiring a real
+    `versioninfo.json` (`FileVersion`/`ProductVersion` from `$(VERSION)`) is separate follow-up
+    work, not bundled here.
+
+**Unverified on real hardware**, same caveat as the rest of this section: whether the packaged
+installer/bundle actually places the UI binary correctly relative to the tray at runtime, whether
+Explorer/Finder show the right icon and shortcut, and -- the one genuinely open question this repo
+cannot resolve without a macOS host -- whether launching the loose UI binary by full path (not via
+the bundle's own `Info.plist`/LaunchServices) is subject to the same Gatekeeper quarantine check a
+double-clicked `.app` bundle gets, or whether a raw `exec()` from an already-running, already-approved
+tray process bypasses that assessment. The UI binary carries its own ad-hoc `LC_CODE_SIGNATURE` from
+Go's darwin/arm64 linker regardless (the same baseline the tray's inner binary always had, even
+before bundle-level signing existed), so the worst case is an extra Gatekeeper prompt on first
+launch, not an unsigned/unverifiable binary.
 
 **No `wails` CLI, no npm, no bundler.** `wails build`/`wails dev` generate Go-side bindings by
 compiling and *running* a host binary, which fails cross-compiling from Linux to Windows. Wails
@@ -285,9 +350,12 @@ surfaced to the operator as "the agent likely restarted, try again" rather than 
 transport-level failure (connection refused) is surfaced as "branchDAM doesn't seem to be running."
 
 **Unverified on real hardware**, same caveat as everything else in this file that can only be
-checked from CI: the window actually rendering and being usable, WebView2 runtime presence on a
-real Windows machine (the NSIS installer bootstrapping it is Track 3f's job, not this one's), and
-whether `SingleInstanceLock`'s second-launch window-focus behavior actually works as documented.
+checked from CI: the window actually rendering and being usable, and WebView2 runtime presence on a
+real Windows machine -- the installer (see "Packaging (Track 3f)" below for what it now ships)
+still does **not** bootstrap the WebView2 runtime installer, so a Windows 10 machine that has never
+had it installed via any other app is a real, untested failure mode, not just an unverified one.
+Also unverified: whether `SingleInstanceLock`'s second-launch window-focus behavior actually works
+as documented.
 
 ## DaVinci Resolve hook menu (issue #68)
 
@@ -719,7 +787,8 @@ to say "verified."
     update render hook" shows the "(skipped just now -- already running)" note rather than running
     two installs concurrently or silently dropping the second click.
 11. Native app UI status window (`cmd/branchdam-agent-ui`, Track 3c): with the tray running, launch
-    `branchdam-agent-ui.exe` directly (no installer entry point exists yet) -- confirm a window opens
+    `branchdam-agent-ui.exe` from wherever the installer placed it (`$INSTDIR`, alongside the tray --
+    see item 15 for verifying the installer actually put it there) -- confirm a window opens
     showing the same status the embedded page shows, refreshing roughly every 5 seconds; quit the
     tray and confirm the window switches to an "agent doesn't seem to be running" message rather than
     hanging or crashing; restart the tray and confirm the window recovers on its own once the new
@@ -743,6 +812,15 @@ to say "verified."
     field's own status turns red with the agent's rejection reason, not a silent failure. Confirm
     editing one field does not reset any other field's in-progress edit (the settings form must
     never re-fetch on the 5-second status poll).
+14. Packaging (Track 3f): run the installer -- confirm `branchdam-agent-ui.exe`, a "Open
+    branchDAM.lnk" Start Menu shortcut, and the other two binaries all land in `$INSTDIR`. Confirm
+    the window's own title bar and (once #211 lands) its header both show a real stamped version,
+    not "dev". Trigger a self-update (or a rollback) from the tray and confirm all three `.exe`s end
+    up on the new version together, not just the two that existed before this PR -- this is the one
+    thing `internal/selfupdate`'s own tests can't exercise end-to-end (they fabricate `InstallLayout`s
+    rather than running a real `Apply` against a real release). Uninstall and confirm
+    `branchdam-agent-ui.exe`, its shortcut, and any `.previous`/`.previous.version` sidecar files are
+    all gone, matching the existing two-binary cleanup.
 
 **macOS (Apple Silicon):**
 
@@ -806,6 +884,13 @@ to say "verified."
     needing anything beyond what a stock macOS install already has.
 14. Native app UI settings form: same as Windows item 13 -- additionally confirm the "Browse…"
     folder/file pickers open Cocoa's native `NSOpenPanel`, not a broken or blank dialog.
+15. Packaging: same as Windows item 14 -- confirm `branchdam-agent.app/Contents/MacOS/` contains
+    both `branchdam-agent` and `branchdam-agent-ui` after installing from the `.dmg`, and that
+    launching `branchdam-agent-ui` by full path (not via the bundle's own `Info.plist`) doesn't hit
+    a Gatekeeper "damaged" dead end the way an unsigned bundle download used to -- this is the one
+    genuinely open question this repo can't resolve without a real Mac (see the Native app UI
+    section's "Packaging (Track 3f)" for why). Trigger a self-update and confirm both binaries in
+    the bundle end up on the new version together.
 
 ### M5 additions (epic #77, #78–#88)
 

@@ -161,12 +161,15 @@ Section "Install"
     Call CheckExeNotRunning
     Push "branchdam-agent-tray.exe"
     Call CheckExeNotRunning
+    Push "branchdam-agent-ui.exe"
+    Call CheckExeNotRunning
 
     SetOutPath "$INSTDIR"
 
     ; Binaries
     File "..\..\dist\branchdam-agent.exe"
     File "..\..\dist\branchdam-agent-tray.exe"
+    File "..\..\dist\branchdam-agent-ui.exe"
 
     ; Ensure config directory exists
     CreateDirectory "$APPDATA\branchdam-agent"
@@ -198,6 +201,7 @@ Section "Install"
     ; Start Menu shortcuts
     CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
     CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\branchdam-agent-tray.exe" "tray"
+    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Open branchDAM.lnk" "$INSTDIR\branchdam-agent-ui.exe"
     CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\uninstall.exe"
 
     ; Add/Remove Programs entry
@@ -225,6 +229,8 @@ Section "Uninstall"
     Call un.CheckExeNotRunning
     Push "branchdam-agent-tray.exe"
     Call un.CheckExeNotRunning
+    Push "branchdam-agent-ui.exe"
+    Call un.CheckExeNotRunning
 
     ; Remove Run registry key
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "BranchDAMAgent"
@@ -232,6 +238,7 @@ Section "Uninstall"
     ; Remove files
     Delete "$INSTDIR\branchdam-agent.exe"
     Delete "$INSTDIR\branchdam-agent-tray.exe"
+    Delete "$INSTDIR\branchdam-agent-ui.exe"
     Delete "$INSTDIR\uninstall.exe"
 
     ; internal/selfupdate.Apply writes a "<target>.previous" backup and (next
@@ -247,8 +254,10 @@ Section "Uninstall"
     ; preserves on purpose.
     Delete "$INSTDIR\branchdam-agent.exe.previous"
     Delete "$INSTDIR\branchdam-agent-tray.exe.previous"
+    Delete "$INSTDIR\branchdam-agent-ui.exe.previous"
     Delete "$INSTDIR\branchdam-agent.exe.previous.version"
     Delete "$INSTDIR\branchdam-agent-tray.exe.previous.version"
+    Delete "$INSTDIR\branchdam-agent-ui.exe.previous.version"
     RMDir "$INSTDIR"
 
     ; config.yaml is deliberately left in place -- an uninstall/reinstall
@@ -261,6 +270,7 @@ Section "Uninstall"
 
     ; Remove Start Menu shortcuts
     Delete "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk"
+    Delete "$SMPROGRAMS\${PRODUCT_NAME}\Open branchDAM.lnk"
     Delete "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk"
     RMDir "$SMPROGRAMS\${PRODUCT_NAME}"
 

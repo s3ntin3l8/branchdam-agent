@@ -54,6 +54,15 @@ func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
 }
 
+// Version returns this UI binary's own stamped version (main.version, "dev"
+// for a local unstamped build) -- distinct from StatusJSON's "version"
+// field, which is the AGENT's own version. The two ship together from the
+// same release and should normally match, but can briefly disagree if a
+// self-update fails partway (see main.go's version var doc comment).
+func (a *App) Version() string {
+	return version
+}
+
 // StatusJSON fetches the agent's current status. Both the server address
 // (from config.yaml) and the session token are re-read on every call
 // rather than cached at Startup: the agent process this window talks to

@@ -45,6 +45,17 @@ func newTestApp(t *testing.T) *App {
 	return a
 }
 
+func TestVersionReturnsStampedValue(t *testing.T) {
+	orig := version
+	version = "1.2.3"
+	t.Cleanup(func() { version = orig })
+
+	a := NewApp()
+	if got := a.Version(); got != "1.2.3" {
+		t.Errorf("Version() = %q, want %q", got, "1.2.3")
+	}
+}
+
 func TestStatusJSONReturnsAgentBodyOnSuccess(t *testing.T) {
 	withTempAgentDir(t)
 	token, err := sessiontoken.Generate()
