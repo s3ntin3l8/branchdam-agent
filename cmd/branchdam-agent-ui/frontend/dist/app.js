@@ -394,7 +394,16 @@ function renderTextField(f, sv) {
       // Only clear a typed secret once it's actually saved -- a rejected
       // save must leave it in the field, or retrying means retyping the
       // whole key from scratch (Hermes review finding on this PR).
-      if (f.password && ok) input.value = "";
+      if (f.password && ok) {
+        input.value = "";
+        // The placeholder was computed once at render time from the
+        // load-time snapshot; after a successful save the "set" state it
+        // reflects is stale until the window reloads (Hermes review
+        // finding on this PR). A password field that just saved
+        // successfully has necessarily transitioned to "set" -- recompute
+        // from a minimal synthetic snapshot instead of a full reload.
+        if (f.placeholder) input.placeholder = f.placeholder({ ServerAPIKeySet: true });
+      }
     });
   });
 

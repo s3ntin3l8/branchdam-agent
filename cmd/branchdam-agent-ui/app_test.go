@@ -182,6 +182,35 @@ func TestSetSettingPostsKeyValueAndReturnsBody(t *testing.T) {
 	}
 }
 
+// TestSetSettingPostsNumericValue pins the exact wire path app.js's two
+// <select> fields (self-update interval, integration sync interval) use:
+// JS Number() -> a Go `any` parameter -> encoding/json's float64 default
+// -> re-marshaled into the request body. A regression here (e.g. losing
+// precision, or the value round-tripping as a string) would only surface
+// on real hardware -- see Hermes review finding on PR #210.
+func TestSetSettingPostsNumericValue(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	if _, err := a.SetSetting("selfUpdate.checkIntervalHours", float64(24)); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	if !strings.Contains(string(gotBody), `"key":"selfUpdate.checkIntervalHours"`) || !strings.Contains(string(gotBody), `"value":24`) {
+		t.Errorf("request body = %s, want a bare numeric value (24), not a quoted string", gotBody)
+	}
+}
+
 func TestSetSettingSurfacesAgentErrorBody(t *testing.T) {
 	withTempAgentDir(t)
 	if _, err := sessiontoken.Generate(); err != nil {
