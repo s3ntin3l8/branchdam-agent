@@ -8,7 +8,7 @@ import (
 	"fyne.io/systray"
 )
 
-// settingsMenu owns the "Settings" submenu's systray items and the
+// settingsMenu owns the "Advanced" submenu's systray items and the
 // goroutine translating their clicks into Settings calls. Kept separate
 // from run_supported.go's main select loop for the same reason
 // ingestNow's worker goroutine is separate: every action here does
@@ -17,17 +17,18 @@ import (
 // -- rather than adding more cases to the already-large select loop in Run.
 //
 // This menu is deliberately minimal (issue #211's slimming half of Track
-// 3d): every free-text/checkbox settings field it used to own (Server URL,
-// API key, Agent ID, watch folders, allowed extensions, archive/local edit
-// root, path mappings, naming template, start-on-login, confirm
-// destructive, self-update enabled/interval, require-unbuffered,
-// require-DCIM, pause-on-metered, auto-eject) now lives in the Wails
-// Settings window (cmd/branchdam-agent-ui, Track 3d/#210) instead. What
-// remains here has no window equivalent: Reload/OpenConfigFile/
-// RevealConfigFolder are hand-edit-config affordances, not settings
-// values, and the window has no "reveal this file in Finder/Explorer"
-// button. See docs/tray-settings-inventory.md for the full graduation
-// table.
+// 3d, renamed from "Settings" to "Advanced" in the tray/window UX rethink
+// since it no longer leads to any actual setting): every free-text/checkbox
+// settings field it used to own (Server URL, API key, Agent ID, watch
+// folders, allowed extensions, archive/local edit root, path mappings,
+// naming template, start-on-login, confirm destructive, self-update
+// enabled/interval, require-unbuffered, require-DCIM, pause-on-metered,
+// auto-eject) now lives in the Wails Settings window (cmd/branchdam-agent-ui,
+// Track 3d/#210) instead. What remains here has no window equivalent:
+// Reload/OpenConfigFile/RevealConfigFolder are hand-edit-config affordances,
+// not settings values, and the window has no "reveal this file in
+// Finder/Explorer" button. See docs/tray-settings-inventory.md for the full
+// graduation table.
 type settingsMenu struct {
 	parent   *systray.MenuItem
 	settings Settings
@@ -46,12 +47,12 @@ type settingsMenu struct {
 	revealConfig *systray.MenuItem
 }
 
-// newSettingsMenu builds the "Settings" submenu under the current systray
+// newSettingsMenu builds the "Advanced" submenu under the current systray
 // menu (systray.AddMenuItem must already have a menu started -- this is
 // only ever called from within Run's onReady) and starts the goroutine
 // that turns its items' clicks into actions on actionCh.
 func newSettingsMenu(settings Settings, actionCh chan<- menuAction) *settingsMenu {
-	parent := systray.AddMenuItem("Settings", "Config file actions -- most settings now live in the branchDAM window")
+	parent := systray.AddMenuItem("Advanced", "Config file actions -- all settings live in the branchDAM window")
 
 	sm := &settingsMenu{parent: parent, settings: settings, actionCh: actionCh}
 
@@ -97,8 +98,8 @@ func (sm *settingsMenu) dispatch() {
 // called on every refresh tick and after every settings action completes.
 func (sm *settingsMenu) sync(_ SettingsView) {
 	if sm.lastErr != nil {
-		sm.parent.SetTitle(fmt.Sprintf("Settings (last change failed: %v)", sm.lastErr))
+		sm.parent.SetTitle(fmt.Sprintf("Advanced (last change failed: %v)", sm.lastErr))
 	} else {
-		sm.parent.SetTitle("Settings")
+		sm.parent.SetTitle("Advanced")
 	}
 }
