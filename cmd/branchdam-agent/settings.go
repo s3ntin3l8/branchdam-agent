@@ -1018,10 +1018,9 @@ func (s *configSettings) RevealConfigFolder() error {
 	return openWithDefaultApp(filepath.Dir(s.path))
 }
 
-// openWithDefaultApp shells out to the platform's own "open" command --
-// same pattern as internal/tray/run_supported.go's openBrowser, duplicated
-// rather than exported from there since this file's only reason to exist
-// is wiring internal/tray.Settings, not sharing OS-shell-out helpers
+// openWithDefaultApp shells out to the platform's own "open" command.
+// Kept here rather than in internal/tray since this file's only reason to
+// exist is wiring internal/tray.Settings, not sharing OS-shell-out helpers
 // across an internal/cmd package boundary for a two-line function.
 func openWithDefaultApp(path string) error {
 	switch runtime.GOOS {

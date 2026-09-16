@@ -5,7 +5,7 @@ package main
 // This file exists solely to supply a linker flag wails v2.16.0's own
 // darwin frontend needs but doesn't declare -- discovered when
 // ci-cd.yml's build-darwin-full job first compiled this package under
-// -tags production (v1.8.1's fix for the "Wails applications will not
+// -tags production (v1.9.0's fix for the "Wails applications will not
 // build without the correct build tags" bug), which is the first time
 // any CI job linked the real (non-stub) darwin code at all.
 //

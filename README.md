@@ -78,7 +78,9 @@ The agent communicates with the branchDAM server via its `/api/v1/agent/*` REST 
   against a different catalog.
 - `internal/tray/`, `internal/autostart/`, `internal/selfupdate/`, `internal/appbundle/` -- the
   tray shell: a `fyne.io/systray` icon/menu (windows/darwin only) plus an embedded `net/http`
-  status page showing watch directories, scratch-directory info, and queue status; login-item
+  status server (`/`, `/status`, `/status.json` -- plain JSON, no browsable page; see the Wails
+  window below for the settings/status UI) reporting watch directories, scratch-directory info,
+  and queue status; login-item
   registration (off by default); `go-selfupdate` wiring (update *checks* on by default -- a
   read-only GitHub API call, `selfUpdate.enabled: false` opts out -- but *applying* one is
   always a separate explicit action) that notifies of an update and, on a menu click (or
@@ -94,7 +96,7 @@ The agent communicates with the branchDAM server via its `/api/v1/agent/*` REST 
 Download the archive for your platform from the
 [latest release](https://github.com/s3ntin3l8/branchdam-agent/releases/latest) and verify it
 against the release's `SHA256SUMS.txt`. Every asset's filename embeds the release version (e.g.
-`branchdam-agent-v1.8.1-windows-amd64.zip`), so downloads from different releases never collide in
+`branchdam-agent-v1.9.0-windows-amd64.zip`), so downloads from different releases never collide in
 `~/Downloads`; `SHA256SUMS.txt` keeps this one fixed, unversioned name across every release, since
 self-update matches it by exact filename, not by pattern:
 
@@ -119,12 +121,13 @@ downloads, not a recommended manual-install path.
    - Write a starter config with your computer name as the agent ID
    - Add the agent to Add/Remove Programs, with a real version number
 3. On finish, check "Launch branchDAM Agent" to start the tray
-4. The tray starts in **"not configured" mode** (gray icon) - configure through the Settings menu:
+4. The tray starts in **"not configured" mode** (gray icon) - click "Open branchDAM" in the tray
+   menu to open the native window and configure:
    - Set your server URL, API key, and agent ID
    - Configure path mappings (archive root, edit root, container paths)
    - Set card detection roots and other preferences
 
-The installer does not collect any configuration at install time (except the default agent ID) - all settings are configured through the tray's Settings menu after installation.
+The installer does not collect any configuration at install time (except the default agent ID) - all settings are configured through the native branchDAM window after installation.
 
 > **Note:** Uninstalling via Add/Remove Programs preserves `%APPDATA%\branchdam-agent\config.yaml`. The installer also preserves it on upgrade (`IfFileExists` guard). Uninstall-then-reinstall keeps your settings. If branchDAM Agent is currently running, installing or uninstalling over it prompts you to quit it (right-click the tray icon → Quit) and retry, rather than silently failing to update the files or leaving the install directory behind.
 
@@ -278,10 +281,11 @@ online `ingest` run has nothing for this to check against.
 go run ./cmd/branchdam-agent tray -config config.yaml
 ```
 
-Starts the tray icon (windows/darwin) plus an embedded status page (default
+Starts the tray icon (windows/darwin) plus an embedded JSON status endpoint (default
 `http://127.0.0.1:38080/`, loopback-only -- see `tray.statusAddr` in `config.example.yaml`)
-showing configured watch directories, the local scratch directory, queue status, each catalog
-integration's config/last-sync state, and the DaVinci Resolve render hook's installed state. The
+reporting configured watch directories, the local scratch directory, queue status, each catalog
+integration's config/last-sync state, and the DaVinci Resolve render hook's installed state -- see
+"Open branchDAM" below for the actual settings/status UI. The
 tray menu's "Ingest now" and its automatic card-insertion trigger both call the same
 `internal/ingest.Engine.IngestCard` the headless `ingest` subcommand uses.
 
@@ -290,9 +294,9 @@ drain and prune passes on their own background timers (`offline.drainIntervalSec
 `prune.intervalMinutes`, default 30, only when `prune.enabled: true`) -- no separate
 `queue-drain -watch`/`prune -watch` process is needed while the tray is running (see
 [`docs/offline-queue.md`](docs/offline-queue.md)). "Drain queue now" and "Prune now" menu items run
-the same passes on demand. The status page and menu show a real backlog count and permanently
-failed count from `queue.db`, never a fabricated number when the queue isn't configured or can't be
-read.
+the same passes on demand. The Wails window and tray tooltip show a real backlog count and
+permanently failed count from `queue.db`, never a fabricated number when the queue isn't
+configured or can't be read.
 
 **Integrations.** Luminar Neo and the DaVinci Resolve database sync each get a **top-level** tray
 menu item (e.g. "Luminar Neo"), not nested under Settings: an Enabled checkbox, a Dry run checkbox
@@ -312,7 +316,7 @@ media edges are created/refreshed and removed memberships make unreviewed edges 
 for audit). Human-reviewed edges remain untouched and are flagged for manual resolution. A server
 without this endpoint returns an actionable sync error; there is no legacy event fallback. The
 database URL prompt is hidden and non-prefilled so credentials do not appear in process arguments
-or the status page. See [Resolve validation](docs/resolve-projectdb.md) before live deployment.
+or in the JSON status output. See [Resolve validation](docs/resolve-projectdb.md) before live deployment.
 
 **DaVinci Resolve render hook.** An installer, not a sync integration, since the hook itself runs
 inside Resolve's own Python interpreter and takes no config beyond an optional
@@ -352,15 +356,16 @@ macOS) and, best-effort, shown as a dialog naming that log path -- see issue #30
 [`docs/platform-support.md`](docs/platform-support.md#startup-diagnostics-and-first-run-setup) for
 what's verified and what isn't yet.
 
-**Settings.** The tray menu's "Settings" submenu covers every commonly-changed field without
-hand-editing `config.yaml`: checkboxes/submenus for start-at-login, update checking (and its
-interval), and require-unbuffered-verify; dialogs for the server URL, API key, the two ingest
-roots, and the naming template. Most changes apply immediately; a change to `tray.statusAddr` or
-`ingest.cardRoots` shows "Restart now" instead, since neither can be hot-reloaded (see
-[`docs/platform-support.md`](docs/platform-support.md)). Multi-value fields (`pathMappings`, multiple
-`ingest.cardRoots`) stay hand-edit only -- "Open config.yaml" and "Reveal config folder" are right
-there in the same submenu for exactly that. See
-[`docs/platform-support.md`](docs/platform-support.md#settings-menu) for what's verified.
+**Settings.** All commonly-changed fields are configured through the native branchDAM window
+("Open branchDAM" in the tray menu), not through hand-editing `config.yaml`: checkboxes for
+start-at-login, update checking (and its interval), and require-unbuffered-verify; text fields for
+the server URL, API key, the two ingest roots, and the naming template. Most changes apply
+immediately; a change to `tray.statusAddr` or `ingest.cardRoots` needs a restart, since neither can
+be hot-reloaded (see [`docs/platform-support.md`](docs/platform-support.md)). Multi-value fields
+(`pathMappings`, multiple `ingest.cardRoots`) stay hand-edit only -- the tray's own "Advanced"
+submenu's "Open config.yaml" and "Reveal config folder" are there for exactly that. See
+[`docs/platform-support.md`](docs/platform-support.md#advanced-menu-formerly-settings) for what's
+verified.
 
 Self-update support is compiled into every build; no build tag is required. Checking is **on by
 default** and periodic (`selfUpdate.enabled: false` opts out entirely) but passive -- it's a

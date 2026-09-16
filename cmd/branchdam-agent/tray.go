@@ -564,7 +564,7 @@ func runTrayCmd(args []string) int {
 	go updater.Run(ctx)
 
 	slog.Info("tray started", "statusURL", statusSrv.StatusURL())
-	fmt.Printf("branchdam-agent tray: status page at %s\n", statusSrv.StatusURL())
+	fmt.Printf("branchdam-agent tray: JSON status at %s\n", statusSrv.StatusURL())
 
 	// selfExe was resolved at the very top (trayDialogSetup), before
 	// tray.Run -- and therefore before any in-place self-update swap --
@@ -586,7 +586,7 @@ func runTrayCmd(args []string) int {
 	// anything but a clean OK" behavior, so the disabled-dialog case
 	// can't accidentally turn into a silent proceed.
 	confirmDestructive := cfg.Tray.ConfirmDestructive
-	outcome, trayErr = trayRun(ctx, runner, statusSrv.StatusURL(), updater, settings, trayConfirm(dialog), confirmDestructive, trayPickDirectory(dialog), trayNotifyOS(dialog))
+	outcome, trayErr = trayRun(ctx, runner, updater, settings, trayConfirm(dialog), confirmDestructive, trayPickDirectory(dialog), trayNotifyOS(dialog))
 	stop() // make sure the status server's ctx.Done() fires even if tray.Run returned on its own (e.g. Quit clicked)
 	wg.Wait()
 

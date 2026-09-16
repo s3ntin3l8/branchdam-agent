@@ -19,7 +19,6 @@ import (
 func Run(
 	_ context.Context,
 	_ *Runner,
-	_ string,
 	_ SelfUpdater,
 	_ Settings,
 	_ func(ctx context.Context, title, body string) bool,

@@ -2,11 +2,9 @@ package tray
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log"
 	"net"
 	"net/http"
@@ -14,54 +12,18 @@ import (
 	"time"
 )
 
-//go:embed assets/index.html
-var statusPageFS embed.FS
-
-type integrationStatusLabels struct {
-	Config  string
-	Skipped string
-}
-
-var integrationStatusLabelsByID = map[IntegrationID]integrationStatusLabels{
-	IntegrationLuminar:   {Config: "Catalog", Skipped: "skipped"},
-	IntegrationResolveDB: {Config: "Database URL", Skipped: "unresolved"},
-}
-
-var statusPageTmpl = template.Must(template.New("index.html").Funcs(template.FuncMap{
-	"since": func(t time.Time) string { return time.Since(t).Round(time.Second).String() },
-	// integrationView bridges SettingsView.Integration's (T, bool) return
-	// into the single value text/template can call: a template method call
-	// must return exactly one value, or two where the second is `error` --
-	// (IntegrationView, bool) doesn't qualify. A miss (ok=false) renders as
-	// IntegrationView{}'s zero value -- an intentional fallback, not a template
-	// bug: cmd/branchdam-agent's TestRegistryCompleteness guarantees
-	// Settings.Snapshot() emits one entry per Integrations() registry ID, so
-	// a real miss can't happen in this repo's own wiring. A third-party
-	// Settings implementation that violated that bijection would render as
-	// "disabled / live / catalog not set" rather than fail loudly -- an
-	// accepted trade, since a status page has no error-reporting surface
-	// beyond its own sections (see settingsmenu.go's lastErr for where
-	// config-change errors actually surface).
-	"integrationView": func(sv SettingsView, id IntegrationID) IntegrationView {
-		iv, _ := sv.Integration(id)
-		return iv
-	},
-	"integrationStatusLabels": func(id IntegrationID) integrationStatusLabels {
-		if labels, ok := integrationStatusLabelsByID[id]; ok {
-			return labels
-		}
-		return integrationStatusLabels{Config: "Catalog", Skipped: "skipped"}
-	},
-	"lower": strings.ToLower,
-}).ParseFS(statusPageFS, "assets/index.html"))
-
-// statusPageView is what statusPageTmpl renders -- deliberately a superset
-// of Status with presentation-only fields (Version), not a second source
-// of truth: PageData always derives from a live Status()/Settings()
-// call. Settings is CONFIG state (enabled, dry run, catalog path) that
-// Status deliberately never carries -- see Status.Integrations' own doc
-// comment -- so the Integrations section joins the two by ID via the
-// integrationView template func above.
+// statusPageView is what handleStatusJSON renders -- deliberately a
+// superset of Status with presentation-only fields (Version), not a second
+// source of truth: it always derives from a live Status()/Settings() call.
+// Settings is CONFIG state (enabled, dry run, catalog path) that Status
+// deliberately never carries -- see Status.Integrations' own doc comment.
+//
+// This used to also be the browsable HTML status page's view model (a
+// hand-maintained Go template at assets/index.html, since removed): it
+// duplicated the Wails window's Settings/status rendering in a second
+// templating language with no consumer of its own, so it was dropped in
+// favor of the window as the single settings/status surface. Every route
+// this server exposes now serves this same JSON shape -- see mux.
 type statusPageView struct {
 	Version  string       `json:"version"`
 	Status   Status       `json:"status"`
@@ -82,7 +44,7 @@ type StatusServer struct {
 	// SettingsFunc supplies the CONFIG-state half of the Integrations
 	// section (enabled, dry run, catalog path) -- nil-tolerant, since
 	// several existing tests construct a StatusServer as a bare struct
-	// literal with no settings source; handleIndex renders an empty
+	// literal with no settings source; handleStatusJSON renders an empty
 	// SettingsView in that case rather than calling a nil func.
 	SettingsFunc func() SettingsView
 	Version      string
@@ -141,18 +103,29 @@ func (s *StatusServer) Listen() (net.Listener, error) {
 	return net.Listen("tcp", s.Addr)
 }
 
-// Serve runs the status page on ln and blocks until ctx is cancelled, then
-// shuts down gracefully. Returns nil on a clean ctx-triggered shutdown,
-// matching net/http.Server.Shutdown's own contract.
-func (s *StatusServer) Serve(ctx context.Context, ln net.Listener) error {
+// mux builds this server's route table. Split out from Serve so tests can
+// exercise routing (root vs. unknown paths, method matching) without
+// binding a real listener.
+func (s *StatusServer) mux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleIndex)
+	// All three routes serve the same JSON status view (see statusPageView's
+	// doc comment) -- there is no browsable HTML page any more. "/{$}" is
+	// the exact-root pattern (Go 1.22+ ServeMux), replacing the old
+	// handleIndex's manual "path != /" 404 guard with routing: any other
+	// path 404s automatically instead of matching this handler.
+	mux.HandleFunc("/{$}", s.handleStatusJSON)
 	mux.HandleFunc("/status", s.handleStatusJSON)
 	mux.HandleFunc("/status.json", s.handleStatusJSON)
 	s.registerAPIRoutes(mux)
+	return mux
+}
 
+// Serve runs the status server on ln and blocks until ctx is cancelled,
+// then shuts down gracefully. Returns nil on a clean ctx-triggered
+// shutdown, matching net/http.Server.Shutdown's own contract.
+func (s *StatusServer) Serve(ctx context.Context, ln net.Listener) error {
 	s.srv = &http.Server{
-		Handler:           mux,
+		Handler:           s.mux(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -188,29 +161,6 @@ func (s *StatusServer) ListenAndServe(ctx context.Context) error {
 	return s.Serve(ctx, ln)
 }
 
-func (s *StatusServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	if strings.Contains(r.Header.Get("Accept"), "application/json") {
-		s.handleStatusJSON(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	view := statusPageView{Version: s.Version, Status: s.StatusFunc()}
-	if s.SettingsFunc != nil {
-		view.Settings = s.SettingsFunc()
-	}
-	if err := statusPageTmpl.Execute(w, view); err != nil {
-		// Template execution failing mid-write can't be turned into a
-		// clean error response (headers/some body bytes may already be
-		// flushed) -- log and move on, matching net/http's own
-		// recommendation for this exact situation.
-		log.Printf("tray: status page template error: %v", err)
-	}
-}
-
 func (s *StatusServer) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	view := statusPageView{Version: s.Version, Status: s.StatusFunc()}
@@ -223,7 +173,10 @@ func (s *StatusServer) handleStatusJSON(w http.ResponseWriter, r *http.Request) 
 }
 
 // StatusURL returns the http:// URL this server's Addr resolves to, for
-// display in the tray menu and for "Open status page".
+// logging and diagnostics. There is no tray menu item that opens it any
+// more -- the Wails window is the only status/settings surface -- but the
+// JSON endpoint itself (see Serve) is still live for anyone who wants to
+// curl it.
 func (s *StatusServer) StatusURL() string {
 	return fmt.Sprintf("http://%s/", s.Addr)
 }

@@ -123,8 +123,9 @@ func Detect(dirs []string, fileName, wantSHA256 string) HookState {
 // import (the same shape as internal/config/patch.go's own
 // writeFileAtomic, duplicated rather than exported across the
 // internal-package boundary for a ~15-line function, matching
-// cmd/branchdam-agent/settings.go's openWithDefaultApp precedent against
-// internal/tray's own openBrowser). Mode 0644, not config.Patch's 0600 --
+// cmd/branchdam-agent/settings.go's own openWithDefaultApp precedent for
+// small OS-facing helpers not worth an internal/cmd package boundary
+// crossing). Mode 0644, not config.Patch's 0600 --
 // this is a script Resolve reads, not a secret. Creates dir if it
 // doesn't exist yet (0755), since CandidateDirs' own install-target
 // entry may not exist until the very first install.
