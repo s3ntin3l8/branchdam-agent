@@ -288,17 +288,19 @@ func TestRunTraySyncsNamingTemplateAtStartup(t *testing.T) {
 	}
 }
 
-// TestRunTrayAppliesServerPathMappingsAtFreshInstallStartup pins the
-// chicken-and-egg deadlock a /code-review pass found on this PR: the
+// TestRunTrayHandshakesAtFreshInstallStartupDespiteIncompleteConfig pins
+// the chicken-and-egg deadlock a /code-review pass found on this PR: the
 // config here has server.baseUrl/apiKey/ingest roots set but an empty
 // pathMappings -- exactly the shape the NSIS installer's starter config
 // writes on a fresh install. Before the fix, missingFields (including a
 // pathMappings check) was computed BEFORE the handshake ran, which set
 // configIncomplete=true and skipped the handshake entirely (gated on
-// !configIncomplete) -- so applyServerPathMappings could never fire on
-// the one path that needed it. This asserts the handshake actually runs
-// on a fresh install and its path mapping lands on disk.
-func TestRunTrayAppliesServerPathMappingsAtFreshInstallStartup(t *testing.T) {
+// !configIncomplete). This asserts the handshake still runs on a fresh
+// install despite the incomplete config -- pathMappings itself is never
+// server-populated (issue #234: HandshakeResponse has no such field,
+// since the server never sends one) and so must remain whatever
+// config.yaml already had.
+func TestRunTrayHandshakesAtFreshInstallStartupDespiteIncompleteConfig(t *testing.T) {
 	stubTrayDialog(t, nil)
 
 	var handshakeCalled int32
@@ -310,9 +312,7 @@ func TestRunTrayAppliesServerPathMappingsAtFreshInstallStartup(t *testing.T) {
 				"ok": true,
 				"serverVersion": "0.12.0",
 				"serverTimeUnix": 1756470000,
-				"pathMappings": [
-					{"workstationPrefix": "D:\\DCIM", "containerPath": "/mnt/dcim"}
-				]
+				"namingTemplate": "{yyyy}/{camera_model}/{original_name}"
 			}`))
 			return
 		}
@@ -352,8 +352,8 @@ func TestRunTrayAppliesServerPathMappingsAtFreshInstallStartup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(onDisk.PathMappings) != 1 || onDisk.PathMappings[0].WorkstationPath != `D:\DCIM` {
-		t.Errorf("expected the server-provided path mapping to be persisted to config.yaml, got %+v", onDisk.PathMappings)
+	if len(onDisk.PathMappings) != 0 {
+		t.Errorf("expected pathMappings to remain empty -- the server never populates it, got %+v", onDisk.PathMappings)
 	}
 }
 

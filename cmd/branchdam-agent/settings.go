@@ -430,12 +430,7 @@ func (s *configSettings) SetPathMappings(entries []tray.PathMappingEntry) error 
 	// empty slice as "[]", not "null", only when it isn't nil. A clear
 	// therefore round-trips on disk as "configured empty," a more honest
 	// representation of "the operator deliberately emptied this" than
-	// "null" (unset). This does NOT change what happens next: reload()
-	// (below) can still re-supply a server-provided value via
-	// applyServerPathMappings, whose own guard (len(cfg.PathMappings) > 0)
-	// treats a nil and an empty-non-nil slice identically -- see that
-	// function's own doc comment, and the Path mappings field's UI note
-	// (app.js) that surfaces this on the very save that triggers it.
+	// "null" (unset).
 	if err := config.Patch(s.path, map[string]any{"pathMappings": mappings}); err != nil {
 		return fmt.Errorf("save pathMappings: %w", err)
 	}
@@ -515,30 +510,25 @@ func serverConfigured(cfg config.Config) bool {
 // resolveServerConfig is the single source of truth for the
 // "construct a client, maybe handshake, compute what's still missing"
 // sequence shared by runTrayCmd (startup) and reload() (Settings menu).
-// It deliberately runs the handshake -- and therefore
-// applyServerPathMappings -- BEFORE computing missingFields: a fresh
-// install's config.yaml has baseUrl/apiKey/agentId/archiveRoot/localEditRoot set
-// but an empty pathMappings, and the server handshake is the only way
-// that gap gets filled. Computing missingFields first (the pre-#185-fix
-// order) made configIncomplete true before the handshake ever had a
-// chance to run, which in turn skipped the handshake entirely (it's
-// gated on !configIncomplete) -- a chicken-and-egg deadlock that made
-// applyServerPathMappings unreachable on the only path that needs it.
+// The handshake runs whenever serverConfigured -- it is never gated on
+// missingFields/configIncomplete, so a fresh install with an incomplete
+// config (e.g. empty pathMappings) still handshakes and still picks up a
+// server-supplied naming template. Nothing missingRequiredFields checks
+// is fed by the handshake response, so the two steps' relative order
+// does not otherwise matter; issue #234 removed the one field
+// (pathMappings) that used to make it matter.
 //
 // hsTimeout bounds the handshake call; warnPrefix distinguishes the
 // startup vs. reload log lines without duplicating the surrounding code.
-func resolveServerConfig(ctx context.Context, cfg *config.Config, configPath string, hsTimeout time.Duration, warnPrefix string) (client *branchdam.Client, missingFields []string) {
+func resolveServerConfig(ctx context.Context, cfg *config.Config, hsTimeout time.Duration, warnPrefix string) (client *branchdam.Client, missingFields []string) {
 	if serverConfigured(*cfg) {
 		client = branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
 
 		hsCtx, hsCancel := context.WithTimeout(ctx, hsTimeout)
 		if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: cfg.AgentID}); err != nil {
 			slog.Warn("could not sync naming template from server handshake"+warnPrefix+"; using config value", "err", err)
-		} else {
-			if hs.NamingTemplate != "" {
-				cfg.Ingest.PathTemplate = hs.NamingTemplate
-			}
-			applyServerPathMappings(cfg, *hs, configPath)
+		} else if hs.NamingTemplate != "" {
+			cfg.Ingest.PathTemplate = hs.NamingTemplate
 		}
 		hsCancel()
 	} else {
@@ -549,51 +539,6 @@ func resolveServerConfig(ctx context.Context, cfg *config.Config, configPath str
 	}
 
 	return client, missingRequiredFields(*cfg)
-}
-
-// applyServerPathMappings applies server-provided path mappings to the config
-// when the agent has none configured yet. This is the single source of truth
-// for the handshake → config path-mapping sync, used by both runTrayCmd and
-// reload. Server wins when client has none; local mappings are never overwritten.
-//
-// "Has none" is a length check (len(cfg.PathMappings) > 0 below), so a nil
-// slice and a deliberately-emptied non-nil one (SetPathMappings clearing
-// the last row) are indistinguishable to this guard -- an operator who
-// clears the list via the Settings window's structured editor will see it
-// re-populated on the very next reload if hs.PathMappings is non-empty
-// for their agent (Hermes review finding on the PR that added
-// SetPathMappings). There is no way to represent "explicitly emptied,
-// don't re-supply" in config.yaml today; that's tracked separately
-// (issue #234 also covers hs.PathMappings itself currently always being
-// empty in practice, since the server doesn't populate it -- which is
-// the only reason this re-supply path doesn't bite today).
-//
-// Trust boundary note: this is intentional trust-of-server, matching the
-// agent's existing trust model for NamingTemplate and other server-pushed
-// config. The client signs outgoing requests (HMAC on X-Timestamp/X-Nonce)
-// but does not verify server response signatures — the server is the source
-// of truth wholesale. The slog.Info line below lists applied prefixes for
-// operator audit.
-func applyServerPathMappings(cfg *config.Config, hs branchdam.HandshakeResponse, configPath string) {
-	if len(hs.PathMappings) == 0 || len(cfg.PathMappings) > 0 {
-		return
-	}
-	cfg.PathMappings = make([]config.PathMapping, len(hs.PathMappings))
-	for i, pm := range hs.PathMappings {
-		cfg.PathMappings[i] = config.PathMapping{
-			WorkstationPath: pm.WorkstationPrefix,
-			ContainerPath:   pm.ContainerPath,
-		}
-	}
-	prefixes := make([]string, len(cfg.PathMappings))
-	for i, pm := range cfg.PathMappings {
-		prefixes[i] = pm.WorkstationPath
-	}
-	slog.Info("applied path mappings from server handshake", "count", len(cfg.PathMappings), "workstationPrefixes", prefixes)
-	// Persist to config.yaml so the mappings survive a restart.
-	if err := config.Patch(configPath, map[string]any{"pathMappings": cfg.PathMappings}); err != nil {
-		slog.Warn("could not persist server-provided path mappings to config", "err", err)
-	}
 }
 
 // patchValueForStringKey converts a raw string value into the shape
@@ -742,13 +687,12 @@ func (s *configSettings) reload() error {
 		return fmt.Errorf("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")
 	}
 
-	// Create the client, handshake if the server side is configured (issue
-	// #86), and compute which required fields are still missing -- in
-	// that order, so a handshake that supplies pathMappings is reflected
-	// in missingFields below. See resolveServerConfig's doc comment for
-	// why the order matters. Handshake failure must not block settings
-	// reload -- continue with config-file values.
-	client, missingFields := resolveServerConfig(context.Background(), &newCfg, s.path, 5*time.Second, " on reload")
+	// Create the client and handshake if the server side is configured
+	// (issue #86); see resolveServerConfig's doc comment for why the
+	// handshake always runs, even with an incomplete config. Handshake
+	// failure must not block settings reload -- continue with
+	// config-file values.
+	client, missingFields := resolveServerConfig(context.Background(), &newCfg, 5*time.Second, " on reload")
 	configIncomplete := len(missingFields) > 0
 
 	engine := ingest.NewEngine(client, newCfg.AgentID, newCfg.Ingest, newCfg.PathMappings)
