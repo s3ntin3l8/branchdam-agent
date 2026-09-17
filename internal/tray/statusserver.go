@@ -58,6 +58,16 @@ type StatusServer struct {
 	// or Settings is nil.
 	Actions  ActionRunner
 	Settings Settings
+	// Updates gates the one on-demand self-update actuator
+	// (POST /api/actions/check-update) -- nil-tolerant like Actions/
+	// Settings above, so a StatusServer that doesn't wire it just 503s
+	// that one route rather than panicking. A separate field/interface
+	// from Actions on purpose: Runner (ActionRunner's implementation) has
+	// no self-update knowledge at all, and growing tray.SelfUpdater (the
+	// tray menu's own contract for ApplyLatest/Rollback) to add this
+	// status-API concern would churn every implementation and fake of
+	// that interface for something they don't need.
+	Updates UpdateChecker
 	// Token, when set, is the shared secret every /api/* request must
 	// present as "Authorization: Bearer <Token>" -- see
 	// internal/sessiontoken.Generate and tokenValid. Left empty, every

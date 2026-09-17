@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -132,6 +133,7 @@ func TestAPIRoutesRequireToken(t *testing.T) {
 		{http.MethodPost, "/api/actions/hook-reveal"},
 		{http.MethodPost, "/api/actions/pause"},
 		{http.MethodPost, "/api/actions/test-connection"},
+		{http.MethodPost, "/api/actions/check-update"},
 	}
 	for _, rt := range routes {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
@@ -418,6 +420,103 @@ func TestHandleActionTestConnectionRequiresActions(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/test-connection", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+// spyUpdates is a fake UpdateChecker recording whether CheckNow was
+// called and returning a configurable canned result.
+type spyUpdates struct {
+	status UpdateStatus
+	ran    bool
+	called bool
+}
+
+func (u *spyUpdates) CheckNow(_ context.Context) (UpdateStatus, bool) {
+	u.called = true
+	return u.status, u.ran
+}
+
+func TestHandleActionCheckUpdateReturnsStatus(t *testing.T) {
+	updates := &spyUpdates{status: UpdateStatus{Enabled: true, Checked: true, CurrentVersion: "1.11.0", LatestVersion: "1.12.0", UpdateFound: true}, ran: true}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Updates: updates}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/check-update", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !updates.called {
+		t.Error("CheckNow was never called")
+	}
+	var got checkUpdateActionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Ran || !got.Status.UpdateFound || got.Status.LatestVersion != "1.12.0" {
+		t.Errorf("got %+v, want Ran=true UpdateFound=true LatestVersion=1.12.0", got)
+	}
+}
+
+func TestHandleActionCheckUpdateRanFalse(t *testing.T) {
+	updates := &spyUpdates{status: UpdateStatus{Enabled: false}, ran: false}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Updates: updates}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/check-update", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d -- ran=false is not an error", rec.Code, http.StatusOK)
+	}
+	var got checkUpdateActionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Ran {
+		t.Errorf("Ran = true, want false")
+	}
+}
+
+// TestHandleActionCheckUpdateRendersErrAsString confirms the route's
+// response renders a failed check's Err as a JSON string, matching what
+// status.selfUpdate already does elsewhere on this same page (app.js's
+// renderSelfUpdate reads both with the same "Err" field name). This is
+// checked against the raw response body, not by unmarshaling into
+// checkUpdateActionResult -- UpdateStatus.Err is typed `error`, an
+// interface encoding/json cannot decode a JSON string into, so a
+// round-trip through the Go struct would fail at the decode step
+// regardless of whether the handler's own encoding is correct.
+func TestHandleActionCheckUpdateRendersErrAsString(t *testing.T) {
+	updates := &spyUpdates{status: UpdateStatus{Enabled: true, Checked: true, Err: errors.New("boom")}, ran: true}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Updates: updates}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/check-update", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"Err":"boom"`) {
+		t.Errorf("body = %s, want an \"Err\":\"boom\" string field", rec.Body.String())
+	}
+}
+
+func TestHandleActionCheckUpdateNotConfigured(t *testing.T) {
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok"}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/check-update", nil))
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
