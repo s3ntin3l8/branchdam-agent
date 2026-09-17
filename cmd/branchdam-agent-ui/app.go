@@ -164,11 +164,12 @@ type PathMappingInput struct {
 }
 
 // SetPathMappings replaces the whole pathMappings list -- POST
-// /api/settings/path-mappings's counterpart. A separate method from
-// SetSetting for the same reason SetIntegrationRewrites is one: mappings
-// parse into a structured value the generic key/value route never
-// handles, and the comma/colon string route SetSetting("pathMappings", ...)
-// still accepts is lossy for a path containing a comma. A nil or empty
+// /api/settings/path-mappings's counterpart, and the only way to set path
+// mappings: the comma/colon string route SetSetting("pathMappings", ...)
+// used to accept was retired (issue #236) because it was lossy for a path
+// containing a comma. A separate method from SetSetting for the same
+// reason SetIntegrationRewrites is one: mappings parse into a structured
+// value the generic key/value route never handles. A nil or empty
 // mappings clears the list.
 func (a *App) SetPathMappings(mappings []PathMappingInput) (string, error) {
 	reqBody, err := json.Marshal(struct {

@@ -171,7 +171,6 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		ArchiveRoot:                cfg.Ingest.ArchiveRoot,
 		LocalEditRoot:              cfg.Ingest.LocalEditRoot,
 		NamingTemplate:             cfg.Ingest.PathTemplate,
-		PathMappings:               formatPathMappings(cfg.PathMappings),
 		PathMappingEntries:         toPathMappingEntries(cfg.PathMappings),
 		AllowedExtensions:          cfg.Ingest.AllowedExtensions,
 		CardRoots:                  cfg.Ingest.CardRoots,
@@ -335,12 +334,6 @@ func (s *configSettings) validateStringChange(key, v string) error {
 		cfg.Ingest.AllowedExtensions = exts
 	case "ingest.pathTemplate":
 		cfg.Ingest.PathTemplate = v
-	case "pathMappings":
-		mappings, err := parsePathMappings(v)
-		if err != nil {
-			return err
-		}
-		cfg.PathMappings = mappings
 	case "integrations.nodeIndexPath":
 		// Shared across every catalog integration (see
 		// config.IntegrationsConfig.NodeIndexPath's own doc comment) --
@@ -387,8 +380,9 @@ func (s *configSettings) validateStringSliceChange(key string, v []string) error
 
 // toPathMappingEntries converts a PathMapping slice into the tray-local
 // PathMappingEntry shape the settings API and the Settings window's
-// structured editor both consume -- SettingsView.PathMappingEntries'
-// canonical form, alongside the legacy formatted string PathMappings.
+// structured editor both consume -- SettingsView.PathMappingEntries' sole,
+// canonical form (issue #236 retired the legacy formatted string
+// alongside it).
 func toPathMappingEntries(mappings []config.PathMapping) []tray.PathMappingEntry {
 	if len(mappings) == 0 {
 		return nil
@@ -401,11 +395,11 @@ func toPathMappingEntries(mappings []config.PathMapping) []tray.PathMappingEntry
 }
 
 // SetPathMappings replaces the whole pathMappings list -- see
-// tray.Settings.SetPathMappings's own doc comment for why this is a
-// separate method from SetString rather than routing through the
-// "workstationPath:containerPath, ..." string format, which is lossy for
-// a path containing a comma. Trims each field and rejects an entry with
-// either side empty, reusing parsePathMappings' own error wording.
+// tray.Settings.SetPathMappings's own doc comment for why this is the only
+// way to set path mappings; the "workstationPath:containerPath, ..."
+// string format was retired (issue #236) because it was lossy for a path
+// containing a comma. Trims each field and rejects an entry with either
+// side empty.
 func (s *configSettings) SetPathMappings(entries []tray.PathMappingEntry) error {
 	mappings := make([]config.PathMapping, 0, len(entries))
 	for _, e := range entries {
@@ -543,16 +537,16 @@ func resolveServerConfig(ctx context.Context, cfg *config.Config, hsTimeout time
 
 // patchValueForStringKey converts a raw string value into the shape
 // config.Patch expects for the keys validateStringChange treats specially
-// (comma-separated lists, path mappings) -- every other key patches the
-// string value verbatim.
+// (comma-separated lists) -- every other key patches the string value
+// verbatim. pathMappings is not among these: it has no string-key path at
+// all (issue #236 retired the lossy comma/colon format) -- SetPathMappings
+// is the only way to set it.
 func patchValueForStringKey(key, value string) (any, error) {
 	switch key {
 	case "ingest.cardRoots":
 		return splitCommaPaths(value), nil
 	case "ingest.allowedExtensions":
 		return splitCommaExtensions(value)
-	case "pathMappings":
-		return parsePathMappings(value)
 	case "agentId":
 		// validateStringChange trims agentId before validating (a
 		// surrounding-whitespace-only value must not read as "set"); patch
@@ -847,43 +841,6 @@ func splitCommaExtensions(s string) ([]string, error) {
 			return nil, fmt.Errorf("extension %q must start with a leading dot (e.g. %q)", ext, "."+strings.TrimPrefix(ext, "."))
 		}
 		out = append(out, ext)
-	}
-	return out, nil
-}
-
-// formatPathMappings renders a PathMapping slice as a comma-separated
-// "workstationPath:containerPath" string for the Settings menu display.
-func formatPathMappings(mappings []config.PathMapping) string {
-	var parts []string
-	for _, m := range mappings {
-		parts = append(parts, m.WorkstationPath+":"+m.ContainerPath)
-	}
-	return strings.Join(parts, ", ")
-}
-
-// parsePathMappings parses a comma-separated "workstationPath:containerPath"
-// string into a PathMapping slice. Each pair must contain exactly one colon.
-func parsePathMappings(s string) ([]config.PathMapping, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil, nil
-	}
-	var out []config.PathMapping
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		// Use LastIndex to handle Windows drive letters (C:\path:/container).
-		// The last colon separates workstation path from container path.
-		idx := strings.LastIndex(part, ":")
-		if idx <= 0 || idx == len(part)-1 {
-			return nil, fmt.Errorf("path mapping %q must be in format workstationPath:containerPath", part)
-		}
-		out = append(out, config.PathMapping{
-			WorkstationPath: strings.TrimSpace(part[:idx]),
-			ContainerPath:   strings.TrimSpace(part[idx+1:]),
-		})
 	}
 	return out, nil
 }

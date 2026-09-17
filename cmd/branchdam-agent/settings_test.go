@@ -445,18 +445,26 @@ func TestConfigSettingsSetStringRejectsInvalid(t *testing.T) {
 	}
 }
 
-// TestConfigSettingsSetStringSpecialKeys confirms SetString applies the
-// comma-separated/path-mapping conversions patchValueForStringKey owns.
-func TestConfigSettingsSetStringSpecialKeys(t *testing.T) {
+// TestConfigSettingsSetStringRejectsPathMappings confirms pathMappings has
+// no string-key path at all: issue #236 retired the lossy comma/colon
+// "workstationPath:containerPath, ..." format entirely, so SetString must
+// reject the key (the same way it rejects any other unrecognized string
+// key) rather than silently accepting and parsing it -- and, matching
+// TestConfigSettingsSetStringRejectsInvalid's own convention, the
+// rejection must happen before config.Patch ever touches disk.
+func TestConfigSettingsSetStringRejectsPathMappings(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner)
 
-	if err := s.SetString("pathMappings", "/mnt/nas:/storage/archive"); err != nil {
-		t.Fatalf("SetString(pathMappings): %v", err)
+	if err := s.SetString("pathMappings", "/mnt/nas:/storage/archive"); err == nil {
+		t.Fatal("expected SetString(pathMappings) to be rejected, got nil error")
 	}
-	sv := s.Snapshot()
-	if sv.PathMappings != "/mnt/nas:/storage/archive" {
-		t.Errorf("PathMappings = %q", sv.PathMappings)
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.PathMappings) != 0 {
+		t.Errorf("PathMappings = %+v, want unchanged (empty)", reloaded.PathMappings)
 	}
 }
 
@@ -475,8 +483,8 @@ func TestConfigSettingsSnapshotExposesCardRoots(t *testing.T) {
 }
 
 // TestConfigSettingsSetPathMappingsRoundTripsCommaAndDriveLetterPaths is
-// the whole point of the structured route: parsePathMappings' comma/colon
-// string format cannot represent a container path containing a comma, but
+// the whole point of the structured route: the retired comma/colon string
+// format could not represent a container path containing a comma, but
 // SetPathMappings takes the fields as separate struct members, so it must.
 func TestConfigSettingsSetPathMappingsRoundTripsCommaAndDriveLetterPaths(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
@@ -536,8 +544,7 @@ func TestConfigSettingsSetPathMappingsEmptyWritesEmptySequence(t *testing.T) {
 }
 
 // TestConfigSettingsSetPathMappingsRejectsEmptySide confirms an entry
-// missing either side is rejected before ever reaching config.Patch,
-// mirroring parsePathMappings' own validation for the string form.
+// missing either side is rejected before ever reaching config.Patch.
 func TestConfigSettingsSetPathMappingsRejectsEmptySide(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner)
@@ -1496,73 +1503,6 @@ func TestConfigSettingsSetBoolAutoEject(t *testing.T) {
 	}
 	if !reloaded.Ingest.AutoEject {
 		t.Error("expected ingest.autoEject to be persisted to disk")
-	}
-}
-
-func TestParsePathMappings(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		want    []config.PathMapping
-		wantErr bool
-	}{
-		{
-			name:  "empty",
-			input: "",
-			want:  nil,
-		},
-		{
-			name:  "single",
-			input: "/mnt/nas:/storage/archive",
-			want:  []config.PathMapping{{WorkstationPath: "/mnt/nas", ContainerPath: "/storage/archive"}},
-		},
-		{
-			name:  "multiple",
-			input: "/mnt/nas:/storage/archive, /mnt/edit:/edit",
-			want: []config.PathMapping{
-				{WorkstationPath: "/mnt/nas", ContainerPath: "/storage/archive"},
-				{WorkstationPath: "/mnt/edit", ContainerPath: "/edit"},
-			},
-		},
-		{
-			name:  "windows drive letter",
-			input: `C:\Users\me\video:/storage/archive`,
-			want:  []config.PathMapping{{WorkstationPath: `C:\Users\me\video`, ContainerPath: "/storage/archive"}},
-		},
-		{
-			name:  "windows multiple with drive letters",
-			input: `C:\Users\me\video:/storage/archive, D:\edit:/edit`,
-			want: []config.PathMapping{
-				{WorkstationPath: `C:\Users\me\video`, ContainerPath: "/storage/archive"},
-				{WorkstationPath: `D:\edit`, ContainerPath: "/edit"},
-			},
-		},
-		{
-			name:    "missing container path",
-			input:   "/mnt/nas:",
-			wantErr: true,
-		},
-		{
-			name:    "missing workstation path",
-			input:   ":/storage",
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parsePathMappings(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parsePathMappings(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("parsePathMappings(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("parsePathMappings(%q)[%d] = %v, want %v", tt.input, i, got[i], tt.want[i])
-				}
-			}
-		})
 	}
 }
 
