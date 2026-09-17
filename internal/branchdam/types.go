@@ -193,6 +193,15 @@ type HandshakeRequest struct {
 	AgentID                string `json:"agentId"`
 	ClientVersion          string `json:"clientVersion,omitempty"`
 	LastProcessedEventUUID string `json:"lastProcessedEventUuid,omitempty"`
+	// CurrentKeyID is the key_id the device is currently using, so the
+	// server can decide whether to send back a PendingRotation hint.
+	// Nil means "no rotation hint, even if a newer key exists" server-side
+	// -- which is exactly what every caller in this codebase gets today,
+	// since this agent has no device-pairing flow yet (it authenticates
+	// with a single long-lived config.yaml server.apiKey, not a rotatable,
+	// numbered key). Wiring a real value through requires that pairing
+	// flow; out of scope for issue #235 (see HandshakeResponse.PendingRotation).
+	CurrentKeyID *int64 `json:"currentKeyId,omitempty"`
 }
 
 // HandshakeResponse is the response body for POST /api/v1/agent/handshake
@@ -207,6 +216,34 @@ type HandshakeResponse struct {
 	AcknowledgedEventUUID string `json:"acknowledgedEventUuid,omitempty"`
 	PendingEventsCount    int64  `json:"pendingEventsCount"`
 	NamingTemplate        string `json:"namingTemplate,omitempty"`
+	// PendingRotation, when non-nil, tells the device about a newer key it
+	// should switch to -- only ever set when the request carried a
+	// CurrentKeyID that isn't the newest active key for this agent_id. See
+	// Client.Handshake, which logs this at Warn since no caller in this
+	// codebase acts on it yet (issue #235; the rotation mechanism itself --
+	// persisting a new key -- is a separate, not-yet-implemented piece of
+	// work).
+	PendingRotation *PendingRotationHint `json:"pendingRotation,omitempty"`
+}
+
+// PendingRotationHint mirrors branchdam's own (unexported)
+// pendingRotationDTO in internal/httpapi/routes.go. APIKey is frequently
+// blank in practice -- the server's pairing.Service does not expose a
+// minted key's plaintext outside CreatePairing/RotateKey, so as of
+// ContractVersion the server ships KeyID (and PreviousKeyExpiresAtUnix) alone
+// and leaves APIKey empty, expecting the device to re-pair via QR code
+// instead. Treat a blank APIKey as "no usable key was included," not as an
+// error.
+type PendingRotationHint struct {
+	// KeyID is the row id of the new key -- for logging/audit only; the
+	// device is expected to store the apiKey value itself, not this id.
+	KeyID int64 `json:"keyId"`
+	// APIKey is the new key's plaintext. May be blank -- see the type doc
+	// comment above.
+	APIKey string `json:"apiKey"`
+	// PreviousKeyExpiresAtUnix is a Unix timestamp: when the caller's current
+	// key stops working.
+	PreviousKeyExpiresAtUnix int64 `json:"previousKeyExpiresAtUnix"`
 }
 
 // UploadOptions configures headers for streaming upload to POST /api/v1/agent/upload.
