@@ -152,7 +152,17 @@ func (a *selfUpdateAgent) CheckNow(ctx context.Context) (tray.UpdateStatus, bool
 	if !a.enabled || a.up == nil {
 		return a.Status(), false
 	}
-	if _, ran := a.checkOnce(ctx); !ran {
+	unavailable, ran := a.checkOnce(ctx)
+	if !ran || unavailable {
+		// unavailable (non-semver build) is folded into ran=false here,
+		// matching this method's own doc comment -- without this, a click
+		// in the seconds before the startup check first lands would
+		// report ran=true with Status().Unavailable=true, which the
+		// frontend's own contract ("ran=false means nothing changed")
+		// never anticipates (Hermes review finding on this PR). Latent in
+		// practice: the button is already disabled once su.Unavailable is
+		// known, but that's the frontend's belt, not this method's own
+		// correctness.
 		return a.Status(), false
 	}
 	return a.Status(), true

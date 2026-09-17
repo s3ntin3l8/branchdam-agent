@@ -57,13 +57,20 @@ func TestCheckNowConstructionFailedDoesNotPanic(t *testing.T) {
 	}
 }
 
-// TestCheckNowStoresStatus confirms CheckNow updates a.st (not just its
-// own return value) via the real check() path -- a.version is
+// TestCheckNowStoresStatusButReportsNotRunOnUnavailable confirms two
+// things via the real check() path, fully offline: (1) CheckNow updates
+// a.st (not just its own return value) even when ran=false, and (2) a
+// non-semver build reports ran=false, matching CheckNow's own doc comment
+// ("ran=false covers ... a non-semver build") -- an earlier version of
+// this method folded checkOnce's `unavailable` into a true `ran`, which
+// would have reported ran=true (misleadingly implying a fresh check
+// result is available) for a build that can structurally never check
+// successfully (Hermes review finding on this PR). a.version is
 // deliberately non-semver so Check() returns ErrVersionNotSemver without
 // making any network call (Updater.Check's own doc comment), letting this
 // run fully offline while still exercising checkOnce's TryLock-success
 // path and check()'s a.st mutation.
-func TestCheckNowStoresStatus(t *testing.T) {
+func TestCheckNowStoresStatusButReportsNotRunOnUnavailable(t *testing.T) {
 	up, err := selfupdate.NewUpdater("owner/repo")
 	if err != nil {
 		t.Fatal(err)
@@ -71,14 +78,14 @@ func TestCheckNowStoresStatus(t *testing.T) {
 	a := &selfUpdateAgent{enabled: true, up: up, version: "not-semver"}
 
 	status, ran := a.CheckNow(context.Background())
-	if !ran {
-		t.Fatal("ran = false, want true")
+	if ran {
+		t.Error("ran = true, want false for a non-semver build")
 	}
 	if !status.Unavailable || !status.Checked {
 		t.Errorf("returned status = %+v, want Unavailable=true Checked=true", status)
 	}
 	if got := a.Status(); !got.Unavailable {
-		t.Errorf("a.Status() after CheckNow = %+v, want Unavailable=true -- CheckNow must store the result, not just return it", got)
+		t.Errorf("a.Status() after CheckNow = %+v, want Unavailable=true -- CheckNow must store the result even when ran=false", got)
 	}
 }
 

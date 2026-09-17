@@ -507,6 +507,20 @@ type checkUpdateActionResult struct {
 	Status UpdateStatus `json:"status"`
 }
 
+// checkUpdateTimeout bounds handleActionCheckUpdate's call into CheckNow.
+// Unlike every other WithoutCancel call site in this file, a self-update
+// check's own underlying HTTP client (go-selfupdate's DetectLatest, over
+// http.DefaultClient) sets no Timeout of its own -- ctx is the ONLY
+// deadline in play, so dropping it via WithoutCancel with nothing to
+// replace it would let a connection that establishes but never responds
+// block this handler (and hold selfUpdateAgent's checkMu) forever, which
+// in turn makes every later manual click AND Run's own interval ticker
+// silently report "already running" until a tray restart (Hermes review
+// finding on this PR). A single GitHub API call needs far less than this,
+// but matches drainPruneClickTimeout's own order of magnitude rather than
+// inventing a new one.
+const checkUpdateTimeout = 2 * time.Minute
+
 // handleActionCheckUpdate runs (or reports it couldn't run) an on-demand
 // self-update check -- read-only (no Runner.TryLockIdle the way
 // ApplyLatest needs, since this never touches the installed binary), so
@@ -519,7 +533,9 @@ func (s *StatusServer) handleActionCheckUpdate(w http.ResponseWriter, r *http.Re
 		http.Error(w, "self-update not configured", http.StatusServiceUnavailable)
 		return
 	}
-	status, ran := s.Updates.CheckNow(context.WithoutCancel(r.Context()))
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), checkUpdateTimeout)
+	defer cancel()
+	status, ran := s.Updates.CheckNow(ctx)
 	s.writeJSON(w, http.StatusOK, checkUpdateActionResult{Ran: ran, Status: status})
 }
 
