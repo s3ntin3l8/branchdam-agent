@@ -1125,25 +1125,20 @@ func TestConfigSettingsReloadSyncsNamingTemplateFromServer(t *testing.T) {
 	}
 }
 
-// TestConfigSettingsReloadAppliesServerPathMappingsAndClearsConfigIncomplete
-// covers the ordering resolveServerConfig now enforces: missingFields (and
-// therefore ConfigIncomplete) is computed AFTER the handshake has had a
-// chance to fill in pathMappings via applyServerPathMappings, not before.
-// The config here has server.baseUrl/apiKey/ingest roots all set but an
-// empty pathMappings -- exactly what the NSIS installer's starter config
-// writes -- so a single Reload() (the Settings-menu path an operator hits
-// after entering their server URL and key) must come out fully configured
-// once the server supplies a mapping, without a second reload.
-func TestConfigSettingsReloadAppliesServerPathMappingsAndClearsConfigIncomplete(t *testing.T) {
+// TestConfigSettingsReloadIgnoresPathMappingsInHandshakeResponse pins
+// issue #234's fix: the server's handshake response has no pathMappings
+// concept (HandshakeResponse no longer declares the field), so a Reload()
+// against a config with an empty pathMappings list must leave it empty and
+// keep ConfigIncomplete true -- unlike NamingTemplate, pathMappings is
+// never server-populated and must be set locally (config.yaml or the
+// Settings window's structured editor).
+func TestConfigSettingsReloadIgnoresPathMappingsInHandshakeResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"ok": true,
 			"serverVersion": "0.12.0",
-			"serverTimeUnix": 1756470000,
-			"pathMappings": [
-				{"workstationPrefix": "D:\\DCIM", "containerPath": "/mnt/dcim"}
-			]
+			"serverTimeUnix": 1756470000
 		}`))
 	}))
 	defer srv.Close()
@@ -1176,16 +1171,16 @@ func TestConfigSettingsReloadAppliesServerPathMappingsAndClearsConfigIncomplete(
 		t.Fatalf("Reload: %v", err)
 	}
 
-	if runner.ConfigIncomplete() {
-		t.Errorf("expected ConfigIncomplete=false after Reload applies the server-provided path mapping, missing=%v", runner.Status(tray.UpdateStatus{}).MissingFields)
+	if !runner.ConfigIncomplete() {
+		t.Errorf("expected ConfigIncomplete=true since pathMappings is never server-populated, missing=%v", runner.Status(tray.UpdateStatus{}).MissingFields)
 	}
 
 	onDisk, err := config.Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(onDisk.PathMappings) != 1 || onDisk.PathMappings[0].WorkstationPath != `D:\DCIM` {
-		t.Errorf("expected the server-provided mapping to be persisted to config.yaml, got %+v", onDisk.PathMappings)
+	if len(onDisk.PathMappings) != 0 {
+		t.Errorf("expected pathMappings to remain empty on disk, got %+v", onDisk.PathMappings)
 	}
 }
 
@@ -1270,7 +1265,7 @@ func TestResolveServerConfigDoesNotHandshakeWithoutAgentID(t *testing.T) {
 		},
 		Ingest: config.IngestConfig{LocalEditRoot: "/edit", UploadStream: true},
 	}
-	_, missing := resolveServerConfig(context.Background(), &cfg, "", time.Second, "")
+	_, missing := resolveServerConfig(context.Background(), &cfg, time.Second, "")
 	if calls.Load() != 0 {
 		t.Fatalf("handshake calls = %d, want 0", calls.Load())
 	}

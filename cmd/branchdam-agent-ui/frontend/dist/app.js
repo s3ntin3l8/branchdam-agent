@@ -777,7 +777,7 @@ const STORAGE_NAMING_FIELDS = [
     note:
       "Translates paths this agent writes into the container paths branchDAM sees, before an event is sent. " +
       "Separate from the server's own Operator Path Rewrites, which resolve references inside project files. " +
-      "If the server has mappings configured for this agent, clearing this list may be re-populated from the server on the next reload.",
+      "Set locally only -- the server never supplies these on handshake.",
   },
   { key: "integrations.nodeIndexPath", label: "Node index path", get: (sv) => sv.NodeIndexPath, browseFile: ["*.json"] },
 ];
@@ -1172,23 +1172,23 @@ function renderPathMappingField(f, sv) {
     try {
       const sv2 = JSON.parse(await app.SetPathMappings(payload));
       setFieldStatus(status, "Saved", "saved");
-      // The server handshake can re-supply mappings on this same reload
-      // whenever the list we just sent ends up empty
-      // (applyServerPathMappings, cmd/branchdam-agent/settings.go) -- only
-      // rebuild from the response (and only re-render) when it actually
-      // diverges from what was sent. Comparing against payload (not the
-      // raw, possibly-still-being-typed entries) matters two ways: an
-      // in-progress row with one side still blank was filtered OUT of
-      // payload, so comparing against unfiltered entries would ALWAYS
-      // read as "changed" and wipe that row out from under the operator
-      // on every keystroke's blur; and a no-op save (nothing to
-      // reconcile) must leave the DOM alone so a mid-edit neighboring row
-      // never loses focus.
+      // Reconcile against whatever the reload-after-save actually
+      // persisted, in case it diverges from what was sent (e.g. the
+      // server-side trim of each field). The server itself never
+      // populates pathMappings -- issue #234, HandshakeResponse has no
+      // such field -- so in practice this rebuilds from an identical
+      // list. Comparing against payload (not the raw, possibly-still-
+      // being-typed entries) matters two ways: an in-progress row with
+      // one side still blank was filtered OUT of payload, so comparing
+      // against unfiltered entries would ALWAYS read as "changed" and
+      // wipe that row out from under the operator on every keystroke's
+      // blur; and a no-op save (nothing to reconcile) must leave the DOM
+      // alone so a mid-edit neighboring row never loses focus.
       const returned = (sv2.PathMappingEntries ?? []).map((e) => ({ workstationPath: e.workstationPath, containerPath: e.containerPath }));
       if (JSON.stringify(returned) !== JSON.stringify(payload)) {
         entries = returned.map((e) => ({ ws: e.workstationPath, cp: e.containerPath }));
         render();
-        setFieldStatus(status, "The branchDAM server re-supplied these on reload", "saved");
+        setFieldStatus(status, "Saved (adjusted)", "saved");
       }
     } catch (err) {
       setFieldStatus(status, String(err), "error");
