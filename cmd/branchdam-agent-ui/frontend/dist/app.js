@@ -1353,11 +1353,14 @@ function renderIntegrationBlock(iv) {
   // running. Toggled via renderCheckboxField's onSaved hook below, not
   // rebuilt: renderSettingsForm runs once, and the Enabled checkbox's own
   // change handler is the only re-entry point into this block afterward,
-  // so flipping `hidden` in place (relying on PR #230's
-  // `[hidden] { display: none !important; }` override, needed because
-  // .field-row's own display:grid would otherwise win the cascade) is
-  // simpler and keeps every field's live value in the DOM rather than
-  // discarding and re-creating it.
+  // so flipping `hidden` in place is simpler and keeps every field's live
+  // value in the DOM rather than discarding and re-creating it. This
+  // element itself carries no display rule of its own, so the browser's
+  // default `[hidden] { display: none }` already hides it without help;
+  // #230's `[hidden] { display: none !important; }` override exists for
+  // an element that DOES have a competing display rule (a .field-row,
+  // whose own display:grid would otherwise win the cascade) -- harmless
+  // here, not load-bearing for this specific element.
   const detail = document.createElement("div");
   detail.className = "integration-detail";
   detail.hidden = !iv.Enabled;
