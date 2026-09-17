@@ -580,6 +580,36 @@ func TestIntegrationBlockRendersFriendlyTitle(t *testing.T) {
 	}
 }
 
+// TestIntegrationBlockHidesDetailWhenDisabled guards the enabled-gating
+// added on this PR: Dry run/Catalog path/Path rewrites/Sync interval/Sync
+// timeout are all noise for an integration that isn't running, so they're
+// wrapped in one .integration-detail element toggled via `hidden` rather
+// than rebuilt -- see that element's own doc comment in app.js for why a
+// rebuild-in-place would be wrong (it would have to re-derive visibility
+// from the checkbox's POST-revert state, which onSaved already handles in
+// exactly one place). There is no JS test harness in this repo (see
+// TestIntegrationBlockWritesSyncTimeoutKey's own doc comment for why this
+// source-grep is the only mechanical check available); a jsdom-based
+// manual smoke test exercising the actual enable/disable/reject sequence
+// is the real verification for this behavior.
+func TestIntegrationBlockHidesDetailWhenDisabled(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	if !strings.Contains(body, `detail.className = "integration-detail"`) {
+		t.Error("frontend/dist/app.js's renderIntegrationBlock no longer wraps its detail fields in an .integration-detail element")
+	}
+	if !strings.Contains(body, "detail.hidden = !iv.Enabled;") {
+		t.Error("frontend/dist/app.js's renderIntegrationBlock no longer hides .integration-detail for a disabled integration at initial render")
+	}
+	if !strings.Contains(body, "detail.hidden = !checked;") {
+		t.Error("frontend/dist/app.js's Enabled checkbox no longer toggles .integration-detail's visibility on save")
+	}
+}
+
 // TestCategoryPanelsGroupSettingsWithTheirStatus is the nav-pane-era
 // successor to the tray/window UX rethink's original
 // TestSettingsSectionsPrecedeLiveSections: that test's premise -- one global
@@ -839,6 +869,39 @@ func TestStatusPollNeverRebuildsSettingsContainers(t *testing.T) {
 	}
 	if !strings.Contains(renderBody, "renderSetupBanner(status)") {
 		t.Error("render(view) must call renderSetupBanner(status) so the missing-fields banner refreshes on every status poll")
+	}
+}
+
+// TestRenderIntegrationsConsultsEnabledByID guards the live-status half of
+// this PR's enabled-gating: a disabled integration's row must not appear
+// under Integrations status either, not just in its own settings detail
+// block. enabledByID is a module-level Map, not part of the once-only
+// settings snapshot, precisely so render(view) -- gated by
+// TestStatusPollNeverRebuildsSettingsContainers above against ever
+// touching a "-config" container or calling renderSettingsForm -- can
+// still consult it without violating that separation.
+func TestRenderIntegrationsConsultsEnabledByID(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	start := strings.Index(body, "function renderIntegrations(status) {")
+	if start == -1 {
+		t.Fatal("app.js: could not find `function renderIntegrations(status) {`")
+	}
+	end := strings.Index(body[start:], "\nfunction ")
+	if end == -1 {
+		t.Fatal("app.js: could not find the end of renderIntegrations")
+	}
+	fnBody := body[start : start+end]
+
+	if !strings.Contains(fnBody, "enabledByID.get(i.ID) !== false") {
+		t.Error("renderIntegrations no longer filters out a disabled integration's live-status row")
+	}
+	if strings.Contains(fnBody, "-config") {
+		t.Error("renderIntegrations must never reference a \"-config\" container -- it runs inside render(view)'s poll-only call graph")
 	}
 }
 

@@ -250,6 +250,31 @@ function renderWatch(status) {
 // concurrent second call, but the busy indicator vanishing was misleading).
 const inFlightActions = new Set();
 
+// enabledByID mirrors each integration's CONFIG-side Enabled flag
+// (SettingsView.Integrations[].Enabled) for the live-status side
+// (renderIntegrations) to consult -- status.integrations carries
+// Registered, never Enabled, and plumbing Enabled into Runner.Status()
+// would mean threading a config.Config into a struct that's deliberately
+// built from nothing but Runner's own runtime maps (tray.go's own
+// Status() doc comment). Seeded once in renderSettingsForm from the
+// initial SettingsJSON() snapshot, then kept fresh by saveSetting, which
+// already receives an up-to-date SettingsView back from every settings
+// save and used to discard it. Module-level and never cleared, matching
+// inFlightActions' own reasoning above: renderIntegrations rebuilds its
+// container on every 5s poll, so this can't be per-render state. Absent
+// key (map not yet seeded, e.g. before the first loadSettings() resolves)
+// must read as "show the row" -- fail-open, never hide a row because a
+// lookup missed.
+const enabledByID = new Map();
+
+// refreshEnabledByID updates enabledByID from any SettingsView-shaped
+// object that carries an Integrations array -- called from saveSetting
+// (every settings save response) and renderSettingsForm (the initial
+// load), so the two never drift out of sync with each other.
+function refreshEnabledByID(sv) {
+  for (const iv of sv?.Integrations ?? []) enabledByID.set(iv.ID, iv.Enabled);
+}
+
 // actionButtonRow builds one label/detail/button/status line as real DOM
 // (not an innerHTML string, unlike this file's other render* status
 // functions) -- the "Sync now"/"Install"/"Reveal" buttons below need a real
@@ -324,7 +349,10 @@ function actionButtonRow(id, detailHtml, buttons) {
 function renderIntegrations(status) {
   const container = byId("integrations-body");
   container.innerHTML = "";
-  const list = status.integrations ?? [];
+  // enabledByID.get(id) === false is the only case that hides a row --
+  // undefined (map not yet seeded) reads as "show it," matching that
+  // map's own fail-open doc comment.
+  const list = (status.integrations ?? []).filter((i) => enabledByID.get(i.ID) !== false);
   if (!list.length) {
     container.innerHTML = `<p class="empty">No integrations registered.</p>`;
     return;
@@ -740,7 +768,20 @@ async function saveSetting(key, value, statusEl) {
   if (!app) return false;
   setFieldStatus(statusEl, "Saving…");
   try {
-    await app.SetSetting(key, value);
+    const body = await app.SetSetting(key, value);
+    // Every settings route already returns the freshly recomputed
+    // SettingsView (statusapi.go ends each handler with
+    // s.Settings.Snapshot()) -- every caller used to just discard it.
+    // Parsing it here, once, lets enabledByID stay current after ANY
+    // save (not just an Enabled checkbox toggle) with no per-call-site
+    // plumbing; a body that doesn't parse as JSON is defensive-only
+    // (SetSetting's own contract guarantees valid JSON on success) and
+    // silently skipped rather than surfaced as a save failure.
+    try {
+      refreshEnabledByID(JSON.parse(body));
+    } catch {
+      /* see comment above */
+    }
     setFieldStatus(statusEl, "Saved", "saved");
     return true;
   } catch (err) {
@@ -1224,6 +1265,12 @@ function renderCheckboxField(f, sv) {
     const previous = !input.checked;
     const ok = await saveSetting(f.key, input.checked, status);
     if (!ok) input.checked = previous;
+    // f.onSaved (renderIntegrationBlock's Enabled checkbox only) fires
+    // AFTER the revert above so it observes post-revert truth -- a
+    // rejected save must leave whatever it controls (the detail block's
+    // visibility) matching the checkbox's reverted state, not the
+    // optimistic click.
+    if (f.onSaved) f.onSaved(ok, input.checked);
   });
 
   row.appendChild(input);
@@ -1300,12 +1347,45 @@ function renderIntegrationBlock(iv) {
   h3.textContent = iv.Title || iv.ID;
   block.appendChild(h3);
 
+  // detail holds every field below Enabled -- hidden whenever the
+  // integration is disabled, since Dry run/Catalog path/Path rewrites/
+  // Sync interval/Sync timeout are all noise for something that isn't
+  // running. Toggled via renderCheckboxField's onSaved hook below, not
+  // rebuilt: renderSettingsForm runs once, and the Enabled checkbox's own
+  // change handler is the only re-entry point into this block afterward,
+  // so flipping `hidden` in place is simpler and keeps every field's live
+  // value in the DOM rather than discarding and re-creating it. This
+  // element itself carries no display rule of its own, so the browser's
+  // default `[hidden] { display: none }` already hides it without help;
+  // #230's `[hidden] { display: none !important; }` override exists for
+  // an element that DOES have a competing display rule (a .field-row,
+  // whose own display:grid would otherwise win the cascade) -- harmless
+  // here, not load-bearing for this specific element.
+  const detail = document.createElement("div");
+  detail.className = "integration-detail";
+  detail.hidden = !iv.Enabled;
+
   // renderCheckboxField's second argument is the "sv" a top-level
   // BEHAVIOR_FIELDS descriptor's own get(sv) reads from; these two
   // descriptors close over iv directly instead (there is no top-level
   // settings snapshot to hand them), so {} is deliberately unused here.
-  block.appendChild(renderCheckboxField({ key: `integrations.${iv.ID}.enabled`, label: "Enabled", get: () => iv.Enabled }, {}));
   block.appendChild(
+    renderCheckboxField(
+      {
+        key: `integrations.${iv.ID}.enabled`,
+        label: "Enabled",
+        get: () => iv.Enabled,
+        // Fires after renderCheckboxField's own revert-on-failure, so a
+        // rejected save leaves `detail` matching the reverted checkbox
+        // state, never the optimistic click.
+        onSaved: (_ok, checked) => {
+          detail.hidden = !checked;
+        },
+      },
+      {},
+    ),
+  );
+  detail.appendChild(
     renderCheckboxField({ key: `integrations.${iv.ID}.dryRun`, label: "Dry run (log only)", get: () => iv.DryRun }, {}),
   );
 
@@ -1367,7 +1447,7 @@ function renderIntegrationBlock(iv) {
   }
   pathInput.addEventListener("change", commit);
   pathRow.appendChild(pathStatus);
-  block.appendChild(pathRow);
+  detail.appendChild(pathRow);
 
   if (isResolve) {
     const rewriteRow = document.createElement("div");
@@ -1393,10 +1473,10 @@ function renderIntegrationBlock(iv) {
       }
     });
     rewriteRow.appendChild(rwStatus);
-    block.appendChild(rewriteRow);
+    detail.appendChild(rewriteRow);
   }
 
-  block.appendChild(
+  detail.appendChild(
     renderSelectField(
       "Sync every",
       [
@@ -1415,7 +1495,7 @@ function renderIntegrationBlock(iv) {
   // away. renderSelectField's own "hand-configured" fallback reproduces the
   // tray's "Sync timeout (currently: %ds, hand-configured)" note for a value
   // outside the fixed set, same as the "Sync every" field above.
-  block.appendChild(
+  detail.appendChild(
     renderSelectField(
       "Sync timeout",
       [
@@ -1429,6 +1509,7 @@ function renderIntegrationBlock(iv) {
     ),
   );
 
+  block.appendChild(detail);
   return block;
 }
 
@@ -1439,6 +1520,8 @@ function renderIntegrationBlock(iv) {
 // this function writes into ends "-config"; TestStatusPollNeverRebuildsSettingsContainers
 // (app_test.go) pins that render()'s call graph never touches one.
 function renderSettingsForm(sv) {
+  refreshEnabledByID(sv);
+
   const serverContainer = byId("settings-server-config");
   serverContainer.innerHTML = "";
   for (const f of SERVER_IDENTITY_FIELDS) serverContainer.appendChild(renderTextField(f, sv));
