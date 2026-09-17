@@ -449,13 +449,22 @@ func TestConfigSettingsSetStringRejectsInvalid(t *testing.T) {
 // no string-key path at all: issue #236 retired the lossy comma/colon
 // "workstationPath:containerPath, ..." format entirely, so SetString must
 // reject the key (the same way it rejects any other unrecognized string
-// key) rather than silently accepting and parsing it.
+// key) rather than silently accepting and parsing it -- and, matching
+// TestConfigSettingsSetStringRejectsInvalid's own convention, the
+// rejection must happen before config.Patch ever touches disk.
 func TestConfigSettingsSetStringRejectsPathMappings(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner)
 
 	if err := s.SetString("pathMappings", "/mnt/nas:/storage/archive"); err == nil {
 		t.Fatal("expected SetString(pathMappings) to be rejected, got nil error")
+	}
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.PathMappings) != 0 {
+		t.Errorf("PathMappings = %+v, want unchanged (empty)", reloaded.PathMappings)
 	}
 }
 
