@@ -400,20 +400,6 @@ func toPathMappingEntries(mappings []config.PathMapping) []tray.PathMappingEntry
 	return out
 }
 
-// fromPathMappingEntries is toPathMappingEntries' inverse, used by
-// SetPathMappings to convert the API's structured request body into
-// config.PathMapping before validating/patching.
-func fromPathMappingEntries(entries []tray.PathMappingEntry) []config.PathMapping {
-	if len(entries) == 0 {
-		return nil
-	}
-	out := make([]config.PathMapping, len(entries))
-	for i, e := range entries {
-		out[i] = config.PathMapping{WorkstationPath: e.WorkstationPath, ContainerPath: e.ContainerPath}
-	}
-	return out
-}
-
 // SetPathMappings replaces the whole pathMappings list -- see
 // tray.Settings.SetPathMappings's own doc comment for why this is a
 // separate method from SetString rather than routing through the
