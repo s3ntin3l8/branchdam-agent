@@ -1,11 +1,13 @@
 package branchdam
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -376,6 +378,75 @@ func TestClientHandshake(t *testing.T) {
 	}
 	if resp.PendingEventsCount != 3 {
 		t.Errorf("PendingEventsCount = %d, want 3", resp.PendingEventsCount)
+	}
+}
+
+// TestClientHandshakeLogsPendingRotation is the regression test for issue
+// #235: the server's pendingRotation hint used to have no field to decode
+// into at all, so encoding/json silently dropped it every time. Now that
+// HandshakeResponse.PendingRotation exists, Handshake must also make its
+// arrival visible (Warn-level, per handshake.go's doc comment) rather than
+// leaving it as a struct field nothing ever reads.
+func TestClientHandshakeLogsPendingRotation(t *testing.T) {
+	srv, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"serverVersion":"0.5.0","serverTimeUnix":1752591200,"pendingEventsCount":0,` +
+			`"pendingRotation":{"keyId":7,"apiKey":"new-plaintext-key","previousKeyExpiresAtUnix":1752677600}}`)) // pragma: allowlist secret
+	})
+	_ = srv
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	resp, err := c.Handshake(context.Background(), HandshakeRequest{AgentID: "workstation-01"})
+	if err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+	if resp.PendingRotation == nil {
+		t.Fatal("PendingRotation = nil, want non-nil")
+	}
+	if resp.PendingRotation.KeyID != 7 {
+		t.Errorf("PendingRotation.KeyID = %d, want 7", resp.PendingRotation.KeyID)
+	}
+	if resp.PendingRotation.APIKey != "new-plaintext-key" { // pragma: allowlist secret
+		t.Errorf("PendingRotation.APIKey = %q, want new-plaintext-key", resp.PendingRotation.APIKey)
+	}
+	if resp.PendingRotation.PreviousKeyExpiresAt != 1752677600 {
+		t.Errorf("PendingRotation.PreviousKeyExpiresAt = %d, want 1752677600", resp.PendingRotation.PreviousKeyExpiresAt)
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("expected a WARN-level log line for the rotation hint, got: %s", out)
+	}
+	if !strings.Contains(out, "newKeyId=7") {
+		t.Errorf("expected the log line to name the new key id, got: %s", out)
+	}
+}
+
+func TestClientHandshakeNoLogWithoutPendingRotation(t *testing.T) {
+	srv, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"serverVersion":"0.5.0","serverTimeUnix":1752591200,"pendingEventsCount":0}`))
+	})
+	_ = srv
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	resp, err := c.Handshake(context.Background(), HandshakeRequest{AgentID: "workstation-01"})
+	if err != nil {
+		t.Fatalf("Handshake: %v", err)
+	}
+	if resp.PendingRotation != nil {
+		t.Fatalf("PendingRotation = %+v, want nil", resp.PendingRotation)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("expected no log output when the server sends no rotation hint, got: %s", logs.String())
 	}
 }
 

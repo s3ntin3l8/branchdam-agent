@@ -120,6 +120,12 @@ never read server-side, `pendingEventsCount` is server-global (not scoped to thi
 handshake failure never aborts the rest of the pass -- `queue.db` is the only source of truth for
 what's outstanding.
 
+If the response carries a `pendingRotation` hint (the server telling this device about a newer
+API key), `internal/branchdam.Client.Handshake` logs it at `Warn` -- see issue #235. Nothing acts
+on it yet: this agent has no device-pairing flow, so it never sends `currentKeyId` on the request,
+and the server never sends the hint back without one. Rotating the stored key in response is a
+separate, not-yet-implemented mechanism.
+
 ## Failure modes worth knowing about
 
 - **Tier-0 location unconfigured server-side**: `EVENT_NODE_CREATED`'s `PostNodeCreated` call
