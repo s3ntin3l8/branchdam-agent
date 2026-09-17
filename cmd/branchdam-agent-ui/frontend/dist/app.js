@@ -261,7 +261,11 @@ const inFlightActions = new Set();
 // only reacting to a click on this particular DOM instance.
 function actionButtonRow(id, detailHtml, buttons) {
   const row = document.createElement("div");
-  row.className = "field-row";
+  // .action-row is a grid-column template distinct from the settings
+  // form's .field-row shape (label/marker/input/browse/status) -- this
+  // row is label/detail/actions/status instead. See style.css's own doc
+  // comment on both classes for why they can't share one template.
+  row.className = "field-row action-row";
 
   const label = document.createElement("label");
   label.textContent = id;
@@ -277,6 +281,14 @@ function actionButtonRow(id, detailHtml, buttons) {
   const alreadyBusy = buttons.find((b) => b.busy);
   if (alreadyBusy) setFieldStatus(status, alreadyBusy.busyText ?? "Working…");
 
+  // buttons are wrapped in one .row-actions element, occupying a single
+  // grid cell -- renderHooks passes TWO buttons (Install, Reveal) into
+  // one call here, and a grid can't place multiple same-tag siblings into
+  // one named column without a common wrapper. .row-actions also gives
+  // the first button (the row's main action) the primary/brand styling
+  // in style.css, with no styling logic needed here.
+  const actions = document.createElement("span");
+  actions.className = "row-actions";
   for (const b of buttons) {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -293,8 +305,9 @@ function actionButtonRow(id, detailHtml, buttons) {
         btn.disabled = !!b.disabled;
       }
     });
-    row.appendChild(btn);
+    actions.appendChild(btn);
   }
+  row.appendChild(actions);
   row.appendChild(status);
   return row;
 }
