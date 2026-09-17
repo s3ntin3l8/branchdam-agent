@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.12.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.11.0...v1.12.0) (2026-09-17)
+
+
+### Features
+
+* **ui,tray:** add on-demand "Check for updates now" button ([#233](https://github.com/s3ntin3l8/branchdam-agent/issues/233)) ([e2f20be](https://github.com/s3ntin3l8/branchdam-agent/commit/e2f20bec8852faee406f10e92119d32efa0c00c1))
+* **ui:** adopt server's semantic style tokens and fix field alignment ([#230](https://github.com/s3ntin3l8/branchdam-agent/issues/230)) ([f7baffb](https://github.com/s3ntin3l8/branchdam-agent/commit/f7baffb9c7c2ea3efc9da9da3c09f7d91943f1e4))
+* **ui:** hide integration detail settings and status when disabled ([#232](https://github.com/s3ntin3l8/branchdam-agent/issues/232)) ([071db7c](https://github.com/s3ntin3l8/branchdam-agent/commit/071db7c635525029a46c5c2406e3afecf7fbec36))
+* **ui:** structured watch-folders/extensions/path-mappings editors ([#231](https://github.com/s3ntin3l8/branchdam-agent/issues/231)) ([067e593](https://github.com/s3ntin3l8/branchdam-agent/commit/067e59312362cd4816c38da6c9b380adf6778152))
+
 ## [1.11.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.10.0...v1.11.0) (2026-09-16)
 
 
