@@ -667,18 +667,41 @@ const STORAGE_NAMING_FIELDS = [
   {
     key: "ingest.cardRoots",
     label: "Watch folders",
-    get: () => "",
-    placeholder: () => "comma-separated -- current value not shown, enter to replace",
-    list: true,
+    kind: "folderList",
+    get: (sv) => sv.CardRoots ?? [],
+    emptyNote: "No watch folders — card auto-detection is off.",
   },
   {
     key: "ingest.allowedExtensions",
     label: "Allowed extensions",
-    get: (sv) => (sv.AllowedExtensions ?? []).join(", "),
-    list: true,
+    kind: "chipList",
+    get: (sv) => sv.AllowedExtensions ?? [],
   },
-  { key: "ingest.pathTemplate", label: "Naming template", get: (sv) => sv.NamingTemplate },
-  { key: "pathMappings", label: "Path mappings", get: (sv) => sv.PathMappings, requiredNote: requiredUnlessDirectUpload },
+  {
+    key: "ingest.pathTemplate",
+    label: "Naming template",
+    kind: "readonly",
+    get: (sv) => sv.NamingTemplate,
+    // AGENTS.md invariant 17(d): overwritten from the server's handshake
+    // response at tray startup and on every reload whenever the server
+    // returns a non-empty value, which -- per the server's own agent-
+    // handshake handler -- it always does. The overwrite is in-memory
+    // only (an operator's own edit survives in config.yaml but is
+    // shadowed on the very next reload), so editing this field here would
+    // silently "succeed" and then revert.
+    note: "Synced from the branchDAM server on every handshake — local edits do not persist.",
+  },
+  {
+    key: "pathMappings",
+    label: "Path mappings",
+    kind: "pathMappings",
+    get: (sv) => sv.PathMappingEntries ?? [],
+    requiredNote: requiredUnlessDirectUpload,
+    note:
+      "Translates paths this agent writes into the container paths branchDAM sees, before an event is sent. " +
+      "Separate from the server's own Operator Path Rewrites, which resolve references inside project files. " +
+      "If the server has mappings configured for this agent, clearing this list may be re-populated from the server on the next reload.",
+  },
   { key: "integrations.nodeIndexPath", label: "Node index path", get: (sv) => sv.NodeIndexPath, browseFile: ["*.json"] },
 ];
 
@@ -726,13 +749,6 @@ async function saveSetting(key, value, statusEl) {
   }
 }
 
-function splitCommaList(s) {
-  return s
-    .split(",")
-    .map((p) => p.trim())
-    .filter((p) => p.length > 0);
-}
-
 function renderTextField(f, sv) {
   const row = document.createElement("div");
   row.className = "field-row";
@@ -765,27 +781,15 @@ function renderTextField(f, sv) {
   const status = document.createElement("span");
   status.className = "field-status";
 
-  if (f.browseDir || f.browseFile) {
-    const browse = document.createElement("button");
-    browse.type = "button";
-    browse.textContent = "Browse…";
-    browse.addEventListener("click", async () => {
-      const app = getApp();
-      if (!app) return;
-      try {
-        const picked = f.browseDir ? await app.PickDirectory(f.label) : await app.PickFile(f.label, f.browseFile);
-        if (picked) input.value = picked;
-      } catch (err) {
-        setFieldStatus(status, String(err), "error");
-      }
-    });
-    row.appendChild(browse);
-  }
-
-  input.addEventListener("change", () => {
+  // commit is the one save path, called both from a manual edit's "change"
+  // event and from a successful Browse pick -- assigning input.value
+  // programmatically does NOT fire "change" on its own (and clears the
+  // element's dirty flag), so without this explicit call, a Browse pick
+  // used to fill the box visually and then silently never reach
+  // config.yaml unless the operator also typed into the field by hand.
+  function commit() {
     if (f.password && input.value === "") return; // blank means "leave unchanged"
-    const value = f.list ? splitCommaList(input.value) : input.value;
-    saveSetting(f.key, value, status).then((ok) => {
+    saveSetting(f.key, input.value, status).then((ok) => {
       // Only clear a typed secret once it's actually saved -- a rejected
       // save must leave it in the field, or retrying means retyping the
       // whole key from scratch (Hermes review finding on this PR).
@@ -800,10 +804,402 @@ function renderTextField(f, sv) {
         if (f.placeholder) input.placeholder = f.placeholder({ ServerAPIKeySet: true });
       }
     });
-  });
+  }
+
+  if (f.browseDir || f.browseFile) {
+    const browse = document.createElement("button");
+    browse.type = "button";
+    browse.textContent = "Browse…";
+    browse.addEventListener("click", async () => {
+      const app = getApp();
+      if (!app) return;
+      try {
+        const picked = f.browseDir ? await app.PickDirectory(f.label) : await app.PickFile(f.label, f.browseFile);
+        if (picked) {
+          input.value = picked;
+          commit();
+        }
+      } catch (err) {
+        setFieldStatus(status, String(err), "error");
+      }
+    });
+    row.appendChild(browse);
+  }
+
+  input.addEventListener("change", commit);
 
   row.appendChild(status);
   return row;
+}
+
+// fieldNote renders f.note (if present) as a small muted line under a
+// field row -- shared by renderReadOnlyField and renderPathMappingField,
+// both of which carry static explanatory text a bare label can't.
+function fieldNote(text) {
+  const note = document.createElement("p");
+  note.className = "field-note";
+  note.textContent = text;
+  return note;
+}
+
+// renderReadOnlyField renders a field the operator can see but not edit
+// here -- ingest.pathTemplate's own descriptor is the only caller today
+// (see its "note" field for why). readOnly rather than disabled: a
+// disabled input drops out of the accessibility tree and can't be
+// selected/copied, neither of which is true of a value that's merely not
+// editABLE from this window.
+function renderReadOnlyField(f, sv) {
+  const wrap = document.createElement("div");
+
+  const row = document.createElement("div");
+  row.className = "field-row";
+  const label = document.createElement("label");
+  label.textContent = f.label;
+  row.appendChild(label);
+  const input = document.createElement("input");
+  input.type = "text";
+  input.readOnly = true;
+  input.className = "readonly";
+  input.value = f.get(sv) ?? "";
+  row.appendChild(input);
+  wrap.appendChild(row);
+
+  if (f.note) wrap.appendChild(fieldNote(f.note));
+  return wrap;
+}
+
+// renderFolderListField backs "Watch folders" (ingest.cardRoots): a
+// repeatable single-directory picker rather than a comma-separated text
+// box with no way to see what's configured. Wails v2 has no multi-select
+// directory dialog, so "pick one folder, repeat" is the design here, not
+// a fallback -- each row is still a plain text input too (not read-only),
+// since cardRoots also supports ${VAR} expansion (e.g. "/media/${USER}"),
+// a value a directory picker can never produce.
+function renderFolderListField(f, sv) {
+  const wrap = document.createElement("div");
+  const rows = document.createElement("div");
+  wrap.appendChild(rows);
+
+  let values = [...(f.get(sv) ?? [])];
+  const status = document.createElement("span");
+  status.className = "field-status";
+
+  function commit() {
+    saveSetting(
+      f.key,
+      values.map((v) => v.trim()).filter((v) => v.length > 0),
+      status,
+    );
+  }
+
+  function render() {
+    rows.innerHTML = "";
+
+    if (values.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = f.emptyNote ?? "";
+      rows.appendChild(empty);
+    }
+
+    values.forEach((val, i) => {
+      const row = document.createElement("div");
+      row.className = "field-row";
+      const label = document.createElement("label");
+      label.textContent = i === 0 ? f.label : "";
+      row.appendChild(label);
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = val;
+      input.addEventListener("change", () => {
+        values[i] = input.value;
+        commit();
+      });
+      row.appendChild(input);
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => {
+        values.splice(i, 1);
+        render();
+        commit();
+      });
+      row.appendChild(remove);
+
+      if (i === values.length - 1) row.appendChild(status);
+      rows.appendChild(row);
+    });
+
+    const addRow = document.createElement("div");
+    addRow.className = "field-row";
+    const addLabel = document.createElement("label");
+    addLabel.textContent = values.length === 0 ? f.label : "";
+    addRow.appendChild(addLabel);
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.textContent = "Add folder…";
+    addBtn.addEventListener("click", async () => {
+      const app = getApp();
+      if (!app) return;
+      try {
+        const picked = await app.PickDirectory(f.label);
+        if (picked) {
+          values.push(picked);
+          render();
+          commit();
+        }
+      } catch (err) {
+        setFieldStatus(status, String(err), "error");
+      }
+    });
+    addRow.appendChild(addBtn);
+    if (values.length === 0) addRow.appendChild(status);
+    rows.appendChild(addRow);
+  }
+
+  render();
+  return wrap;
+}
+
+// renderChipListField backs "Allowed extensions": removable chips plus a
+// free-text input that commits a token on Enter, comma, or blur, saving
+// through the same SetStringSlice wire path the old comma-separated
+// input used. Client-side normalization (lowercased, leading dot added if
+// missing) mirrors the server-side check in
+// validateStringSliceChange/splitCommaExtensions.
+function renderChipListField(f, sv) {
+  const row = document.createElement("div");
+  row.className = "field-row";
+
+  const label = document.createElement("label");
+  label.textContent = f.label;
+  row.appendChild(label);
+
+  const chipBox = document.createElement("div");
+  chipBox.className = "chip-box";
+  row.appendChild(chipBox);
+
+  const status = document.createElement("span");
+  status.className = "field-status";
+  row.appendChild(status);
+
+  // normalizeExtension mirrors the server-side rule (splitCommaExtensions
+  // / validateStringSliceChange's own leading-dot check): lowercase, with
+  // a leading dot added if missing. Applied to the LOADED values too, not
+  // just newly-typed ones (Hermes review finding on the PR that added
+  // this editor) -- a dotless extension hand-written into config.yaml
+  // would otherwise render as a chip, then fail the very next save (the
+  // whole array re-sent through SetStringSlice, which rejects it) with no
+  // way to tell from the chip alone which entry was the problem.
+  function normalizeExtension(v) {
+    v = v.trim().toLowerCase();
+    if (v && !v.startsWith(".")) v = "." + v;
+    return v;
+  }
+
+  let values = [...new Set((f.get(sv) ?? []).map(normalizeExtension).filter(Boolean))];
+
+  function commit() {
+    saveSetting(f.key, values, status);
+  }
+
+  function render() {
+    chipBox.innerHTML = "";
+    values.forEach((val, i) => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.textContent = val;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", `Remove ${val}`);
+      remove.addEventListener("click", () => {
+        values.splice(i, 1);
+        render();
+        commit();
+      });
+      chip.appendChild(remove);
+      chipBox.appendChild(chip);
+    });
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = values.length === 0 ? "e.g. .jpg" : "Add…";
+    function commitToken() {
+      const v = normalizeExtension(input.value);
+      input.value = "";
+      if (!v) return;
+      if (!values.includes(v)) {
+        values.push(v);
+        render();
+        commit();
+      }
+    }
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === ",") {
+        e.preventDefault();
+        commitToken();
+      }
+    });
+    input.addEventListener("blur", commitToken);
+    chipBox.appendChild(input);
+  }
+
+  render();
+  return row;
+}
+
+// renderPathMappingField backs "Path mappings": a structured from->to row
+// editor saving through the dedicated POST /api/settings/path-mappings
+// route (App.SetPathMappings) rather than the comma/colon string format
+// (parsePathMappings), which is lossy for any path containing a comma --
+// exactly the kind of path a structured editor makes easier to produce.
+function renderPathMappingField(f, sv) {
+  const wrap = document.createElement("div");
+  const rows = document.createElement("div");
+  wrap.appendChild(rows);
+
+  // PathMappingEntry (internal/tray/settings.go) carries explicit lowercase
+  // camelCase json tags -- unlike most of SettingsView, which is
+  // untagged and serializes under its exact (capitalized) Go field
+  // names -- because this same shape doubles as the path-mappings route's
+  // request body. Read/write "workstationPath"/"containerPath" here to
+  // match the wire shape exactly, not "WorkstationPath"/"ContainerPath"
+  // the way every other field on this page does.
+  let entries = (f.get(sv) ?? []).map((e) => ({ ws: e.workstationPath, cp: e.containerPath }));
+  const status = document.createElement("span");
+  status.className = "field-status";
+
+  async function commit() {
+    const app = getApp();
+    if (!app) return;
+    const payload = entries
+      .map((e) => ({ workstationPath: e.ws.trim(), containerPath: e.cp.trim() }))
+      .filter((e) => e.workstationPath && e.containerPath);
+    setFieldStatus(status, "Saving…");
+    try {
+      const sv2 = JSON.parse(await app.SetPathMappings(payload));
+      setFieldStatus(status, "Saved", "saved");
+      // The server handshake can re-supply mappings on this same reload
+      // whenever the list we just sent ends up empty
+      // (applyServerPathMappings, cmd/branchdam-agent/settings.go) -- only
+      // rebuild from the response (and only re-render) when it actually
+      // diverges from what was sent. Comparing against payload (not the
+      // raw, possibly-still-being-typed entries) matters two ways: an
+      // in-progress row with one side still blank was filtered OUT of
+      // payload, so comparing against unfiltered entries would ALWAYS
+      // read as "changed" and wipe that row out from under the operator
+      // on every keystroke's blur; and a no-op save (nothing to
+      // reconcile) must leave the DOM alone so a mid-edit neighboring row
+      // never loses focus.
+      const returned = (sv2.PathMappingEntries ?? []).map((e) => ({ workstationPath: e.workstationPath, containerPath: e.containerPath }));
+      if (JSON.stringify(returned) !== JSON.stringify(payload)) {
+        entries = returned.map((e) => ({ ws: e.workstationPath, cp: e.containerPath }));
+        render();
+        setFieldStatus(status, "The branchDAM server re-supplied these on reload", "saved");
+      }
+    } catch (err) {
+      setFieldStatus(status, String(err), "error");
+    }
+  }
+
+  function render() {
+    rows.innerHTML = "";
+
+    entries.forEach((entry, i) => {
+      const row = document.createElement("div");
+      row.className = "field-row";
+      const label = document.createElement("label");
+      label.textContent = i === 0 ? f.label : "";
+      row.appendChild(label);
+      if (i === 0 && (f.required || f.requiredNote)) {
+        const marker = document.createElement("span");
+        marker.className = "req";
+        marker.title = f.requiredNote ?? "required";
+        marker.textContent = "*";
+        row.appendChild(marker);
+      }
+
+      const pair = document.createElement("div");
+      pair.className = "mapping-pair";
+      const ws = document.createElement("input");
+      ws.type = "text";
+      ws.placeholder = "Workstation path";
+      ws.value = entry.ws;
+      ws.addEventListener("change", () => {
+        entry.ws = ws.value;
+        commit();
+      });
+      const cp = document.createElement("input");
+      cp.type = "text";
+      cp.placeholder = "Container path";
+      cp.value = entry.cp;
+      cp.addEventListener("change", () => {
+        entry.cp = cp.value;
+        commit();
+      });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => {
+        entries.splice(i, 1);
+        render();
+        commit();
+      });
+      pair.append(ws, cp, remove);
+      row.appendChild(pair);
+
+      if (i === entries.length - 1) row.appendChild(status);
+      rows.appendChild(row);
+    });
+
+    const addRow = document.createElement("div");
+    addRow.className = "field-row";
+    const addLabel = document.createElement("label");
+    addLabel.textContent = entries.length === 0 ? f.label : "";
+    addRow.appendChild(addLabel);
+    if (entries.length === 0 && (f.required || f.requiredNote)) {
+      const marker = document.createElement("span");
+      marker.className = "req";
+      marker.title = f.requiredNote ?? "required";
+      marker.textContent = "*";
+      addRow.appendChild(marker);
+    }
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.textContent = "Add mapping";
+    addBtn.addEventListener("click", () => {
+      entries.push({ ws: "", cp: "" });
+      render();
+    });
+    addRow.appendChild(addBtn);
+    if (entries.length === 0) addRow.appendChild(status);
+    rows.appendChild(addRow);
+  }
+
+  render();
+  if (f.note) wrap.appendChild(fieldNote(f.note));
+  return wrap;
+}
+
+// renderStorageField dispatches STORAGE_NAMING_FIELDS entries by f.kind --
+// most fields have no kind and fall through to the plain renderTextField,
+// same as before this function existed.
+function renderStorageField(f, sv) {
+  switch (f.kind) {
+    case "folderList":
+      return renderFolderListField(f, sv);
+    case "chipList":
+      return renderChipListField(f, sv);
+    case "pathMappings":
+      return renderPathMappingField(f, sv);
+    case "readonly":
+      return renderReadOnlyField(f, sv);
+    default:
+      return renderTextField(f, sv);
+  }
 }
 
 function renderCheckboxField(f, sv) {
@@ -925,6 +1321,24 @@ function renderIntegrationBlock(iv) {
   pathRow.appendChild(pathInput);
   const pathStatus = document.createElement("span");
   pathStatus.className = "field-status";
+  // commit is shared between a manual edit's "change" event and a
+  // successful Browse pick, same reasoning as renderTextField's own
+  // commit() -- assigning pathInput.value programmatically doesn't fire
+  // "change" on its own, so a Browse pick used to fill the box visually
+  // and never actually save.
+  async function commit() {
+    if (isResolve && pathInput.value === "") return; // blank means "leave unchanged"
+    const app = getApp();
+    if (!app) return;
+    setFieldStatus(pathStatus, "Saving…");
+    try {
+      await app.SetIntegrationPath(iv.ID, pathInput.value);
+      setFieldStatus(pathStatus, "Saved", "saved");
+      if (isResolve) pathInput.value = "";
+    } catch (err) {
+      setFieldStatus(pathStatus, String(err), "error");
+    }
+  }
   if (!isResolve) {
     const browse = document.createElement("button");
     browse.type = "button";
@@ -941,26 +1355,17 @@ function renderIntegrationBlock(iv) {
         // PromptAndSetIntegrationPath) is gone as of issue #217 -- there
         // is no filtered picker left to match.
         const picked = await app.PickFile(pathLabel.textContent, []);
-        if (picked) pathInput.value = picked;
+        if (picked) {
+          pathInput.value = picked;
+          await commit();
+        }
       } catch (err) {
         setFieldStatus(pathStatus, String(err), "error");
       }
     });
     pathRow.appendChild(browse);
   }
-  pathInput.addEventListener("change", async () => {
-    if (isResolve && pathInput.value === "") return; // blank means "leave unchanged"
-    const app = getApp();
-    if (!app) return;
-    setFieldStatus(pathStatus, "Saving…");
-    try {
-      await app.SetIntegrationPath(iv.ID, pathInput.value);
-      setFieldStatus(pathStatus, "Saved", "saved");
-      if (isResolve) pathInput.value = "";
-    } catch (err) {
-      setFieldStatus(pathStatus, String(err), "error");
-    }
-  });
+  pathInput.addEventListener("change", commit);
   pathRow.appendChild(pathStatus);
   block.appendChild(pathRow);
 
@@ -1040,7 +1445,7 @@ function renderSettingsForm(sv) {
 
   const storageContainer = byId("settings-storage-config");
   storageContainer.innerHTML = "";
-  for (const f of STORAGE_NAMING_FIELDS) storageContainer.appendChild(renderTextField(f, sv));
+  for (const f of STORAGE_NAMING_FIELDS) storageContainer.appendChild(renderStorageField(f, sv));
 
   const behaviorContainer = byId("settings-behavior-config");
   behaviorContainer.innerHTML = "";

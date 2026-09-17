@@ -1771,6 +1771,7 @@ func (fakeSettings) SetStringSlice(_ string, _ []string) error              { re
 func (fakeSettings) SetString(_, _ string) error                            { return nil }
 func (fakeSettings) SetIntegrationPath(_ IntegrationID, _ string) error     { return nil }
 func (fakeSettings) SetIntegrationRewrites(_ IntegrationID, _ string) error { return nil }
+func (fakeSettings) SetPathMappings(_ []PathMappingEntry) error             { return nil }
 func (fakeSettings) Reload() error                                          { return nil }
 func (fakeSettings) OpenConfigFile() error                                  { return nil }
 func (fakeSettings) RevealConfigFolder() error                              { return nil }

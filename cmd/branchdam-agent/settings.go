@@ -172,7 +172,9 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		LocalEditRoot:              cfg.Ingest.LocalEditRoot,
 		NamingTemplate:             cfg.Ingest.PathTemplate,
 		PathMappings:               formatPathMappings(cfg.PathMappings),
+		PathMappingEntries:         toPathMappingEntries(cfg.PathMappings),
 		AllowedExtensions:          cfg.Ingest.AllowedExtensions,
+		CardRoots:                  cfg.Ingest.CardRoots,
 		RestartRequired:            s.restartRequired,
 		NodeIndexPath:              cfg.Integrations.NodeIndexPath,
 		NodeIndexPathSet:           cfg.Integrations.NodeIndexPath != "",
@@ -366,11 +368,78 @@ func (s *configSettings) validateStringSliceChange(key string, v []string) error
 	case "ingest.cardRoots":
 		cfg.Ingest.CardRoots = append([]string(nil), v...)
 	case "ingest.allowedExtensions":
+		// The string form of this same key (validateStringChange, via
+		// splitCommaExtensions) requires a leading dot on every non-empty
+		// extension -- enforce the same rule here so the array wire path
+		// (SetStringSlice, what the chip-list editor uses) can't silently
+		// persist a value ("jpg") the string path would have rejected.
+		for _, ext := range v {
+			if !strings.HasPrefix(ext, ".") || len(ext) == 1 {
+				return fmt.Errorf("extension %q must start with a leading dot (e.g. %q)", ext, "."+strings.TrimPrefix(ext, "."))
+			}
+		}
 		cfg.Ingest.AllowedExtensions = append([]string(nil), v...)
 	default:
 		return fmt.Errorf("settings: %q is not a settable string slice key", key)
 	}
 	return firstValidateProblem(cfg)
+}
+
+// toPathMappingEntries converts a PathMapping slice into the tray-local
+// PathMappingEntry shape the settings API and the Settings window's
+// structured editor both consume -- SettingsView.PathMappingEntries'
+// canonical form, alongside the legacy formatted string PathMappings.
+func toPathMappingEntries(mappings []config.PathMapping) []tray.PathMappingEntry {
+	if len(mappings) == 0 {
+		return nil
+	}
+	out := make([]tray.PathMappingEntry, len(mappings))
+	for i, m := range mappings {
+		out[i] = tray.PathMappingEntry{WorkstationPath: m.WorkstationPath, ContainerPath: m.ContainerPath}
+	}
+	return out
+}
+
+// SetPathMappings replaces the whole pathMappings list -- see
+// tray.Settings.SetPathMappings's own doc comment for why this is a
+// separate method from SetString rather than routing through the
+// "workstationPath:containerPath, ..." string format, which is lossy for
+// a path containing a comma. Trims each field and rejects an entry with
+// either side empty, reusing parsePathMappings' own error wording.
+func (s *configSettings) SetPathMappings(entries []tray.PathMappingEntry) error {
+	mappings := make([]config.PathMapping, 0, len(entries))
+	for _, e := range entries {
+		ws := strings.TrimSpace(e.WorkstationPath)
+		cp := strings.TrimSpace(e.ContainerPath)
+		if ws == "" || cp == "" {
+			return fmt.Errorf("path mapping %q must be in format workstationPath:containerPath", ws+":"+cp)
+		}
+		mappings = append(mappings, config.PathMapping{WorkstationPath: ws, ContainerPath: cp})
+	}
+
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	cfg.PathMappings = mappings
+	if err := firstValidateProblem(cfg); err != nil {
+		return err
+	}
+
+	// mappings is built via make/append above, so it is never nil (even
+	// when entries is empty) -- config.Patch's yaml.Node encoder writes an
+	// empty slice as "[]", not "null", only when it isn't nil. A clear
+	// therefore round-trips on disk as "configured empty," a more honest
+	// representation of "the operator deliberately emptied this" than
+	// "null" (unset). This does NOT change what happens next: reload()
+	// (below) can still re-supply a server-provided value via
+	// applyServerPathMappings, whose own guard (len(cfg.PathMappings) > 0)
+	// treats a nil and an empty-non-nil slice identically -- see that
+	// function's own doc comment, and the Path mappings field's UI note
+	// (app.js) that surfaces this on the very save that triggers it.
+	if err := config.Patch(s.path, map[string]any{"pathMappings": mappings}); err != nil {
+		return fmt.Errorf("save pathMappings: %w", err)
+	}
+	return s.reload()
 }
 
 func firstValidateProblem(cfg config.Config) error {
@@ -486,6 +555,18 @@ func resolveServerConfig(ctx context.Context, cfg *config.Config, configPath str
 // when the agent has none configured yet. This is the single source of truth
 // for the handshake → config path-mapping sync, used by both runTrayCmd and
 // reload. Server wins when client has none; local mappings are never overwritten.
+//
+// "Has none" is a length check (len(cfg.PathMappings) > 0 below), so a nil
+// slice and a deliberately-emptied non-nil one (SetPathMappings clearing
+// the last row) are indistinguishable to this guard -- an operator who
+// clears the list via the Settings window's structured editor will see it
+// re-populated on the very next reload if hs.PathMappings is non-empty
+// for their agent (Hermes review finding on the PR that added
+// SetPathMappings). There is no way to represent "explicitly emptied,
+// don't re-supply" in config.yaml today; that's tracked separately
+// (issue #234 also covers hs.PathMappings itself currently always being
+// empty in practice, since the server doesn't populate it -- which is
+// the only reason this re-supply path doesn't bite today).
 //
 // Trust boundary note: this is intentional trust-of-server, matching the
 // agent's existing trust model for NamingTemplate and other server-pushed

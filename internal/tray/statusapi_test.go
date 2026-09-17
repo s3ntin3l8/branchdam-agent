@@ -123,6 +123,7 @@ func TestAPIRoutesRequireToken(t *testing.T) {
 		{http.MethodPost, "/api/settings"},
 		{http.MethodPost, "/api/settings/integration-path"},
 		{http.MethodPost, "/api/settings/integration-rewrites"},
+		{http.MethodPost, "/api/settings/path-mappings"},
 		{http.MethodPost, "/api/actions/ingest"},
 		{http.MethodPost, "/api/actions/drain"},
 		{http.MethodPost, "/api/actions/prune"},
@@ -130,6 +131,7 @@ func TestAPIRoutesRequireToken(t *testing.T) {
 		{http.MethodPost, "/api/actions/hook-install"},
 		{http.MethodPost, "/api/actions/hook-reveal"},
 		{http.MethodPost, "/api/actions/pause"},
+		{http.MethodPost, "/api/actions/test-connection"},
 	}
 	for _, rt := range routes {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
@@ -229,6 +231,7 @@ type spySettings struct {
 	lastPathVal    string
 	lastRewriteID  IntegrationID
 	lastRewriteVal string
+	lastMappings   []PathMappingEntry
 }
 
 func (s *spySettings) Snapshot() SettingsView { return s.snapshot }
@@ -254,6 +257,10 @@ func (s *spySettings) SetIntegrationPath(id IntegrationID, v string) error {
 }
 func (s *spySettings) SetIntegrationRewrites(id IntegrationID, v string) error {
 	s.lastRewriteID, s.lastRewriteVal = id, v
+	return s.setErr
+}
+func (s *spySettings) SetPathMappings(mappings []PathMappingEntry) error {
+	s.lastMappings = mappings
 	return s.setErr
 }
 func (s *spySettings) Reload() error             { return nil }
@@ -761,6 +768,78 @@ func TestHandleAPISettingsIntegrationRewritesRequiresID(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPISettingsPathMappings(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	want := []PathMappingEntry{{WorkstationPath: `D:\Photos\Archive`, ContainerPath: "/storage/archive"}}
+	body, _ := json.Marshal(pathMappingsSettingsRequest{Mappings: want})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings/path-mappings", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(settings.lastMappings) != 1 || settings.lastMappings[0] != want[0] {
+		t.Errorf("SetPathMappings called with %+v, want %+v", settings.lastMappings, want)
+	}
+}
+
+func TestHandleAPISettingsPathMappingsEmptyArrayClears(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(pathMappingsSettingsRequest{})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings/path-mappings", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	// A nil "mappings" in the request must reach SetPathMappings as a
+	// non-nil empty slice, not nil -- see handleAPISettingsPathMappings'
+	// own doc comment for why the distinction matters downstream.
+	if settings.lastMappings == nil {
+		t.Error("SetPathMappings called with nil, want a non-nil empty slice")
+	}
+	if len(settings.lastMappings) != 0 {
+		t.Errorf("SetPathMappings called with %+v, want empty", settings.lastMappings)
+	}
+}
+
+func TestHandleAPISettingsPathMappingsSurfacesSetterError(t *testing.T) {
+	settings := &spySettings{setErr: errors.New("config problem: pathMappings entry has an empty side")}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(pathMappingsSettingsRequest{Mappings: []PathMappingEntry{{WorkstationPath: "/a"}}})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings/path-mappings", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleAPISettingsPathMappingsNotConfigured(t *testing.T) {
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok"}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(pathMappingsSettingsRequest{})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/settings/path-mappings", body))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
 }
 

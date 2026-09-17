@@ -24,12 +24,35 @@ type SettingsView struct {
 	ServerBaseURL   string
 	ServerAPIKeySet bool
 
-	AgentID           string
-	ArchiveRoot       string
-	LocalEditRoot     string
-	NamingTemplate    string
-	PathMappings      string // formatted as "workstationPath:containerPath, ..."
-	AllowedExtensions []string
+	AgentID       string
+	ArchiveRoot   string
+	LocalEditRoot string
+	// NamingTemplate is overwritten by the branchDAM server's handshake
+	// response on every tray startup/reload whenever the server returns a
+	// non-empty value (cmd/branchdam-agent/settings.go's resolveServerConfig)
+	// -- which, per the server's own agent-handshake handler, it always
+	// does (falling back to naming.DefaultPathTemplate when unset). The
+	// overwrite is in-memory only: an operator's own edit survives in
+	// config.yaml but is shadowed by this field on the very next reload.
+	// See AGENTS.md invariant 17(d). Settings windows render this
+	// read-only rather than editable for that reason.
+	NamingTemplate string
+	// PathMappings is the formatted "workstationPath:containerPath, ..."
+	// display string -- kept for any existing consumer of the flat form.
+	// PathMappingEntries below is the canonical, editable representation;
+	// the two are always computed from the same underlying config value
+	// in the same Snapshot() call, so they can never disagree.
+	PathMappings       string
+	PathMappingEntries []PathMappingEntry
+	AllowedExtensions  []string
+	// CardRoots are the parent directories the ingest engine watches for
+	// newly mounted removable card volumes (config.IngestConfig.CardRoots).
+	// An empty slice means auto-detection is off (AGENTS.md invariant 14's
+	// "empty roots early-returns without starting a [detector]" path), not
+	// "unset" -- there is no separate CardRootsSet companion field the way
+	// ServerAPIKeySet/CatalogPathSet exist for secrets, since there is
+	// nothing here to mask.
+	CardRoots []string
 
 	// RestartRequired is true once a change to a restart-only field
 	// (tray.statusAddr) has been saved but not yet
@@ -95,6 +118,17 @@ type IntegrationView struct {
 	PathRewritesSet bool
 }
 
+// PathMappingEntry is one workstation-path -> container-path translation
+// rule (config.PathMapping's tray-local counterpart). Declared here rather
+// than imported from internal/config: this package is deliberately kept
+// free of a config dependency (SettingsView is plain scalars/slices
+// throughout), and this same type doubles as the request body shape for
+// the settings API's path-mappings route, one shape in both directions.
+type PathMappingEntry struct {
+	WorkstationPath string `json:"workstationPath"`
+	ContainerPath   string `json:"containerPath"`
+}
+
 // Integration looks up v's entry for id by ID, never by slice position --
 // a future integration (lrcat #47, applephotos #46) could register in any
 // order relative to another. ok is false if the implementation didn't
@@ -143,6 +177,16 @@ type Settings interface {
 	// the given integration. Only meaningful for integrations that have a
 	// pathRewrites config field (Resolve).
 	SetIntegrationRewrites(id IntegrationID, value string) error
+
+	// SetPathMappings replaces the whole pathMappings list with mappings,
+	// a separate method from SetString for the same reason
+	// SetIntegrationRewrites is one: mappings parse into a structured
+	// value, and the "workstationPath:containerPath, ..." comma/colon
+	// string form SetString("pathMappings", ...) still accepts is lossy
+	// for any path that itself contains a comma. An empty (or nil)
+	// mappings clears the list -- SetString("pathMappings", "") already
+	// allows that, so this does too.
+	SetPathMappings(mappings []PathMappingEntry) error
 
 	// Reload re-reads config.yaml from disk and reconfigures the running
 	// tray -- the same path a hand-edit followed by "Reload config" takes,

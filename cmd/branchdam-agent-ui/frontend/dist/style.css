@@ -262,6 +262,96 @@ ul { margin: 4px 0; padding-left: 18px; }
   color: var(--fg);
 }
 
+/* A readonly text field (renderReadOnlyField, e.g. Naming template) looks
+   like a normal .field-row input but visually flags that it can't be
+   edited from here -- readOnly rather than disabled, so the value stays
+   selectable/copyable and in the accessibility tree. */
+.field-row > input.readonly {
+  color: var(--muted);
+  background: var(--surface-sunken);
+  cursor: default;
+}
+
+/* fieldNote's small muted line under a field row (renderReadOnlyField's
+   "synced from the server" note, renderPathMappingField's "separate from
+   Operator Path Rewrites" note). */
+.field-note {
+  margin: 2px 0 8px var(--field-label-w);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* renderChipListField's token editor: existing values render as pill-like
+   chips with their own remove button, followed by a borderless text input
+   that grows to fill the rest of the "input" column. */
+.field-row > .chip-box {
+  grid-column: input;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.chip-box .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--sel);
+  border-radius: 999px;
+  padding: 1px 4px 1px 8px;
+  font-size: 12px;
+}
+.chip-box .chip button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.chip-box input[type="text"] {
+  flex: 1;
+  min-width: 60px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 2px 0;
+}
+.chip-box input[type="text"]:focus { outline: none; }
+
+/* renderPathMappingField's two-input-plus-button row: spans the "input"
+   and "browse" columns together (a from/to pair plus Remove doesn't fit
+   .field-row's normal single-input-plus-single-button shape). */
+.field-row > .mapping-pair {
+  grid-column: input / span 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mapping-pair input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.mapping-pair button {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 /* [hidden] is load-bearing, not decoration: once .field-row declares
    display:grid, the user-agent's own default "[hidden] { display: none }"
    rule loses the cascade to the more specific .field-row rules above, so
@@ -316,5 +406,7 @@ ul { margin: 4px 0; padding-left: 18px; }
    together rather than letting the content column get squeezed first. */
 @media (max-width: 760px) {
   #nav { flex-basis: 116px; }
-  .field-row, .action-row { --field-label-w: 120px; }
+  /* Set on #content (not just .field-row/.action-row) so it also reaches
+     .field-note's margin-left, which isn't a .field-row descendant. */
+  #content { --field-label-w: 120px; }
 }

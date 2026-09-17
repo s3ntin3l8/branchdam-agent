@@ -41,6 +41,27 @@ page`) is gone in the same rethink -- the Wails window is now the only
 settings/status surface; `/`, `/status`, and `/status.json` still serve
 plain JSON for anyone who wants to `curl` them.
 
+**Post-v1.11.0 note (structured list editors):** `cardRoots` and
+`pathMappings` (rows below) went through a second graduation, this time
+from a single comma-separated text input to a real structured editor in
+the Wails window. `SettingsView.CardRoots []string` is new (there was no
+`SettingsView` field for it at all before this -- the comma-separated box's
+own placeholder used to read "current value not shown" for exactly that
+reason); `app.js`'s `renderFolderListField` renders it as a repeatable
+single-folder picker (Wails has no multi-select directory dialog) and
+saves through the existing `SetStringSlice` array wire path, unchanged.
+`pathMappings` gained a parallel structured representation,
+`SettingsView.PathMappingEntries []tray.PathMappingEntry`, alongside the
+existing formatted-string `PathMappings` field (kept, not replaced, so
+nothing that reads the flat string breaks) -- because the comma/colon
+string format `parsePathMappings` reads is lossy for a path containing a
+comma, which a structured row editor makes easier to produce by accident.
+A new `POST /api/settings/path-mappings` route and `configSettings.SetPathMappings`
+(`cmd/branchdam-agent/settings.go`) write the structured form directly;
+`SetString("pathMappings", ...)` still works for anything that still calls
+it. `ingest.allowedExtensions` also moved off its comma-separated box to a
+chip/token editor, still over the same `SetStringSlice` path as before.
+
 **Post-#217 note:** `PromptAndSet`/`PromptAndSetIntegrationPath`/
 `PromptAndSetIntegrationRewrites` and the `SettingsField` enum -- cited
 below as the graduation mechanism for several rows, back when the tray's
