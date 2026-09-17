@@ -30,7 +30,7 @@ func (c *Client) Handshake(ctx context.Context, req HandshakeRequest) (*Handshak
 	if out.PendingRotation != nil {
 		slog.Warn("branchdam: server sent a key-rotation hint; automatic rotation is not implemented, manual re-pairing is required",
 			"newKeyId", out.PendingRotation.KeyID,
-			"previousKeyExpiresAtUnix", out.PendingRotation.PreviousKeyExpiresAt,
+			"previousKeyExpiresAtUnix", out.PendingRotation.PreviousKeyExpiresAtUnix,
 			"apiKeyProvided", out.PendingRotation.APIKey != "",
 		)
 	}

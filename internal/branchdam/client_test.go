@@ -413,8 +413,8 @@ func TestClientHandshakeLogsPendingRotation(t *testing.T) {
 	if resp.PendingRotation.APIKey != "new-plaintext-key" { // pragma: allowlist secret
 		t.Errorf("PendingRotation.APIKey = %q, want new-plaintext-key", resp.PendingRotation.APIKey)
 	}
-	if resp.PendingRotation.PreviousKeyExpiresAt != 1752677600 {
-		t.Errorf("PendingRotation.PreviousKeyExpiresAt = %d, want 1752677600", resp.PendingRotation.PreviousKeyExpiresAt)
+	if resp.PendingRotation.PreviousKeyExpiresAtUnix != 1752677600 {
+		t.Errorf("PendingRotation.PreviousKeyExpiresAtUnix = %d, want 1752677600", resp.PendingRotation.PreviousKeyExpiresAtUnix)
 	}
 
 	out := logs.String()

@@ -230,7 +230,7 @@ type HandshakeResponse struct {
 // pendingRotationDTO in internal/httpapi/routes.go. APIKey is frequently
 // blank in practice -- the server's pairing.Service does not expose a
 // minted key's plaintext outside CreatePairing/RotateKey, so as of
-// ContractVersion the server ships KeyID (and PreviousKeyExpiresAt) alone
+// ContractVersion the server ships KeyID (and PreviousKeyExpiresAtUnix) alone
 // and leaves APIKey empty, expecting the device to re-pair via QR code
 // instead. Treat a blank APIKey as "no usable key was included," not as an
 // error.
@@ -241,9 +241,9 @@ type PendingRotationHint struct {
 	// APIKey is the new key's plaintext. May be blank -- see the type doc
 	// comment above.
 	APIKey string `json:"apiKey"`
-	// PreviousKeyExpiresAt is a Unix timestamp: when the caller's current
+	// PreviousKeyExpiresAtUnix is a Unix timestamp: when the caller's current
 	// key stops working.
-	PreviousKeyExpiresAt int64 `json:"previousKeyExpiresAtUnix"`
+	PreviousKeyExpiresAtUnix int64 `json:"previousKeyExpiresAtUnix"`
 }
 
 // UploadOptions configures headers for streaming upload to POST /api/v1/agent/upload.

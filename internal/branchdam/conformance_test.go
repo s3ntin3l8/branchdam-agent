@@ -219,8 +219,8 @@ func TestConformanceHandshakeRequestResponse(t *testing.T) {
 		// APIKey deliberately left "" here to pin the realistic case --
 		// see PendingRotationHint's doc comment on why it's usually blank.
 		PendingRotation: &PendingRotationHint{
-			KeyID:                7,
-			PreviousKeyExpiresAt: 1752677600,
+			KeyID:                    7,
+			PreviousKeyExpiresAtUnix: 1752677600,
 		},
 	}
 	checkGolden(t, "handshake_response.golden.json", marshalIndent(t, resp))
