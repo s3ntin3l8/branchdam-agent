@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.12.0...v1.12.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* **branchdam-agent:** agent silently drops the server's key-rotation handshake hint ([24d0b2d](https://github.com/s3ntin3l8/branchdam-agent/commit/24d0b2d8f7dbd86eb5a4239eae147f4cf11e3e7a))
+* **branchdam,agent:** agent's handshake pathMappings field is dead code -- server never sends it ([dfacedb](https://github.com/s3ntin3l8/branchdam-agent/commit/dfacedba4c54ad5997d9afcc7376594d3a4d34c2))
+
 ## [1.12.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.11.0...v1.12.0) (2026-09-17)
 
 
