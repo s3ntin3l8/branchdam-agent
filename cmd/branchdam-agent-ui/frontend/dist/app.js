@@ -1143,9 +1143,10 @@ function renderChipListField(f, sv) {
 
 // renderPathMappingField backs "Path mappings": a structured from->to row
 // editor saving through the dedicated POST /api/settings/path-mappings
-// route (App.SetPathMappings) rather than the comma/colon string format
-// (parsePathMappings), which is lossy for any path containing a comma --
-// exactly the kind of path a structured editor makes easier to produce.
+// route (App.SetPathMappings). The old comma/colon string format was
+// retired (issue #236) because it was lossy for any path containing a
+// comma -- exactly the kind of path a structured editor makes easier to
+// produce.
 function renderPathMappingField(f, sv) {
   const wrap = document.createElement("div");
   const rows = document.createElement("div");

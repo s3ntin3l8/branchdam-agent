@@ -52,15 +52,29 @@ single-folder picker (Wails has no multi-select directory dialog) and
 saves through the existing `SetStringSlice` array wire path, unchanged.
 `pathMappings` gained a parallel structured representation,
 `SettingsView.PathMappingEntries []tray.PathMappingEntry`, alongside the
-existing formatted-string `PathMappings` field (kept, not replaced, so
-nothing that reads the flat string breaks) -- because the comma/colon
-string format `parsePathMappings` reads is lossy for a path containing a
-comma, which a structured row editor makes easier to produce by accident.
-A new `POST /api/settings/path-mappings` route and `configSettings.SetPathMappings`
-(`cmd/branchdam-agent/settings.go`) write the structured form directly;
-`SetString("pathMappings", ...)` still works for anything that still calls
-it. `ingest.allowedExtensions` also moved off its comma-separated box to a
-chip/token editor, still over the same `SetStringSlice` path as before.
+existing formatted-string `PathMappings` field (kept at the time, not
+replaced, so nothing that read the flat string broke) -- because the
+comma/colon string format `parsePathMappings` read is lossy for a path
+containing a comma, which a structured row editor makes easier to produce
+by accident. A new `POST /api/settings/path-mappings` route and
+`configSettings.SetPathMappings` (`cmd/branchdam-agent/settings.go`) write
+the structured form directly; `SetString("pathMappings", ...)` still
+worked for anything that still called it. `ingest.allowedExtensions` also
+moved off its comma-separated box to a chip/token editor, still over the
+same `SetStringSlice` path as before.
+
+**Post-issue-#236 note:** the lossy comma/colon string form described
+above was retired entirely, not just superseded. An audit found nothing
+still depended on it -- the Wails window already routed exclusively
+through `SetPathMappings` (per the note above), and the tray's own native
+"Path mappings…" menu item was gone since #211. `parsePathMappings`,
+`formatPathMappings`, the `"pathMappings"` case in
+`validateStringChange`/`patchValueForStringKey`
+(`cmd/branchdam-agent/settings.go`), and `SettingsView.PathMappings`
+(`internal/tray/settings.go`) are all removed. `pathMappings` now has
+exactly one write path: `SetPathMappings` /
+`POST /api/settings/path-mappings`; `SetString("pathMappings", ...)` is
+rejected the same way any other unrecognized string key is.
 
 **Post-#217 note:** `PromptAndSet`/`PromptAndSetIntegrationPath`/
 `PromptAndSetIntegrationRewrites` and the `SettingsField` enum -- cited

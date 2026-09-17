@@ -37,12 +37,11 @@ type SettingsView struct {
 	// See AGENTS.md invariant 17(d). Settings windows render this
 	// read-only rather than editable for that reason.
 	NamingTemplate string
-	// PathMappings is the formatted "workstationPath:containerPath, ..."
-	// display string -- kept for any existing consumer of the flat form.
-	// PathMappingEntries below is the canonical, editable representation;
-	// the two are always computed from the same underlying config value
-	// in the same Snapshot() call, so they can never disagree.
-	PathMappings       string
+	// PathMappingEntries is the canonical, editable representation of
+	// pathMappings -- the "workstationPath:containerPath, ..." comma/colon
+	// string format was retired (issue #236): it silently corrupted any
+	// path containing a comma, and every consumer (the Wails Settings
+	// window, this struct) had already moved to the structured form.
 	PathMappingEntries []PathMappingEntry
 	AllowedExtensions  []string
 	// CardRoots are the parent directories the ingest engine watches for
@@ -178,14 +177,11 @@ type Settings interface {
 	// pathRewrites config field (Resolve).
 	SetIntegrationRewrites(id IntegrationID, value string) error
 
-	// SetPathMappings replaces the whole pathMappings list with mappings,
-	// a separate method from SetString for the same reason
-	// SetIntegrationRewrites is one: mappings parse into a structured
-	// value, and the "workstationPath:containerPath, ..." comma/colon
-	// string form SetString("pathMappings", ...) still accepts is lossy
-	// for any path that itself contains a comma. An empty (or nil)
-	// mappings clears the list -- SetString("pathMappings", "") already
-	// allows that, so this does too.
+	// SetPathMappings replaces the whole pathMappings list with mappings --
+	// the only way to set path mappings; SetString("pathMappings", ...)'s
+	// lossy "workstationPath:containerPath, ..." comma/colon string form
+	// was retired (issue #236) because it silently corrupted any path
+	// containing a comma. An empty (or nil) mappings clears the list.
 	SetPathMappings(mappings []PathMappingEntry) error
 
 	// Reload re-reads config.yaml from disk and reconfigures the running

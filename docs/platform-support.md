@@ -203,14 +203,16 @@ unauthenticated and loopback-only, same as before, for anyone who wants to `curl
 **A separate, authenticated `/api/*` surface exists alongside the plain JSON routes above**
 (`internal/tray/statusapi.go`), built for the native app UI (Track 3 of the distribution/UX plan):
 `GET /api/status`, `GET`/`POST /api/settings`, `POST /api/settings/integration-path`,
-`POST /api/settings/integration-rewrites`, and
+`POST /api/settings/integration-rewrites`, `POST /api/settings/path-mappings`, and
 `POST /api/actions/{ingest,drain,prune,sync,hook-install,pause}`. `POST /api/settings`'s value
 selects the setter by JSON type -- boolean, number, string, or array of strings -- so a free-text
-field (server URL, agent ID, the two ingest roots, `pathMappings`, ...) is reachable
-non-interactively via `Settings.SetString`. Per-integration catalog paths and Resolve's path
-rewrites need the two dedicated routes above instead, since a raw dotted key alone can't
-disambiguate `catalogPath` from `databaseUrl`, and rewrites parse into a structured value the
-generic string path never handles. Every request must present `Authorization: Bearer <token>`,
+field (server URL, agent ID, the two ingest roots, ...) is reachable non-interactively via
+`Settings.SetString`. Per-integration catalog paths, Resolve's path rewrites, and `pathMappings`
+need the three dedicated routes above instead: a raw dotted key alone can't disambiguate
+`catalogPath` from `databaseUrl`, and both rewrites and path mappings parse into a structured
+value the generic string path never handles -- `pathMappings` had a comma/colon string form once,
+but it was retired (issue #236) for being lossy on any path containing a comma; the dedicated
+route is now the only way to set it. Every request must present `Authorization: Bearer <token>`,
 where `<token>` is a fresh value `internal/sessiontoken.Generate` writes 0600 beside `agent.log` on
 each tray start (never persisted across restarts, never passed as an argument). The routes are
 registered at all only when the status server's own bind address resolves to loopback -- an
