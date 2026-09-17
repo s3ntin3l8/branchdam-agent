@@ -699,7 +699,8 @@ const STORAGE_NAMING_FIELDS = [
     requiredNote: requiredUnlessDirectUpload,
     note:
       "Translates paths this agent writes into the container paths branchDAM sees, before an event is sent. " +
-      "Separate from the server's own Operator Path Rewrites, which resolve references inside project files.",
+      "Separate from the server's own Operator Path Rewrites, which resolve references inside project files. " +
+      "If the server has mappings configured for this agent, clearing this list may be re-populated from the server on the next reload.",
   },
   { key: "integrations.nodeIndexPath", label: "Node index path", get: (sv) => sv.NodeIndexPath, browseFile: ["*.json"] },
 ];
@@ -984,7 +985,21 @@ function renderChipListField(f, sv) {
   status.className = "field-status";
   row.appendChild(status);
 
-  let values = [...(f.get(sv) ?? [])];
+  // normalizeExtension mirrors the server-side rule (splitCommaExtensions
+  // / validateStringSliceChange's own leading-dot check): lowercase, with
+  // a leading dot added if missing. Applied to the LOADED values too, not
+  // just newly-typed ones (Hermes review finding on the PR that added
+  // this editor) -- a dotless extension hand-written into config.yaml
+  // would otherwise render as a chip, then fail the very next save (the
+  // whole array re-sent through SetStringSlice, which rejects it) with no
+  // way to tell from the chip alone which entry was the problem.
+  function normalizeExtension(v) {
+    v = v.trim().toLowerCase();
+    if (v && !v.startsWith(".")) v = "." + v;
+    return v;
+  }
+
+  let values = [...new Set((f.get(sv) ?? []).map(normalizeExtension).filter(Boolean))];
 
   function commit() {
     saveSetting(f.key, values, status);
@@ -1013,10 +1028,9 @@ function renderChipListField(f, sv) {
     input.type = "text";
     input.placeholder = values.length === 0 ? "e.g. .jpg" : "Add…";
     function commitToken() {
-      let v = input.value.trim().toLowerCase();
-      if (!v) return;
-      if (!v.startsWith(".")) v = "." + v;
+      const v = normalizeExtension(input.value);
       input.value = "";
+      if (!v) return;
       if (!values.includes(v)) {
         values.push(v);
         render();

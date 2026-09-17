@@ -441,11 +441,15 @@ func (s *configSettings) SetPathMappings(entries []tray.PathMappingEntry) error 
 
 	// mappings is built via make/append above, so it is never nil (even
 	// when entries is empty) -- config.Patch's yaml.Node encoder writes an
-	// empty slice as "[]", not "null", only when it isn't nil. An explicit
-	// clear (the operator removing the last row) must round-trip as an
-	// empty list, not accidentally revert to "unset" and let
-	// applyServerPathMappings silently re-supply a server-side value on
-	// the very next reload.
+	// empty slice as "[]", not "null", only when it isn't nil. A clear
+	// therefore round-trips on disk as "configured empty," a more honest
+	// representation of "the operator deliberately emptied this" than
+	// "null" (unset). This does NOT change what happens next: reload()
+	// (below) can still re-supply a server-provided value via
+	// applyServerPathMappings, whose own guard (len(cfg.PathMappings) > 0)
+	// treats a nil and an empty-non-nil slice identically -- see that
+	// function's own doc comment, and the Path mappings field's UI note
+	// (app.js) that surfaces this on the very save that triggers it.
 	if err := config.Patch(s.path, map[string]any{"pathMappings": mappings}); err != nil {
 		return fmt.Errorf("save pathMappings: %w", err)
 	}
@@ -565,6 +569,18 @@ func resolveServerConfig(ctx context.Context, cfg *config.Config, configPath str
 // when the agent has none configured yet. This is the single source of truth
 // for the handshake → config path-mapping sync, used by both runTrayCmd and
 // reload. Server wins when client has none; local mappings are never overwritten.
+//
+// "Has none" is a length check (len(cfg.PathMappings) > 0 below), so a nil
+// slice and a deliberately-emptied non-nil one (SetPathMappings clearing
+// the last row) are indistinguishable to this guard -- an operator who
+// clears the list via the Settings window's structured editor will see it
+// re-populated on the very next reload if hs.PathMappings is non-empty
+// for their agent (Hermes review finding on the PR that added
+// SetPathMappings). There is no way to represent "explicitly emptied,
+// don't re-supply" in config.yaml today; that's tracked separately
+// (issue #234 also covers hs.PathMappings itself currently always being
+// empty in practice, since the server doesn't populate it -- which is
+// the only reason this re-supply path doesn't bite today).
 //
 // Trust boundary note: this is intentional trust-of-server, matching the
 // agent's existing trust model for NamingTemplate and other server-pushed
