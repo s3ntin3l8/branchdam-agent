@@ -56,7 +56,9 @@ func runInitCmd(args []string) int {
 
 	fmt.Printf("branchdam-agent init: wrote a starter config to %s\n\n", path)
 	fmt.Println("Next steps:")
-	fmt.Println("  1. Edit server.baseUrl, server.apiKey (>= 32 chars), and agentId.")
+	fmt.Println("  1. Set server.baseUrl and agentId, plus one of:")
+	fmt.Println("       a. server.apiKey (>= 32 chars), for the shared-secret path; or")
+	fmt.Println("       b. branchdam-agent pair <branchdam-url>, for Companion Pairing (recommended for new deployments).")
 	fmt.Println("  2. Set ingest.archiveRoot and ingest.localEditRoot to real paths, and add a")
 	fmt.Println("     pathMappings entry covering ingest.archiveRoot.")
 	fmt.Printf("  3. Run: branchdam-agent preflight -config %s\n", path)
