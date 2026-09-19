@@ -54,6 +54,14 @@ func TestPairCmdPersistsCredentials(t *testing.T) {
 	if err := os.WriteFile(cfgPath, initial, 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
+	// On Windows, os.WriteFile's mode argument is ignored -- the file
+	// would land at 0666 (group/world readable) and refuseIfPermsLeaky
+	// would correctly refuse, breaking this happy-path test. t.Chmod
+	// sets the perms portably across Unix and Windows so the same test
+	// asserts the same invariant on every CI shard.
+	if err := os.Chmod(cfgPath, 0o600); err != nil {
+		t.Fatalf("chmod seed config: %v", err)
+	}
 
 	rawURL := "branchdam://?server=" + urlEscape(t, wantURL) + "&key=" + wantKey + "&agent=" + wantAgent
 	rc := runPairCmd([]string{"-config", cfgPath, rawURL})
@@ -155,6 +163,13 @@ func TestPairCmdRejectsServerRefusal(t *testing.T) {
 	initial := []byte("server:\n  baseUrl: \"https://old.example.com\"\n  apiKey: \"old-working-key-that-must-survive\"\nagentId: \"dev-old\"\n")
 	if err := os.WriteFile(cfgPath, initial, 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
+	}
+	// Same Windows port as the happy-path test: 0o600 in WriteFile is
+	// ignored on Windows, so the perms-refusal would fire BEFORE the
+	// server-refusal we're trying to test. Explicit chmod keeps the
+	// assertion order stable across CI shards.
+	if err := os.Chmod(cfgPath, 0o600); err != nil {
+		t.Fatalf("chmod seed: %v", err)
 	}
 	originalBytes, err := os.ReadFile(cfgPath)
 	if err != nil {
