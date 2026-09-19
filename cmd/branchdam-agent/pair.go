@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -107,7 +108,18 @@ func runPairCmd(args []string) int {
 // posture in internal/config.Load's checkConfigFilePerms (called by
 // every config-touching subcommand) but refuses rather than warns, since
 // the user's intent on `pair` is specifically to embed a secret.
+//
+// Windows is exempt: per the same rationale internal/config's
+// checkFilePermissions documents (issue #126), Windows exposes ACLs
+// rather than POSIX group/world mode bits, so any Stat-derived mask
+// would always trip 0o077 on a writable file and reject every legitimate
+// `pair` invocation. The "embed a secret" risk doesn't apply on Windows
+// the same way -- ACLs are the right surface, and this CLI doesn't own
+// ACL management. Skip silently rather than fail-closed.
 func refuseIfPermsLeaky(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	fi, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
