@@ -94,6 +94,19 @@ func ParsePairingURL(rawURL string) (PairingURL, error) {
 		return PairingURL{}, fmt.Errorf("%w: missing required field (server=%q key=%q agent=%q)", ErrPairingURLInvalid, server, redactKey(key), agent)
 	}
 
+	// Validate the server URL the same way client.New's constructor
+	// would: bad scheme, cleartext on a non-loopback host, or otherwise
+	// unparseable. Without this, a malformed server field would slip
+	// through to client.New and panic via validateBaseURL, leaving a
+	// Go-stack-trace error instead of the typed ErrPairingURLInvalid
+	// every other branch of this function deliberately produces. The
+	// pairing-URL parser is a user-input gate -- New is a programmer-
+	// input gate -- and the same allow/deny rule must apply at both
+	// without forcing a panic at the user-input gate.
+	if err := ValidateServerURL(server); err != nil {
+		return PairingURL{}, fmt.Errorf("%w: %v", ErrPairingURLInvalid, err)
+	}
+
 	return PairingURL{Server: server, Key: key, Agent: agent}, nil
 }
 
@@ -107,6 +120,17 @@ func ParsePairingURL(rawURL string) (PairingURL, error) {
 // match each "field=value" by the leading field name. This is best-
 // effort -- the canonical form is query-style and any new operator
 // onboarding today will be using the query form anyway.
+//
+// Known truncation: a key value containing an unencoded "/" is split
+// at that slash and the trailing segment is parsed as the next field
+// (and silently dropped if it's not `agent=...`). The Companion
+// Pairing mint path (internal/pairing/service.go's mintAPIKey) uses
+// base64.URLEncoding without padding, so a generated key never
+// contains "/"; only operator-typed values can. Since the legacy form
+// is supported solely for backward compatibility with already-issued
+// QR codes, and the canonical query form is what new QR codes use,
+// accepting this best-effort behavior keeps the parser simple rather
+// than adding a "did the server actually emit this?" disambiguation.
 func parseLegacyPairingURL(body string) url.Values {
 	if body == "" {
 		return nil
@@ -136,17 +160,61 @@ func parseLegacyPairingURL(body string) url.Values {
 	return v
 }
 
-// safePrefix returns the first ~40 chars of s, replacing any CR/LF with
-// their visible escape so a maliciously-crafted URL can't smuggle a
-// forged log line (CWE-117). Mirrors branchdam-server's
-// internal/auth.sanitizeForLog posture.
+// safePrefix returns the first ~40 chars of s for inclusion in an error
+// message, replacing any CR/LF with their visible escape (so a
+// maliciously-crafted URL can't smuggle a forged log line, CWE-117) AND
+// redacting any `key=<value>` segment so a typo'd scheme (e.g.
+// `branchdm://`) doesn't echo the plaintext API key into stderr /
+// operator.log. Mirrors branchdam-server's sanitizeForLog posture
+// (CR/LF) plus the redactKey posture the rest of this file already
+// applies to parsed values.
+//
+// If s starts with branchdam:// but the post-scheme body is not a
+// `?...` query (i.e. the legacy-fragment form, or just garbage), the
+// entire body is treated as potentially secret and replaced with
+// <elided> -- covers the case where an operator pastes a bare key
+// value (no key= label) after the scheme, which the parser would
+// otherwise echo verbatim into the error message.
 func safePrefix(s string) string {
-	const max = 40
+	// 64 (rather than the previous 40) so the full <elided> marker
+	// survives a worst-case truncation -- e.g. an input like
+	// `branchdm://?server=example.com&key=<plaintext>` truncates
+	// cleanly to `...key=<elided>` instead of cutting mid-token.
+	const max = 64
+	s = redactKeyInRaw(s)
+	if strings.HasPrefix(s, "branchdam://") {
+		body := strings.TrimPrefix(s, "branchdam://")
+		if !strings.HasPrefix(body, "?") {
+			s = "branchdam://" + "<elided>"
+		}
+	}
 	if len(s) > max {
 		s = s[:max] + "..."
 	}
 	s = strings.ReplaceAll(s, "\r", `\r`)
 	return strings.ReplaceAll(s, "\n", `\n`)
+}
+
+// redactKeyInRaw replaces any `key=<value>` segment in a raw URL string
+// with `key=<elided>`. The match stops at the next `&` (query-style
+// boundary) or end-of-string; both forms the server and the legacy
+// fragment form use the same `key=` field name, so a single regex-free
+// scan covers them. Empty `key=` (followed immediately by `&` or EOF)
+// passes through -- the empty-key case is already covered by the
+// missing-field branch in ParsePairingURL, so an empty value here
+// doesn't carry secret material.
+func redactKeyInRaw(s string) string {
+	const marker = "key="
+	idx := strings.Index(s, marker)
+	if idx < 0 {
+		return s
+	}
+	start := idx + len(marker)
+	end := start
+	for end < len(s) && s[end] != '&' {
+		end++
+	}
+	return s[:start] + "<elided>" + s[end:]
 }
 
 // redactKey returns "<elided>" for any non-empty key, so error messages
