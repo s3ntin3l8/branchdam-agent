@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.13.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.12.1...v1.13.0) (2026-09-19)
+
+
+### Features
+
+* **agent:** branchdam-agent pair &lt;url&gt; persists paired credentials ([5d5f85f](https://github.com/s3ntin3l8/branchdam-agent/commit/5d5f85f02a556902c9686d923f60818a162e3055))
+* **agent:** branchdam-agent pair &lt;url&gt; persists paired credentials ([#243](https://github.com/s3ntin3l8/branchdam-agent/issues/243)) ([64c1541](https://github.com/s3ntin3l8/branchdam-agent/commit/64c154129785b0e946ed0df66bdbcfbc2513e76b))
+
 ## [1.12.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.12.0...v1.12.1) (2026-09-17)
 
 
