@@ -101,13 +101,20 @@ func TestPairCmdPersistsCredentials(t *testing.T) {
 
 	// Mode must be 0600 -- config.Patch promises this, but a regression
 	// in the atomic-rename path that widened perms would put a plaintext
-	// API key into a leaky file. Verify directly via os.Stat.
+	// API key into a leaky file. Verify directly via os.Stat. Skip on
+	// Windows where the perms-translation gap means FileInfo.Mode().Perm()
+	// always reports 0666 regardless of what config.Patch wrote; ACLs
+	// are the right surface there, and config.Patch's atomic temp+rename
+	// still ran (the post-rename file is reachable, owned by the same
+	// user, and writable).
 	fi, err := os.Stat(cfgPath)
 	if err != nil {
 		t.Fatalf("stat config: %v", err)
 	}
-	if mode := fi.Mode().Perm(); mode != 0o600 {
-		t.Errorf("config mode = %#o, want 0600", mode)
+	if runtime.GOOS != "windows" {
+		if mode := fi.Mode().Perm(); mode != 0o600 {
+			t.Errorf("config mode = %#o, want 0600", mode)
+		}
 	}
 }
 
