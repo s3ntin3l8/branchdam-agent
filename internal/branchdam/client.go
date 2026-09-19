@@ -93,14 +93,22 @@ func New(baseURL, apiKey string, opts ...Option) *Client {
 	return c
 }
 
-// validateBaseURL is New's parse-and-refuse gate. It is intentionally a
-// thin wrapper over net/url's Parse + a single allow/deny rule -- the
+// ValidateServerURL is the parse-and-refuse gate that both New's
+// panic-on-programmer-error path and ParsePairingURL's
+// typed-error-on-user-input path consult. It is intentionally a thin
+// wrapper over net/url's Parse + a single allow/deny rule -- the
 // exhaustive BaseURL policy (trailing slash, scheme allowlist,
 // loopback carve-out) lives in internal/config.checkServerBaseURL and
 // runs on every Load; this gate only repeats the cleartext-non-loopback
 // half, which is the one an attacker can weaponize even when a process
-// skips Load entirely (e.g. an embedded test harness).
-func validateBaseURL(raw string) error {
+// skips Load entirely (e.g. an embedded test harness) or pastes a
+// pairing URL with a malformed server field (the `pair` CLI).
+//
+// Exported so ParsePairingURL can return a typed ErrPairingURLInvalid
+// rather than panicking through New's contract; New itself still
+// panics on a non-nil result because a Client built directly with a bad
+// URL is a programmer error, not a user-input condition.
+func ValidateServerURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("server.baseUrl %q is not a valid URL: %w", raw, err)
@@ -112,6 +120,14 @@ func validateBaseURL(raw string) error {
 		return fmt.Errorf("server.baseUrl %q uses cleartext http on a non-loopback host; the X-API-Key shared secret must not be sent over a cleartext wire", raw)
 	}
 	return nil
+}
+
+// validateBaseURL is New's contract-named alias for ValidateServerURL,
+// kept so the panic message in New reads naturally. New panics on a
+// non-nil result; callers wanting typed errors should call
+// ValidateServerURL directly.
+func validateBaseURL(raw string) error {
+	return ValidateServerURL(raw)
 }
 
 // isLoopbackHost reports whether h is one of the loopback host names an
