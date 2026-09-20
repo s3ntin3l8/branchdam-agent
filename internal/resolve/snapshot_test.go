@@ -102,6 +102,8 @@ func TestSnapshotEmptyDatabaseSubmitsAuthoritativeEmptySnapshot(t *testing.T) {
 	s := &Syncer{
 		DB: db, AgentID: "agent-a", DatabaseURL: "file:/tmp/resolve.db",
 		UseSnapshot: true, SnapshotClient: client,
+		LegacyTimelineNodeUUIDs: []string{"legacy-node"},
+		LegacyTimelineIDs:       []string{"old-timeline"},
 		OnSuccessfulSnapshot: func(scope string) error {
 			if scope == wantScope {
 				saves++
@@ -118,6 +120,13 @@ func TestSnapshotEmptyDatabaseSubmitsAuthoritativeEmptySnapshot(t *testing.T) {
 	}
 	if len(client.calls[0].Timelines) != 0 || len(client.calls[0].Memberships) != 0 {
 		t.Fatalf("empty database snapshot = %+v", client.calls[0])
+	}
+	legacyFound := false
+	for _, id := range client.calls[0].LegacyTimelineNodeUUIDs {
+		legacyFound = legacyFound || id == "legacy-node"
+	}
+	if len(client.calls[0].LegacyTimelineNodeUUIDs) != 2 || !legacyFound {
+		t.Fatalf("empty database migration companions = %+v", client.calls[0].LegacyTimelineNodeUUIDs)
 	}
 	if stats.ClipsFound != 0 || stats.VirtualNodes != 0 || stats.Emitted != 0 || saves != 1 {
 		t.Fatalf("empty database result: stats=%+v saves=%d", stats, saves)
