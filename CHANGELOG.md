@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.14.0...v1.14.1) (2026-09-20)
+
+
+### Bug Fixes
+
+* repair macOS DMG build ([843c19b](https://github.com/s3ntin3l8/branchdam-agent/commit/843c19b03738a3427f570d7334e19ecd061fe18b))
+
 ## [1.14.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.13.0...v1.14.0) (2026-09-20)
 
 
