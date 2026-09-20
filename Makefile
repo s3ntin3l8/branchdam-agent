@@ -160,11 +160,11 @@ build-darwin-dmg: build-darwin-app ## Build styled .dmg installer -- macOS host 
 	  --volname "branchDAM Agent" \
 	  --volicon dist/dmg-root/branchdam-agent.app/Contents/Resources/icon.icns \
 	  --background dist/background.png \
-	  --icon "branchdam-agent.app" 160 280 \
+	  --icon "branchdam-agent.app" 180 320 \
 	  --icon-size 128 \
-	  --app-drop-link 500 280 \
+	  --app-drop-link 580 320 \
 	  --window-pos 200 120 \
-	  --window-size 660 400 \
+	  --window-size 760 480 \
 	  "dist/branchdam-agent-$(VERSION)-darwin-arm64.dmg" \
 	  dist/dmg-root/
 

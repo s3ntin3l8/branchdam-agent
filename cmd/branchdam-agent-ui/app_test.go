@@ -432,6 +432,31 @@ func TestCheckForUpdatePostsToActionRoute(t *testing.T) {
 	}
 }
 
+func TestApplyUpdatePostsToActionRoute(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/actions/apply-update" {
+			t.Errorf("method/path = %s %s, want POST /api/actions/apply-update", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"started":true,"status":{"Phase":"downloading"}}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	got, err := a.ApplyUpdate()
+	if err != nil {
+		t.Fatalf("ApplyUpdate: %v", err)
+	}
+	if !strings.Contains(got, `"started":true`) {
+		t.Errorf("ApplyUpdate() = %q, want started=true response", got)
+	}
+}
+
 func TestTriggerHookInstallPostsID(t *testing.T) {
 	withTempAgentDir(t)
 	if _, err := sessiontoken.Generate(); err != nil {

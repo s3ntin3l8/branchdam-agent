@@ -663,14 +663,15 @@ pipeline is code-signed or notarized, so that checksum check is the *only* integ
 before a downloaded binary is written to disk.
 
 Notify-and-confirm, never unattended: the tray checks on startup and periodically thereafter
-(`selfUpdate.checkIntervalHours`, default 24h) and shows "Install and restart" once an update is
-found, but nothing downloads or applies until that menu item is clicked (or, on a headless host,
-`branchdam-agent update` is run and confirmed) -- `selfUpdate.enabled` gates whether the binary
-may contact GitHub at all, not whether an update, once found, gets applied automatically; that
-second gate is always a separate, explicit action regardless of this flag. The install refuses
-while an ingest is in flight, for the whole duration of the download and apply, not just at the
-moment the click is handled -- `internal/tray.Runner.TryLockIdle` holds the same gate
-`TriggerIngest` does.
+(`selfUpdate.checkIntervalHours`, default 24h) and exposes "Install and restart" once an update is
+found. The tray menu and the native branchDAM window both offer that action; nothing downloads or
+applies until it is explicitly confirmed (or, on a headless host, `branchdam-agent update` is run
+and confirmed). While an apply is running, the native window shows its phase and any failure
+instead of appearing idle. `selfUpdate.enabled` gates whether the binary may contact GitHub at all,
+not whether an update, once found, gets applied automatically; that second gate is always a
+separate, explicit action regardless of this flag. The install refuses while an ingest is in
+flight, for the whole duration of the download and apply, not just at the moment the click is
+handled -- `internal/tray.Runner.TryLockIdle` holds the same gate `TriggerIngest` does.
 
 **Self-update requires a per-user install location.** Applying writes a replacement binary next
 to the running one, which needs write permission on the containing directory --

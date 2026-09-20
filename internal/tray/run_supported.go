@@ -189,6 +189,7 @@ func Run(
 		quitItem := systray.AddMenuItem("Quit", "Stop the branchDAM agent tray")
 
 		var applying, rollingBack bool
+		var windowRestartRequested bool
 		// drainSkipped/pruneSkipped are set by the drainDoneCh/pruneDoneCh
 		// handlers below when a menu click's TriggerDrain/TriggerPrune call
 		// reported ran=false (a pass was already running, or -- for prune
@@ -200,6 +201,15 @@ func Run(
 		refresh := func() {
 			us := up.Status()
 			st := r.Status(us)
+			// A window-triggered apply runs outside this select loop. Once it
+			// has completed, the updater marks the phase restarting; use the
+			// same orderly systray quit path as the tray menu apply handler so
+			// cmd/branchdam-agent can release the listener and relaunch.
+			if us.Phase == "restarting" && !applying && !rollingBack {
+				outcome = Outcome{RestartRequested: true, AppliedVersion: us.Applied}
+				windowRestartRequested = true
+				return
+			}
 			systray.SetTooltip(FormatTooltip(st))
 			statusItem.SetTitle("Status: " + summarize(st))
 			updateItem.SetTitle("Self-update: " + us.Note())
@@ -314,6 +324,10 @@ func Run(
 			case applying:
 				// Left as "Installing..." by the click handler; don't
 				// stomp it with a stale UpdateFound-driven title.
+			case us.Phase == "failed" && !us.StartedAt.IsZero():
+				installItem.Show()
+				installItem.SetTitle("Install and restart (failed -- see branchDAM window)")
+				installItem.Enable()
 			case us.UpdateFound:
 				installItem.Show()
 				if st.Busy || rollingBack {
@@ -347,6 +361,10 @@ func Run(
 			}
 		}
 		refresh()
+		if windowRestartRequested {
+			systray.Quit()
+			return
+		}
 
 		ticker := time.NewTicker(menuRefreshInterval)
 		defer ticker.Stop()
@@ -691,6 +709,10 @@ func Run(
 				return
 			case <-ticker.C:
 				refresh()
+				if windowRestartRequested {
+					systray.Quit()
+					return
+				}
 			}
 		}
 	}

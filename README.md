@@ -370,8 +370,9 @@ verified.
 Self-update support is compiled into every build; no build tag is required. Checking is **on by
 default** and periodic (`selfUpdate.enabled: false` opts out entirely) but passive -- it's a
 read-only GitHub API call and never downloads or applies anything by itself. Installing is
-always a separate, explicit action: a menu click ("Install and restart") that
-checksum-verifies against the release's `SHA256SUMS.txt`, applies, and restarts the tray.
+always a separate, explicit action: confirm "Install and restart" in either the tray menu or the
+native branchDAM window. The action checksum-verifies against the release's `SHA256SUMS.txt`,
+applies, and restarts the tray.
 Headless hosts (Linux, or a Windows/macOS console-only install) get the same thing via
 `branchdam-agent update -config
 config.yaml [-check] [-yes]`.

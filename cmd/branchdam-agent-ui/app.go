@@ -240,6 +240,18 @@ func (a *App) CheckForUpdate() (string, error) {
 	return string(body), nil
 }
 
+// ApplyUpdate starts an approved self-update through the tray's authenticated
+// loopback API. The action returns immediately; the frontend continues to
+// poll status so the window can show downloading/verification/error phases
+// without blocking its event loop for the duration of the archive transfer.
+func (a *App) ApplyUpdate() (string, error) {
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/apply-update", nil)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
 // TriggerHookInstall installs (or reinstalls) id's render hook right now --
 // POST /api/actions/hook-install's counterpart, mirroring
 // internal/tray/hooksmenu.go's own "Install / update render hook" item.

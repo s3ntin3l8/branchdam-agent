@@ -2,10 +2,45 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/selfupdate"
+	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
+
+func TestRecordApplyErrorPersistsPhaseAndError(t *testing.T) {
+	a := &selfUpdateAgent{enabled: true, st: tray.UpdateStatus{Enabled: true, UpdateFound: true}}
+	want := errors.New("download stalled")
+	a.recordApplyError(want)
+
+	got := a.Status()
+	if got.Phase != updatePhaseFailed {
+		t.Errorf("Phase = %q, want %q", got.Phase, updatePhaseFailed)
+	}
+	if !errors.Is(got.Err, want) {
+		t.Errorf("Err = %v, want %v", got.Err, want)
+	}
+}
+
+func TestTrayUpdateApplierRejectsApplyDuringCheck(t *testing.T) {
+	updater := &selfUpdateAgent{
+		enabled: true,
+		st: tray.UpdateStatus{
+			Enabled:     true,
+			UpdateFound: true,
+			Phase:       updatePhaseChecking,
+		},
+	}
+	applier := &trayUpdateApplier{updater: updater}
+	status, started := applier.StartApply()
+	if started {
+		t.Fatal("started = true, want false while the update check is running")
+	}
+	if status.Err == nil || status.Err.Error() != "self-update: check/apply is already checking" {
+		t.Fatalf("status.Err = %v, want check-in-progress error", status.Err)
+	}
+}
 
 // TestSelfUpdateAgentRollbackAvailableFalseByDefault and
 // TestSelfUpdateAgentRollbackFailsWithoutPrevious both rely on the real
@@ -75,7 +110,7 @@ func TestCheckNowStoresStatusButReportsNotRunOnUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &selfUpdateAgent{enabled: true, up: up, version: "not-semver"}
+	a := &selfUpdateAgent{enabled: true, up: up, version: "not-semver", st: tray.UpdateStatus{Enabled: true}}
 
 	status, ran := a.CheckNow(context.Background())
 	if ran {
@@ -86,6 +121,12 @@ func TestCheckNowStoresStatusButReportsNotRunOnUnavailable(t *testing.T) {
 	}
 	if got := a.Status(); !got.Unavailable {
 		t.Errorf("a.Status() after CheckNow = %+v, want Unavailable=true -- CheckNow must store the result even when ran=false", got)
+	}
+	if got := a.Status(); got.Phase != updatePhaseIdle {
+		t.Errorf("a.Status().Phase = %q, want %q for an unavailable dev build", got.Phase, updatePhaseIdle)
+	}
+	if got := a.Status().Note(); got != "unavailable (not a released build)" {
+		t.Errorf("a.Status().Note() = %q, want unavailable notice", got)
 	}
 }
 
@@ -112,5 +153,19 @@ func TestCheckNowSkipsWhileAnotherCheckRuns(t *testing.T) {
 
 	if _, ran := a.CheckNow(context.Background()); ran {
 		t.Error("ran = true, want false while another check holds checkMu")
+	}
+}
+
+func TestCheckNowSkipsWhileApplyRuns(t *testing.T) {
+	up, err := selfupdate.NewUpdater("owner/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &selfUpdateAgent{enabled: true, up: up, version: "not-semver"}
+	a.applyMu.Lock()
+	defer a.applyMu.Unlock()
+
+	if _, ran := a.CheckNow(context.Background()); ran {
+		t.Error("ran = true, want false while an apply holds applyMu")
 	}
 }

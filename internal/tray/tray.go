@@ -136,9 +136,14 @@ type SelfUpdater interface {
 // "Install and restart" on UpdateFound directly, rather than parsing
 // prose.
 type UpdateStatus struct {
-	Enabled        bool
-	Checked        bool
-	CheckedAt      time.Time
+	Enabled   bool
+	Checked   bool
+	CheckedAt time.Time
+	// Phase describes the active self-update lifecycle. It is deliberately
+	// separate from Note so the native window and tray can render progress
+	// without parsing prose. Empty means the updater has not started a pass.
+	Phase          string
+	StartedAt      time.Time
 	CurrentVersion string
 	LatestVersion  string
 	UpdateFound    bool
@@ -169,6 +174,11 @@ func (u UpdateStatus) Note() string {
 	switch {
 	case !u.Enabled:
 		return "disabled (selfUpdate.enabled: false in config)"
+	case u.Phase != "" && u.Phase != "available" && u.Phase != "idle":
+		if u.Err != nil {
+			return fmt.Sprintf("%s: %v", u.Phase, u.Err)
+		}
+		return u.Phase
 	case u.Applied != "":
 		return fmt.Sprintf("updated to %s -- restarting", u.Applied)
 	case u.Unavailable:

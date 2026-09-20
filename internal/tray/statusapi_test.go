@@ -134,6 +134,7 @@ func TestAPIRoutesRequireToken(t *testing.T) {
 		{http.MethodPost, "/api/actions/pause"},
 		{http.MethodPost, "/api/actions/test-connection"},
 		{http.MethodPost, "/api/actions/check-update"},
+		{http.MethodPost, "/api/actions/apply-update"},
 	}
 	for _, rt := range routes {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
@@ -434,6 +435,17 @@ type spyUpdates struct {
 	called bool
 }
 
+type spyUpdateApply struct {
+	status  UpdateStatus
+	started bool
+	called  bool
+}
+
+func (u *spyUpdateApply) StartApply() (UpdateStatus, bool) {
+	u.called = true
+	return u.status, u.started
+}
+
 func (u *spyUpdates) CheckNow(_ context.Context) (UpdateStatus, bool) {
 	u.called = true
 	return u.status, u.ran
@@ -518,6 +530,44 @@ func TestHandleActionCheckUpdateNotConfigured(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/check-update", nil))
 
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestHandleActionApplyUpdateStartsAndReturnsStatus(t *testing.T) {
+	apply := &spyUpdateApply{status: UpdateStatus{Enabled: true, Phase: "downloading", UpdateFound: true}, started: true}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", UpdateApply: apply}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/apply-update", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !apply.called {
+		t.Fatal("StartApply was never called")
+	}
+	var got struct {
+		Started bool         `json:"started"`
+		Status  UpdateStatus `json:"status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Started || got.Status.Phase != "downloading" {
+		t.Errorf("got %+v, want started=true and phase=downloading", got)
+	}
+}
+
+func TestHandleActionApplyUpdateNotConfigured(t *testing.T) {
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok"}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/apply-update", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
