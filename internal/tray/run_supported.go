@@ -478,14 +478,14 @@ func Run(
 		for {
 			select {
 			case <-ctx.Done():
-				if applying || rollingBack {
+				if applying || rollingBack || updatePhaseOwnsBinary(up.Status().Phase) {
 					quitRequested = true
 					continue
 				}
 				systray.Quit()
 				return
 			case <-quitItem.ClickedCh:
-				if applying || rollingBack {
+				if applying || rollingBack || updatePhaseOwnsBinary(up.Status().Phase) {
 					quitRequested = true
 					continue
 				}
