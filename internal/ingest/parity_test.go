@@ -38,6 +38,8 @@ import (
 	"time"
 )
 
+var parityHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 func TestParityAgentIngestVsServerScan(t *testing.T) {
 	branchdamSrc := locateBranchDAMSrc(t)
 	if branchdamSrc == "" {
@@ -692,7 +694,7 @@ func triggerServerScan(t *testing.T, baseURL string, locationID int64) {
 	req.Header.Set("X-Authentik-Username", "parity-test-user")
 	req.Header.Set("X-Authentik-Groups", "parity-test-admins")
 
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := parityHTTPClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST /api/v1/scan: %v", err)
 	}
@@ -718,7 +720,7 @@ func createAgentPairing(t *testing.T, baseURL string) (agentID, apiKey string) {
 	req.Header.Set("X-Authentik-Username", "parity-test-user")
 	req.Header.Set("X-Authentik-Groups", "parity-test-admins")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := parityHTTPClient.Do(req)
 	if err != nil {
 		t.Fatalf("create companion pairing: %v", err)
 	}
@@ -740,7 +742,35 @@ func createAgentPairing(t *testing.T, baseURL string) (agentID, apiKey string) {
 	if out.AgentID == "" || out.APIKey == "" {
 		t.Fatalf("create companion pairing returned incomplete credentials: agentId=%q apiKey-present=%t", out.AgentID, out.APIKey != "")
 	}
+	verifyAgentPairing(t, baseURL, out.APIKey)
 	return out.AgentID, out.APIKey
+}
+
+// verifyAgentPairing distinguishes a pairing-capable server from an older
+// sibling checkout that happens to expose the pairing-management route but
+// still authenticates agent routes only with the retired shared key. In that
+// environment the parity test cannot exercise the agent contract, so skip
+// with an actionable capability message instead of reporting a misleading
+// media-ingest failure.
+func verifyAgentPairing(t *testing.T, baseURL, apiKey string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/agent/hello", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-API-Key", apiKey)
+	resp, err := parityHTTPClient.Do(req)
+	if err != nil {
+		t.Fatalf("verify companion pairing: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		t.Skipf("branchDAM server at %s lacks pairing-only agent authentication (hello status %d); use a pairing-capable checkout", baseURL, resp.StatusCode)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("verify companion pairing: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 }
 
 // --- DB helpers (shell out to the sqlite3 CLI, read-only) ---
