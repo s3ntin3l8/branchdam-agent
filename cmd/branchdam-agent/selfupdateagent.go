@@ -71,6 +71,11 @@ func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
 		status.Err = errors.New("self-update: an update or check is already in progress")
 		return status, false
 	}
+	a.updater.mu.Lock()
+	a.updater.st.Phase = updatePhaseDownloading
+	a.updater.st.StartedAt = time.Now()
+	a.updater.st.Err = nil
+	a.updater.mu.Unlock()
 	go func() {
 		defer release()
 		defer a.updater.applyMu.Unlock()

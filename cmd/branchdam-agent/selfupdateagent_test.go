@@ -102,6 +102,9 @@ func TestTrayUpdateApplierReservesAndReleasesLocks(t *testing.T) {
 	if !started {
 		t.Fatalf("started = false, status = %+v", status)
 	}
+	if status.Phase != updatePhaseDownloading {
+		t.Errorf("status.Phase = %q, want %q before worker starts", status.Phase, updatePhaseDownloading)
+	}
 
 	deadline := time.NewTimer(time.Second)
 	defer deadline.Stop()
