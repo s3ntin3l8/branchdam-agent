@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 
 	"fyne.io/systray"
@@ -119,8 +118,16 @@ func Run(
 	r.SetConfirmDestructive(confirmDestructive)
 
 	onReady := func() {
-		systray.SetIcon(buildTrayIcon())
-		systray.SetTitle("branchDAM")
+		if runtime.GOOS == "darwin" {
+			// Template icon: macOS reads the alpha channel and
+			// auto-tints the foreground to match the menu bar.
+			// SetTemplateIcon (not SetIcon) is required for this.
+			systray.SetTemplateIcon(buildTemplateIcon(), buildTrayIcon())
+			systray.SetTitle("")
+		} else {
+			systray.SetIcon(buildTrayIcon())
+			systray.SetTitle("branchDAM")
+		}
 		systray.SetTooltip("branchDAM agent")
 
 		statusItem := systray.AddMenuItem("Status: starting...", "Current tray status")
@@ -216,13 +223,21 @@ func Run(
 
 			switch {
 			case st.ConfigIncomplete:
-				systray.SetIcon(buildUnconfiguredTrayIcon())
+				if runtime.GOOS == "darwin" {
+					systray.SetTemplateIcon(buildTemplateIcon(), buildTrayIcon())
+				} else {
+					systray.SetIcon(buildUnconfiguredTrayIcon())
+				}
 				systray.SetTooltip("branchDAM agent — not configured")
 			case st.Paused:
 				systray.SetIcon(buildPausedTrayIcon())
 				systray.SetTooltip("branchDAM agent (ingest paused)")
 			default:
-				systray.SetIcon(buildTrayIcon())
+				if runtime.GOOS == "darwin" {
+					systray.SetTemplateIcon(buildTemplateIcon(), buildTrayIcon())
+				} else {
+					systray.SetIcon(buildTrayIcon())
+				}
 				systray.SetTooltip(FormatTooltip(st))
 			}
 
@@ -700,34 +715,27 @@ func Run(
 	return outcome, nil
 }
 
-// buildUnconfiguredTrayIcon renders branchDAM's b-node monogram in gray,
-// indicating the tray is running with an incomplete config ("not configured").
+// buildTemplateIcon renders the monogram in white — the alpha channel
+// carries the shape, and macOS uses it for auto-tinting via
+// SetTemplateIcon. The RGB values are irrelevant; macOS ignores them.
+func buildTemplateIcon() []byte {
+	return buildIconColor(false, color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff})
+}
+
+// buildUnconfiguredTrayIcon renders branchDAM's b-node monogram in gray
+// on Windows, indicating the tray is running with an incomplete config.
 func buildUnconfiguredTrayIcon() []byte {
 	return buildIconColor(false, color.RGBA{R: 0x80, G: 0x80, B: 0x80, A: 0xff}) // gray
 }
 
-// missingFieldsSummaryLimit bounds how many field names summarize() names
-// inline before falling back to "+N more" -- a long tail (every one of
-// ingest.archiveRoot/localEditRoot/pathMappings plus server.* fields on a
-// truly blank config) would otherwise turn the tray tooltip into a wall of
-// text instead of a quick pointer to Settings.
-const missingFieldsSummaryLimit = 3
-
+// summarize returns a one-line status string for the tray menu item.
+// When config is incomplete, it intentionally omits the missing field
+// names — those are shown in detail in the Wails Settings window's setup
+// banner. The tray menu needs only a quick pointer to Settings, not a
+// wall of technical field names.
 func summarize(st Status) string {
 	if st.ConfigIncomplete {
-		if len(st.MissingFields) == 0 {
-			// Should not happen (ConfigIncomplete is only ever set alongside
-			// a non-empty MissingFields -- see SetConfigIncomplete's own doc
-			// comment), but a generic fallback beats a bare "missing: ".
-			return "not configured — open Settings to set up"
-		}
-		shown := st.MissingFields
-		suffix := ""
-		if len(shown) > missingFieldsSummaryLimit {
-			suffix = fmt.Sprintf(", +%d more", len(shown)-missingFieldsSummaryLimit)
-			shown = shown[:missingFieldsSummaryLimit]
-		}
-		return fmt.Sprintf("not configured — missing: %s%s", strings.Join(shown, ", "), suffix)
+		return "not configured"
 	}
 	if st.Paused {
 		return "ingest paused by user"

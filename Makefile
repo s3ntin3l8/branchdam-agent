@@ -149,6 +149,23 @@ build-darwin-app: ## Build + assemble the .app bundle -- macOS host only (intern
 	go build -tags production -ldflags="-X main.version=$(VERSION)" -o dist/branchdam-agent-ui ./cmd/branchdam-agent-ui
 	go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -ui-binary dist/branchdam-agent-ui -version "$(VERSION)"
 
+build-darwin-dmg: build-darwin-app ## Build styled .dmg installer -- macOS host only, requires: brew install create-dmg
+	mkdir -p dist/dmg-root
+	cp -R dist/branchdam-agent.app dist/dmg-root/
+	sips -s format png resources/dmg/background.svg --out dist/background.png
+	create-dmg \
+	  --overwrite \
+	  --volname "branchDAM Agent" \
+	  --volicon dist/dmg-root/branchdam-agent.app/Contents/Resources/icon.icns \
+	  --background dist/background.png \
+	  --icon "branchdam-agent.app" 160 280 \
+	  --icon-size 128 \
+	  --app-drop-link "Applications" 500 280 \
+	  --window-pos 200 120 \
+	  --window-size 660 400 \
+	  "dist/branchdam-agent-$(VERSION)-darwin-arm64.dmg" \
+	  dist/dmg-root/
+
 check: build vet test vulncheck build-windows build-darwin ## One-shot pre-PR gate: build + vet + test + vulncheck + cross-build checks (does not require pre-commit -- see `lint`)
 
 clean: ## Remove build artifacts and caches

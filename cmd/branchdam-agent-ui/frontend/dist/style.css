@@ -12,6 +12,7 @@
   --surface-canvas: #fafafa;
   --surface-raised: #ffffff;
   --surface-sunken: #f5f5f5;
+  --surface-hover: #f0f0f0;
   --surface-selected: #e5e5e5;
   --border-subtle: #e5e5e5;
   --text-primary: #171717;
@@ -37,16 +38,13 @@
     --surface-canvas: #0a0a0a;
     --surface-raised: #171717;
     --surface-sunken: #0a0a0a;
+    --surface-hover: #1a1a1a;
     --surface-selected: #262626;
     --border-subtle: #262626;
     --text-primary: #f5f5f5;
     --text-muted: #a3a3a3;
-    /* --ok/--bad deliberately NOT overridden here: .pill.ok/.pill.bad and
-       the error/setup banners below pair them with hardcoded PALE
-       backgrounds (#dafbe1, #fdecea, #fff8e1) -- brightening only the
-       foreground would put light text on a light fill. Tokenizing those
-       backgrounds too is a worthwhile follow-up, but touches every status
-       surface, not just the settings form this PR is about. */
+    --ok: #3fb950;
+    --bad: #f85149;
   }
 }
 
@@ -59,17 +57,17 @@ body {
   display: flex;
   flex-direction: column;
   font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--fg);
   background: var(--bg);
 }
 
-h1 { font-size: 16px; margin: 0 0 4px; }
+h1 { font-size: 18px; font-weight: 700; margin: 0 0 4px; }
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 20px 0 6px; }
 
 #version { color: var(--muted); font-size: 12px; }
 
-#app-header { flex: 0 0 auto; padding: 16px 20px 8px; }
+#app-header { flex: 0 0 auto; padding: 16px 20px 12px; border-bottom: 1px solid var(--border); }
 
 #error-banner {
   display: none;
@@ -80,6 +78,9 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: 
   padding: 8px 12px;
   margin: 10px 0;
 }
+@media (prefers-color-scheme: dark) {
+  #error-banner { background: #2d1111; color: var(--bad); border-color: var(--bad); }
+}
 #error-banner.visible { display: block; }
 
 #setup-banner {
@@ -87,16 +88,20 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: 
   background: #fff8e1;
   color: #7a5b00;
   border: 1px solid #d9a400;
+  border-left: 3px solid #d9a400;
   border-radius: 6px;
   padding: 8px 12px;
   margin: 10px 0;
 }
 @media (prefers-color-scheme: dark) {
-  #setup-banner { background: #3a2f00; color: #f0c94d; border-color: #d9a400; }
+  #setup-banner { background: #2d2200; color: #f0c94d; border-color: #d9a400; border-left-color: #d9a400; }
 }
 #setup-banner.visible { display: block; }
 #setup-banner p { margin: 0 0 4px; }
-#setup-banner code { font-size: 11px; }
+#setup-banner code { font-size: 11px; background: rgba(0,0,0,0.06); padding: 1px 4px; border-radius: 3px; }
+@media (prefers-color-scheme: dark) {
+  #setup-banner code { background: rgba(255,255,255,0.1); }
+}
 
 /* Nav pane / content shell. #layout is the flex row (nav + content);
    #content is what scrolls -- min-height/min-width: 0 below are both
@@ -124,12 +129,14 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: 
   color: var(--fg);
   background: transparent;
   border: 1px solid transparent;
+  border-left: 2px solid transparent;
   border-radius: 6px;
   padding: 6px 10px;
   cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
 }
-.nav-item:hover { border-color: var(--border); }
-.nav-item.active { background: var(--sel); border-color: var(--border); font-weight: 600; }
+.nav-item:hover { border-color: var(--border); border-left-color: var(--border); background: var(--surface-hover); }
+.nav-item.active { background: var(--sel); border-color: var(--border); border-left-color: var(--color-brand); font-weight: 600; }
 .nav-item:focus-visible { outline: 2px solid var(--color-brand); outline-offset: 1px; }
 
 #content {
@@ -144,9 +151,13 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: 
 section {
   background: var(--surface-raised);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 10px 14px;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+@media (prefers-color-scheme: dark) {
+  section { box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
 }
 
 table { width: 100%; border-collapse: collapse; }
@@ -165,6 +176,11 @@ ul { margin: 4px 0; padding-left: 18px; }
 .pill.ok { background: #dafbe1; color: var(--ok); }
 .pill.bad { background: #fdecea; color: var(--bad); }
 .pill.neutral { background: #eee; color: var(--muted); }
+@media (prefers-color-scheme: dark) {
+  .pill.ok { background: #0d2818; color: var(--ok); }
+  .pill.bad { background: #2d1111; color: var(--bad); }
+  .pill.neutral { background: #262626; color: var(--muted); }
+}
 
 .empty { color: var(--muted); font-style: italic; }
 
@@ -230,6 +246,11 @@ ul { margin: 4px 0; padding-left: 18px; }
   padding: 3px 8px;
   font-size: 12px;
   cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.field-row > button:hover,
+.row-actions > button:hover {
+  background: var(--surface-sunken);
 }
 .field-row > button { grid-column: browse; }
 .field-row > .field-status {
@@ -247,6 +268,19 @@ ul { margin: 4px 0; padding-left: 18px; }
 }
 .field-row > .field-status.saved { color: var(--ok); }
 .field-row > .field-status.error { color: var(--bad); }
+
+/* Focus rings for keyboard navigation and accessibility. */
+.field-row > input[type="text"]:focus,
+.field-row > input[type="password"]:focus,
+.field-row > select:focus {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 1px;
+}
+.field-row > button:focus-visible,
+.row-actions > button:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 1px;
+}
 
 /* checkbox-row reverses the source order (input, label, status) and has
    no marker/browse column of its own -- the checkbox takes the "label"

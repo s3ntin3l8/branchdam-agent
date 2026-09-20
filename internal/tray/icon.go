@@ -226,7 +226,8 @@ func buildTrayIcon() []byte {
 }
 
 // buildPausedTrayIcon renders branchDAM's monogram overlaid with an amber
-// pause badge (issue #83).
+// pause badge (issue #83). On darwin, the amber badge is intentionally
+// non-template (colored) so the paused state is visually distinct.
 func buildPausedTrayIcon() []byte {
 	return buildIcon(true)
 }
