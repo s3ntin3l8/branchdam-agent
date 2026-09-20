@@ -93,6 +93,65 @@ func TestSnapshotFailureDoesNotAdvanceState(t *testing.T) {
 	}
 }
 
+func TestSnapshotEmptyDatabaseSubmitsAuthoritativeEmptySnapshot(t *testing.T) {
+	db := openTestDBForSyncWithClips(t, nil)
+	defer func() { _ = db.Close() }()
+	client := &fakeSnapshotSubmitter{}
+	saves := 0
+	wantScope := ScopeID("file:/tmp/resolve.db")
+	s := &Syncer{
+		DB: db, AgentID: "agent-a", DatabaseURL: "file:/tmp/resolve.db",
+		UseSnapshot: true, SnapshotClient: client,
+		LegacyTimelineNodeUUIDs: []string{"legacy-node"},
+		LegacyTimelineIDs:       []string{"old-timeline"},
+		OnSuccessfulSnapshot: func(scope string) error {
+			if scope == wantScope {
+				saves++
+			}
+			return nil
+		},
+	}
+	stats, err := s.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.calls) != 1 {
+		t.Fatalf("empty database calls = %d, want 1", len(client.calls))
+	}
+	if len(client.calls[0].Timelines) != 0 || len(client.calls[0].Memberships) != 0 {
+		t.Fatalf("empty database snapshot = %+v", client.calls[0])
+	}
+	legacyFound := false
+	for _, id := range client.calls[0].LegacyTimelineNodeUUIDs {
+		legacyFound = legacyFound || id == "legacy-node"
+	}
+	if len(client.calls[0].LegacyTimelineNodeUUIDs) != 2 || !legacyFound {
+		t.Fatalf("empty database migration companions = %+v", client.calls[0].LegacyTimelineNodeUUIDs)
+	}
+	if stats.ClipsFound != 0 || stats.VirtualNodes != 0 || stats.Emitted != 0 || saves != 1 {
+		t.Fatalf("empty database result: stats=%+v saves=%d", stats, saves)
+	}
+}
+
+func TestSnapshotQueryFailureDoesNotSubmitEmptySnapshot(t *testing.T) {
+	db := openTestDBForSyncWithClips(t, nil)
+	defer func() { _ = db.Close() }()
+	client := &fakeSnapshotSubmitter{}
+	saves := 0
+	s := &Syncer{
+		DB: db, AgentID: "agent-a", DatabaseURL: "file:/tmp/resolve.db",
+		Query:       `SELECT missing_column FROM missing_table`,
+		UseSnapshot: true, SnapshotClient: client,
+		OnSuccessfulSnapshot: func(string) error { saves++; return nil },
+	}
+	if _, err := s.Sync(context.Background()); err == nil {
+		t.Fatal("query failure unexpectedly produced a successful empty snapshot")
+	}
+	if len(client.calls) != 0 || saves != 0 {
+		t.Fatalf("query failure advanced snapshot state: calls=%d saves=%d", len(client.calls), saves)
+	}
+}
+
 func TestSnapshotStatsOriginalPathNotContainerPath(t *testing.T) {
 	dir := t.TempDir()
 	original := filepath.Join(dir, "a.mov")

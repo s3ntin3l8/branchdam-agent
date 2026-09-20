@@ -154,13 +154,28 @@ func TestTimelineClipsEmpty(t *testing.T) {
 	if _, err := db.db.ExecContext(context.Background(), resolveSchema); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
+	if _, err := db.db.ExecContext(context.Background(), `INSERT INTO "Sm2Timeline" VALUES ('empty', 'Empty')`); err != nil {
+		t.Fatalf("insert timeline: %v", err)
+	}
+	if _, err := db.db.ExecContext(context.Background(), `INSERT INTO "Sm2Sequence" VALUES ('empty-seq', 'empty')`); err != nil {
+		t.Fatalf("insert sequence: %v", err)
+	}
+	if _, err := db.db.ExecContext(context.Background(), `INSERT INTO "Sm2TiTrack" VALUES ('empty-track', 0, 'empty-seq')`); err != nil {
+		t.Fatalf("insert track: %v", err)
+	}
+	if _, err := db.db.ExecContext(context.Background(), `INSERT INTO "Sm2TiItem" VALUES ('empty-item', 'placeholder', NULL, NULL, NULL, NULL, 'empty-track')`); err != nil {
+		t.Fatalf("insert empty item: %v", err)
+	}
+	if _, err := db.db.ExecContext(context.Background(), `INSERT INTO "Sm2TiItem" VALUES ('media-item', 'clip', 'D:\Videos\clip.mov', NULL, NULL, NULL, 'empty-track')`); err != nil {
+		t.Fatalf("insert media item: %v", err)
+	}
 
 	clips, err := db.TimelineClips(context.Background(), DefaultTimelineQuery)
 	if err != nil {
 		t.Fatalf("TimelineClips: %v", err)
 	}
-	if len(clips) != 0 {
-		t.Errorf("expected 0 clips, got %d", len(clips))
+	if len(clips) != 1 || clips[0].MediaFilePath != `D:\Videos\clip.mov` {
+		t.Errorf("expected only the media-bearing row, got %+v", clips)
 	}
 }
 

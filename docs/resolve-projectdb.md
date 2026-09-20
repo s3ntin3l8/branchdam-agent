@@ -5,6 +5,14 @@ Project Server without writing to either. The branchDAM server must expose
 `POST /api/v1/agent/resolve-snapshot` before turning off `dryRun`; a 404 is
 an upgrade-required error, not a successful legacy sync.
 
+Empty Resolve timelines are intentionally omitted: the query only returns
+timelines with at least one non-null `MediaFilePath`, so a timeline with no
+media produces no virtual node or memberships. If a previously populated
+timeline becomes empty, a successful empty snapshot deactivates its automatic
+edges while retaining the virtual timeline node and audit rows. A database
+query failure is reported as an error and is never submitted as an empty
+snapshot.
+
 Set `integrations.resolvedb.enabled: true`, keep `dryRun: true` for the first
 pass, and configure `integrations.nodeIndexPath` plus `pathRewrites` from
 Resolve's original media paths to branchDAM container paths. An empty
