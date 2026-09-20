@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.2](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.14.1...v1.14.2) (2026-09-20)
+
+
+### Bug Fixes
+
+* make macOS self-update reliable ([c320307](https://github.com/s3ntin3l8/branchdam-agent/commit/c3203071ec2ca4e9cf9621058fbeea3c57824905))
+
 ## [1.14.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.14.0...v1.14.1) (2026-09-20)
 
 
