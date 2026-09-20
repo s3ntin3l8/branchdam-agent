@@ -140,6 +140,11 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 	assertVersionedAsset(t, darwinPackage.Run, "darwin-arm64.tar.gz")
 	darwinDMG, _ := workflowStep(t, darwinForAssets, "Build DMG")
 	assertVersionedAsset(t, darwinDMG.Run, "darwin-arm64.dmg")
+	darwinArtifact := workflowUses(t, darwinForAssets, "actions/upload-artifact")
+	darwinPath := fmt.Sprint(darwinArtifact.With["path"])
+	if !strings.Contains(darwinPath, "darwin-arm64.tar.gz") || !strings.Contains(darwinPath, "darwin-arm64.dmg") {
+		t.Error("Darwin build artifact must include both the tarball and the DMG")
+	}
 
 	// The attest job is not a build job and has no default RELEASE_VERSION
 	// from env context inheritance -- it needs its own, or the "Assemble

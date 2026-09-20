@@ -9,29 +9,24 @@ import (
 	"testing"
 )
 
-func TestSummarizeNamesMissingFields(t *testing.T) {
-	got := summarize(Status{ConfigIncomplete: true, MissingFields: []string{"ingest.localEditRoot", "pathMappings"}})
-	want := "not configured"
-	if got != want {
-		t.Errorf("summarize() = %q, want %q", got, want)
+func TestSummarizeReturnsNotConfigured(t *testing.T) {
+	cases := []struct {
+		name string
+		st   Status
+	}{
+		{"nil missing fields", Status{ConfigIncomplete: true}},
+		{"two missing fields", Status{ConfigIncomplete: true, MissingFields: []string{"ingest.localEditRoot", "pathMappings"}}},
+		{"five missing fields", Status{ConfigIncomplete: true, MissingFields: []string{
+			"server.apiKey", "server.baseUrl", "agentId", "ingest.localEditRoot", "ingest.archiveRoot",
+		}}},
 	}
-}
-
-func TestSummarizeTruncatesLongMissingFieldsList(t *testing.T) {
-	got := summarize(Status{ConfigIncomplete: true, MissingFields: []string{
-		"server.apiKey", "server.baseUrl", "agentId", "ingest.localEditRoot", "ingest.archiveRoot",
-	}})
-	want := "not configured"
-	if got != want {
-		t.Errorf("summarize() = %q, want %q", got, want)
-	}
-}
-
-func TestSummarizeFallsBackWithoutMissingFields(t *testing.T) {
-	got := summarize(Status{ConfigIncomplete: true})
-	want := "not configured"
-	if got != want {
-		t.Errorf("summarize() = %q, want %q", got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summarize(tc.st)
+			if got != "not configured" {
+				t.Errorf("summarize() = %q, want %q", got, "not configured")
+			}
+		})
 	}
 }
 

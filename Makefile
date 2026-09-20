@@ -152,12 +152,12 @@ build-darwin-app: ## Build + assemble the .app bundle -- macOS host only (intern
 build-darwin-dmg: build-darwin-app ## Build styled .dmg installer -- macOS host only, requires: brew install create-dmg
 	mkdir -p dist/dmg-root
 	cp -R dist/branchdam-agent.app dist/dmg-root/
-	ln -s /Applications dist/dmg-root/Applications
-	sips -s format png resources/dmg/background.svg --out dist/dmg-root/background.png
+	sips -s format png resources/dmg/background.svg --out dist/background.png
 	create-dmg \
+	  --overwrite \
 	  --volname "branchDAM Agent" \
 	  --volicon dist/dmg-root/branchdam-agent.app/Contents/Resources/icon.icns \
-	  --background dist/dmg-root/background.png \
+	  --background dist/background.png \
 	  --icon "branchdam-agent.app" 160 280 \
 	  --icon-size 128 \
 	  --app-drop-link "Applications" 500 280 \

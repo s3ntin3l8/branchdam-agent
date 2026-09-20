@@ -119,8 +119,11 @@ func Run(
 
 	onReady := func() {
 		if runtime.GOOS == "darwin" {
-			systray.SetIcon(buildTrayIconDarwin())
-			systray.SetTitle("") // empty title → macOS template-icon mode (auto-tints)
+			// Template icon: macOS reads the alpha channel and
+			// auto-tints the foreground to match the menu bar.
+			// SetTemplateIcon (not SetIcon) is required for this.
+			systray.SetTemplateIcon(buildTemplateIcon(), buildTrayIcon())
+			systray.SetTitle("")
 		} else {
 			systray.SetIcon(buildTrayIcon())
 			systray.SetTitle("branchDAM")
@@ -221,7 +224,7 @@ func Run(
 			switch {
 			case st.ConfigIncomplete:
 				if runtime.GOOS == "darwin" {
-					systray.SetIcon(buildUnconfiguredTrayIconDarwin())
+					systray.SetTemplateIcon(buildTemplateIcon(), buildTrayIcon())
 				} else {
 					systray.SetIcon(buildUnconfiguredTrayIcon())
 				}
@@ -231,7 +234,7 @@ func Run(
 				systray.SetTooltip("branchDAM agent (ingest paused)")
 			default:
 				if runtime.GOOS == "darwin" {
-					systray.SetIcon(buildTrayIconDarwin())
+					systray.SetTemplateIcon(buildTemplateIcon(), buildTrayIcon())
 				} else {
 					systray.SetIcon(buildTrayIcon())
 				}
@@ -712,10 +715,15 @@ func Run(
 	return outcome, nil
 }
 
+// buildTemplateIcon renders the monogram in white — the alpha channel
+// carries the shape, and macOS uses it for auto-tinting via
+// SetTemplateIcon. The RGB values are irrelevant; macOS ignores them.
+func buildTemplateIcon() []byte {
+	return buildIconColor(false, color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff})
+}
+
 // buildUnconfiguredTrayIcon renders branchDAM's b-node monogram in gray
 // on Windows, indicating the tray is running with an incomplete config.
-// On macOS, buildUnconfiguredTrayIconDarwin is used instead (white
-// template icon — gray would be invisible on a dark menu bar).
 func buildUnconfiguredTrayIcon() []byte {
 	return buildIconColor(false, color.RGBA{R: 0x80, G: 0x80, B: 0x80, A: 0xff}) // gray
 }

@@ -250,14 +250,16 @@ jobs:
         run: |
           mkdir -p dist/dmg-root
           cp -R dist/branchdam-agent.app dist/dmg-root/
-          ln -s /Applications dist/dmg-root/Applications
           # create-dmg only accepts raster formats (PNG/JPEG/GIF) for
-          --background; convert the SVG source to PNG with macOS sips.
-          sips -s format png resources/dmg/background.svg --out dist/dmg-root/background.png
+          # --background; convert the SVG source to PNG with macOS sips.
+          # Write outside dmg-root/ so the PNG doesn't ship as a stray file
+          # in the mounted volume.
+          sips -s format png resources/dmg/background.svg --out dist/background.png
           create-dmg \
+            --overwrite \
             --volname "branchDAM Agent" \
             --volicon dist/dmg-root/branchdam-agent.app/Contents/Resources/icon.icns \
-            --background dist/dmg-root/background.png \
+            --background dist/background.png \
             --icon "branchdam-agent.app" 160 280 \
             --icon-size 128 \
             --app-drop-link "Applications" 500 280 \
