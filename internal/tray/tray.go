@@ -188,7 +188,7 @@ func (u UpdateStatus) Note() string {
 	switch {
 	case !u.Enabled:
 		return "disabled (selfUpdate.enabled: false in config)"
-	case u.Phase != "" && u.Phase != "available" && u.Phase != "idle" && u.Phase != UpdatePhaseRestarting:
+	case u.Phase != "" && u.Phase != UpdatePhaseAvailable && u.Phase != UpdatePhaseIdle && u.Phase != UpdatePhaseRestarting:
 		if u.Err != nil {
 			return fmt.Sprintf("%s: %v", u.Phase, u.Err)
 		}

@@ -1787,6 +1787,19 @@ func TestWindowApplyRestartOutcome(t *testing.T) {
 	}
 }
 
+func TestUpdatePhaseInFlight(t *testing.T) {
+	for _, phase := range []string{UpdatePhaseChecking, UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting} {
+		if !updatePhaseInFlight(phase) {
+			t.Errorf("updatePhaseInFlight(%q) = false, want true", phase)
+		}
+	}
+	for _, phase := range []string{"", UpdatePhaseIdle, UpdatePhaseAvailable, UpdatePhaseFailed} {
+		if updatePhaseInFlight(phase) {
+			t.Errorf("updatePhaseInFlight(%q) = true, want false", phase)
+		}
+	}
+}
+
 func TestUpdateStatusNoteAppliedRestarting(t *testing.T) {
 	status := UpdateStatus{
 		Enabled: true,

@@ -56,15 +56,19 @@ func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
 		status.Err = fmt.Errorf("self-update: check/apply is already %s", status.Phase)
 		return status, false
 	}
-	if !a.updater.applyMu.TryLock() {
-		status.Err = errors.New("self-update: an update or check is already in progress")
-		return status, false
-	}
 	release, ok := a.runner.TryLockIdle()
 	if !ok {
-		a.updater.applyMu.Unlock()
 		status = a.updater.Status()
 		status.Err = errors.New("self-update: an ingest or update is already in progress")
+		return status, false
+	}
+	// Keep the same lock order as the tray menu's synchronous apply path:
+	// Runner.gate first, then applyMu. Reversing these two acquisitions would
+	// let a window apply deadlock with a tray click that already owns the gate.
+	if !a.updater.applyMu.TryLock() {
+		release()
+		status = a.updater.Status()
+		status.Err = errors.New("self-update: an update or check is already in progress")
 		return status, false
 	}
 	go func() {

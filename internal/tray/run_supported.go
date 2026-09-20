@@ -199,6 +199,7 @@ func Run(
 
 		refresh := func() {
 			us := up.Status()
+			windowApplying := updatePhaseInFlight(us.Phase)
 			st := r.Status(us)
 			systray.SetTooltip(FormatTooltip(st))
 			statusItem.SetTitle("Status: " + summarize(st))
@@ -352,7 +353,7 @@ func Run(
 			default:
 				if rbVersion, ok := up.RollbackAvailable(); ok {
 					rollbackItem.Show()
-					if st.Busy || applying {
+					if st.Busy || applying || windowApplying {
 						rollbackItem.SetTitle(fmt.Sprintf("Roll back to %s (waiting for ingest of %s to finish)", rbVersion, st.BusyCard))
 						rollbackItem.Disable()
 					} else {

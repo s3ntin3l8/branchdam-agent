@@ -1,5 +1,14 @@
 package tray
 
+func updatePhaseInFlight(phase string) bool {
+	switch phase {
+	case UpdatePhaseChecking, UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting:
+		return true
+	default:
+		return false
+	}
+}
+
 // windowApplyRestartOutcome converts a completed native-window apply into
 // the same restart request the tray menu's apply handler returns. Kept pure so
 // the platform-tagged systray loop can use it without making the decision

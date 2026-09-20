@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/selfupdate"
 	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
@@ -85,6 +86,39 @@ func TestTrayUpdateApplierRejectsApplyWhileApplyLocked(t *testing.T) {
 	}
 	if status.Err == nil || status.Err.Error() != "self-update: an update or check is already in progress" {
 		t.Fatalf("status.Err = %v, want apply-lock error", status.Err)
+	}
+}
+
+func TestTrayUpdateApplierReservesAndReleasesLocks(t *testing.T) {
+	runner := tray.NewRunner(nil, nil, "")
+	updater := &selfUpdateAgent{
+		enabled: true,
+		st:      tray.UpdateStatus{Enabled: true, UpdateFound: true, Phase: updatePhaseAvailable},
+		// A nil updater makes the worker fail immediately after it has
+		// reserved both locks, keeping this test offline and deterministic.
+	}
+	applier := &trayUpdateApplier{runner: runner, updater: updater}
+	status, started := applier.StartApply()
+	if !started {
+		t.Fatalf("started = false, status = %+v", status)
+	}
+
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for {
+		if got := updater.Status(); got.Phase == updatePhaseFailed && updater.applyMu.TryLock() {
+			if release, ok := runner.TryLockIdle(); ok {
+				release()
+				updater.applyMu.Unlock()
+				return
+			}
+			updater.applyMu.Unlock()
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("worker did not record its failure: status = %+v", updater.Status())
+		case <-time.After(time.Millisecond):
+		}
 	}
 }
 

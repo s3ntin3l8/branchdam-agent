@@ -515,7 +515,9 @@ function renderSelfUpdate(status, settings) {
   if (su.Err) rows.push(["Error", raw(pill(su.Err, "bad"))]);
   container.innerHTML = table(rows);
 
-  const applyInFlight = ["checking", "downloading", "verifying", "restarting"].includes(su.Phase);
+  // Unknown non-terminal phases fail closed too, so a newly added Go phase
+  // cannot accidentally re-enable the destructive button in an older UI.
+  const applyInFlight = !!su.Phase && !["idle", "available", "failed"].includes(su.Phase);
   container.appendChild(
     actionButtonRow("Update check", "", [
       {
