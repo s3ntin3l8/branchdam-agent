@@ -240,15 +240,31 @@ jobs:
       # resolves App Translocation (internal/selfupdate.DetectLayout's
       # ErrTranslocated path) for a normal browser download -- extracting a
       # tarball into ~/Downloads and double-clicking the .app is exactly
-      # the scenario translocation targets. hdiutil is a macOS built-in, no
-      # extra tool needed.
+      # the scenario translocation targets. create-dmg wraps hdiutil with
+      # background-image and icon-positioning support for a polished
+      # installer window.
+      - name: Install create-dmg
+        run: brew install create-dmg
+
       - name: Build DMG
         run: |
           mkdir -p dist/dmg-root
           cp -R dist/branchdam-agent.app dist/dmg-root/
           ln -s /Applications dist/dmg-root/Applications
-          hdiutil create -volname "branchDAM Agent" -srcfolder dist/dmg-root \
-            -ov -format UDZO "branchdam-agent-${{ env.RELEASE_VERSION }}-darwin-arm64.dmg"
+          # create-dmg only accepts raster formats (PNG/JPEG/GIF) for
+          --background; convert the SVG source to PNG with macOS sips.
+          sips -s format png resources/dmg/background.svg --out dist/dmg-root/background.png
+          create-dmg \
+            --volname "branchDAM Agent" \
+            --volicon dist/dmg-root/branchdam-agent.app/Contents/Resources/icon.icns \
+            --background dist/dmg-root/background.png \
+            --icon "branchdam-agent.app" 160 280 \
+            --icon-size 128 \
+            --app-drop-link "Applications" 500 280 \
+            --window-pos 200 120 \
+            --window-size 660 400 \
+            "dist/branchdam-agent-${{ env.RELEASE_VERSION }}-darwin-arm64.dmg" \
+            dist/dmg-root/
       - uses: actions/upload-artifact@v7
         with:
           name: darwin-arm64
