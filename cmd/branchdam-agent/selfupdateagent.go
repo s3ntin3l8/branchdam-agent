@@ -51,7 +51,8 @@ func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
 		status.Err = errors.New("self-update: no update is currently available")
 		return status, false
 	}
-	if status.Phase != "" && status.Phase != updatePhaseAvailable {
+	if status.Phase != "" && status.Phase != updatePhaseAvailable &&
+		!(status.Phase == updatePhaseFailed && !status.StartedAt.IsZero()) {
 		status.Err = fmt.Errorf("self-update: check/apply is already %s", status.Phase)
 		return status, false
 	}

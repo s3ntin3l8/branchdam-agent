@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/sessiontoken"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // withTempAgentDir points internal/agentlog (and therefore
@@ -454,6 +455,34 @@ func TestApplyUpdatePostsToActionRoute(t *testing.T) {
 	}
 	if !strings.Contains(got, `"started":true`) {
 		t.Errorf("ApplyUpdate() = %q, want started=true response", got)
+	}
+}
+
+func TestConfirmApplyUpdateUsesNativeQuestionDialog(t *testing.T) {
+	orig := messageDialogFunc
+	t.Cleanup(func() { messageDialogFunc = orig })
+	var got wailsruntime.MessageDialogOptions
+	messageDialogFunc = func(_ context.Context, options wailsruntime.MessageDialogOptions) (string, error) {
+		got = options
+		return "Install and restart", nil
+	}
+
+	a := newTestApp(t)
+	confirmed, err := a.ConfirmApplyUpdate("1.14.1")
+	if err != nil {
+		t.Fatalf("ConfirmApplyUpdate: %v", err)
+	}
+	if !confirmed {
+		t.Fatal("confirmed = false, want true for the install button")
+	}
+	if got.Type != wailsruntime.QuestionDialog || got.Title != "Confirm install and restart" {
+		t.Errorf("dialog type/title = %q/%q, want question/confirm title", got.Type, got.Title)
+	}
+	if got.Message == "" || !strings.Contains(got.Message, "1.14.1") {
+		t.Errorf("dialog message = %q, want release version", got.Message)
+	}
+	if !strings.Contains(strings.Join(got.Buttons, ","), "Install and restart") {
+		t.Errorf("dialog buttons = %v, want install action", got.Buttons)
 	}
 }
 

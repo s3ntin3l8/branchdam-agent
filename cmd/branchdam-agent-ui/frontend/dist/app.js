@@ -566,9 +566,18 @@ function renderSelfUpdate(status, settings) {
           const app = getApp();
           if (!app) return;
           // Match the tray menu's destructive-action setting. If settings
-          // are unavailable, keep the confirmation (fail closed).
+          // are unavailable, keep the confirmation (fail closed). Wails' Go
+          // binding uses the native question dialog; browser confirm() is
+          // not reliable in the macOS WKWebView.
           if (!settings || settings.ConfirmDestructive !== false) {
-            if (!window.confirm(`Install update ${su.LatestVersion} and restart the tray?`)) return;
+            let confirmed;
+            try {
+              confirmed = await app.ConfirmApplyUpdate(su.LatestVersion);
+            } catch (err) {
+              setFieldStatus(statusEl, String(err), "error");
+              return;
+            }
+            if (!confirmed) return;
           }
           inFlightActions.add("applyUpdate");
           let result;

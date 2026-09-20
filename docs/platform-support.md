@@ -204,7 +204,8 @@ unauthenticated and loopback-only, same as before, for anyone who wants to `curl
 (`internal/tray/statusapi.go`), built for the native app UI (Track 3 of the distribution/UX plan):
 `GET /api/status`, `GET`/`POST /api/settings`, `POST /api/settings/integration-path`,
 `POST /api/settings/integration-rewrites`, `POST /api/settings/path-mappings`, and
-`POST /api/actions/{ingest,drain,prune,sync,hook-install,pause}`. `POST /api/settings`'s value
+`POST /api/actions/{ingest,drain,prune,sync,hook-install,hook-reveal,pause,test-connection,check-update,apply-update}`.
+`POST /api/settings`'s value
 selects the setter by JSON type -- boolean, number, string, or array of strings -- so a free-text
 field (server URL, agent ID, the two ingest roots, ...) is reachable non-interactively via
 `Settings.SetString`. Per-integration catalog paths, Resolve's path rewrites, and `pathMappings`
@@ -868,9 +869,10 @@ A live-refresh via TUF is the proper long-term answer but is out of scope here.
 - **The hardened `/api/*` surface (see Status page above) has one consumer so far** --
   `cmd/branchdam-agent-ui`. It now exercises `GET /api/status`, `GET`/`POST /api/settings`,
   `POST /api/settings/integration-{path,rewrites}` (the Settings section, Track 3d), and
-  `POST /api/actions/{sync,hook-install,hook-reveal}` (the Integrations/hooks action buttons,
-  Track 3e); `POST /api/actions/{ingest,drain,prune,pause}` remain unexercised by any real UI --
-  those four stay tray-only, with no equivalent button in this window. None of it has run on real
+  `POST /api/actions/{sync,hook-install,hook-reveal,test-connection,check-update,apply-update}`
+  (the Integrations/hooks, server, and self-update buttons, Track 3e); `POST
+  /api/actions/{ingest,drain,prune,pause}` remain unexercised by any real UI -- those four stay
+  tray-only, with no equivalent button in this window. None of it has run on real
   Windows/macOS hardware yet -- see the hardware checklist. Known limitations, by design rather
   than oversight: `POST
   /api/actions/ingest` runs synchronously to completion with no server-side timeout (a real card
