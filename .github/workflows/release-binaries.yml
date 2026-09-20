@@ -262,7 +262,7 @@ jobs:
             --background dist/background.png \
             --icon "branchdam-agent.app" 160 280 \
             --icon-size 128 \
-            --app-drop-link "Applications" 500 280 \
+            --app-drop-link 500 280 \
             --window-pos 200 120 \
             --window-size 660 400 \
             "branchdam-agent-${{ env.RELEASE_VERSION }}-darwin-arm64.dmg" \

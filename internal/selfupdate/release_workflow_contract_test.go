@@ -140,6 +140,12 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 	assertVersionedAsset(t, darwinPackage.Run, "darwin-arm64.tar.gz")
 	darwinDMG, _ := workflowStep(t, darwinForAssets, "Build DMG")
 	assertVersionedAsset(t, darwinDMG.Run, "darwin-arm64.dmg")
+	if !strings.Contains(darwinDMG.Run, "--app-drop-link 500 280") {
+		t.Error("Darwin DMG build must pass only the Applications drop-link coordinates to create-dmg")
+	}
+	if strings.Contains(darwinDMG.Run, `--app-drop-link "Applications" 500 280`) {
+		t.Error("Darwin DMG build must not pass the Applications name as an app-drop-link coordinate")
+	}
 	darwinArtifact := workflowUses(t, darwinForAssets, "actions/upload-artifact")
 	darwinPath := fmt.Sprint(darwinArtifact.With["path"])
 	// All patterns in one upload-artifact step must share a single root
@@ -152,6 +158,18 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 	}
 	if strings.Contains(darwinPath, "dist/") {
 		t.Error("Darwin artifact globs must share a single bare root (no dist/ prefix)")
+	}
+
+	makefile, err := os.ReadFile("../../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeText := string(makefile)
+	if !strings.Contains(makeText, "--app-drop-link 500 280") {
+		t.Error("Makefile Darwin DMG build must pass only the Applications drop-link coordinates to create-dmg")
+	}
+	if strings.Contains(makeText, `--app-drop-link "Applications" 500 280`) {
+		t.Error("Makefile Darwin DMG build must not pass the Applications name as an app-drop-link coordinate")
 	}
 
 	// The attest job is not a build job and has no default RELEASE_VERSION
