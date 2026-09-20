@@ -42,6 +42,52 @@ func TestTrayUpdateApplierRejectsApplyDuringCheck(t *testing.T) {
 	}
 }
 
+func TestTrayUpdateApplierAllowsRetryAfterCheckFailure(t *testing.T) {
+	runner := tray.NewRunner(nil, nil, "")
+	release, ok := runner.TryLockIdle()
+	if !ok {
+		t.Fatal("could not reserve runner gate")
+	}
+	defer release()
+
+	updater := &selfUpdateAgent{
+		enabled: true,
+		st: tray.UpdateStatus{
+			Enabled:     true,
+			UpdateFound: true,
+			Phase:       updatePhaseFailed,
+			// A failed check has no StartedAt, but it must not make a
+			// still-available update permanently un-installable.
+		},
+	}
+	applier := &trayUpdateApplier{runner: runner, updater: updater}
+	status, started := applier.StartApply()
+	if started {
+		t.Fatal("started = true, want false while the runner gate is busy")
+	}
+	if status.Err == nil || status.Err.Error() != "self-update: an ingest or update is already in progress" {
+		t.Fatalf("status.Err = %v, want runner-busy error (failed phase must be retryable)", status.Err)
+	}
+}
+
+func TestTrayUpdateApplierRejectsApplyWhileApplyLocked(t *testing.T) {
+	updater := &selfUpdateAgent{
+		enabled: true,
+		st:      tray.UpdateStatus{Enabled: true, UpdateFound: true, Phase: updatePhaseAvailable},
+	}
+	updater.applyMu.Lock()
+	defer updater.applyMu.Unlock()
+
+	applier := &trayUpdateApplier{runner: tray.NewRunner(nil, nil, ""), updater: updater}
+	status, started := applier.StartApply()
+	if started {
+		t.Fatal("started = true, want false while applyMu is reserved")
+	}
+	if status.Err == nil || status.Err.Error() != "self-update: an update or check is already in progress" {
+		t.Fatalf("status.Err = %v, want apply-lock error", status.Err)
+	}
+}
+
 // TestSelfUpdateAgentRollbackAvailableFalseByDefault and
 // TestSelfUpdateAgentRollbackFailsWithoutPrevious both rely on the real
 // go test binary naturally having no ".previous"/".previous.version"

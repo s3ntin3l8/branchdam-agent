@@ -1760,6 +1760,44 @@ func (fakeSelfUpdater) ApplyLatest(_ context.Context) (string, error) { return "
 func (fakeSelfUpdater) RollbackAvailable() (string, bool)             { return "", false }
 func (fakeSelfUpdater) Rollback(_ context.Context) (string, error)    { return "", nil }
 
+func TestWindowApplyRestartOutcome(t *testing.T) {
+	status := UpdateStatus{Phase: UpdatePhaseRestarting, Applied: "1.14.1"}
+
+	got, ok := windowApplyRestartOutcome(status, false, false)
+	if !ok {
+		t.Fatal("ok = false, want true for a completed window apply")
+	}
+	if !got.RestartRequested || got.AppliedVersion != status.Applied {
+		t.Fatalf("outcome = %+v, want restart for %q", got, status.Applied)
+	}
+
+	for _, tc := range []struct {
+		name         string
+		trayApplying bool
+		rollingBack  bool
+	}{
+		{name: "tray apply", trayApplying: true},
+		{name: "rollback", rollingBack: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := windowApplyRestartOutcome(status, tc.trayApplying, tc.rollingBack); ok {
+				t.Fatal("ok = true, want false while another tray operation owns restart")
+			}
+		})
+	}
+}
+
+func TestUpdateStatusNoteAppliedRestarting(t *testing.T) {
+	status := UpdateStatus{
+		Enabled: true,
+		Phase:   UpdatePhaseRestarting,
+		Applied: "1.14.1",
+	}
+	if got := status.Note(); got != "updated to 1.14.1 -- restarting" {
+		t.Fatalf("Note() = %q, want applied-version restart message", got)
+	}
+}
+
 // fakeSettings is a no-op Settings shared by tests across build tags, the
 // same way fakeSelfUpdater is.
 type fakeSettings struct{}

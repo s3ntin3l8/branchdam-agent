@@ -3,8 +3,8 @@
 ## background.svg
 
 The branded background image for the macOS DMG installer window (760x480).
-The top 40% is a dark header (slate-900) with the branchDAM monogram in
-teal and the product name. The bottom 60% is white, serving as the content
+The top 35% is a dark header (slate-900) with the branchDAM monogram in
+teal and the product name. The bottom 65% is white, serving as the content
 area where `create-dmg` places the `.app` icon and Applications alias.
 
 ### Customization

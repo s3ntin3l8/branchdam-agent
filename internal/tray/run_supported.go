@@ -317,12 +317,21 @@ func Run(
 			case us.Phase == UpdatePhaseChecking || us.Phase == UpdatePhaseDownloading ||
 				us.Phase == UpdatePhaseVerifying || us.Phase == UpdatePhaseRestarting:
 				installItem.Show()
-				installItem.SetTitle(fmt.Sprintf("Install and restart (%s)", us.Phase))
+				if st.Busy {
+					installItem.SetTitle(fmt.Sprintf("Install and restart (waiting for ingest of %s to finish)", st.BusyCard))
+				} else {
+					installItem.SetTitle(fmt.Sprintf("Install and restart (%s)", us.Phase))
+				}
 				installItem.Disable()
 			case us.Phase == UpdatePhaseFailed && !us.StartedAt.IsZero():
 				installItem.Show()
-				installItem.SetTitle("Install and restart (failed -- see branchDAM window)")
-				installItem.Enable()
+				if st.Busy || rollingBack {
+					installItem.SetTitle(fmt.Sprintf("Install and restart (waiting for ingest of %s to finish)", st.BusyCard))
+					installItem.Disable()
+				} else {
+					installItem.SetTitle("Install and restart (failed -- see branchDAM window)")
+					installItem.Enable()
+				}
 			case us.UpdateFound:
 				installItem.Show()
 				if st.Busy || rollingBack {
@@ -705,9 +714,8 @@ func Run(
 				// make the same orderly shutdown/relaunch decision as the tray
 				// menu apply handler. Keep this in the select-loop goroutine:
 				// refresh is also invoked by detector callbacks.
-				us := up.Status()
-				if us.Phase == UpdatePhaseRestarting && !applying && !rollingBack {
-					outcome = Outcome{RestartRequested: true, AppliedVersion: us.Applied}
+				if restart, ok := windowApplyRestartOutcome(up.Status(), applying, rollingBack); ok {
+					outcome = restart
 					systray.Quit()
 					return
 				}

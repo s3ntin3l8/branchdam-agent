@@ -515,7 +515,7 @@ function renderSelfUpdate(status, settings) {
   if (su.Err) rows.push(["Error", raw(pill(su.Err, "bad"))]);
   container.innerHTML = table(rows);
 
-  const applyInFlight = ["checking", "downloading", "verifying", "installing", "restarting"].includes(su.Phase);
+  const applyInFlight = ["checking", "downloading", "verifying", "restarting"].includes(su.Phase);
   container.appendChild(
     actionButtonRow("Update check", "", [
       {

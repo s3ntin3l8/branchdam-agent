@@ -51,22 +51,28 @@ func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
 		status.Err = errors.New("self-update: no update is currently available")
 		return status, false
 	}
-	if status.Phase != "" && status.Phase != updatePhaseAvailable &&
-		(status.Phase != updatePhaseFailed || status.StartedAt.IsZero()) {
+	switch status.Phase {
+	case updatePhaseChecking, updatePhaseDownloading, updatePhaseVerifying, updatePhaseRestarting:
 		status.Err = fmt.Errorf("self-update: check/apply is already %s", status.Phase)
+		return status, false
+	}
+	if !a.updater.applyMu.TryLock() {
+		status.Err = errors.New("self-update: an update or check is already in progress")
 		return status, false
 	}
 	release, ok := a.runner.TryLockIdle()
 	if !ok {
+		a.updater.applyMu.Unlock()
 		status = a.updater.Status()
 		status.Err = errors.New("self-update: an ingest or update is already in progress")
 		return status, false
 	}
 	go func() {
+		defer release()
+		defer a.updater.applyMu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		_, _ = a.updater.ApplyLatest(ctx)
-		release()
+		_, _ = a.updater.applyLatestLocked(ctx)
 	}()
 	return a.updater.Status(), true
 }
@@ -292,7 +298,20 @@ func (a *selfUpdateAgent) ApplyLatest(ctx context.Context) (string, error) {
 		return "", errors.New("self-update: an update is already in progress")
 	}
 	defer a.applyMu.Unlock()
+	return a.applyLatestLocked(ctx)
+}
 
+// applyLatestLocked is the shared apply implementation for the tray menu and
+// the asynchronous native-window action. Callers must hold applyMu for the
+// complete operation; this lets StartApply reserve the lock before returning
+// started=true, so a concurrent check cannot win the race before the worker
+// begins.
+func (a *selfUpdateAgent) applyLatestLocked(ctx context.Context) (string, error) {
+	if !a.enabled || a.up == nil {
+		err := errors.New("self-update: not enabled")
+		a.recordApplyError(err)
+		return "", err
+	}
 	a.mu.Lock()
 	a.st.Phase = updatePhaseDownloading
 	a.st.StartedAt = time.Now()
