@@ -199,7 +199,7 @@ func Run(
 
 		refresh := func() {
 			us := up.Status()
-			windowApplying := updatePhaseInFlight(us.Phase)
+			windowApplying := updatePhaseOwnsBinary(us.Phase)
 			st := r.Status(us)
 			systray.SetTooltip(FormatTooltip(st))
 			statusItem.SetTitle("Status: " + summarize(st))

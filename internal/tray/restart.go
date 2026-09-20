@@ -1,8 +1,12 @@
 package tray
 
-func updatePhaseInFlight(phase string) bool {
+// updatePhaseOwnsBinary reports phases during which an apply has acquired
+// the idle gate and may be mutating the installed files. A read-only check is
+// intentionally excluded: rollback remains safe and accurately labelled
+// while GitHub metadata is being queried.
+func updatePhaseOwnsBinary(phase string) bool {
 	switch phase {
-	case UpdatePhaseChecking, UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting:
+	case UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting:
 		return true
 	default:
 		return false
