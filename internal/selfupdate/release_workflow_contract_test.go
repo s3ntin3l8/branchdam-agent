@@ -73,10 +73,41 @@ func assertCreateDMGAppDropLink(t *testing.T, recipe string) {
 	// coordinates. Keep this as an arity/shape assertion rather than pinning
 	// the current coordinates, so a future visual re-layout can update them
 	// without breaking the contract test.
-	pattern := regexp.MustCompile(`(?m)--app-drop-link[ \t]+[0-9]+[ \t]+[0-9]+[ \t]*(\\)?[ \t\r]*$`)
-	if !pattern.MatchString(recipe) {
-		t.Errorf("DMG recipe must pass exactly two numeric --app-drop-link coordinates\n---\n%s", recipe)
+	continuation := regexp.MustCompile(`\\[ \t]*\r?\n`)
+	tokens := strings.Fields(continuation.ReplaceAllString(recipe, " "))
+	for i, token := range tokens {
+		if token != "--app-drop-link" {
+			continue
+		}
+		if i+2 >= len(tokens) || !isDMGCoordinate(tokens[i+1]) || !isDMGCoordinate(tokens[i+2]) {
+			break
+		}
+		if i+3 == len(tokens) || strings.HasPrefix(tokens[i+3], "--") {
+			return
+		}
+		break
 	}
+	t.Errorf("DMG recipe must pass exactly two numeric --app-drop-link coordinates\n---\n%s", recipe)
+}
+
+func isDMGCoordinate(token string) bool {
+	return regexp.MustCompile(`^-?[0-9]+$`).MatchString(token)
+}
+
+func makeTargetRecipe(t *testing.T, makeText, target string) string {
+	t.Helper()
+	targetPattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(target) + `:[^\r\n]*`)
+	start := targetPattern.FindStringIndex(makeText)
+	if start == nil {
+		t.Fatalf("Makefile is missing %s target", target)
+	}
+
+	end := len(makeText)
+	nextTarget := regexp.MustCompile(`(?m)^[A-Za-z0-9_.-]+:`).FindStringIndex(makeText[start[1]:])
+	if nextTarget != nil {
+		end = start[1] + nextTarget[0]
+	}
+	return makeText[start[0]:end]
 }
 
 func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
@@ -172,16 +203,7 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	makeText := string(makefile)
-	start := strings.Index(makeText, "build-darwin-dmg:")
-	if start < 0 {
-		t.Fatal("Makefile is missing build-darwin-dmg target")
-	}
-	recipe := makeText[start:]
-	if end := strings.Index(recipe, "\ncheck:"); end >= 0 {
-		recipe = recipe[:end]
-	}
-	assertCreateDMGAppDropLink(t, recipe)
+	assertCreateDMGAppDropLink(t, makeTargetRecipe(t, string(makefile), "build-darwin-dmg"))
 
 	// The attest job is not a build job and has no default RELEASE_VERSION
 	// from env context inheritance -- it needs its own, or the "Assemble
