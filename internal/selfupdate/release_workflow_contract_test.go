@@ -1,6 +1,7 @@
 package selfupdate
 
 import (
+	"encoding/xml"
 	"fmt"
 	"os"
 	"regexp"
@@ -63,6 +64,18 @@ func assertVersionedAsset(t *testing.T, runText, archTail string) {
 	pattern := regexp.MustCompile(`branchdam-agent-\$\{\{\s*env\.RELEASE_VERSION\s*\}\}-` + regexp.QuoteMeta(archTail))
 	if !pattern.MatchString(runText) {
 		t.Errorf("release workflow step does not build a versioned asset ending %q (want to match %s)\n---\n%s", archTail, pattern, runText)
+	}
+}
+
+func assertCreateDMGAppDropLink(t *testing.T, recipe string) {
+	t.Helper()
+	// create-dmg's --app-drop-link option accepts exactly two numeric
+	// coordinates. Keep this as an arity/shape assertion rather than pinning
+	// the current coordinates, so a future visual re-layout can update them
+	// without breaking the contract test.
+	pattern := regexp.MustCompile(`(?m)--app-drop-link[ \t]+[0-9]+[ \t]+[0-9]+[ \t]*(\\)?$`)
+	if !pattern.MatchString(recipe) {
+		t.Errorf("DMG recipe must pass exactly two numeric --app-drop-link coordinates\n---\n%s", recipe)
 	}
 }
 
@@ -140,12 +153,7 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 	assertVersionedAsset(t, darwinPackage.Run, "darwin-arm64.tar.gz")
 	darwinDMG, _ := workflowStep(t, darwinForAssets, "Build DMG")
 	assertVersionedAsset(t, darwinDMG.Run, "darwin-arm64.dmg")
-	if !strings.Contains(darwinDMG.Run, "--app-drop-link 500 280") {
-		t.Error("Darwin DMG build must pass only the Applications drop-link coordinates to create-dmg")
-	}
-	if strings.Contains(darwinDMG.Run, `--app-drop-link "Applications" 500 280`) {
-		t.Error("Darwin DMG build must not pass the Applications name as an app-drop-link coordinate")
-	}
+	assertCreateDMGAppDropLink(t, darwinDMG.Run)
 	darwinArtifact := workflowUses(t, darwinForAssets, "actions/upload-artifact")
 	darwinPath := fmt.Sprint(darwinArtifact.With["path"])
 	// All patterns in one upload-artifact step must share a single root
@@ -165,12 +173,15 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	makeText := string(makefile)
-	if !strings.Contains(makeText, "--app-drop-link 500 280") {
-		t.Error("Makefile Darwin DMG build must pass only the Applications drop-link coordinates to create-dmg")
+	start := strings.Index(makeText, "build-darwin-dmg:")
+	if start < 0 {
+		t.Fatal("Makefile is missing build-darwin-dmg target")
 	}
-	if strings.Contains(makeText, `--app-drop-link "Applications" 500 280`) {
-		t.Error("Makefile Darwin DMG build must not pass the Applications name as an app-drop-link coordinate")
+	recipe := makeText[start:]
+	if end := strings.Index(recipe, "\ncheck:"); end >= 0 {
+		recipe = recipe[:end]
 	}
+	assertCreateDMGAppDropLink(t, recipe)
 
 	// The attest job is not a build job and has no default RELEASE_VERSION
 	// from env context inheritance -- it needs its own, or the "Assemble
@@ -204,6 +215,16 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 		t.Error("manual release upload must reject a mismatched tag ref")
 	}
 	workflowStep(t, upload, "Upload complete release set")
+}
+
+func TestDMGBackgroundIsWellFormedXML(t *testing.T) {
+	b, err := os.ReadFile("../../resources/dmg/background.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := xml.Unmarshal(b, new(struct{})); err != nil {
+		t.Fatalf("resources/dmg/background.svg is not well-formed XML: %v", err)
+	}
 }
 
 // TestReleaseWorkflowSignsDarwinBundleBeforePackaging pins the ordering
