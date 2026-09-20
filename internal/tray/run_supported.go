@@ -314,7 +314,12 @@ func Run(
 			case applying:
 				// Left as "Installing..." by the click handler; don't
 				// stomp it with a stale UpdateFound-driven title.
-			case us.Phase == "failed" && !us.StartedAt.IsZero():
+			case us.Phase == UpdatePhaseChecking || us.Phase == UpdatePhaseDownloading ||
+				us.Phase == UpdatePhaseVerifying || us.Phase == UpdatePhaseRestarting:
+				installItem.Show()
+				installItem.SetTitle(fmt.Sprintf("Install and restart (%s)", us.Phase))
+				installItem.Disable()
+			case us.Phase == UpdatePhaseFailed && !us.StartedAt.IsZero():
 				installItem.Show()
 				installItem.SetTitle("Install and restart (failed -- see branchDAM window)")
 				installItem.Enable()
@@ -701,7 +706,7 @@ func Run(
 				// menu apply handler. Keep this in the select-loop goroutine:
 				// refresh is also invoked by detector callbacks.
 				us := up.Status()
-				if us.Phase == "restarting" && !applying && !rollingBack {
+				if us.Phase == UpdatePhaseRestarting && !applying && !rollingBack {
 					outcome = Outcome{RestartRequested: true, AppliedVersion: us.Applied}
 					systray.Quit()
 					return

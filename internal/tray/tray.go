@@ -157,6 +157,20 @@ type UpdateStatus struct {
 	Applied string
 }
 
+// Update lifecycle phase values shared by the tray menu, status API, and the
+// command-layer self-update implementation. They are wire strings as well as
+// display-state identifiers, so callers should compare these constants
+// rather than repeating literals.
+const (
+	UpdatePhaseIdle        = "idle"
+	UpdatePhaseChecking    = "checking"
+	UpdatePhaseAvailable   = "available"
+	UpdatePhaseDownloading = "downloading"
+	UpdatePhaseVerifying   = "verifying"
+	UpdatePhaseRestarting  = "restarting"
+	UpdatePhaseFailed      = "failed"
+)
+
 // MarshalJSON renders Err as a string -- see IngestSummary.MarshalJSON's
 // doc comment for why and how.
 func (u UpdateStatus) MarshalJSON() ([]byte, error) {

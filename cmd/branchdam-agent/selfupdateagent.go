@@ -72,13 +72,13 @@ func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
 }
 
 const (
-	updatePhaseIdle        = "idle"
-	updatePhaseChecking    = "checking"
-	updatePhaseAvailable   = "available"
-	updatePhaseDownloading = "downloading"
-	updatePhaseVerifying   = "verifying"
-	updatePhaseRestarting  = "restarting"
-	updatePhaseFailed      = "failed"
+	updatePhaseIdle        = tray.UpdatePhaseIdle
+	updatePhaseChecking    = tray.UpdatePhaseChecking
+	updatePhaseAvailable   = tray.UpdatePhaseAvailable
+	updatePhaseDownloading = tray.UpdatePhaseDownloading
+	updatePhaseVerifying   = tray.UpdatePhaseVerifying
+	updatePhaseRestarting  = tray.UpdatePhaseRestarting
+	updatePhaseFailed      = tray.UpdatePhaseFailed
 )
 
 // newSelfUpdateAgent builds an agent from cfg -- Run and ApplyLatest are
