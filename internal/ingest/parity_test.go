@@ -17,6 +17,8 @@ package ingest
 // paths for local dev convenience. Skips cleanly, not a failure, when none
 // resolve to a real branchDAM checkout. Also requires `exiftool` and
 // `go build` on PATH; skips cleanly if either is missing.
+// The branchDAM checkout must include the Companion Pairing API: agent
+// authentication is provisioned through POST /api/v1/companion/pairings.
 //
 // See TestExifExtractsPromotedColumnsAndSidecarWins and the djisrt/hashing
 // package tests for the narrower, always-run unit coverage of the pieces
@@ -690,7 +692,7 @@ func triggerServerScan(t *testing.T, baseURL string, locationID int64) {
 	req.Header.Set("X-Authentik-Username", "parity-test-user")
 	req.Header.Set("X-Authentik-Groups", "parity-test-admins")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
 		t.Fatalf("POST /api/v1/scan: %v", err)
 	}
@@ -723,6 +725,9 @@ func createAgentPairing(t *testing.T, baseURL string) (agentID, apiKey string) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+			t.Skipf("branchDAM server at %s lacks the Companion Pairing API (status %d); use a pairing-capable checkout", baseURL, resp.StatusCode)
+		}
 		t.Fatalf("create companion pairing: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var out struct {
