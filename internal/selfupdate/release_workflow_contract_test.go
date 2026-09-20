@@ -142,8 +142,11 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 	assertVersionedAsset(t, darwinDMG.Run, "darwin-arm64.dmg")
 	darwinArtifact := workflowUses(t, darwinForAssets, "actions/upload-artifact")
 	darwinPath := fmt.Sprint(darwinArtifact.With["path"])
-	if !strings.Contains(darwinPath, "darwin-arm64.tar.gz") || !strings.Contains(darwinPath, "darwin-arm64.dmg") {
-		t.Error("Darwin build artifact must include both the tarball and the DMG")
+	// @actions/glob@0.6.1's * does not cross / -- the DMG is written to
+	// dist/ by create-dmg, so its glob must be dist/-prefixed to match.
+	if !strings.Contains(darwinPath, "branchdam-agent-*-darwin-arm64.tar.gz") ||
+		!strings.Contains(darwinPath, "dist/branchdam-agent-*-darwin-arm64.dmg") {
+		t.Error("Darwin artifact must include tarball (at root) and dist/-prefixed DMG")
 	}
 
 	// The attest job is not a build job and has no default RELEASE_VERSION

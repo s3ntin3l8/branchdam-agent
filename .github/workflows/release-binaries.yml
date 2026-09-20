@@ -272,7 +272,7 @@ jobs:
           name: darwin-arm64
           path: |
             branchdam-agent-*-darwin-arm64.tar.gz
-            branchdam-agent-*-darwin-arm64.dmg
+            dist/branchdam-agent-*-darwin-arm64.dmg
           if-no-files-found: error
           retention-days: 1
 
