@@ -142,11 +142,16 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 	assertVersionedAsset(t, darwinDMG.Run, "darwin-arm64.dmg")
 	darwinArtifact := workflowUses(t, darwinForAssets, "actions/upload-artifact")
 	darwinPath := fmt.Sprint(darwinArtifact.With["path"])
-	// @actions/glob@0.6.1's * does not cross / -- the DMG is written to
-	// dist/ by create-dmg, so its glob must be dist/-prefixed to match.
+	// All patterns in one upload-artifact step must share a single root
+	// (mixed roots nest files inside the artifact zip and break the
+	// attest job's cp). Assert both globs are bare (at the workspace
+	// root) and contain the expected suffixes.
 	if !strings.Contains(darwinPath, "branchdam-agent-*-darwin-arm64.tar.gz") ||
-		!strings.Contains(darwinPath, "dist/branchdam-agent-*-darwin-arm64.dmg") {
-		t.Error("Darwin artifact must include tarball (at root) and dist/-prefixed DMG")
+		!strings.Contains(darwinPath, "branchdam-agent-*-darwin-arm64.dmg") {
+		t.Error("Darwin artifact must include both the tarball and the DMG")
+	}
+	if strings.Contains(darwinPath, "dist/") {
+		t.Error("Darwin artifact globs must share a single bare root (no dist/ prefix)")
 	}
 
 	// The attest job is not a build job and has no default RELEASE_VERSION

@@ -265,14 +265,14 @@ jobs:
             --app-drop-link "Applications" 500 280 \
             --window-pos 200 120 \
             --window-size 660 400 \
-            "dist/branchdam-agent-${{ env.RELEASE_VERSION }}-darwin-arm64.dmg" \
+            "branchdam-agent-${{ env.RELEASE_VERSION }}-darwin-arm64.dmg" \
             dist/dmg-root/
       - uses: actions/upload-artifact@v7
         with:
           name: darwin-arm64
           path: |
             branchdam-agent-*-darwin-arm64.tar.gz
-            dist/branchdam-agent-*-darwin-arm64.dmg
+            branchdam-agent-*-darwin-arm64.dmg
           if-no-files-found: error
           retention-days: 1
 
