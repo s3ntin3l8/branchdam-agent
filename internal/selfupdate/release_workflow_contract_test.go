@@ -73,7 +73,7 @@ func assertCreateDMGAppDropLink(t *testing.T, recipe string) {
 	// coordinates. Keep this as an arity/shape assertion rather than pinning
 	// the current coordinates, so a future visual re-layout can update them
 	// without breaking the contract test.
-	pattern := regexp.MustCompile(`(?m)--app-drop-link[ \t]+[0-9]+[ \t]+[0-9]+[ \t]*(\\)?$`)
+	pattern := regexp.MustCompile(`(?m)--app-drop-link[ \t]+[0-9]+[ \t]+[0-9]+[ \t]*(\\)?[ \t\r]*$`)
 	if !pattern.MatchString(recipe) {
 		t.Errorf("DMG recipe must pass exactly two numeric --app-drop-link coordinates\n---\n%s", recipe)
 	}
