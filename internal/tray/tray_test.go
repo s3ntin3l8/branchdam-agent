@@ -1379,6 +1379,9 @@ func TestTriggerIngestProbeDoesNotHoldGate(t *testing.T) {
 		t.Fatal("reachability probe held Runner.gate")
 	}
 	releaseGate()
+	if r.GateHeld() {
+		t.Fatal("GateHeld() = true after idle reservation was released")
+	}
 	close(releaseProbe)
 	<-done
 }
@@ -1388,6 +1391,9 @@ func TestTriggerIngestStartsClockAfterGate(t *testing.T) {
 	releaseGate, ok := r.TryLockIdle()
 	if !ok {
 		t.Fatal("expected to acquire idle gate")
+	}
+	if !r.GateHeld() {
+		t.Fatal("GateHeld() = false while idle reservation is held")
 	}
 
 	done := make(chan IngestSummary, 1)
@@ -1801,17 +1807,20 @@ func TestUpdatePhaseOwnsBinary(t *testing.T) {
 }
 
 func TestTrayQuitBlocked(t *testing.T) {
-	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseDownloading}, false, false) {
+	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseDownloading}, false, false, false) {
 		t.Fatal("window apply should block tray quit")
 	}
-	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseIdle}, true, false) {
+	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseIdle}, true, false, false) {
 		t.Fatal("tray apply should block tray quit")
 	}
-	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseIdle}, false, true) {
+	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseIdle}, false, true, false) {
 		t.Fatal("rollback should block tray quit")
 	}
-	if trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseChecking}, false, false) {
+	if trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseChecking}, false, false, false) {
 		t.Fatal("read-only check should not block tray quit")
+	}
+	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseIdle}, false, false, true) {
+		t.Fatal("a gate reservation should block tray quit before phase publication")
 	}
 }
 

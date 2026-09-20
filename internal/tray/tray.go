@@ -314,6 +314,11 @@ type Runner struct {
 	// ingester/watchDirs/scratchDir must never change out from under a
 	// card mid-copy.
 	gate sync.Mutex
+	// gateHeld mirrors the reservation state for the select loop's quit
+	// guard. It is separate from Busy(): a self-update owns gate before any
+	// ingest status is published, so Busy/UpdateStatus snapshots have a
+	// small but real gap.
+	gateHeld atomic.Bool
 
 	// drainMu is a SEPARATE mutex from gate, deliberately -- see
 	// TriggerDrain's doc comment for why a drain pass must never be
@@ -677,19 +682,19 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		if notifyErr != nil {
 			notifyErr("branchDAM Ingest", msg)
 		}
-		r.gate.Lock()
+		r.lockGate()
 		r.mu.Lock()
 		r.last = &summary
 		r.mu.Unlock()
-		r.gate.Unlock()
+		r.unlockGate()
 		return summary
 	}
 	if !reachable {
 		summary.Offline = true
 	}
 
-	r.gate.Lock()
-	defer r.gate.Unlock()
+	r.lockGate()
+	defer r.unlockGate()
 	summary.StartedAt = time.Now()
 
 	r.lastProgress.Store(nil)
@@ -824,7 +829,25 @@ func (r *Runner) TryLockIdle() (release func(), ok bool) {
 	if !r.gate.TryLock() {
 		return nil, false
 	}
-	return r.gate.Unlock, true
+	r.gateHeld.Store(true)
+	return r.unlockGate, true
+}
+
+// GateHeld reports whether the shared ingest/update reservation is held.
+// Unlike Busy, this covers the short interval after a self-update acquires
+// the gate and before it publishes its downloading phase.
+func (r *Runner) GateHeld() bool { return r.gateHeld.Load() }
+
+func (r *Runner) lockGate() {
+	r.gate.Lock()
+	r.gateHeld.Store(true)
+}
+
+func (r *Runner) unlockGate() {
+	// Clear the marker before unlocking. A new owner can only acquire the
+	// mutex after this point, so it cannot be overwritten by this release.
+	r.gateHeld.Store(false)
+	r.gate.Unlock()
 }
 
 // SetQueueDeps wires the offline-queue status readout and the drain/prune
@@ -1618,7 +1641,7 @@ func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir s
 	var rootsChanged bool
 	var newRoots []string
 
-	r.gate.Lock()
+	r.lockGate()
 	r.mu.Lock()
 	oldRoots := append([]string(nil), r.watchDirs...)
 	r.ingester = ingester
@@ -1630,7 +1653,7 @@ func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir s
 		r.watchDirs = newRoots
 	}
 	r.mu.Unlock()
-	r.gate.Unlock()
+	r.unlockGate()
 
 	if rootsChanged {
 		r.ReconfigureDetector(r.BaseContext(), newRoots)

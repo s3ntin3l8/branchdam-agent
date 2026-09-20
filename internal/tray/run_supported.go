@@ -353,8 +353,11 @@ func Run(
 			default:
 				if rbVersion, ok := up.RollbackAvailable(); ok {
 					rollbackItem.Show()
-					if st.Busy || applying || windowApplying {
+					if st.Busy {
 						rollbackItem.SetTitle(fmt.Sprintf("Roll back to %s (waiting for ingest of %s to finish)", rbVersion, st.BusyCard))
+						rollbackItem.Disable()
+					} else if applying || windowApplying {
+						rollbackItem.SetTitle(fmt.Sprintf("Roll back to %s (waiting for update to finish)", rbVersion))
 						rollbackItem.Disable()
 					} else {
 						rollbackItem.SetTitle(fmt.Sprintf("Roll back to %s", rbVersion))
@@ -478,7 +481,7 @@ func Run(
 		for {
 			select {
 			case <-ctxDone:
-				if trayQuitBlocked(up.Status(), applying, rollingBack) {
+				if trayQuitBlocked(up.Status(), applying, rollingBack, r.GateHeld()) {
 					quitRequested = true
 					// A closed context channel is permanently ready. Disable
 					// this case while the protected operation finishes so the
@@ -489,7 +492,7 @@ func Run(
 				systray.Quit()
 				return
 			case <-quitItem.ClickedCh:
-				if trayQuitBlocked(up.Status(), applying, rollingBack) {
+				if trayQuitBlocked(up.Status(), applying, rollingBack, r.GateHeld()) {
 					quitRequested = true
 					continue
 				}
@@ -724,7 +727,7 @@ func Run(
 					systray.Quit()
 					return
 				}
-				if quitRequested && !trayQuitBlocked(up.Status(), applying, rollingBack) {
+				if quitRequested && !trayQuitBlocked(up.Status(), applying, rollingBack, r.GateHeld()) {
 					systray.Quit()
 					return
 				}

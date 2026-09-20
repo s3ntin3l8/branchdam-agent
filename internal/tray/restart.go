@@ -13,8 +13,8 @@ func updatePhaseOwnsBinary(phase string) bool {
 	}
 }
 
-func trayQuitBlocked(status UpdateStatus, trayApplying, rollingBack bool) bool {
-	return trayApplying || rollingBack || updatePhaseOwnsBinary(status.Phase)
+func trayQuitBlocked(status UpdateStatus, trayApplying, rollingBack, gateHeld bool) bool {
+	return trayApplying || rollingBack || gateHeld || updatePhaseOwnsBinary(status.Phase)
 }
 
 // windowApplyRestartOutcome converts a completed native-window apply into
