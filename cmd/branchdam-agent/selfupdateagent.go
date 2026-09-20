@@ -52,7 +52,7 @@ func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
 		return status, false
 	}
 	if status.Phase != "" && status.Phase != updatePhaseAvailable &&
-		!(status.Phase == updatePhaseFailed && !status.StartedAt.IsZero()) {
+		(status.Phase != updatePhaseFailed || status.StartedAt.IsZero()) {
 		status.Err = fmt.Errorf("self-update: check/apply is already %s", status.Phase)
 		return status, false
 	}
