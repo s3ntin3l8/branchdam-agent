@@ -10,7 +10,7 @@ SHELL := /usr/bin/env bash
 # failing step, not by relaxing the global flag. Leave this as-is unless
 # a concrete target needs the override.
 .SHELLFLAGS := -eu -o pipefail -c
-.PHONY: help install-hooks test lint fmt vet tidy vulncheck build build-windows build-darwin build-darwin-app clean check
+.PHONY: help install-hooks test lint fmt vet tidy vulncheck build build-windows build-darwin build-darwin-app build-darwin-dmg clean check
 
 # VERSION stamps main.version via -X ldflags -- unset (the default "dev")
 # for a local build, since internal/selfupdate refuses to self-update a
@@ -147,9 +147,11 @@ build-darwin-app: ## Build + assemble the .app bundle -- macOS host only (intern
 	mkdir -p dist
 	go build -ldflags="-X main.version=$(VERSION)" -o dist/branchdam-agent ./cmd/branchdam-agent
 	go build -tags production -ldflags="-X main.version=$(VERSION)" -o dist/branchdam-agent-ui ./cmd/branchdam-agent-ui
+	rm -rf dist/branchdam-agent.app
 	go run ./tools/mkbundle -app dist/branchdam-agent.app -binary dist/branchdam-agent -ui-binary dist/branchdam-agent-ui -version "$(VERSION)"
 
 build-darwin-dmg: build-darwin-app ## Build styled .dmg installer -- macOS host only, requires: brew install create-dmg
+	rm -rf dist/dmg-root dist/background.png
 	mkdir -p dist/dmg-root
 	cp -R dist/branchdam-agent.app dist/dmg-root/
 	sips -s format png resources/dmg/background.svg --out dist/background.png
@@ -160,7 +162,7 @@ build-darwin-dmg: build-darwin-app ## Build styled .dmg installer -- macOS host 
 	  --background dist/background.png \
 	  --icon "branchdam-agent.app" 160 280 \
 	  --icon-size 128 \
-	  --app-drop-link "Applications" 500 280 \
+	  --app-drop-link 500 280 \
 	  --window-pos 200 120 \
 	  --window-size 660 400 \
 	  "dist/branchdam-agent-$(VERSION)-darwin-arm64.dmg" \
