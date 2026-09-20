@@ -1379,6 +1379,9 @@ func TestTriggerIngestProbeDoesNotHoldGate(t *testing.T) {
 		t.Fatal("reachability probe held Runner.gate")
 	}
 	releaseGate()
+	if r.GateHeld() {
+		t.Fatal("GateHeld() = true after idle reservation was released")
+	}
 	close(releaseProbe)
 	<-done
 }
@@ -1388,6 +1391,9 @@ func TestTriggerIngestStartsClockAfterGate(t *testing.T) {
 	releaseGate, ok := r.TryLockIdle()
 	if !ok {
 		t.Fatal("expected to acquire idle gate")
+	}
+	if !r.GateHeld() {
+		t.Fatal("GateHeld() = false while idle reservation is held")
 	}
 
 	done := make(chan IngestSummary, 1)
@@ -1759,6 +1765,75 @@ func (fakeSelfUpdater) Status() UpdateStatus                          { return U
 func (fakeSelfUpdater) ApplyLatest(_ context.Context) (string, error) { return "", nil }
 func (fakeSelfUpdater) RollbackAvailable() (string, bool)             { return "", false }
 func (fakeSelfUpdater) Rollback(_ context.Context) (string, error)    { return "", nil }
+
+func TestWindowApplyRestartOutcome(t *testing.T) {
+	status := UpdateStatus{Phase: UpdatePhaseRestarting, Applied: "1.14.1"}
+
+	got, ok := windowApplyRestartOutcome(status, false, false)
+	if !ok {
+		t.Fatal("ok = false, want true for a completed window apply")
+	}
+	if !got.RestartRequested || got.AppliedVersion != status.Applied {
+		t.Fatalf("outcome = %+v, want restart for %q", got, status.Applied)
+	}
+
+	for _, tc := range []struct {
+		name         string
+		trayApplying bool
+		rollingBack  bool
+	}{
+		{name: "tray apply", trayApplying: true},
+		{name: "rollback", rollingBack: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := windowApplyRestartOutcome(status, tc.trayApplying, tc.rollingBack); ok {
+				t.Fatal("ok = true, want false while another tray operation owns restart")
+			}
+		})
+	}
+}
+
+func TestUpdatePhaseOwnsBinary(t *testing.T) {
+	for _, phase := range []string{UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting} {
+		if !updatePhaseOwnsBinary(phase) {
+			t.Errorf("updatePhaseOwnsBinary(%q) = false, want true", phase)
+		}
+	}
+	for _, phase := range []string{"", UpdatePhaseIdle, UpdatePhaseAvailable, UpdatePhaseChecking, UpdatePhaseFailed} {
+		if updatePhaseOwnsBinary(phase) {
+			t.Errorf("updatePhaseOwnsBinary(%q) = true, want false", phase)
+		}
+	}
+}
+
+func TestTrayQuitBlocked(t *testing.T) {
+	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseDownloading}, false, false, false) {
+		t.Fatal("window apply should block tray quit")
+	}
+	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseIdle}, true, false, false) {
+		t.Fatal("tray apply should block tray quit")
+	}
+	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseIdle}, false, true, false) {
+		t.Fatal("rollback should block tray quit")
+	}
+	if trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseChecking}, false, false, false) {
+		t.Fatal("read-only check should not block tray quit")
+	}
+	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseIdle}, false, false, true) {
+		t.Fatal("a gate reservation should block tray quit before phase publication")
+	}
+}
+
+func TestUpdateStatusNoteAppliedRestarting(t *testing.T) {
+	status := UpdateStatus{
+		Enabled: true,
+		Phase:   UpdatePhaseRestarting,
+		Applied: "1.14.1",
+	}
+	if got := status.Note(); got != "updated to 1.14.1 -- restarting" {
+		t.Fatalf("Note() = %q, want applied-version restart message", got)
+	}
+}
 
 // fakeSettings is a no-op Settings shared by tests across build tags, the
 // same way fakeSelfUpdater is.

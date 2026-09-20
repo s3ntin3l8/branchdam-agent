@@ -199,6 +199,7 @@ func Run(
 
 		refresh := func() {
 			us := up.Status()
+			windowApplying := updatePhaseOwnsBinary(us.Phase)
 			st := r.Status(us)
 			systray.SetTooltip(FormatTooltip(st))
 			statusItem.SetTitle("Status: " + summarize(st))
@@ -314,6 +315,24 @@ func Run(
 			case applying:
 				// Left as "Installing..." by the click handler; don't
 				// stomp it with a stale UpdateFound-driven title.
+			case us.Phase == UpdatePhaseChecking || us.Phase == UpdatePhaseDownloading ||
+				us.Phase == UpdatePhaseVerifying || us.Phase == UpdatePhaseRestarting:
+				installItem.Show()
+				if st.Busy {
+					installItem.SetTitle(fmt.Sprintf("Install and restart (waiting for ingest of %s to finish)", st.BusyCard))
+				} else {
+					installItem.SetTitle(fmt.Sprintf("Install and restart (%s)", us.Phase))
+				}
+				installItem.Disable()
+			case us.Phase == UpdatePhaseFailed && !us.StartedAt.IsZero():
+				installItem.Show()
+				if st.Busy || rollingBack {
+					installItem.SetTitle(fmt.Sprintf("Install and restart (waiting for ingest of %s to finish)", st.BusyCard))
+					installItem.Disable()
+				} else {
+					installItem.SetTitle("Install and restart (failed -- see branchDAM window)")
+					installItem.Enable()
+				}
 			case us.UpdateFound:
 				installItem.Show()
 				if st.Busy || rollingBack {
@@ -334,8 +353,11 @@ func Run(
 			default:
 				if rbVersion, ok := up.RollbackAvailable(); ok {
 					rollbackItem.Show()
-					if st.Busy || applying {
+					if st.Busy {
 						rollbackItem.SetTitle(fmt.Sprintf("Roll back to %s (waiting for ingest of %s to finish)", rbVersion, st.BusyCard))
+						rollbackItem.Disable()
+					} else if applying || windowApplying {
+						rollbackItem.SetTitle(fmt.Sprintf("Roll back to %s (waiting for update to finish)", rbVersion))
 						rollbackItem.Disable()
 					} else {
 						rollbackItem.SetTitle(fmt.Sprintf("Roll back to %s", rbVersion))
@@ -451,22 +473,26 @@ func Run(
 		// shutdown can't interrupt a Windows sibling-then-primary swap
 		// mid-way -- but that guarantee is worthless if this select loop
 		// quits and the whole process exits out from under that goroutine
-		// regardless. Quitting is deferred, not ignored: applyDoneCh's
-		// own case still quits once the apply (bounded by its own
-		// 10-minute timeout) actually finishes.
+		// regardless. Quitting is deferred until the apply result or the
+		// ticker observes that a window apply no longer owns the binary.
 		var quitRequested bool
+		ctxDone := ctx.Done()
 
 		for {
 			select {
-			case <-ctx.Done():
-				if applying || rollingBack {
+			case <-ctxDone:
+				if trayQuitBlocked(up.Status(), applying, rollingBack, r.GateHeld()) {
 					quitRequested = true
+					// A closed context channel is permanently ready. Disable
+					// this case while the protected operation finishes so the
+					// ticker can observe completion without a hot loop.
+					ctxDone = nil
 					continue
 				}
 				systray.Quit()
 				return
 			case <-quitItem.ClickedCh:
-				if applying || rollingBack {
+				if trayQuitBlocked(up.Status(), applying, rollingBack, r.GateHeld()) {
 					quitRequested = true
 					continue
 				}
@@ -691,6 +717,20 @@ func Run(
 				return
 			case <-ticker.C:
 				refresh()
+				// A window-triggered apply runs outside this select loop. Once
+				// it has completed, the updater marks the phase restarting;
+				// make the same orderly shutdown/relaunch decision as the tray
+				// menu apply handler. Keep this in the select-loop goroutine:
+				// refresh is also invoked by detector callbacks.
+				if restart, ok := windowApplyRestartOutcome(up.Status(), applying, rollingBack); ok {
+					outcome = restart
+					systray.Quit()
+					return
+				}
+				if quitRequested && !trayQuitBlocked(up.Status(), applying, rollingBack, r.GateHeld()) {
+					systray.Quit()
+					return
+				}
 			}
 		}
 	}

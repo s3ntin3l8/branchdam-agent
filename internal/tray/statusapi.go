@@ -46,6 +46,16 @@ type UpdateChecker interface {
 	CheckNow(ctx context.Context) (status UpdateStatus, ran bool)
 }
 
+// UpdateApplier is the asynchronous self-update action exposed to the native
+// window. StartApply returns immediately after the caller has acquired the
+// same idle gate used by the tray menu; the lifecycle and any eventual error
+// are observed through UpdateStatus polling. Keeping this separate from
+// UpdateChecker avoids making the read-only check contract responsible for
+// process replacement and restart behavior.
+type UpdateApplier interface {
+	StartApply() (status UpdateStatus, started bool)
+}
+
 // isLoopbackHost reports whether addr's host resolves to the loopback
 // interface. Used once, at route-registration time in Serve, to decide
 // whether the /api/* routes get registered at all -- see Serve's own
@@ -156,6 +166,7 @@ func (s *StatusServer) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/actions/pause", s.withAPIAuth(s.handleActionPause))
 	mux.HandleFunc("POST /api/actions/test-connection", s.withAPIAuth(s.handleActionTestConnection))
 	mux.HandleFunc("POST /api/actions/check-update", s.withAPIAuth(s.handleActionCheckUpdate))
+	mux.HandleFunc("POST /api/actions/apply-update", s.withAPIAuth(s.handleActionApplyUpdate))
 }
 
 func (s *StatusServer) writeJSON(w http.ResponseWriter, status int, v any) {
@@ -537,6 +548,23 @@ func (s *StatusServer) handleActionCheckUpdate(w http.ResponseWriter, r *http.Re
 	defer cancel()
 	status, ran := s.Updates.CheckNow(ctx)
 	s.writeJSON(w, http.StatusOK, checkUpdateActionResult{Ran: ran, Status: status})
+}
+
+type applyUpdateActionResult struct {
+	Started bool         `json:"started"`
+	Status  UpdateStatus `json:"status"`
+}
+
+// handleActionApplyUpdate starts an apply in the background so the Wails
+// window remains responsive while the archive and attestations are fetched.
+// The caller polls /api/status for phase/error/restart state.
+func (s *StatusServer) handleActionApplyUpdate(w http.ResponseWriter, _ *http.Request) {
+	if s.UpdateApply == nil {
+		http.Error(w, "self-update apply not configured", http.StatusServiceUnavailable)
+		return
+	}
+	status, started := s.UpdateApply.StartApply()
+	s.writeJSON(w, http.StatusOK, applyUpdateActionResult{Started: started, Status: status})
 }
 
 type pruneActionResult struct {

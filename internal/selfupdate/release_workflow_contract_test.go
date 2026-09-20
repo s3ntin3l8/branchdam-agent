@@ -90,6 +90,19 @@ func assertCreateDMGAppDropLink(t *testing.T, recipe string) {
 	t.Errorf("DMG recipe must pass exactly two numeric --app-drop-link coordinates\n---\n%s", recipe)
 }
 
+func assertDMGWindowLayout(t *testing.T, recipe string) {
+	t.Helper()
+	if !strings.Contains(recipe, "--window-size 760 480") {
+		t.Errorf("DMG recipe must use the expanded 760x480 window, got:\n%s", recipe)
+	}
+	if !strings.Contains(recipe, `--icon "branchdam-agent.app" 180 320`) {
+		t.Errorf("DMG recipe has drifted from the expanded app-icon position, got:\n%s", recipe)
+	}
+	if !strings.Contains(recipe, "--app-drop-link 580 320") {
+		t.Errorf("DMG recipe has drifted from the expanded Applications position, got:\n%s", recipe)
+	}
+}
+
 func isDMGCoordinate(token string) bool {
 	return regexp.MustCompile(`^-?[0-9]+$`).MatchString(token)
 }
@@ -203,7 +216,17 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertCreateDMGAppDropLink(t, makeTargetRecipe(t, string(makefile), "build-darwin-dmg"))
+	makeRecipe := makeTargetRecipe(t, string(makefile), "build-darwin-dmg")
+	assertCreateDMGAppDropLink(t, makeRecipe)
+	assertDMGWindowLayout(t, makeRecipe)
+	background, err := os.ReadFile("../../resources/dmg/background.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(background), `width="760" height="480" viewBox="0 0 760 480"`) {
+		t.Errorf("DMG background must be 760x480 to match create-dmg window")
+	}
+	assertDMGWindowLayout(t, darwinDMG.Run)
 
 	// The attest job is not a build job and has no default RELEASE_VERSION
 	// from env context inheritance -- it needs its own, or the "Assemble

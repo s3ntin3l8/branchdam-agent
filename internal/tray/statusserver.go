@@ -68,6 +68,10 @@ type StatusServer struct {
 	// status-API concern would churn every implementation and fake of
 	// that interface for something they don't need.
 	Updates UpdateChecker
+	// UpdateApply starts the destructive update action asynchronously. It is
+	// nil-tolerant like Updates so older/test-only StatusServers still serve
+	// the rest of the API unchanged.
+	UpdateApply UpdateApplier
 	// Token, when set, is the shared secret every /api/* request must
 	// present as "Authorization: Bearer <Token>" -- see
 	// internal/sessiontoken.Generate and tokenValid. Left empty, every

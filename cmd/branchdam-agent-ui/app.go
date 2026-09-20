@@ -240,6 +240,40 @@ func (a *App) CheckForUpdate() (string, error) {
 	return string(body), nil
 }
 
+// ApplyUpdate starts an approved self-update through the tray's authenticated
+// loopback API. The action returns immediately; the frontend continues to
+// poll status so the window can show downloading/verification/error phases
+// without blocking its event loop for the duration of the archive transfer.
+func (a *App) ApplyUpdate() (string, error) {
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/apply-update", nil)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// ConfirmApplyUpdate renders a native question dialog before the destructive
+// update action. Browser confirm() is not reliable in Wails' macOS WKWebView,
+// so this stays in the Go binding and uses the platform-native dialog API.
+func (a *App) ConfirmApplyUpdate(latestVersion string) (bool, error) {
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	selected, err := messageDialogFunc(ctx, runtime.MessageDialogOptions{
+		Type:          runtime.QuestionDialog,
+		Title:         "Confirm install and restart",
+		Message:       fmt.Sprintf("Install update %s and restart the tray? The tray will be unavailable for ~5 seconds.", latestVersion),
+		Buttons:       []string{"Cancel", "Install and restart"},
+		DefaultButton: "Install and restart",
+		CancelButton:  "Cancel",
+	})
+	if err != nil {
+		return false, err
+	}
+	return selected == "Install and restart", nil
+}
+
 // TriggerHookInstall installs (or reinstalls) id's render hook right now --
 // POST /api/actions/hook-install's counterpart, mirroring
 // internal/tray/hooksmenu.go's own "Install / update render hook" item.
@@ -403,6 +437,11 @@ func (a *App) agentRequest(method, path string, body []byte) ([]byte, error) {
 // so app_test.go can point StatusJSON at an httptest.Server instead of a
 // real config.yaml.
 var statusServerAddrFunc = statusServerAddr
+
+// messageDialogFunc is a seam for the native confirmation dialog. Keeping it
+// indirect makes the button/selection contract testable on a cross-compiled
+// Darwin/Windows package without opening a real desktop dialog in CI.
+var messageDialogFunc = runtime.MessageDialog
 
 // statusServerAddr resolves the same config.yaml cmd/branchdam-agent's own
 // tray subcommand resolves with no -config flag (config.ResolvePath's own

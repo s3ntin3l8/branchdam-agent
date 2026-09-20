@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -33,7 +34,67 @@ type selfUpdateAgent struct {
 	// same GitHub API; checkOnce's TryLock makes a concurrent call a
 	// harmless no-op (ran=false) rather than two overlapping requests.
 	checkMu sync.Mutex
+	applyMu sync.Mutex
 }
+
+// trayUpdateApplier is the status API's asynchronous adapter. The tray menu
+// already owns the Runner idle gate for its apply path; the window needs the
+// same gate so a window click cannot update files while an ingest is writing.
+type trayUpdateApplier struct {
+	runner  *tray.Runner
+	updater *selfUpdateAgent
+}
+
+func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
+	status := a.updater.Status()
+	if !status.Enabled || !status.UpdateFound {
+		status.Err = errors.New("self-update: no update is currently available")
+		return status, false
+	}
+	switch status.Phase {
+	case updatePhaseChecking, updatePhaseDownloading, updatePhaseVerifying, updatePhaseRestarting:
+		status.Err = fmt.Errorf("self-update: check/apply is already %s", status.Phase)
+		return status, false
+	}
+	release, ok := a.runner.TryLockIdle()
+	if !ok {
+		status = a.updater.Status()
+		status.Err = errors.New("self-update: an ingest or update is already in progress")
+		return status, false
+	}
+	// Keep the same lock order as the tray menu's synchronous apply path:
+	// Runner.gate first, then applyMu. Reversing these two acquisitions would
+	// let a window apply deadlock with a tray click that already owns the gate.
+	if !a.updater.applyMu.TryLock() {
+		release()
+		status = a.updater.Status()
+		status.Err = errors.New("self-update: an update or check is already in progress")
+		return status, false
+	}
+	a.updater.mu.Lock()
+	a.updater.st.Phase = updatePhaseDownloading
+	a.updater.st.StartedAt = time.Now()
+	a.updater.st.Err = nil
+	a.updater.mu.Unlock()
+	go func() {
+		defer release()
+		defer a.updater.applyMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		_, _ = a.updater.applyLatestLocked(ctx)
+	}()
+	return a.updater.Status(), true
+}
+
+const (
+	updatePhaseIdle        = tray.UpdatePhaseIdle
+	updatePhaseChecking    = tray.UpdatePhaseChecking
+	updatePhaseAvailable   = tray.UpdatePhaseAvailable
+	updatePhaseDownloading = tray.UpdatePhaseDownloading
+	updatePhaseVerifying   = tray.UpdatePhaseVerifying
+	updatePhaseRestarting  = tray.UpdatePhaseRestarting
+	updatePhaseFailed      = tray.UpdatePhaseFailed
+)
 
 // newSelfUpdateAgent builds an agent from cfg -- Run and ApplyLatest are
 // no-ops when cfg.SelfUpdate.Enabled is false, so the tray/status page
@@ -44,7 +105,7 @@ func newSelfUpdateAgent(cfg config.Config, version string) *selfUpdateAgent {
 		enabled:  cfg.SelfUpdate.Enabled,
 		version:  version,
 		interval: time.Duration(cfg.SelfUpdate.CheckIntervalHoursOrDefault()) * time.Hour,
-		st:       tray.UpdateStatus{Enabled: cfg.SelfUpdate.Enabled},
+		st:       tray.UpdateStatus{Enabled: cfg.SelfUpdate.Enabled, Phase: updatePhaseIdle},
 	}
 	if !a.enabled {
 		return a
@@ -103,6 +164,12 @@ func (a *selfUpdateAgent) Run(ctx context.Context) {
 // error; TryLock failing has nothing to do with the running build being
 // non-semver.
 func (a *selfUpdateAgent) checkOnce(ctx context.Context) (unavailable, ran bool) {
+	// An apply owns this lock for its entire download/verify/swap. A check
+	// must not reset the status of an apply already in progress.
+	if !a.applyMu.TryLock() {
+		return false, false
+	}
+	defer a.applyMu.Unlock()
 	if !a.checkMu.TryLock() {
 		return false, false
 	}
@@ -117,6 +184,11 @@ func (a *selfUpdateAgent) checkOnce(ctx context.Context) (unavailable, ran bool)
 // must not call this directly -- it does not itself guard against
 // concurrent use of a.up.
 func (a *selfUpdateAgent) check(ctx context.Context) (unavailable bool) {
+	a.mu.Lock()
+	a.st.Phase = updatePhaseChecking
+	a.st.StartedAt = time.Time{}
+	a.st.Err = nil
+	a.mu.Unlock()
 	result, err := a.up.Check(ctx, a.version)
 
 	a.mu.Lock()
@@ -126,15 +198,25 @@ func (a *selfUpdateAgent) check(ctx context.Context) (unavailable bool) {
 	if err != nil {
 		if errors.Is(err, selfupdate.ErrVersionNotSemver) {
 			a.st.Unavailable = true
+			// A locally built/dev binary is not an apply failure. Keep the
+			// lifecycle idle so Note and the native window render the more
+			// useful "unavailable" state rather than "failed".
+			a.st.Phase = updatePhaseIdle
 			return true
 		}
 		a.st.Err = err
+		a.st.Phase = updatePhaseFailed
 		return false
 	}
 	a.st.Err = nil
 	a.st.CurrentVersion = result.CurrentVersion
 	a.st.LatestVersion = result.LatestVersion
 	a.st.UpdateFound = result.UpdateFound
+	if result.UpdateFound {
+		a.st.Phase = updatePhaseAvailable
+	} else {
+		a.st.Phase = updatePhaseIdle
+	}
 	return false
 }
 
@@ -221,23 +303,62 @@ func (a *selfUpdateAgent) ApplyLatest(ctx context.Context) (string, error) {
 	if !a.enabled || a.up == nil {
 		return "", errors.New("self-update: not enabled")
 	}
+	if !a.applyMu.TryLock() {
+		return "", errors.New("self-update: an update is already in progress")
+	}
+	defer a.applyMu.Unlock()
+	return a.applyLatestLocked(ctx)
+}
+
+// applyLatestLocked is the shared apply implementation for the tray menu and
+// the asynchronous native-window action. Callers must hold applyMu for the
+// complete operation; this lets StartApply reserve the lock before returning
+// started=true, so a concurrent check cannot win the race before the worker
+// begins.
+func (a *selfUpdateAgent) applyLatestLocked(ctx context.Context) (string, error) {
+	if !a.enabled || a.up == nil {
+		err := errors.New("self-update: not enabled")
+		a.recordApplyError(err)
+		return "", err
+	}
+	a.mu.Lock()
+	a.st.Phase = updatePhaseDownloading
+	a.st.StartedAt = time.Now()
+	a.st.Err = nil
+	a.mu.Unlock()
 
 	execPath, err := os.Executable()
 	if err != nil {
+		a.recordApplyError(err)
 		return "", fmt.Errorf("self-update: resolve own executable: %w", err)
 	}
 	layout, err := selfupdate.DetectLayout(execPath)
 	if err != nil {
+		a.recordApplyError(err)
 		return "", err
 	}
 
+	a.mu.Lock()
+	a.st.Phase = updatePhaseVerifying
+	a.mu.Unlock()
 	appliedVersion, err := a.up.Apply(ctx, a.version, layout)
 	if err != nil {
+		a.recordApplyError(err)
 		return "", err
 	}
 
 	a.mu.Lock()
 	a.st.Applied = appliedVersion
+	a.st.Phase = updatePhaseRestarting
+	a.st.Err = nil
 	a.mu.Unlock()
 	return appliedVersion, nil
+}
+
+func (a *selfUpdateAgent) recordApplyError(err error) {
+	a.mu.Lock()
+	a.st.Phase = updatePhaseFailed
+	a.st.Err = err
+	a.mu.Unlock()
+	slog.Error("self-update apply failed", "err", err)
 }

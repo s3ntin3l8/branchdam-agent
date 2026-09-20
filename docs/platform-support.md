@@ -204,7 +204,8 @@ unauthenticated and loopback-only, same as before, for anyone who wants to `curl
 (`internal/tray/statusapi.go`), built for the native app UI (Track 3 of the distribution/UX plan):
 `GET /api/status`, `GET`/`POST /api/settings`, `POST /api/settings/integration-path`,
 `POST /api/settings/integration-rewrites`, `POST /api/settings/path-mappings`, and
-`POST /api/actions/{ingest,drain,prune,sync,hook-install,pause}`. `POST /api/settings`'s value
+`POST /api/actions/{ingest,drain,prune,sync,hook-install,hook-reveal,pause,test-connection,check-update,apply-update}`.
+`POST /api/settings`'s value
 selects the setter by JSON type -- boolean, number, string, or array of strings -- so a free-text
 field (server URL, agent ID, the two ingest roots, ...) is reachable non-interactively via
 `Settings.SetString`. Per-integration catalog paths, Resolve's path rewrites, and `pathMappings`
@@ -663,14 +664,15 @@ pipeline is code-signed or notarized, so that checksum check is the *only* integ
 before a downloaded binary is written to disk.
 
 Notify-and-confirm, never unattended: the tray checks on startup and periodically thereafter
-(`selfUpdate.checkIntervalHours`, default 24h) and shows "Install and restart" once an update is
-found, but nothing downloads or applies until that menu item is clicked (or, on a headless host,
-`branchdam-agent update` is run and confirmed) -- `selfUpdate.enabled` gates whether the binary
-may contact GitHub at all, not whether an update, once found, gets applied automatically; that
-second gate is always a separate, explicit action regardless of this flag. The install refuses
-while an ingest is in flight, for the whole duration of the download and apply, not just at the
-moment the click is handled -- `internal/tray.Runner.TryLockIdle` holds the same gate
-`TriggerIngest` does.
+(`selfUpdate.checkIntervalHours`, default 24h) and exposes "Install and restart" once an update is
+found. The tray menu and the native branchDAM window both offer that action; nothing downloads or
+applies until it is explicitly confirmed (or, on a headless host, `branchdam-agent update` is run
+and confirmed). While an apply is running, the native window shows its phase and any failure
+instead of appearing idle. `selfUpdate.enabled` gates whether the binary may contact GitHub at all,
+not whether an update, once found, gets applied automatically; that second gate is always a
+separate, explicit action regardless of this flag. The install refuses while an ingest is in
+flight, for the whole duration of the download and apply, not just at the moment the click is
+handled -- `internal/tray.Runner.TryLockIdle` holds the same gate `TriggerIngest` does.
 
 **Self-update requires a per-user install location.** Applying writes a replacement binary next
 to the running one, which needs write permission on the containing directory --
@@ -867,9 +869,10 @@ A live-refresh via TUF is the proper long-term answer but is out of scope here.
 - **The hardened `/api/*` surface (see Status page above) has one consumer so far** --
   `cmd/branchdam-agent-ui`. It now exercises `GET /api/status`, `GET`/`POST /api/settings`,
   `POST /api/settings/integration-{path,rewrites}` (the Settings section, Track 3d), and
-  `POST /api/actions/{sync,hook-install,hook-reveal}` (the Integrations/hooks action buttons,
-  Track 3e); `POST /api/actions/{ingest,drain,prune,pause}` remain unexercised by any real UI --
-  those four stay tray-only, with no equivalent button in this window. None of it has run on real
+  `POST /api/actions/{sync,hook-install,hook-reveal,test-connection,check-update,apply-update}`
+  (the Integrations/hooks, server, and self-update buttons, Track 3e); `POST
+  /api/actions/{ingest,drain,prune,pause}` remain unexercised by any real UI -- those four stay
+  tray-only, with no equivalent button in this window. None of it has run on real
   Windows/macOS hardware yet -- see the hardware checklist. Known limitations, by design rather
   than oversight: `POST
   /api/actions/ingest` runs synchronously to completion with no server-side timeout (a real card

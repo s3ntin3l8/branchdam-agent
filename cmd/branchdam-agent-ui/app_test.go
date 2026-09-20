@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/sessiontoken"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // withTempAgentDir points internal/agentlog (and therefore
@@ -429,6 +430,59 @@ func TestCheckForUpdatePostsToActionRoute(t *testing.T) {
 	}
 	if !strings.Contains(got, `"LatestVersion":"1.12.0"`) {
 		t.Errorf("CheckForUpdate() = %q, want the agent's raw response body passed through", got)
+	}
+}
+
+func TestApplyUpdatePostsToActionRoute(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/actions/apply-update" {
+			t.Errorf("method/path = %s %s, want POST /api/actions/apply-update", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"started":true,"status":{"Phase":"downloading"}}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	got, err := a.ApplyUpdate()
+	if err != nil {
+		t.Fatalf("ApplyUpdate: %v", err)
+	}
+	if !strings.Contains(got, `"started":true`) {
+		t.Errorf("ApplyUpdate() = %q, want started=true response", got)
+	}
+}
+
+func TestConfirmApplyUpdateUsesNativeQuestionDialog(t *testing.T) {
+	orig := messageDialogFunc
+	t.Cleanup(func() { messageDialogFunc = orig })
+	var got wailsruntime.MessageDialogOptions
+	messageDialogFunc = func(_ context.Context, options wailsruntime.MessageDialogOptions) (string, error) {
+		got = options
+		return "Install and restart", nil
+	}
+
+	a := newTestApp(t)
+	confirmed, err := a.ConfirmApplyUpdate("1.14.1")
+	if err != nil {
+		t.Fatalf("ConfirmApplyUpdate: %v", err)
+	}
+	if !confirmed {
+		t.Fatal("confirmed = false, want true for the install button")
+	}
+	if got.Type != wailsruntime.QuestionDialog || got.Title != "Confirm install and restart" {
+		t.Errorf("dialog type/title = %q/%q, want question/confirm title", got.Type, got.Title)
+	}
+	if got.Message == "" || !strings.Contains(got.Message, "1.14.1") {
+		t.Errorf("dialog message = %q, want release version", got.Message)
+	}
+	if !strings.Contains(strings.Join(got.Buttons, ","), "Install and restart") {
+		t.Errorf("dialog buttons = %v, want install action", got.Buttons)
 	}
 }
 

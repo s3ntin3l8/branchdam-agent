@@ -490,7 +490,7 @@ function renderHooks(status) {
   }
 }
 
-function renderSelfUpdate(status) {
+function renderSelfUpdate(status, settings) {
   const su = status.selfUpdate;
   const container = byId("selfupdate-body");
   if (!su) {
@@ -502,7 +502,9 @@ function renderSelfUpdate(status) {
     return;
   }
   const rows = [["Current version", su.CurrentVersion]];
-  if (su.Unavailable) {
+  if (su.Phase && !["idle", "available"].includes(su.Phase)) {
+    rows.push(["Status", raw(pill(su.Phase, su.Phase === "failed" ? "bad" : "neutral"))]);
+  } else if (su.Unavailable) {
     rows.push(["Status", raw(pill("unavailable (non-release build)", "neutral"))]);
   } else if (su.UpdateFound) {
     rows.push(["Status", raw(pill(`update available: ${su.LatestVersion}`, "bad"))]);
@@ -513,10 +515,9 @@ function renderSelfUpdate(status) {
   if (su.Err) rows.push(["Error", raw(pill(su.Err, "bad"))]);
   container.innerHTML = table(rows);
 
-  // A non-semver dev build (su.Unavailable) can never check successfully
-  // -- the button stays visible (Enabled is still true) but disabled, so
-  // the reason is explained by the "unavailable" pill above rather than
-  // by hiding the control outright.
+  // Unknown non-terminal phases fail closed too, so a newly added Go phase
+  // cannot accidentally re-enable the destructive button in an older UI.
+  const applyInFlight = !!su.Phase && !["idle", "available", "failed"].includes(su.Phase);
   container.appendChild(
     actionButtonRow("Update check", "", [
       {
@@ -556,6 +557,43 @@ function renderSelfUpdate(status) {
             setFieldStatus(statusEl, "Up to date", "saved");
           }
           await poll(); // refresh the table above immediately, rather than waiting up to POLL_INTERVAL_MS
+        },
+      },
+      {
+        label: "Install and restart",
+        busyText: "Installing…",
+        disabled: !su.UpdateFound || !!su.Unavailable || applyInFlight,
+        busy: inFlightActions.has("applyUpdate"),
+        run: async (statusEl) => {
+          const app = getApp();
+          if (!app) return;
+          // Match the tray menu's destructive-action setting. If settings
+          // are unavailable, keep the confirmation (fail closed). Wails' Go
+          // binding uses the native question dialog; browser confirm() is
+          // not reliable in the macOS WKWebView.
+          if (!settings || settings.ConfirmDestructive !== false) {
+            let confirmed;
+            try {
+              confirmed = await app.ConfirmApplyUpdate(su.LatestVersion);
+            } catch (err) {
+              setFieldStatus(statusEl, String(err), "error");
+              return;
+            }
+            if (!confirmed) return;
+          }
+          inFlightActions.add("applyUpdate");
+          let result;
+          try {
+            result = JSON.parse(await app.ApplyUpdate());
+          } finally {
+            inFlightActions.delete("applyUpdate");
+          }
+          if (!result.started) {
+            setFieldStatus(statusEl, result.status?.Err || "Update could not be started", "error");
+            return;
+          }
+          setFieldStatus(statusEl, "Update started — watch status above", "saved");
+          await poll();
         },
       },
     ]),
@@ -603,7 +641,7 @@ function render(view) {
   renderWatch(status);
   renderIntegrations(status);
   renderHooks(status);
-  renderSelfUpdate(status);
+  renderSelfUpdate(status, view.settings);
 }
 
 function showError(message) {
