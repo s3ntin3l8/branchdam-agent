@@ -470,22 +470,26 @@ func Run(
 		// shutdown can't interrupt a Windows sibling-then-primary swap
 		// mid-way -- but that guarantee is worthless if this select loop
 		// quits and the whole process exits out from under that goroutine
-		// regardless. Quitting is deferred, not ignored: applyDoneCh's
-		// own case still quits once the apply (bounded by its own
-		// 10-minute timeout) actually finishes.
+		// regardless. Quitting is deferred until the apply result or the
+		// ticker observes that a window apply no longer owns the binary.
 		var quitRequested bool
+		ctxDone := ctx.Done()
 
 		for {
 			select {
-			case <-ctx.Done():
-				if applying || rollingBack || updatePhaseOwnsBinary(up.Status().Phase) {
+			case <-ctxDone:
+				if trayQuitBlocked(up.Status(), applying, rollingBack) {
 					quitRequested = true
+					// A closed context channel is permanently ready. Disable
+					// this case while the protected operation finishes so the
+					// ticker can observe completion without a hot loop.
+					ctxDone = nil
 					continue
 				}
 				systray.Quit()
 				return
 			case <-quitItem.ClickedCh:
-				if applying || rollingBack || updatePhaseOwnsBinary(up.Status().Phase) {
+				if trayQuitBlocked(up.Status(), applying, rollingBack) {
 					quitRequested = true
 					continue
 				}
@@ -717,6 +721,10 @@ func Run(
 				// refresh is also invoked by detector callbacks.
 				if restart, ok := windowApplyRestartOutcome(up.Status(), applying, rollingBack); ok {
 					outcome = restart
+					systray.Quit()
+					return
+				}
+				if quitRequested && !trayQuitBlocked(up.Status(), applying, rollingBack) {
 					systray.Quit()
 					return
 				}

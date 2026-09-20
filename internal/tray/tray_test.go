@@ -1787,7 +1787,7 @@ func TestWindowApplyRestartOutcome(t *testing.T) {
 	}
 }
 
-func TestUpdatePhaseInFlight(t *testing.T) {
+func TestUpdatePhaseOwnsBinary(t *testing.T) {
 	for _, phase := range []string{UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting} {
 		if !updatePhaseOwnsBinary(phase) {
 			t.Errorf("updatePhaseOwnsBinary(%q) = false, want true", phase)
@@ -1797,6 +1797,21 @@ func TestUpdatePhaseInFlight(t *testing.T) {
 		if updatePhaseOwnsBinary(phase) {
 			t.Errorf("updatePhaseOwnsBinary(%q) = true, want false", phase)
 		}
+	}
+}
+
+func TestTrayQuitBlocked(t *testing.T) {
+	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseDownloading}, false, false) {
+		t.Fatal("window apply should block tray quit")
+	}
+	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseIdle}, true, false) {
+		t.Fatal("tray apply should block tray quit")
+	}
+	if !trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseIdle}, false, true) {
+		t.Fatal("rollback should block tray quit")
+	}
+	if trayQuitBlocked(UpdateStatus{Phase: UpdatePhaseChecking}, false, false) {
+		t.Fatal("read-only check should not block tray quit")
 	}
 }
 
