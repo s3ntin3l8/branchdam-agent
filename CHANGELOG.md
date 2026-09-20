@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.13.0...v1.14.0) (2026-09-20)
+
+
+### Features
+
+* polish tray icon, status text, settings UI, and DMG installer ([#247](https://github.com/s3ntin3l8/branchdam-agent/issues/247)) ([79b9ec6](https://github.com/s3ntin3l8/branchdam-agent/commit/79b9ec69acdd99b75b9a3e3b7d9ceb00804fe89f))
+
 ## [1.13.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.12.1...v1.13.0) (2026-09-19)
 
 
