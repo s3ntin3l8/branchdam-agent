@@ -17,6 +17,8 @@ package ingest
 // paths for local dev convenience. Skips cleanly, not a failure, when none
 // resolve to a real branchDAM checkout. Also requires `exiftool` and
 // `go build` on PATH; skips cleanly if either is missing.
+// The branchDAM checkout must include the Companion Pairing API: agent
+// authentication is provisioned through POST /api/v1/companion/pairings.
 //
 // See TestExifExtractsPromotedColumnsAndSidecarWins and the djisrt/hashing
 // package tests for the narrower, always-run unit coverage of the pieces
@@ -25,6 +27,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -35,9 +38,7 @@ import (
 	"time"
 )
 
-// parityTestAPIKey must be >= 32 characters (server.apiKey's own
-// requirement) -- a fixed, obviously-fake value scoped to this test only.
-const parityTestAPIKey = "parity-test-agent-api-key-0123456789" // pragma: allowlist secret
+var parityHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 func TestParityAgentIngestVsServerScan(t *testing.T) {
 	branchdamSrc := locateBranchDAMSrc(t)
@@ -85,7 +86,6 @@ func TestParityAgentIngestVsServerScan(t *testing.T) {
 	writeServerConfig(t, serverScanCfgPath, serverConfigVars{
 		DBPath:           serverScanDBPath,
 		Port:             serverScanPort,
-		APIKey:           parityTestAPIKey,
 		ThumbsDir:        filepath.Join(dir, "thumbs-serverscan"),
 		ServerScanRoot:   serverScanDir,
 		AgentArchiveRoot: agentArchiveDir,
@@ -97,7 +97,6 @@ func TestParityAgentIngestVsServerScan(t *testing.T) {
 	writeServerConfig(t, agentArchiveCfgPath, serverConfigVars{
 		DBPath:           agentArchiveDBPath,
 		Port:             agentArchivePort,
-		APIKey:           parityTestAPIKey,
 		ThumbsDir:        filepath.Join(dir, "thumbs-agentarchive"),
 		ServerScanRoot:   serverScanDir,
 		AgentArchiveRoot: agentArchiveDir,
@@ -140,6 +139,7 @@ func TestParityAgentIngestVsServerScan(t *testing.T) {
 	agentArchiveBaseURL := fmt.Sprintf("http://127.0.0.1:%d", agentArchivePort)
 	waitForHealthz(t, serverScanBaseURL, 20*time.Second)
 	waitForHealthz(t, agentArchiveBaseURL, 20*time.Second)
+	agentID, agentAPIKey := createAgentPairing(t, agentArchiveBaseURL)
 
 	// --- Resolve storage location IDs (seeded from config.yaml at startup). ---
 	serverScanLocID := waitForStorageLocationID(t, serverScanDBPath, "serverscan", 10*time.Second)
@@ -149,7 +149,8 @@ func TestParityAgentIngestVsServerScan(t *testing.T) {
 	agentCfgPath := filepath.Join(dir, "agent-config.yaml")
 	writeAgentConfig(t, agentCfgPath, agentConfigVars{
 		BaseURL:          agentArchiveBaseURL,
-		APIKey:           parityTestAPIKey,
+		AgentID:          agentID,
+		APIKey:           agentAPIKey,
 		AgentArchiveRoot: agentArchiveDir,
 		LocalEditRoot:    filepath.Join(dir, "localedit"),
 	})
@@ -571,7 +572,6 @@ func buildAgentBinary(t *testing.T, moduleRoot string) string {
 type serverConfigVars struct {
 	DBPath           string
 	Port             int
-	APIKey           string
 	ThumbsDir        string
 	ServerScanRoot   string
 	AgentArchiveRoot string
@@ -593,8 +593,6 @@ workers:
   fullHashPolicy: tier3_and_collision
 thumbnails:
   cacheDir: %s
-agent:
-  apiKey: %q
 authz:
   groups:
     - parity-test-admins
@@ -609,7 +607,7 @@ storageLocations:
     rootPath: %s
     tier: TIER3_MASTER_ARCHIVE
     readOnly: true
-`, v.Port, v.DBPath, v.ThumbsDir, v.APIKey, v.ServerScanRoot, v.AgentArchiveRoot)
+`, v.Port, v.DBPath, v.ThumbsDir, v.ServerScanRoot, v.AgentArchiveRoot)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -617,6 +615,7 @@ storageLocations:
 
 type agentConfigVars struct {
 	BaseURL          string
+	AgentID          string
 	APIKey           string
 	AgentArchiveRoot string
 	LocalEditRoot    string
@@ -628,7 +627,7 @@ func writeAgentConfig(t *testing.T, path string, v agentConfigVars) {
 server:
   baseUrl: %q
   apiKey: %q
-agentId: "parity-test-agent"
+agentId: %q
 pathMappings:
   - workstationPath: %q
     containerPath: %q
@@ -636,7 +635,7 @@ ingest:
   archiveRoot: %q
   localEditRoot: %q
   pathTemplate: "{original_name}"
-`, v.BaseURL, v.APIKey, v.AgentArchiveRoot, v.AgentArchiveRoot, v.AgentArchiveRoot, v.LocalEditRoot)
+`, v.BaseURL, v.APIKey, v.AgentID, v.AgentArchiveRoot, v.AgentArchiveRoot, v.AgentArchiveRoot, v.LocalEditRoot)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +657,7 @@ func waitForHealthz(t *testing.T, baseURL string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(baseURL + "/healthz")
+		resp, err := parityHTTPClient.Get(baseURL + "/healthz")
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -695,13 +694,82 @@ func triggerServerScan(t *testing.T, baseURL string, locationID int64) {
 	req.Header.Set("X-Authentik-Username", "parity-test-user")
 	req.Header.Set("X-Authentik-Groups", "parity-test-admins")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := parityHTTPClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST /api/v1/scan: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		t.Fatalf("POST /api/v1/scan: status %d", resp.StatusCode)
+	}
+}
+
+// createAgentPairing provisions the temporary agent identity used by the
+// parity run. branchDAM no longer accepts the historical shared
+// agent.apiKey config value; agent routes authenticate only with a
+// per-device Companion Pairing key. The test server's forward-auth config
+// makes this request equivalent to an authenticated admin browser request,
+// without requiring a real Authentik or PAT setup.
+func createAgentPairing(t *testing.T, baseURL string) (agentID, apiKey string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/companion/pairings", strings.NewReader(`{"friendlyLabel":"parity-test-agent"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Authentik-Username", "parity-test-user")
+	req.Header.Set("X-Authentik-Groups", "parity-test-admins")
+
+	resp, err := parityHTTPClient.Do(req)
+	if err != nil {
+		t.Fatalf("create companion pairing: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+			t.Skipf("branchDAM server at %s lacks the Companion Pairing API (status %d); use a pairing-capable checkout", baseURL, resp.StatusCode)
+		}
+		t.Fatalf("create companion pairing: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out struct {
+		AgentID string `json:"agentId"`
+		APIKey  string `json:"apiKey"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode companion pairing: %v", err)
+	}
+	if out.AgentID == "" || out.APIKey == "" {
+		t.Fatalf("create companion pairing returned incomplete credentials: agentId=%q apiKey-present=%t", out.AgentID, out.APIKey != "")
+	}
+	verifyAgentPairing(t, baseURL, out.APIKey)
+	return out.AgentID, out.APIKey
+}
+
+// verifyAgentPairing distinguishes a pairing-capable server from an older
+// sibling checkout that happens to expose the pairing-management route but
+// still authenticates agent routes only with the retired shared key. In that
+// environment the parity test cannot exercise the agent contract, so skip
+// with an actionable capability message instead of reporting a misleading
+// media-ingest failure.
+func verifyAgentPairing(t *testing.T, baseURL, apiKey string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/agent/hello", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-API-Key", apiKey)
+	resp, err := parityHTTPClient.Do(req)
+	if err != nil {
+		t.Fatalf("verify companion pairing: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		t.Skipf("branchDAM server at %s lacks pairing-only agent authentication (hello status %d); use a pairing-capable checkout", baseURL, resp.StatusCode)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("verify companion pairing: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 }
 
