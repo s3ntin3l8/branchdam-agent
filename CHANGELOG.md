@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.14.3](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.14.2...v1.14.3) (2026-09-21)
+
+
+### Bug Fixes
+
+* prevent log injection in tray diagnostics ([#255](https://github.com/s3ntin3l8/branchdam-agent/issues/255)) ([3858f02](https://github.com/s3ntin3l8/branchdam-agent/commit/3858f02b6e82c911c7137aeedf3f75abac66021d))
+* prevent start-on-login log injection ([#259](https://github.com/s3ntin3l8/branchdam-agent/issues/259)) ([3ecac5e](https://github.com/s3ntin3l8/branchdam-agent/commit/3ecac5e949db354fc238cd1e1da57fa69d6ae414))
+* prevent start-on-login log injection ([#260](https://github.com/s3ntin3l8/branchdam-agent/issues/260)) ([864df69](https://github.com/s3ntin3l8/branchdam-agent/commit/864df69a585a4827875dc1ed9dbd23fd0cc7e564))
+* quote start-on-login log errors ([#258](https://github.com/s3ntin3l8/branchdam-agent/issues/258)) ([2a06697](https://github.com/s3ntin3l8/branchdam-agent/commit/2a066977713df7b67e056a5878507dd5fd403edc))
+* sanitize start-on-login log errors ([#257](https://github.com/s3ntin3l8/branchdam-agent/issues/257)) ([ddf4459](https://github.com/s3ntin3l8/branchdam-agent/commit/ddf44596a42167cd3fab6daf24f37c2a443e79b4))
+
 ## [1.14.2](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.14.1...v1.14.2) (2026-09-20)
 
 
