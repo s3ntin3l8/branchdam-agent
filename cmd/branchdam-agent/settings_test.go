@@ -64,34 +64,53 @@ func settingsTestFixture(t *testing.T) (path string, cfg config.Config, runner *
 }
 
 func TestConfigSettingsStartOnLoginErrorEscapesLogLineBreaks(t *testing.T) {
-	path, cfg, runner := settingsTestFixture(t)
-	s := newConfigSettings(path, cfg, runner)
-
 	originalEnable := enableStartOnLoginFunc
+	originalDisable := disableStartOnLoginFunc
 	enableStartOnLoginFunc = func(string) error { return errors.New("registration failed\r\nforged entry") }
-	t.Cleanup(func() { enableStartOnLoginFunc = originalEnable })
+	disableStartOnLoginFunc = func() error { return errors.New("registration failed\r\nforged entry") }
+	t.Cleanup(func() {
+		enableStartOnLoginFunc = originalEnable
+		disableStartOnLoginFunc = originalDisable
+	})
 
-	var logs bytes.Buffer
-	originalLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(originalLogger) })
+	for _, tt := range []struct {
+		name    string
+		enabled bool
+		msg     string
+	}{
+		{name: "enabling", enabled: true, msg: "start-on-login registration change failed while enabling"},
+		{name: "disabling", enabled: false, msg: "start-on-login registration change failed while disabling"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path, cfg, runner := settingsTestFixture(t)
+			s := newConfigSettings(path, cfg, runner)
 
-	if err := s.SetBool("tray.startOnLogin", true); err != nil {
-		t.Fatalf("SetBool: %v", err)
-	}
+			var logs bytes.Buffer
+			originalLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(originalLogger) })
 
-	var startOnLoginLine string
-	for _, line := range strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n") {
-		if strings.Contains(line, "start-on-login registration change failed") {
-			startOnLoginLine = line
-			break
-		}
-	}
-	if startOnLoginLine == "" {
-		t.Fatalf("start-on-login warning was not logged: %q", logs.String())
-	}
-	if !strings.Contains(startOnLoginLine, `msg="start-on-login registration change failed: \"registration failed\\r\\nforged entry\""`) {
-		t.Errorf("log did not quote line breaks visibly: %q", startOnLoginLine)
+			if err := s.SetBool("tray.startOnLogin", tt.enabled); err != nil {
+				t.Fatalf("SetBool: %v", err)
+			}
+
+			var startOnLoginLine string
+			for _, line := range strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n") {
+				if strings.Contains(line, "start-on-login registration change failed") {
+					startOnLoginLine = line
+					break
+				}
+			}
+			if startOnLoginLine == "" {
+				t.Fatalf("start-on-login warning was not logged: %q", logs.String())
+			}
+			if !strings.Contains(startOnLoginLine, `msg="`+tt.msg+`"`) {
+				t.Errorf("log did not preserve the setting: %q", startOnLoginLine)
+			}
+			if !strings.Contains(startOnLoginLine, `err="registration failed\r\nforged entry"`) {
+				t.Errorf("log did not quote line breaks visibly: %q", startOnLoginLine)
+			}
+		})
 	}
 }
 

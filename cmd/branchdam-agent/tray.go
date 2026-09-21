@@ -50,6 +50,8 @@ var trayDialogSetup = func() (run dialogRunner, selfExe string, err error) {
 // loop. Production always uses tray.Run.
 var trayRun = tray.Run
 
+const startOnLoginRegistrationFailed = "start-on-login registration failed"
+
 // trayConfirm builds the destructive-action confirmation callback the
 // tray's select loop (internal/tray/run_supported.go) hands each of the
 // four gated click handlers. It re-execs `dialog -kind question
@@ -537,7 +539,7 @@ func runTrayCmd(args []string) int {
 		if err := enableStartOnLogin(resolvedPath); err != nil {
 			// Non-fatal: an operator who opted in still gets a working
 			// tray this session, just without the login item registered.
-			slog.Warn("start-on-login registration failed", "err", err)
+			slog.Warn(startOnLoginRegistrationFailed, "err", err)
 			writeStartOnLoginWarning(os.Stderr, err)
 		}
 	}
@@ -656,7 +658,7 @@ func runTrayCmd(args []string) int {
 }
 
 func writeStartOnLoginWarning(w io.Writer, err error) {
-	_, _ = fmt.Fprintf(w, "branchdam-agent tray: WARN: start-on-login registration failed: %q\n", err.Error())
+	_, _ = fmt.Fprintf(w, "branchdam-agent tray: WARN: %s: %q\n", startOnLoginRegistrationFailed, err.Error())
 }
 
 // enableStartOnLogin registers this binary (with the same -config flag it
