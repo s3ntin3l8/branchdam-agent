@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // maxSizeBytes is the size a log file is allowed to reach before Setup
@@ -30,6 +31,12 @@ import (
 // next restart, which is an acceptable trade for not adding a rotation
 // dependency to a repo whose CLAUDE.md already prefers a minimal one.
 const maxSizeBytes = 5 * 1024 * 1024
+
+// Sanitize renders carriage returns and newlines visibly so untrusted values
+// cannot forge additional entries in the plain-text agent log.
+func Sanitize(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\r", `\r`), "\n", `\n`)
+}
 
 // Path returns the platform-appropriate log file location:
 //   - Windows: %LOCALAPPDATA%\branchDAM\logs\agent.log

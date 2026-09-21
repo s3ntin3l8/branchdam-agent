@@ -348,13 +348,13 @@ func runTrayCmd(args []string) int {
 	// is advisory.
 	for _, p := range cfg.Validate() {
 		if p.Advisory() {
-			slog.Warn("config problem", "field", p.Field, "message", p.Message)
+			slog.Warn("config problem", "field", agentlog.Sanitize(p.Field), "message", agentlog.Sanitize(p.Message))
 			continue
 		}
 		if strings.HasPrefix(p.Field, "server.") {
 			return fail("config problem: %s", p)
 		}
-		slog.Warn("config problem", "field", p.Field, "message", p.Message)
+		slog.Warn("config problem", "field", agentlog.Sanitize(p.Field), "message", agentlog.Sanitize(p.Message))
 	}
 	if cfg.Offline.QueueDBPath != "" && cfg.Offline.Tier0ContainerRoot == "" {
 		return fail("offline.tier0ContainerRoot must be set in config when offline.queueDbPath is set")

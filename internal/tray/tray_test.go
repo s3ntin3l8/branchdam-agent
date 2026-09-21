@@ -1,9 +1,11 @@
 package tray
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +27,15 @@ type fakeIngester struct {
 	offlineErr    error
 	calls         []string
 	offlineCalls  []string
+}
+
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	original := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(original) })
+	return &buf
 }
 
 func (f *fakeIngester) IngestCard(_ context.Context, cardRoot string) (ingest.CardResult, error) {
@@ -2187,6 +2198,38 @@ func TestTriggerIngestSkipsWhenPaused(t *testing.T) {
 	}
 }
 
+func TestTriggerIngestPausedSanitizesCardPathInLog(t *testing.T) {
+	logs := captureLogs(t)
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetPaused(true)
+
+	r.TriggerIngest(context.Background(), "/media/card\nforged entry")
+
+	got := logs.String()
+	if strings.Count(got, "\n") != 1 {
+		t.Errorf("paused-ingest log has %d physical lines, want 1: %q", strings.Count(got, "\n"), got)
+	}
+	if !strings.Contains(got, `path="/media/card\\nforged entry"`) {
+		t.Errorf("paused-ingest log did not visibly escape path newline: %q", got)
+	}
+}
+
+func TestTriggerIngestIncompleteConfigSanitizesCardPathInLog(t *testing.T) {
+	logs := captureLogs(t)
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetConfigIncomplete(true, []string{"ingest.localEditRoot"})
+
+	r.TriggerIngest(context.Background(), "/media/card\r\nforged entry")
+
+	got := logs.String()
+	if strings.Count(got, "\n") != 1 {
+		t.Errorf("incomplete-config log has %d physical lines, want 1: %q", strings.Count(got, "\n"), got)
+	}
+	if !strings.Contains(got, `path="/media/card\\r\\nforged entry"`) {
+		t.Errorf("incomplete-config log did not visibly escape path line breaks: %q", got)
+	}
+}
+
 func TestTriggerDrainSkipsWhenPaused(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, nil, "")
 	fd := &fakeDrainer{summary: DrainSummary{NodeCreatedSent: 2}}
@@ -3063,6 +3106,26 @@ func TestAutoEjectFailureNotification(t *testing.T) {
 	}
 	if notifMsg != "Eject failed — please eject manually" {
 		t.Errorf("expected notifMsg = %q, got %q", "Eject failed — please eject manually", notifMsg)
+	}
+}
+
+func TestAutoEjectFailureSanitizesLogAttributes(t *testing.T) {
+	logs := captureLogs(t)
+	fi := &fakeIngester{result: ingest.CardResult{Files: []ingest.FileResult{{SourcePath: "photo.jpg"}}}}
+	r := NewRunner(fi, []string{"/media"}, "/scratch")
+	r.SetAutoEject(true)
+	r.SetEjectFunc(func(string) error { return errors.New("device busy\nforged entry") })
+
+	r.TriggerIngest(context.Background(), "/media/card\r\nforged entry")
+
+	got := logs.String()
+	if strings.Count(got, "\n") != 1 {
+		t.Errorf("eject-failure log has %d physical lines, want 1: %q", strings.Count(got, "\n"), got)
+	}
+	for _, want := range []string{`card="/media/card\\r\\nforged entry"`, `err="device busy\\nforged entry"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("eject-failure log missing escaped attribute %q: %q", want, got)
+		}
 	}
 }
 
