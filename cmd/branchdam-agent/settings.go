@@ -69,6 +69,10 @@ type configSettings struct {
 	queueStore *queue.Store
 }
 
+// enableStartOnLoginFunc is a test seam for the best-effort registration
+// performed when the start-on-login setting changes.
+var enableStartOnLoginFunc = enableStartOnLogin
+
 // newConfigSettings builds a configSettings over the already-loaded cfg
 // (runTrayCmd's own startup load -- avoids reading config.yaml twice
 // before anything has changed).
@@ -207,12 +211,12 @@ func (s *configSettings) SetBool(key string, v bool) error {
 		// cooperated with actually registering the login item.
 		var err error
 		if v {
-			err = enableStartOnLogin(s.path)
+			err = enableStartOnLoginFunc(s.path)
 		} else {
 			err = autostart.Disable()
 		}
 		if err != nil {
-			slog.Warn("start-on-login registration change failed", "enabled", v, "err", strings.ReplaceAll(strings.ReplaceAll(err.Error(), "\r", ""), "\n", ""))
+			slog.Warn("start-on-login registration change failed", "enabled", v, "err", fmt.Sprintf("%q", err.Error()))
 		}
 	}
 	return s.reload()
