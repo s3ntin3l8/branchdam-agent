@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 
 	"os"
@@ -537,7 +538,7 @@ func runTrayCmd(args []string) int {
 			// Non-fatal: an operator who opted in still gets a working
 			// tray this session, just without the login item registered.
 			slog.Warn("start-on-login registration failed", "err", err)
-			fmt.Fprintf(os.Stderr, "branchdam-agent tray: WARN: start-on-login registration failed: %v\n", err)
+			writeStartOnLoginWarning(os.Stderr, err)
 		}
 	}
 
@@ -652,6 +653,10 @@ func runTrayCmd(args []string) int {
 	}
 
 	return 0
+}
+
+func writeStartOnLoginWarning(w io.Writer, err error) {
+	_, _ = fmt.Fprintf(w, "branchdam-agent tray: WARN: start-on-login registration failed: %q\n", err.Error())
 }
 
 // enableStartOnLogin registers this binary (with the same -config flag it

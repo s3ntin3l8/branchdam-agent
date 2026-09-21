@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +19,19 @@ import (
 )
 
 var stubTrayRunCalls atomic.Int32
+
+func TestWriteStartOnLoginWarningEscapesLineBreaks(t *testing.T) {
+	var stderr bytes.Buffer
+	writeStartOnLoginWarning(&stderr, errors.New("registration failed\r\nforged entry"))
+
+	got := stderr.String()
+	if strings.Count(got, "\n") != 1 {
+		t.Errorf("stderr has %d physical lines, want 1: %q", strings.Count(got, "\n"), got)
+	}
+	if !strings.Contains(got, `"registration failed\r\nforged entry"`) {
+		t.Errorf("stderr did not quote line breaks visibly: %q", got)
+	}
+}
 
 // stubTrayDialog overrides trayDialogSetup for the duration of a test, so
 // runTrayCmd's startup-error notification never re-execs the actual `go test` binary as

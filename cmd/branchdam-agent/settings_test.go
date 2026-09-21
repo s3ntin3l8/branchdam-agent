@@ -90,7 +90,7 @@ func TestConfigSettingsStartOnLoginErrorEscapesLogLineBreaks(t *testing.T) {
 	if startOnLoginLine == "" {
 		t.Fatalf("start-on-login warning was not logged: %q", logs.String())
 	}
-	if !strings.Contains(startOnLoginLine, `err="\"registration failed\\r\\nforged entry\""`) {
+	if !strings.Contains(startOnLoginLine, `msg="start-on-login registration change failed: \"registration failed\\r\\nforged entry\""`) {
 		t.Errorf("log did not quote line breaks visibly: %q", startOnLoginLine)
 	}
 }
