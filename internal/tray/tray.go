@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/s3ntin3l8/branchdam-agent/internal/agentlog"
 	"github.com/s3ntin3l8/branchdam-agent/internal/eject"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
@@ -632,11 +633,11 @@ func (r *Runner) TriggerDetectedIngest(ctx context.Context, cardPath string) Ing
 
 func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection bool) IngestSummary {
 	if r.paused.Load() {
-		slog.Info("tray: ingest paused, skipping", "path", cardPath)
+		slog.Info("tray: ingest paused, skipping", "path", agentlog.Sanitize(cardPath))
 		return IngestSummary{CardPath: cardPath}
 	}
 	if r.ConfigIncomplete() {
-		slog.Info("tray: config incomplete, skipping ingest", "path", cardPath)
+		slog.Info("tray: config incomplete, skipping ingest", "path", agentlog.Sanitize(cardPath))
 		return IngestSummary{CardPath: cardPath, Err: ErrConfigIncomplete}
 	}
 	if isDetection {
@@ -759,7 +760,7 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 			ejectFn = eject.Eject
 		}
 		if err := ejectFn(cardPath); err != nil {
-			slog.Error("failed to eject card", "card", cardPath, "err", err)
+			slog.Error("failed to eject card", "card", agentlog.Sanitize(cardPath), "err", agentlog.Sanitize(err.Error()))
 			if notifier != nil {
 				notifier("branchDAM Agent", "Eject failed — please eject manually")
 			}

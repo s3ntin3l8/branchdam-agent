@@ -9,6 +9,29 @@ import (
 	"testing"
 )
 
+func TestSanitize(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "LF", in: "before\nafter", want: `before\nafter`},
+		{name: "CR", in: "before\rafter", want: `before\rafter`},
+		{name: "CRLF", in: "before\r\nafter", want: `before\r\nafter`},
+		{name: "multiple line breaks", in: "a\n\rb\r\nc", want: `a\n\rb\r\nc`},
+		{name: "benign text", in: "a normal path/file.jpg", want: "a normal path/file.jpg"},
+		{name: "empty", in: "", want: ""},
+		{name: "unicode", in: "K\u00f6ln \U0001F4F7", want: "K\u00f6ln \U0001F4F7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Sanitize(tt.in); got != tt.want {
+				t.Errorf("Sanitize(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func setTestLogRoot(t *testing.T, root string) string {
 	t.Helper()
 	switch runtime.GOOS {
