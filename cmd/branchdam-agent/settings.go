@@ -73,6 +73,10 @@ type configSettings struct {
 // performed when the start-on-login setting changes.
 var enableStartOnLoginFunc = enableStartOnLogin
 
+// disableStartOnLoginFunc is the corresponding test seam for removing a
+// start-on-login registration when the setting changes.
+var disableStartOnLoginFunc = autostart.Disable
+
 // newConfigSettings builds a configSettings over the already-loaded cfg
 // (runTrayCmd's own startup load -- avoids reading config.yaml twice
 // before anything has changed).
@@ -209,14 +213,16 @@ func (s *configSettings) SetBool(key string, v bool) error {
 		// already been saved -- the operator's stated intent is what
 		// config.yaml should reflect regardless of whether the OS
 		// cooperated with actually registering the login item.
+		msg := "start-on-login registration change failed while disabling"
 		var err error
 		if v {
 			err = enableStartOnLoginFunc(s.path)
+			msg = "start-on-login registration change failed while enabling"
 		} else {
-			err = autostart.Disable()
+			err = disableStartOnLoginFunc()
 		}
 		if err != nil {
-			slog.Warn(fmt.Sprintf("start-on-login registration change failed: %q", err.Error()), "enabled", v)
+			slog.Warn(msg, "err", err)
 		}
 	}
 	return s.reload()
