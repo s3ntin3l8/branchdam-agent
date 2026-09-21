@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/hooks/resolve"
-	"github.com/s3ntin3l8/branchdam-agent/internal/agentlog"
 	"github.com/s3ntin3l8/branchdam-agent/internal/autostart"
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
@@ -213,7 +212,7 @@ func (s *configSettings) SetBool(key string, v bool) error {
 			err = autostart.Disable()
 		}
 		if err != nil {
-			slog.Warn("start-on-login registration change failed", "enabled", v, "err", agentlog.Sanitize(err.Error()))
+			slog.Warn("start-on-login registration change failed", "enabled", v, "err", strings.ReplaceAll(strings.ReplaceAll(err.Error(), "\r", ""), "\n", ""))
 		}
 	}
 	return s.reload()
