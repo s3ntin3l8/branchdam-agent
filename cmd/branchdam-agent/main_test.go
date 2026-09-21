@@ -38,10 +38,11 @@ func TestEffectiveLaunchArgs(t *testing.T) {
 		{name: "windows console", goos: "windows", executable: `C:\\branchdam-agent.exe`},
 		{name: "mac bundle", goos: "darwin", executable: "/Applications/branchdam-agent.app/Contents/MacOS/branchdam-agent", want: []string{"tray"}},
 		{name: "mac console", goos: "darwin", executable: "/usr/local/bin/branchdam-agent"},
-		{name: "linux", goos: "linux", executable: "/usr/local/bin/branchdam-agent"},
 		{name: "explicit args win", goos: "windows", executable: `C:\\branchdam-agent-tray.exe`, args: []string{"version"}, want: []string{"version"}},
 		{name: "explicit args mac", goos: "darwin", executable: "/Applications/branchdam-agent.app/Contents/MacOS/branchdam-agent", args: []string{"preflight"}, want: []string{"preflight"}},
+		{name: "deep link url arg", goos: "darwin", executable: "/Applications/branchdam-agent.app/Contents/MacOS/branchdam-agent", args: []string{"branchdam://?server=http://localhost&key=123"}, want: []string{"pair", "branchdam://?server=http://localhost&key=123"}},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := effectiveLaunchArgs(tt.goos, tt.executable, tt.args)

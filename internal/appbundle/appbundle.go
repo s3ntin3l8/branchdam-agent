@@ -126,6 +126,17 @@ func RenderInfoPlist(version string) string {
     <string>%s</string>
     <key>CFBundleVersion</key>
     <string>%s</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>branchDAM Companion Pairing</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>branchdam</string>
+            </array>
+        </dict>
+    </array>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>

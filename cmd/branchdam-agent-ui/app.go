@@ -225,6 +225,23 @@ func (a *App) TestConnection() (string, error) {
 	return string(body), nil
 }
 
+// Pair submits a branchdam:// pairing URL to the agent's loopback API --
+// POST /api/actions/pair's counterpart. Returns the raw pairActionResult
+// JSON (internal/tray/statusapi.go) so the frontend can check ok and err.
+func (a *App) Pair(rawURL string) (string, error) {
+	reqBody, err := json.Marshal(struct {
+		URL string `json:"url"`
+	}{URL: rawURL})
+	if err != nil {
+		return "", err
+	}
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/pair", reqBody)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
 // CheckForUpdate runs one on-demand self-update check right now --
 // POST /api/actions/check-update's counterpart, the same no-request-body
 // shape as TestConnection above. Read-only (never touches the installed

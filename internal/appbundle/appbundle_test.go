@@ -37,6 +37,8 @@ func TestRenderInfoPlist(t *testing.T) {
 		"<key>CFBundleShortVersionString</key>\n    <string>1.2.3</string>",
 		"<key>CFBundleVersion</key>\n    <string>1.2.3</string>",
 		"<key>CFBundleIconFile</key>\n    <string>icon</string>",
+		"<key>CFBundleURLTypes</key>",
+		"<string>branchdam</string>",
 		"<key>LSUIElement</key>\n    <true/>",
 	} {
 		if !strings.Contains(plist, want) {

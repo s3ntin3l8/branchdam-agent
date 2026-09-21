@@ -40,7 +40,12 @@ func main() {
 // launchers cannot supply. A bare console binary deliberately keeps the CLI's
 // no-argument usage error; only the dedicated Windows GUI binary and a binary
 // inside a macOS application bundle default to the tray.
+// Also, if the application is launched with a branchdam:// URL as its argument
+// (e.g. via OS protocol association), it routes directly to "pair".
 func effectiveLaunchArgs(goos, executable string, args []string) []string {
+	if len(args) == 1 && strings.HasPrefix(args[0], "branchdam://") {
+		return []string{"pair", args[0]}
+	}
 	if len(args) != 0 {
 		return args
 	}

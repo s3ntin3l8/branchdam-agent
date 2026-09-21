@@ -10,7 +10,12 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 )
+
+// ParsePairingURLFunc is an indirection for branchdam.ParsePairingURL, allowing tests to mock parsing errors.
+var ParsePairingURLFunc = branchdam.ParsePairingURL
 
 // ActionRunner is the subset of *Runner the status server's mutating
 // /api/actions/* routes drive. A structural interface, like Drainer/
@@ -167,6 +172,7 @@ func (s *StatusServer) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/actions/test-connection", s.withAPIAuth(s.handleActionTestConnection))
 	mux.HandleFunc("POST /api/actions/check-update", s.withAPIAuth(s.handleActionCheckUpdate))
 	mux.HandleFunc("POST /api/actions/apply-update", s.withAPIAuth(s.handleActionApplyUpdate))
+	mux.HandleFunc("POST /api/actions/pair", s.withAPIAuth(s.handleActionPair))
 }
 
 func (s *StatusServer) writeJSON(w http.ResponseWriter, status int, v any) {
@@ -751,4 +757,42 @@ func (s *StatusServer) handleActionPause(w http.ResponseWriter, r *http.Request)
 	}
 	s.Actions.SetPaused(req.Paused)
 	s.writeJSON(w, http.StatusOK, pauseActionResult{Paused: s.Actions.Paused()})
+}
+
+type pairActionRequest struct {
+	URL string `json:"url"`
+}
+
+type pairActionResult struct {
+	Server  string `json:"server"`
+	AgentID string `json:"agentId"`
+}
+
+func (s *StatusServer) handleActionPair(w http.ResponseWriter, r *http.Request) {
+	if s.Settings == nil {
+		http.Error(w, "settings not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req pairActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.URL == "" {
+		http.Error(w, "url is required", http.StatusBadRequest)
+		return
+	}
+	parsed, err := ParsePairingURLFunc(req.URL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.Settings.Pair(parsed.Server, parsed.Key, parsed.Agent); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, pairActionResult{
+		Server:  parsed.Server,
+		AgentID: parsed.Agent,
+	})
 }

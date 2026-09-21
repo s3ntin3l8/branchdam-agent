@@ -266,6 +266,11 @@ func (s *spySettings) SetPathMappings(mappings []PathMappingEntry) error {
 	s.lastMappings = mappings
 	return s.setErr
 }
+func (s *spySettings) Pair(server, key, agent string) error {
+	s.lastStringKey = "pair"
+	s.lastStringVal = server
+	return s.setErr
+}
 func (s *spySettings) Reload() error             { return nil }
 func (s *spySettings) OpenConfigFile() error     { return nil }
 func (s *spySettings) RevealConfigFolder() error { return nil }
@@ -1034,5 +1039,68 @@ func TestHandleAPISettingsPostPropagatesValidationError(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleActionPairSuccess(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var res pairActionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if res.Server != "https://dam.example.com" {
+		t.Errorf("Server = %q, want https://dam.example.com", res.Server)
+	}
+	if res.AgentID != "dev-x123" {
+		t.Errorf("AgentID = %q, want dev-x123", res.AgentID)
+	}
+	if settings.lastStringKey != "pair" || settings.lastStringVal != "https://dam.example.com" {
+		t.Errorf("settings.Pair was not invoked as expected: key=%q val=%q", settings.lastStringKey, settings.lastStringVal)
+	}
+}
+
+func TestHandleActionPairRejectsInvalidURL(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(pairActionRequest{URL: "invalid://bad-scheme"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleActionPairPropagatesPairError(t *testing.T) {
+	settings := &spySettings{setErr: errors.New("server hello rejected")}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(rec.Body.String(), "server hello rejected") {
+		t.Errorf("body = %q, want server hello rejected", rec.Body.String())
 	}
 }
