@@ -216,7 +216,7 @@ func (s *configSettings) SetBool(key string, v bool) error {
 			err = autostart.Disable()
 		}
 		if err != nil {
-			slog.Warn("start-on-login registration change failed", "enabled", v, "err", fmt.Sprintf("%q", err.Error()))
+			slog.Warn(fmt.Sprintf("start-on-login registration change failed: %q", err.Error()), "enabled", v)
 		}
 	}
 	return s.reload()
