@@ -32,8 +32,8 @@ import (
 // dependency to a repo whose CLAUDE.md already prefers a minimal one.
 const maxSizeBytes = 5 * 1024 * 1024
 
-// Sanitize renders carriage returns and newlines visibly so untrusted values
-// cannot forge additional entries in the plain-text agent log.
+// Sanitize renders carriage returns and newlines visibly before untrusted
+// values are written to the plain-text agent log.
 func Sanitize(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, "\r", `\r`), "\n", `\n`)
 }
