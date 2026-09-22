@@ -135,6 +135,7 @@ func TestAPIRoutesRequireToken(t *testing.T) {
 		{http.MethodPost, "/api/actions/test-connection"},
 		{http.MethodPost, "/api/actions/check-update"},
 		{http.MethodPost, "/api/actions/apply-update"},
+		{http.MethodPost, "/api/actions/pair"},
 	}
 	for _, rt := range routes {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
@@ -1059,6 +1060,9 @@ func TestHandleActionPairSuccess(t *testing.T) {
 	var res pairActionResult
 	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !res.OK {
+		t.Errorf("res.OK = false, want true")
 	}
 	if res.Server != "https://dam.example.com" {
 		t.Errorf("Server = %q, want https://dam.example.com", res.Server)

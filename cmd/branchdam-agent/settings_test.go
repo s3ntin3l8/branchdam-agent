@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -1683,11 +1684,13 @@ func TestConfigSettingsPair(t *testing.T) {
 	}
 
 	// Refuses leaky perms
-	if err := os.Chmod(path, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Pair(srv.URL, validKey, "paired-agent"); err == nil {
-		t.Fatal("expected error when config file has leaky perms")
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Pair(srv.URL, validKey, "paired-agent"); err == nil {
+			t.Fatal("expected error when config file has leaky perms")
+		}
 	}
 
 }

@@ -764,6 +764,7 @@ type pairActionRequest struct {
 }
 
 type pairActionResult struct {
+	OK      bool   `json:"ok"`
 	Server  string `json:"server"`
 	AgentID string `json:"agentId"`
 }
@@ -792,6 +793,7 @@ func (s *StatusServer) handleActionPair(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.writeJSON(w, http.StatusOK, pairActionResult{
+		OK:      true,
 		Server:  parsed.Server,
 		AgentID: parsed.Agent,
 	})
