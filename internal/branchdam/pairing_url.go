@@ -31,6 +31,14 @@ var ErrPairingConfigInvalid = errors.New("pairing config invalid")
 // errors.Is against it for 400-class mapping.
 var ErrPairingAgentBlank = errors.New("agentId cannot be blank")
 
+// ErrPairingHelloFailed marks a failure of the pre-write Hello()
+// credential validation against the proposed server -- whether the server
+// replied with an error (*HTTPError, reachable via errors.As) or never
+// replied at all (dial/DNS/timeout). Both are client-input conditions from
+// the pairing flow's perspective (mistyped URL, dead host, revoked key), so
+// callers mapping to HTTP status should report 400, not 500.
+var ErrPairingHelloFailed = errors.New("pairing hello validation failed")
+
 // PairingURL is the parsed form of a branchdam:// pairing URL emitted by
 // branchDAM's Companion Pairing endpoint (see branchdam-server's
 // internal/httpapi.qrPayloadFor and the round-trip test
@@ -161,8 +169,12 @@ func ParsePairingURL(rawURL string) (PairingURL, error) {
 // pairingServerShape matches exactly scheme://authority: an absolute-URL
 // prefix with NOTHING after the authority -- no userinfo ("@"), path,
 // query ("?"), or fragment ("#"). Host policy is intentionally NOT encoded
-// here; see the guard's comment in ParsePairingURL.
-var pairingServerShape = regexp.MustCompile(`^[a-z][a-z0-9+.-]*://[^/?#@]+$`)
+// here; see the guard's comment in ParsePairingURL. The scheme class is
+// case-insensitive because url.Parse normalizes the scheme to lowercase,
+// so ValidateServerURL above already accepted "HTTPS://..." by the time
+// this gate runs -- rejecting it here would reintroduce a policy divergence
+// in the opposite direction.
+var pairingServerShape = regexp.MustCompile(`^(?i:[a-z][a-z0-9+.-]*)://[^/?#@]+$`)
 
 // parseLegacyPairingURL parses the older "key/value/key/value" fragment
 // form. Returns nil if no recognizable key appears; the caller then

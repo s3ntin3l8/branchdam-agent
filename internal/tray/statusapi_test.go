@@ -1156,6 +1156,26 @@ func TestHandleActionPairValidationErrorIs400(t *testing.T) {
 	}
 }
 
+// TestHandleActionPairHelloNetworkErrorIs400 covers the dead-host half of
+// the credential-validation contract: when the server never answers
+// (dial/DNS/timeout), pairConfig still wraps the failure in
+// ErrPairingHelloFailed, so a mistyped paste maps to 400 rather than 500.
+func TestHandleActionPairHelloNetworkErrorIs400(t *testing.T) {
+	settings := &spySettings{setErr: fmt.Errorf("%w: server at https://dam.example.com rejected the key: dial tcp: lookup dam.example.com: no such host", branchdam.ErrPairingHelloFailed)}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
 func TestHandleActionPairPropagatesInternalError(t *testing.T) {
 	settings := &spySettings{setErr: errors.New("disk write failure")}
 	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}

@@ -111,7 +111,12 @@ func pairConfig(path, server, key, agent string, timeout time.Duration, cfg conf
 	defer cancel()
 	client := branchdam.New(server, key)
 	if _, err := client.Hello(ctx); err != nil {
-		return fmt.Errorf("server at %s rejected the key: %w", server, err)
+		// Wrapped in ErrPairingHelloFailed so callers can classify a
+		// failed validation as client-side (400) whether the server
+		// replied (*HTTPError, preserved via the second %w) or never
+		// answered (bare dial/DNS/timeout error). The CLI message is
+		// unchanged.
+		return fmt.Errorf("%w: server at %s rejected the key: %w", branchdam.ErrPairingHelloFailed, server, err)
 	}
 
 	// Patch all three fields atomically. config.Patch writes back at mode

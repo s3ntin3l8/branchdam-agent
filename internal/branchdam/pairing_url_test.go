@@ -294,6 +294,10 @@ func TestParsePairingURLServerShape(t *testing.T) {
 		"https://[::1]:8443",
 		"https://[2001:db8::1]:8443",
 		"https://dam_example.com",
+		// url.Parse lowercases the scheme, so ValidateServerURL accepts
+		// an uppercase-scheme URL -- the shape gate must not reject it
+		// (would be a policy divergence in the opposite direction).
+		"HTTPS://dam.example.com",
 	}
 	for _, server := range accepts {
 		t.Run("accept/"+server, func(t *testing.T) {

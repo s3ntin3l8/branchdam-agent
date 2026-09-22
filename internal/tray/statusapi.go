@@ -792,14 +792,17 @@ func (s *StatusServer) handleActionPair(w http.ResponseWriter, r *http.Request) 
 		// "config problem: ..." is emitted BOTH by pairConfig's
 		// pre-write validation (wrapped in ErrPairingConfigInvalid, 400)
 		// and by the post-patch reload (settings.go, a genuine 500 even
-		// though the file was already written). HTTPError covers the
-		// Hello() key-rejection case. Everything else -- perms refusal,
+		// though the file was already written). ErrPairingHelloFailed
+		// covers the credential-validation call (rejected key via
+		// *HTTPError, or dead/unreachable host via a bare network error)
+		// -- both client input. Everything else -- perms refusal,
 		// I/O, reload failure -- is server-side (500).
 		status := http.StatusInternalServerError
 		var httpErr *branchdam.HTTPError
 		if errors.Is(err, branchdam.ErrPairingURLInvalid) ||
 			errors.Is(err, branchdam.ErrPairingConfigInvalid) ||
 			errors.Is(err, branchdam.ErrPairingAgentBlank) ||
+			errors.Is(err, branchdam.ErrPairingHelloFailed) ||
 			errors.As(err, &httpErr) {
 			status = http.StatusBadRequest
 		}
