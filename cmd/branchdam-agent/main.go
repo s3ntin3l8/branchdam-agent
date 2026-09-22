@@ -40,7 +40,19 @@ func main() {
 // launchers cannot supply. A bare console binary deliberately keeps the CLI's
 // no-argument usage error; only the dedicated Windows GUI binary and a binary
 // inside a macOS application bundle default to the tray.
+//
+// A deep-link launch (OS protocol association hands the process a bare
+// branchdam:// URL, sometimes alongside a LaunchServices "-psn_0_..." token
+// on darwin) is the ONE case rewritten to "pair": those argv carry no
+// subcommand of their own. Anything else -- including an explicit
+// "pair -config <path> <url>" invocation, whose FlagSet parses the URL as a
+// positional arg natively -- passes through untouched, so a stray URL can
+// never hijack another subcommand (e.g. "tray <url>") and real CLI flags
+// are never silently dropped.
 func effectiveLaunchArgs(goos, executable string, args []string) []string {
+	if url, ok := bareDeepLinkArgs(goos, args); ok {
+		return []string{"pair", url}
+	}
 	if len(args) != 0 {
 		return args
 	}
@@ -58,6 +70,29 @@ func effectiveLaunchArgs(goos, executable string, args []string) []string {
 		}
 	}
 	return args
+}
+
+// bareDeepLinkArgs reports whether args are exactly a deep-link launch: one
+// branchdam:// URL plus nothing but optional darwin LaunchServices noise
+// ("-psn_0_..."). Any other argument (a subcommand, a flag, a second URL)
+// means the operator's own invocation and must NOT be rewritten -- the deep
+// link is only ever OS-generated, and it never carries anything but the URL.
+func bareDeepLinkArgs(goos string, args []string) (string, bool) {
+	var url string
+	for _, arg := range args {
+		switch {
+		case strings.HasPrefix(arg, "branchdam://"):
+			if url != "" {
+				return "", false // two URLs -- not an OS handoff.
+			}
+			url = arg
+		case goos == "darwin" && strings.HasPrefix(arg, "-psn_"):
+			// LaunchServices-process serial number; ignorable noise.
+		default:
+			return "", false
+		}
+	}
+	return url, url != ""
 }
 
 func run(args []string) int {

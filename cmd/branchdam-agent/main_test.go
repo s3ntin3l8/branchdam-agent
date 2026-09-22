@@ -41,7 +41,18 @@ func TestEffectiveLaunchArgs(t *testing.T) {
 		{name: "linux", goos: "linux", executable: "/usr/local/bin/branchdam-agent"},
 		{name: "explicit args win", goos: "windows", executable: `C:\\branchdam-agent-tray.exe`, args: []string{"version"}, want: []string{"version"}},
 		{name: "explicit args mac", goos: "darwin", executable: "/Applications/branchdam-agent.app/Contents/MacOS/branchdam-agent", args: []string{"preflight"}, want: []string{"preflight"}},
+		{name: "deep link url arg", goos: "darwin", executable: "/Applications/branchdam-agent.app/Contents/MacOS/branchdam-agent", args: []string{"branchdam://?server=http://localhost&key=123"}, want: []string{"pair", "branchdam://?server=http://localhost&key=123"}},
+		{name: "deep link with mac os launch args", goos: "darwin", executable: "/Applications/branchdam-agent.app/Contents/MacOS/branchdam-agent", args: []string{"-psn_0_123456", "branchdam://?server=http://localhost&key=123"}, want: []string{"pair", "branchdam://?server=http://localhost&key=123"}},
+		// Beyond a bare OS handoff, nothing is rewritten: an explicit
+		// subcommand (even "pair") keeps its own argv so its FlagSet sees
+		// every flag, and a stray URL can never hijack another command.
+		{name: "explicit pair with config flag", goos: "linux", executable: "/usr/local/bin/branchdam-agent", args: []string{"pair", "-config", "/tmp/cd/config.yaml", "branchdam://?server=http://localhost&key=123"}, want: []string{"pair", "-config", "/tmp/cd/config.yaml", "branchdam://?server=http://localhost&key=123"}},
+		{name: "stray url does not hijack tray", goos: "linux", executable: "/usr/local/bin/branchdam-agent", args: []string{"tray", "branchdam://?server=http://localhost&key=123"}, want: []string{"tray", "branchdam://?server=http://localhost&key=123"}},
+		{name: "two deep link urls not rewritten", goos: "darwin", executable: "/Applications/branchdam-agent.app/Contents/MacOS/branchdam-agent", args: []string{"branchdam://a", "branchdam://b"}, want: []string{"branchdam://a", "branchdam://b"}},
+		{name: "unknown flag alongside url not rewritten", goos: "darwin", executable: "/Applications/branchdam-agent.app/Contents/MacOS/branchdam-agent", args: []string{"--verbose", "branchdam://?server=http://localhost&key=123"}, want: []string{"--verbose", "branchdam://?server=http://localhost&key=123"}},
+		{name: "psn noise without url not rewritten", goos: "darwin", executable: "/Applications/branchdam-agent.app/Contents/MacOS/branchdam-agent", args: []string{"-psn_0_123456"}, want: []string{"-psn_0_123456"}},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := effectiveLaunchArgs(tt.goos, tt.executable, tt.args)

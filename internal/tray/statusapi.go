@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 )
 
 // ActionRunner is the subset of *Runner the status server's mutating
@@ -167,6 +170,7 @@ func (s *StatusServer) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/actions/test-connection", s.withAPIAuth(s.handleActionTestConnection))
 	mux.HandleFunc("POST /api/actions/check-update", s.withAPIAuth(s.handleActionCheckUpdate))
 	mux.HandleFunc("POST /api/actions/apply-update", s.withAPIAuth(s.handleActionApplyUpdate))
+	mux.HandleFunc("POST /api/actions/pair", s.withAPIAuth(s.handleActionPair))
 }
 
 func (s *StatusServer) writeJSON(w http.ResponseWriter, status int, v any) {
@@ -751,4 +755,63 @@ func (s *StatusServer) handleActionPause(w http.ResponseWriter, r *http.Request)
 	}
 	s.Actions.SetPaused(req.Paused)
 	s.writeJSON(w, http.StatusOK, pauseActionResult{Paused: s.Actions.Paused()})
+}
+
+type pairActionRequest struct {
+	URL string `json:"url"`
+}
+
+type pairActionResult struct {
+	OK      bool   `json:"ok"`
+	Server  string `json:"server"`
+	AgentID string `json:"agentId"`
+}
+
+func (s *StatusServer) handleActionPair(w http.ResponseWriter, r *http.Request) {
+	if s.Settings == nil {
+		http.Error(w, "settings not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req pairActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.URL == "" {
+		http.Error(w, "url is required", http.StatusBadRequest)
+		return
+	}
+	parsed, err := branchdam.ParsePairingURL(req.URL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.Settings.Pair(parsed.Server, parsed.Key, parsed.Agent); err != nil {
+		// Differentiate client/credential problems (400) from internal
+		// errors (500) via typed errors only -- never message text:
+		// "config problem: ..." is emitted BOTH by pairConfig's
+		// pre-write validation (wrapped in ErrPairingConfigInvalid, 400)
+		// and by the post-patch reload (settings.go, a genuine 500 even
+		// though the file was already written). ErrPairingHelloFailed
+		// covers the credential-validation call (rejected key via
+		// *HTTPError, or dead/unreachable host via a bare network error)
+		// -- both client input. Everything else -- perms refusal,
+		// I/O, reload failure -- is server-side (500).
+		status := http.StatusInternalServerError
+		var httpErr *branchdam.HTTPError
+		if errors.Is(err, branchdam.ErrPairingURLInvalid) ||
+			errors.Is(err, branchdam.ErrPairingConfigInvalid) ||
+			errors.Is(err, branchdam.ErrPairingAgentBlank) ||
+			errors.Is(err, branchdam.ErrPairingHelloFailed) ||
+			errors.As(err, &httpErr) {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, pairActionResult{
+		OK:      true,
+		Server:  parsed.Server,
+		AgentID: parsed.Agent,
+	})
 }

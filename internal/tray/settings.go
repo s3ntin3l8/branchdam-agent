@@ -184,6 +184,10 @@ type Settings interface {
 	// containing a comma. An empty (or nil) mappings clears the list.
 	SetPathMappings(mappings []PathMappingEntry) error
 
+	// Pair atomically saves server.baseUrl, server.apiKey, and agentId into
+	// the config and reconfigures the running agent/tray.
+	Pair(server, key, agent string) error
+
 	// Reload re-reads config.yaml from disk and reconfigures the running
 	// tray -- the same path a hand-edit followed by "Reload config" takes,
 	// and what every SetBool/SetInt/SetString call does internally after

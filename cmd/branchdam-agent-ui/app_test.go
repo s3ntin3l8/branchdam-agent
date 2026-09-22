@@ -408,6 +408,35 @@ func TestTestConnectionPostsToActionRoute(t *testing.T) {
 	}
 }
 
+func TestPairPostsToActionRoute(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/actions/pair" {
+			t.Errorf("method/path = %s %s, want POST /api/actions/pair", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"url":"branchdam://test"`) {
+			t.Errorf("request body = %q, want url field", string(body))
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"server":"http://example.com","agentId":"test-agent"}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	got, err := a.Pair("branchdam://test")
+	if err != nil {
+		t.Fatalf("Pair: %v", err)
+	}
+	if !strings.Contains(got, `"ok":true`) || !strings.Contains(got, `"server":"http://example.com"`) {
+		t.Errorf("Pair() = %q, want the agent's raw response body passed through", got)
+	}
+}
+
 func TestCheckForUpdatePostsToActionRoute(t *testing.T) {
 	withTempAgentDir(t)
 	if _, err := sessiontoken.Generate(); err != nil {

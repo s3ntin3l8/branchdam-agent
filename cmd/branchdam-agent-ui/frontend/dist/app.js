@@ -138,7 +138,7 @@ function renderServer(status) {
   const container = byId("server-body");
   container.innerHTML = table(rows);
   container.appendChild(
-    actionButtonRow("Connection check", "", [
+    actionButtonRow("Server actions", "", [
       {
         label: "Test connection",
         busyText: "Checking…",
@@ -174,8 +174,43 @@ function renderServer(status) {
           await poll(); // refresh the Status pill above immediately, rather than waiting up to POLL_INTERVAL_MS
         },
       },
+      {
+        label: "Pair with Server…",
+        busyText: "Pairing…",
+        busy: inFlightActions.has("pairServer"),
+        run: async (statusEl) => {
+          const rawURL = window.prompt(
+            "Paste the branchdam:// pairing URL from branchDAM's Companion Pairing page:",
+          );
+          if (!rawURL || !rawURL.trim()) return;
+
+          const app = getApp();
+          if (!app) return;
+
+          inFlightActions.add("pairServer");
+          let result;
+          try {
+            const raw = await app.Pair(rawURL.trim());
+            result = JSON.parse(raw);
+          } catch (err) {
+            setFieldStatus(statusEl, (err && err.message) || String(err) || "Pairing failed", "error");
+            return;
+          } finally {
+            inFlightActions.delete("pairServer");
+          }
+
+          if (!result || !result.ok) {
+            setFieldStatus(statusEl, (result && result.err) || "Pairing failed", "error");
+            return;
+          }
+          setFieldStatus(statusEl, `Paired with ${result.server}`, "saved");
+          await poll();
+          await loadSettings();
+        },
+      },
     ]),
   );
+
 }
 
 function renderIngest(status) {

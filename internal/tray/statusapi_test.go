@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 )
 
 func TestIsLoopbackHost(t *testing.T) {
@@ -135,6 +138,7 @@ func TestAPIRoutesRequireToken(t *testing.T) {
 		{http.MethodPost, "/api/actions/test-connection"},
 		{http.MethodPost, "/api/actions/check-update"},
 		{http.MethodPost, "/api/actions/apply-update"},
+		{http.MethodPost, "/api/actions/pair"},
 	}
 	for _, rt := range routes {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
@@ -264,6 +268,11 @@ func (s *spySettings) SetIntegrationRewrites(id IntegrationID, v string) error {
 }
 func (s *spySettings) SetPathMappings(mappings []PathMappingEntry) error {
 	s.lastMappings = mappings
+	return s.setErr
+}
+func (s *spySettings) Pair(server, key, agent string) error {
+	s.lastStringKey = "pair"
+	s.lastStringVal = server
 	return s.setErr
 }
 func (s *spySettings) Reload() error             { return nil }
@@ -1034,5 +1043,154 @@ func TestHandleAPISettingsPostPropagatesValidationError(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleActionPairSuccess(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var res pairActionResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !res.OK {
+		t.Errorf("res.OK = false, want true")
+	}
+	if res.Server != "https://dam.example.com" {
+		t.Errorf("Server = %q, want https://dam.example.com", res.Server)
+	}
+	if res.AgentID != "dev-x123" {
+		t.Errorf("AgentID = %q, want dev-x123", res.AgentID)
+	}
+	if settings.lastStringKey != "pair" || settings.lastStringVal != "https://dam.example.com" {
+		t.Errorf("settings.Pair was not invoked as expected: key=%q val=%q", settings.lastStringKey, settings.lastStringVal)
+	}
+}
+
+func TestHandleActionPairRejectsInvalidURL(t *testing.T) {
+	settings := &spySettings{}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	body, _ := json.Marshal(pairActionRequest{URL: "invalid://bad-scheme"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleActionPairPropagatesPairError(t *testing.T) {
+	// Hello() key rejection surfaces as a wrapped *branchdam.HTTPError;
+	// the handler must classify it via errors.As, not message text.
+	settings := &spySettings{setErr: fmt.Errorf("server at https://dam.example.com rejected the key: %w", &branchdam.HTTPError{StatusCode: 401, Body: "unauthorized"})}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(rec.Body.String(), "rejected the key") {
+		t.Errorf("body = %q, want rejected the key", rec.Body.String())
+	}
+}
+
+// TestHandleActionPairPostPatchFailureIs500 pins the 400/500 contract
+// Hermes flagged in round 2: "config problem: ..." is emitted by BOTH
+// pairConfig's pre-write validation (wrapped in ErrPairingConfigInvalid,
+// 400 -- covered elsewhere) and the post-patch reload (a genuine 500 even
+// though the text is identical, because the file has already been
+// rewritten). Only the typed sentinel may map to 400; a bare
+// "config problem: ..." error from Settings.Pair must stay 500.
+func TestHandleActionPairPostPatchFailureIs500(t *testing.T) {
+	settings := &spySettings{setErr: errors.New("config problem: server.baseUrl is unreachable after reload")}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+}
+
+// TestHandleActionPairValidationErrorIs400 covers the pre-write
+// validation half of the contract: pairConfig wraps its snapshot
+// validation in ErrPairingConfigInvalid, which maps to 400.
+func TestHandleActionPairValidationErrorIs400(t *testing.T) {
+	settings := &spySettings{setErr: fmt.Errorf("%w: server.baseUrl must not end with a trailing slash", branchdam.ErrPairingConfigInvalid)}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+// TestHandleActionPairHelloNetworkErrorIs400 covers the dead-host half of
+// the credential-validation contract: when the server never answers
+// (dial/DNS/timeout), pairConfig still wraps the failure in
+// ErrPairingHelloFailed, so a mistyped paste maps to 400 rather than 500.
+func TestHandleActionPairHelloNetworkErrorIs400(t *testing.T) {
+	settings := &spySettings{setErr: fmt.Errorf("%w: server at https://dam.example.com rejected the key: dial tcp: lookup dam.example.com: no such host", branchdam.ErrPairingHelloFailed)}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleActionPairPropagatesInternalError(t *testing.T) {
+	settings := &spySettings{setErr: errors.New("disk write failure")}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if !strings.Contains(rec.Body.String(), "disk write failure") {
+		t.Errorf("body = %q, want disk write failure", rec.Body.String())
 	}
 }

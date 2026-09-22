@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -1630,4 +1631,66 @@ func TestFormatResolvePathRewrites(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfigSettingsPair(t *testing.T) {
+	var helloCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/agent/hello" {
+			helloCalled.Store(true)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"server":"branchdam","version":"1.0.0"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	path, cfg, runner := settingsTestFixture(t)
+	// settingsTestFixture creates the file with 0644. Chmod to 0600 for pairing test.
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := newConfigSettings(path, cfg, runner)
+
+	// Successful pairing
+	validKey := "0123456789abcdef0123456789abcdef" // pragma: allowlist secret
+	err := s.Pair(srv.URL, validKey, "paired-agent")
+	if err != nil {
+		t.Fatalf("Pair unexpected error: %v", err)
+	}
+	if !helloCalled.Load() {
+		t.Fatal("expected Hello() to be called on server during pairing")
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Server.BaseURL != srv.URL {
+		t.Errorf("expected BaseURL %q, got %q", srv.URL, reloaded.Server.BaseURL)
+	}
+	if reloaded.Server.APIKey != validKey { // pragma: allowlist secret
+		t.Errorf("expected APIKey to be updated, got %q", reloaded.Server.APIKey)
+	}
+	if reloaded.AgentID != "paired-agent" {
+		t.Errorf("expected AgentID %q, got %q", "paired-agent", reloaded.AgentID)
+	}
+
+	// Server rejects key
+	err = s.Pair("http://127.0.0.1:1", validKey, "some-agent")
+	if err == nil {
+		t.Fatal("expected error when server rejects or is unreachable")
+	}
+
+	// Refuses leaky perms
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Pair(srv.URL, validKey, "paired-agent"); err == nil {
+			t.Fatal("expected error when config file has leaky perms")
+		}
+	}
+
 }

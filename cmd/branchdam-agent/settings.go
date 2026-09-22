@@ -809,6 +809,21 @@ func (s *configSettings) RevealConfigFolder() error {
 	return openWithDefaultApp(filepath.Dir(s.path))
 }
 
+// Pair validates the credentials by calling branchdam.New(server, key).Hello(ctx),
+// checks that the config file permissions are not group/world-readable,
+// pre-validates against an in-memory snapshot, patches server.baseUrl,
+// server.apiKey, and agentId, and triggers a reload.
+func (s *configSettings) Pair(server, key, agent string) error {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+
+	if err := pairConfig(s.path, server, key, agent, 10*time.Second, cfg); err != nil {
+		return err
+	}
+	return s.reload()
+}
+
 // openWithDefaultApp shells out to the platform's own "open" command.
 // Kept here rather than in internal/tray since this file's only reason to
 // exist is wiring internal/tray.Settings, not sharing OS-shell-out helpers
