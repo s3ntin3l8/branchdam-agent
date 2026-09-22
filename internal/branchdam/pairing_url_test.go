@@ -237,6 +237,67 @@ func TestParsePairingURLRejectsCleartextServerOnNonLoopbackHost(t *testing.T) {
 	}
 }
 
+// TestParsePairingURLServerShape pins the scheme://host[:port]-only shape
+// gate (no userinfo, path, query, or fragment in the server field). The
+// userinfo case is the security-critical one: "https://attacker@trusted"
+// would pair the agent against the userinfo host, not the host the
+// operator believes they paired with. The path/query cases matter too:
+// client.go concatenates baseURL+path verbatim, so a server field with a
+// path would produce "host/path/api/..." requests and a config.yaml that
+// Load accepts but every request mangles.
+func TestParsePairingURLServerShape(t *testing.T) {
+	rejects := []struct {
+		name      string
+		server    string
+		errSubstr string
+	}{
+		{"userinfo", "https://user:pass@dam.example.com", "scheme://host[:port]"}, // pragma: allowlist secret -- "user:pass" is a fixture, not a credential
+		{"userinfo without password", "https://attacker@dam.example.com", "scheme://host[:port]"},
+		{"path", "https://dam.example.com/branchdam", "scheme://host[:port]"},
+		{"path with trailing slash", "https://dam.example.com/", "scheme://host[:port]"},
+		{"query", "https://dam.example.com?x=1", "scheme://host[:port]"},
+		{"fragment", "https://dam.example.com#frag", "scheme://host[:port]"},
+		// Rejected one gate earlier (ValidateServerURL's cleartext
+		// rule), not by the shape regexp -- same typed error, different
+		// message.
+		{"non-loopback http with port", "http://192.168.1.1:8080", "cleartext http"},
+	}
+	for _, tc := range rejects {
+		t.Run("reject/"+tc.name, func(t *testing.T) {
+			_, err := ParsePairingURL("branchdam://?server=" + urlEncodeForTest(tc.server) + "&key=k1&agent=dev-x")
+			if err == nil {
+				t.Fatalf("server %q: err = nil, want rejection", tc.server)
+			}
+			if !errors.Is(err, ErrPairingURLInvalid) {
+				t.Errorf("err = %v, want errors.Is(err, ErrPairingURLInvalid)", err)
+			}
+			if !strings.Contains(err.Error(), tc.errSubstr) {
+				t.Errorf("err = %q, want substring %q", err.Error(), tc.errSubstr)
+			}
+		})
+	}
+
+	accepts := []string{
+		"https://dam.example.com",
+		"https://dam.example.com:8443",
+		"https://sub.dam-example.com",
+		"http://127.0.0.1:8080",
+		"http://localhost:8080",
+		"http://[::1]:9000",
+	}
+	for _, server := range accepts {
+		t.Run("accept/"+server, func(t *testing.T) {
+			got, err := ParsePairingURL("branchdam://?server=" + urlEncodeForTest(server) + "&key=k1&agent=dev-x")
+			if err != nil {
+				t.Fatalf("server %q: err = %v, want nil", server, err)
+			}
+			if got.Server != server {
+				t.Errorf("got.Server = %q, want %q", got.Server, server)
+			}
+		})
+	}
+}
+
 // TestValidateServerURL covers the exported server-URL gate now shared
 // between client.New and ParsePairingURL. The two callers' contracts
 // diverge (New panics on failure; ParsePairingURL wraps), but both

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -107,8 +108,39 @@ func ParsePairingURL(rawURL string) (PairingURL, error) {
 		return PairingURL{}, fmt.Errorf("%w: %v", ErrPairingURLInvalid, err)
 	}
 
+	// Shape gate: the server field must be exactly scheme://host[:port] --
+	// no userinfo, path, query, or fragment. This is a real tightening,
+	// not just lint appeasement:
+	//
+	//   - a userinfo component (https://<user>:<pass>@host) would send the
+	//     operator's pairing request (and later every signed agent request)
+	//     to the userinfo host, not the host the operator believes they
+	//     paired with -- a pasted-URL phishing vector;
+	//   - a path/query/fragment would flow verbatim into client.go's
+	//     baseURL+path concatenation, producing "host/path/api/..."
+	//     requests and a config.yaml that fails in non-obvious ways.
+	//
+	// The config validator tolerates paths (only a trailing slash is a
+	// problem there), so without this gate a pairing URL could persist a
+	// baseUrl that Load accepts but every request mangles.
+	//
+	// As a regexp match used as an if-condition barrier over `server`,
+	// this guard is also what severs the CodeQL go/request-forgery
+	// (CWE-918) taint path from the pairing URL to http.NewRequest in
+	// Client.post: every consumer of PairingURL.Server (pair CLI,
+	// deep-link dispatch, the /api/actions/pair loopback endpoint)
+	// inherits the sanitized value from this single user-input gate.
+	if !pairingServerShape.MatchString(server) {
+		return PairingURL{}, fmt.Errorf("%w: server %q must be scheme://host[:port] only (no userinfo, path, query, or fragment)", ErrPairingURLInvalid, server)
+	}
+
 	return PairingURL{Server: server, Key: key, Agent: agent}, nil
 }
+
+// pairingServerShape matches exactly scheme://host[:port] for the two
+// transports ValidateServerURL allows: https on any host, or http on a
+// loopback host. Case-insensitive (URL schemes and hostnames both are).
+var pairingServerShape = regexp.MustCompile(`^(?i:https://[a-z0-9.-]+(:\d{1,5})?|http://(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?)$`)
 
 // parseLegacyPairingURL parses the older "key/value/key/value" fragment
 // form. Returns nil if no recognizable key appears; the caller then
