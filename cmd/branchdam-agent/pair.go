@@ -91,7 +91,7 @@ func runPairCmd(args []string) int {
 func pairConfig(path, server, key, agent string, timeout time.Duration, cfg config.Config) error {
 	trimmedAgent := strings.TrimSpace(agent)
 	if trimmedAgent == "" {
-		return errors.New("agentId cannot be blank")
+		return branchdam.ErrPairingAgentBlank
 	}
 
 	// Pre-validate the proposed change against the config validator so we
@@ -101,7 +101,7 @@ func pairConfig(path, server, key, agent string, timeout time.Duration, cfg conf
 	cfgValidation.Server.APIKey = key // pragma: allowlist secret -- assigning parameter, not a literal credential
 	cfgValidation.AgentID = trimmedAgent
 	if problem := firstBlockingProblem(cfgValidation); problem != nil {
-		return fmt.Errorf("config problem: %s", problem)
+		return fmt.Errorf("%w: %s", branchdam.ErrPairingConfigInvalid, problem)
 	}
 
 	// Validate before touching the config. A pasted key that the server
@@ -158,7 +158,11 @@ func refuseIfPermsLeaky(path string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil // Patch will create it at 0600.
+			// config.Patch cannot create a missing config.yaml (it
+			// read-modify-writes the existing file), so the Patch below
+			// will fail with a clear error instead -- this refusal gate
+			// only guards pre-existing files.
+			return nil
 		}
 		return fmt.Errorf("stat %s: %w", path, err)
 	}

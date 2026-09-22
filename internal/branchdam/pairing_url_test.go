@@ -284,6 +284,16 @@ func TestParsePairingURLServerShape(t *testing.T) {
 		"http://127.0.0.1:8080",
 		"http://localhost:8080",
 		"http://[::1]:9000",
+		// Everything below is host policy, not shape: ValidateServerURL's
+		// isLoopbackHost accepts all of 127.0.0.0/8, expanded IPv6
+		// loopback, and bracketed IPv6 on either scheme -- the shape
+		// gate must not narrow that policy (Hermes round-2 review,
+		// PR #261).
+		"http://127.0.0.2:8080",
+		"http://[0:0:0:0:0:0:0:1]:9000",
+		"https://[::1]:8443",
+		"https://[2001:db8::1]:8443",
+		"https://dam_example.com",
 	}
 	for _, server := range accepts {
 		t.Run("accept/"+server, func(t *testing.T) {

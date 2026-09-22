@@ -15,6 +15,22 @@ import (
 // for human display.
 var ErrPairingURLInvalid = errors.New("pairing url invalid")
 
+// ErrPairingConfigInvalid is returned (wrapped) when the credentials from
+// an otherwise well-formed pairing URL fail pre-write config validation
+// (e.g. the server field trips a config.Load invariant such as the
+// trailing-slash rule). It marks the failure as CLIENT-side: the paste is
+// bad, the file was not touched. Callers distinguishing "your input was
+// rejected" (HTTP 400) from "the server failed" (HTTP 500) should
+// errors.Is against this sentinel -- NOT match message text, since the
+// post-patch reload path produces a bare "config problem: ..." error that
+// is a genuine server-side 500 even though the text is identical.
+var ErrPairingConfigInvalid = errors.New("pairing config invalid")
+
+// ErrPairingAgentBlank is returned when the pairing URL's agent field is
+// empty or whitespace-only after trimming. Client-side failure --
+// errors.Is against it for 400-class mapping.
+var ErrPairingAgentBlank = errors.New("agentId cannot be blank")
+
 // PairingURL is the parsed form of a branchdam:// pairing URL emitted by
 // branchDAM's Companion Pairing endpoint (see branchdam-server's
 // internal/httpapi.qrPayloadFor and the round-trip test
@@ -108,9 +124,14 @@ func ParsePairingURL(rawURL string) (PairingURL, error) {
 		return PairingURL{}, fmt.Errorf("%w: %v", ErrPairingURLInvalid, err)
 	}
 
-	// Shape gate: the server field must be exactly scheme://host[:port] --
-	// no userinfo, path, query, or fragment. This is a real tightening,
-	// not just lint appeasement:
+	// Shape gate: the server field must be exactly scheme://authority --
+	// no userinfo, path, query, or fragment. This regexp deliberately
+	// encodes ONLY that structural invariant. Scheme and host policy
+	// (http/https allowlist, cleartext-non-loopback refusal, all of
+	// 127.0.0.0/8, expanded or bracketed IPv6 loopback) stays solely in
+	// ValidateServerURL/isLoopbackHost, which ran immediately above --
+	// one authoritative policy, not two diverging copies. The structural
+	// gate is still a real tightening, not lint appeasement:
 	//
 	//   - a userinfo component (https://<user>:<pass>@host) would send the
 	//     operator's pairing request (and later every signed agent request)
@@ -120,16 +141,16 @@ func ParsePairingURL(rawURL string) (PairingURL, error) {
 	//     baseURL+path concatenation, producing "host/path/api/..."
 	//     requests and a config.yaml that fails in non-obvious ways.
 	//
-	// The config validator tolerates paths (only a trailing slash is a
-	// problem there), so without this gate a pairing URL could persist a
-	// baseUrl that Load accepts but every request mangles.
-	//
-	// As a regexp match used as an if-condition barrier over `server`,
-	// this guard is also what severs the CodeQL go/request-forgery
-	// (CWE-918) taint path from the pairing URL to http.NewRequest in
-	// Client.post: every consumer of PairingURL.Server (pair CLI,
-	// deep-link dispatch, the /api/actions/pair loopback endpoint)
-	// inherits the sanitized value from this single user-input gate.
+	// Implementation note: this MUST stay a regexp-match used as an
+	// if-condition barrier over `server`. CodeQL's go/request-forgery
+	// (CWE-918) query recognizes regexp-match barrier guards as
+	// sanitizers, and this guard severs the taint path from the pairing
+	// URL to http.NewRequest in Client.post for every consumer of
+	// PairingURL.Server (pair CLI, deep-link dispatch, the
+	// /api/actions/pair loopback endpoint). A plain helper call here
+	// (e.g. isLoopbackHost + u.User == nil checks) would NOT be
+	// recognized and would reopen the alert. The security justification
+	// stands on the allowlist above regardless of the analyzer.
 	if !pairingServerShape.MatchString(server) {
 		return PairingURL{}, fmt.Errorf("%w: server %q must be scheme://host[:port] only (no userinfo, path, query, or fragment)", ErrPairingURLInvalid, server)
 	}
@@ -137,10 +158,11 @@ func ParsePairingURL(rawURL string) (PairingURL, error) {
 	return PairingURL{Server: server, Key: key, Agent: agent}, nil
 }
 
-// pairingServerShape matches exactly scheme://host[:port] for the two
-// transports ValidateServerURL allows: https on any host, or http on a
-// loopback host. Case-insensitive (URL schemes and hostnames both are).
-var pairingServerShape = regexp.MustCompile(`^(?i:https://[a-z0-9.-]+(:\d{1,5})?|http://(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?)$`)
+// pairingServerShape matches exactly scheme://authority: an absolute-URL
+// prefix with NOTHING after the authority -- no userinfo ("@"), path,
+// query ("?"), or fragment ("#"). Host policy is intentionally NOT encoded
+// here; see the guard's comment in ParsePairingURL.
+var pairingServerShape = regexp.MustCompile(`^[a-z][a-z0-9+.-]*://[^/?#@]+$`)
 
 // parseLegacyPairingURL parses the older "key/value/key/value" fragment
 // form. Returns nil if no recognizable key appears; the caller then

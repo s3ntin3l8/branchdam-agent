@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 )
 
 func TestIsLoopbackHost(t *testing.T) {
@@ -1091,7 +1094,9 @@ func TestHandleActionPairRejectsInvalidURL(t *testing.T) {
 }
 
 func TestHandleActionPairPropagatesPairError(t *testing.T) {
-	settings := &spySettings{setErr: errors.New("server at https://dam.example.com rejected the key")}
+	// Hello() key rejection surfaces as a wrapped *branchdam.HTTPError;
+	// the handler must classify it via errors.As, not message text.
+	settings := &spySettings{setErr: fmt.Errorf("server at https://dam.example.com rejected the key: %w", &branchdam.HTTPError{StatusCode: 401, Body: "unauthorized"})}
 	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
 	mux := http.NewServeMux()
 	s.registerAPIRoutes(mux)
@@ -1106,6 +1111,48 @@ func TestHandleActionPairPropagatesPairError(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "rejected the key") {
 		t.Errorf("body = %q, want rejected the key", rec.Body.String())
+	}
+}
+
+// TestHandleActionPairPostPatchFailureIs500 pins the 400/500 contract
+// Hermes flagged in round 2: "config problem: ..." is emitted by BOTH
+// pairConfig's pre-write validation (wrapped in ErrPairingConfigInvalid,
+// 400 -- covered elsewhere) and the post-patch reload (a genuine 500 even
+// though the text is identical, because the file has already been
+// rewritten). Only the typed sentinel may map to 400; a bare
+// "config problem: ..." error from Settings.Pair must stay 500.
+func TestHandleActionPairPostPatchFailureIs500(t *testing.T) {
+	settings := &spySettings{setErr: errors.New("config problem: server.baseUrl is unreachable after reload")}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+}
+
+// TestHandleActionPairValidationErrorIs400 covers the pre-write
+// validation half of the contract: pairConfig wraps its snapshot
+// validation in ErrPairingConfigInvalid, which maps to 400.
+func TestHandleActionPairValidationErrorIs400(t *testing.T) {
+	settings := &spySettings{setErr: fmt.Errorf("%w: server.baseUrl must not end with a trailing slash", branchdam.ErrPairingConfigInvalid)}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
 

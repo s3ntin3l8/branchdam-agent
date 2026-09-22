@@ -10,7 +10,6 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -788,17 +787,20 @@ func (s *StatusServer) handleActionPair(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.Settings.Pair(parsed.Server, parsed.Key, parsed.Agent); err != nil {
-		// Differentiate client/credential problems (400) from internal errors (500).
-		// Server hello rejection, config validation problems, or blank agentId
-		// reflect client/credential issues (400 Bad Request), whereas file I/O or
-		// reload errors reflect internal server errors (500).
+		// Differentiate client/credential problems (400) from internal
+		// errors (500) via typed errors only -- never message text:
+		// "config problem: ..." is emitted BOTH by pairConfig's
+		// pre-write validation (wrapped in ErrPairingConfigInvalid, 400)
+		// and by the post-patch reload (settings.go, a genuine 500 even
+		// though the file was already written). HTTPError covers the
+		// Hello() key-rejection case. Everything else -- perms refusal,
+		// I/O, reload failure -- is server-side (500).
 		status := http.StatusInternalServerError
 		var httpErr *branchdam.HTTPError
 		if errors.Is(err, branchdam.ErrPairingURLInvalid) ||
-			errors.As(err, &httpErr) ||
-			strings.Contains(err.Error(), "rejected the key") ||
-			strings.Contains(err.Error(), "config problem:") ||
-			strings.Contains(err.Error(), "agentId cannot be blank") {
+			errors.Is(err, branchdam.ErrPairingConfigInvalid) ||
+			errors.Is(err, branchdam.ErrPairingAgentBlank) ||
+			errors.As(err, &httpErr) {
 			status = http.StatusBadRequest
 		}
 		http.Error(w, err.Error(), status)
