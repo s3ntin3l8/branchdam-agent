@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.14.3...v1.15.0) (2026-09-22)
+
+
+### Features
+
+* **pairing:** support deep-link protocol launch and UI pairing ([d7db21e](https://github.com/s3ntin3l8/branchdam-agent/commit/d7db21eb7e3f9991d851c05ae8f2fadb1376d826))
+
 ## [1.14.3](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.14.2...v1.14.3) (2026-09-21)
 
 
