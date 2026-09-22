@@ -1091,7 +1091,7 @@ func TestHandleActionPairRejectsInvalidURL(t *testing.T) {
 }
 
 func TestHandleActionPairPropagatesPairError(t *testing.T) {
-	settings := &spySettings{setErr: errors.New("server hello rejected")}
+	settings := &spySettings{setErr: errors.New("server at https://dam.example.com rejected the key")}
 	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
 	mux := http.NewServeMux()
 	s.registerAPIRoutes(mux)
@@ -1104,7 +1104,26 @@ func TestHandleActionPairPropagatesPairError(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
-	if !strings.Contains(rec.Body.String(), "server hello rejected") {
-		t.Errorf("body = %q, want server hello rejected", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "rejected the key") {
+		t.Errorf("body = %q, want rejected the key", rec.Body.String())
+	}
+}
+
+func TestHandleActionPairPropagatesInternalError(t *testing.T) {
+	settings := &spySettings{setErr: errors.New("disk write failure")}
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Settings: settings}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	rawURL := "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
+	body, _ := json.Marshal(pairActionRequest{URL: rawURL})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodPost, "/api/actions/pair", body))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if !strings.Contains(rec.Body.String(), "disk write failure") {
+		t.Errorf("body = %q, want disk write failure", rec.Body.String())
 	}
 }

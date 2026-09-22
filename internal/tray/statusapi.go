@@ -4,18 +4,17 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 )
-
-// ParsePairingURLFunc is an indirection for branchdam.ParsePairingURL, allowing tests to mock parsing errors.
-var ParsePairingURLFunc = branchdam.ParsePairingURL
 
 // ActionRunner is the subset of *Runner the status server's mutating
 // /api/actions/* routes drive. A structural interface, like Drainer/
@@ -783,13 +782,26 @@ func (s *StatusServer) handleActionPair(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "url is required", http.StatusBadRequest)
 		return
 	}
-	parsed, err := ParsePairingURLFunc(req.URL)
+	parsed, err := branchdam.ParsePairingURL(req.URL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := s.Settings.Pair(parsed.Server, parsed.Key, parsed.Agent); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// Differentiate client/credential problems (400) from internal errors (500).
+		// Server hello rejection, config validation problems, or blank agentId
+		// reflect client/credential issues (400 Bad Request), whereas file I/O or
+		// reload errors reflect internal server errors (500).
+		status := http.StatusInternalServerError
+		var httpErr *branchdam.HTTPError
+		if errors.Is(err, branchdam.ErrPairingURLInvalid) ||
+			errors.As(err, &httpErr) ||
+			strings.Contains(err.Error(), "rejected the key") ||
+			strings.Contains(err.Error(), "config problem:") ||
+			strings.Contains(err.Error(), "agentId cannot be blank") {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, pairActionResult{

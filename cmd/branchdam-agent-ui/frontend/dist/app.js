@@ -190,13 +190,17 @@ function renderServer(status) {
           inFlightActions.add("pairServer");
           let result;
           try {
-            result = JSON.parse(await app.Pair(rawURL.trim()));
+            const raw = await app.Pair(rawURL.trim());
+            result = JSON.parse(raw);
+          } catch (err) {
+            setFieldStatus(statusEl, (err && err.message) || String(err) || "Pairing failed", "error");
+            return;
           } finally {
             inFlightActions.delete("pairServer");
           }
 
-          if (!result.ok) {
-            setFieldStatus(statusEl, result.err || "Pairing failed", "error");
+          if (!result || !result.ok) {
+            setFieldStatus(statusEl, (result && result.err) || "Pairing failed", "error");
             return;
           }
           setFieldStatus(statusEl, `Paired with ${result.server}`, "saved");

@@ -43,8 +43,10 @@ func main() {
 // Also, if the application is launched with a branchdam:// URL as its argument
 // (e.g. via OS protocol association), it routes directly to "pair".
 func effectiveLaunchArgs(goos, executable string, args []string) []string {
-	if len(args) == 1 && strings.HasPrefix(args[0], "branchdam://") {
-		return []string{"pair", args[0]}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "branchdam://") {
+			return []string{"pair", arg}
+		}
 	}
 	if len(args) != 0 {
 		return args

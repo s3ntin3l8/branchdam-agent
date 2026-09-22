@@ -811,29 +811,16 @@ func (s *configSettings) RevealConfigFolder() error {
 
 // Pair validates the credentials by calling branchdam.New(server, key).Hello(ctx),
 // checks that the config file permissions are not group/world-readable,
-// patches server.baseUrl, server.apiKey, and agentId, and triggers a reload.
+// pre-validates against an in-memory snapshot, patches server.baseUrl,
+// server.apiKey, and agentId, and triggers a reload.
 func (s *configSettings) Pair(server, key, agent string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
 
-	client := branchdam.New(server, key)
-	if _, err := client.Hello(ctx); err != nil {
-		return fmt.Errorf("server at %s rejected the key: %w", server, err)
-	}
-
-	if err := refuseIfPermsLeaky(s.path); err != nil {
+	if err := pairConfig(s.path, server, key, agent, 10*time.Second, cfg); err != nil {
 		return err
 	}
-
-	changes := map[string]any{
-		"server.baseUrl": server,
-		"server.apiKey":  key,
-		"agentId":        agent,
-	}
-	if err := config.Patch(s.path, changes); err != nil {
-		return fmt.Errorf("patch config: %w", err)
-	}
-
 	return s.reload()
 }
 

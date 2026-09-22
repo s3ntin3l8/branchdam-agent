@@ -230,6 +230,36 @@ func TestPairCmdRequiresURL(t *testing.T) {
 	}
 }
 
+func TestPairCmdRejectsInvalidConfigBeforeWriting(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(branchdam.HelloResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	initial := []byte("server:\n  baseUrl: \"http://127.0.0.1:8080\"\n  apiKey: \"initial-key-0123456789012345678\"\nagentId: \"dev-initial\"\n")
+	if err := os.WriteFile(cfgPath, initial, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Trailing slash in server URL fails checkServerBaseURL / Validate()
+	rawURL := "branchdam://?server=" + urlEscape(t, srv.URL+"/") + "&key=01234567890123456789012345678901&agent=dev-new"
+	rc := runPairCmd([]string{"-config", cfgPath, rawURL})
+	if rc == 0 {
+		t.Fatalf("runPairCmd rc = 0, want non-zero (trailing slash must be rejected by pre-validation)")
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	if string(after) != string(initial) {
+		t.Errorf("config was modified despite pre-validation failure; before=%q after=%q", initial, after)
+	}
+}
+
 // urlEscape is a thin wrapper around url.QueryEscape so the test doesn't
 // pull in net/url just for the escape call (cmd/branchdam-agent/pair.go
 // uses ParsePairingURL which already accepts url-encoded values, so the

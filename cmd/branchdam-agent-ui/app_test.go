@@ -422,7 +422,7 @@ func TestPairPostsToActionRoute(t *testing.T) {
 		if !strings.Contains(string(body), `"url":"branchdam://test"`) {
 			t.Errorf("request body = %q, want url field", string(body))
 		}
-		_, _ = w.Write([]byte(`{"ok":true,"server":"http://example.com","agent":"test-agent"}`))
+		_, _ = w.Write([]byte(`{"ok":true,"server":"http://example.com","agentId":"test-agent"}`))
 	}))
 	defer srv.Close()
 	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))

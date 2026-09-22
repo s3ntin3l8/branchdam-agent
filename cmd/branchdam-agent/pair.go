@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -52,21 +53,65 @@ func runPairCmd(args []string) int {
 		return 1
 	}
 
-	// Validate before touching the config. A pasted key that the server
-	// rejects (rotated, revoked, mistyped) must not silently overwrite a
-	// working credential set in the file.
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-	client := branchdam.New(parsed.Server, parsed.Key)
-	if _, err := client.Hello(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent pair: server at %s rejected the key: %v\n", parsed.Server, err)
-		return 1
-	}
-
 	path, err := config.ResolvePath(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "branchdam-agent pair: resolve config path: %v\n", err)
 		return 1
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent pair: load config: %v\n", err)
+		return 1
+	}
+
+	if err := pairConfig(path, parsed.Server, parsed.Key, parsed.Agent, *timeout, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "branchdam-agent pair: %v\n", err)
+		return 1
+	}
+
+	trimmedAgent := strings.TrimSpace(parsed.Agent)
+	fmt.Printf("branchdam-agent pair: paired with %s as agentId %q\n", parsed.Server, trimmedAgent)
+	fmt.Printf("  credentials written to %s (mode 0600).\n", path)
+	fmt.Println()
+	fmt.Println("Next steps:")
+	fmt.Println("  1. Run: branchdam-agent preflight -config " + path)
+	fmt.Println("     to confirm server reachability, agentId round-trip, and path mappings.")
+	fmt.Println("  2. Restart any running tray/ingest so they pick up the new credentials.")
+	return 0
+}
+
+// pairConfig is the single source of truth for validating credentials and
+// persisting them to config.yaml -- shared by runPairCmd (CLI) and
+// configSettings.Pair (Settings window / loopback API).
+//
+// Pre-validates the proposed change against cfg before patching the file on
+// disk, so an invalid URL (e.g. trailing slash, cleartext non-loopback HTTP)
+// or blank agentId will not leave an unparseable or broken config on disk.
+func pairConfig(path, server, key, agent string, timeout time.Duration, cfg config.Config) error {
+	trimmedAgent := strings.TrimSpace(agent)
+	if trimmedAgent == "" {
+		return errors.New("agentId cannot be blank")
+	}
+
+	// Pre-validate the proposed change against the config validator so we
+	// never write an invalid configuration to disk.
+	cfgValidation := cfg
+	cfgValidation.Server.BaseURL = server
+	cfgValidation.Server.APIKey = key // pragma: allowlist secret -- assigning parameter, not a literal credential
+	cfgValidation.AgentID = trimmedAgent
+	if problem := firstBlockingProblem(cfgValidation); problem != nil {
+		return fmt.Errorf("config problem: %s", problem)
+	}
+
+	// Validate before touching the config. A pasted key that the server
+	// rejects (rotated, revoked, mistyped) must not silently overwrite a
+	// working credential set in the file.
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	client := branchdam.New(server, key)
+	if _, err := client.Hello(ctx); err != nil {
+		return fmt.Errorf("server at %s rejected the key: %w", server, err)
 	}
 
 	// Patch all three fields atomically. config.Patch writes back at mode
@@ -76,28 +121,18 @@ func runPairCmd(args []string) int {
 	// writing a secret into a leaky file is worse than the current
 	// state.
 	if err := refuseIfPermsLeaky(path); err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent pair: %v\n", err)
-		return 1
+		return err
 	}
 
 	changes := map[string]any{
-		"server.baseUrl": parsed.Server,
-		"server.apiKey":  parsed.Key,
-		"agentId":        parsed.Agent,
+		"server.baseUrl": server,
+		"server.apiKey":  key,
+		"agentId":        trimmedAgent,
 	}
 	if err := config.Patch(path, changes); err != nil {
-		fmt.Fprintf(os.Stderr, "branchdam-agent pair: write config: %v\n", err)
-		return 1
+		return fmt.Errorf("write config: %w", err)
 	}
-
-	fmt.Printf("branchdam-agent pair: paired with %s as agentId %q\n", parsed.Server, parsed.Agent)
-	fmt.Printf("  credentials written to %s (mode 0600).\n", path)
-	fmt.Println()
-	fmt.Println("Next steps:")
-	fmt.Println("  1. Run: branchdam-agent preflight -config " + path)
-	fmt.Println("     to confirm server reachability, agentId round-trip, and path mappings.")
-	fmt.Println("  2. Restart any running tray/ingest so they pick up the new credentials.")
-	return 0
+	return nil
 }
 
 // refuseIfPermsLeaky returns an error if the file at path exists and is
