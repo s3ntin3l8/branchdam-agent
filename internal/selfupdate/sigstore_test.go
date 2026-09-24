@@ -196,6 +196,22 @@ func encodeCertBase64(t *testing.T, cert *x509.Certificate) []byte {
 	return []byte(base64.StdEncoding.EncodeToString(encodeCertPEM(t, cert)))
 }
 
+// wrapBase64 inserts a newline every width bytes, the shape of a
+// MIME-wrapped base64 blob. Used to pin unwrapCertPEM's whitespace
+// strip, which single-line fixtures never exercise.
+func wrapBase64(b64 []byte, width int) []byte {
+	var out []byte
+	for i := 0; i < len(b64); i += width {
+		end := i + width
+		if end > len(b64) {
+			end = len(b64)
+		}
+		out = append(out, b64[i:end]...)
+		out = append(out, '\n')
+	}
+	return out
+}
+
 // encodeSigBase64 returns the .sig bytes cosign would produce (raw
 // signature bytes, base64-encoded with std encoding, trailing newline).
 func encodeSigBase64(t *testing.T, sig []byte) []byte {
@@ -377,6 +393,11 @@ func TestParseLeafCertEncoding(t *testing.T) {
 		{name: "raw PEM with trailing newline", in: append(append([]byte{}, rawPEM...), '\n')},
 		{name: "base64 PEM (cosign output)", in: b64PEM},
 		{name: "base64 PEM with trailing newline", in: append(append([]byte{}, b64PEM...), '\n')},
+		// Pins unwrapCertPEM's whitespace strip: a 64-column wrapped blob
+		// is not what cosign emits today, but strings.Fields exists so a
+		// wrapped sidecar still decodes. Without this case that path is
+		// untested.
+		{name: "base64 PEM wrapped at 64 columns", in: wrapBase64(b64PEM, 64)},
 		{
 			name: "base64 of a non-certificate PEM block",
 			in: []byte(base64.StdEncoding.EncodeToString(
