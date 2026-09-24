@@ -11,10 +11,12 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
-        # This generated, embedded trust-root snapshot is intentionally a
-        # single byte-for-byte JSON line. Reformatting it creates a noisy
-        # whole-file diff and is unrelated to source hygiene.
-        exclude: ^internal/selfupdate/trusted_root_public_good\.json$
+        # These are byte-for-byte snapshots of third-party output (an
+        # embedded trust-root JSON, and the real .cert release asset
+        # pinned by TestParseLeafCertGoldenReleaseFixture). Reformatting
+        # them creates a noisy whole-file diff, breaks the pinned
+        # sha256, and is unrelated to source hygiene.
+        exclude: ^internal/selfupdate/(trusted_root_public_good\.json|testdata/)
       - id: check-yaml
       - id: check-json
       - id: check-merge-conflict

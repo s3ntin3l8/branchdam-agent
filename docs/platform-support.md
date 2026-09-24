@@ -760,6 +760,25 @@ The historical v1.5.0 workflow uploaded raw assets before its Cosign step failed
 has no `.sig`/`.cert` sidecars. Upgrade from it manually if self-update reports a missing
 attestation. v1.6 and later publish only after the complete signed artifact set verifies.
 
+**`.cert` encoding.** `cosign sign-blob --output-certificate` writes a single-line
+`base64(PEM)` blob, not raw PEM; cosign's own loader (`loadCertFromPEM`) base64-decodes
+first and falls back to the raw bytes, which is why the workflow's `verify-blob` step
+always accepted it. `internal/selfupdate`'s `parseLeafCert` did not, so releases
+v1.10.0–v1.15.0 were rejected with `.cert is not PEM-encoded` and self-update dead-ended
+on every platform. Two changes close it, and both are load-bearing:
+
+- `unwrapCertPEM` accepts either encoding (raw PEM, or base64 whose decode is a PEM
+  `CERTIFICATE`), mirroring cosign. It is an encoding layer only — single block, cert
+  type, DER parse, Fulcio chain, OIDC issuer, SAN and ECDSA checks are all unchanged.
+- the release workflow rewrites every `.cert` to raw PEM *before* its `verify-blob` step,
+  so the attest job — which runs before anything is published — fails closed if cosign
+  ever rejects the normalized file, and so already-installed agents ≤ v1.15.0 (whose
+  parser only accepts raw PEM) can verify the next release without needing this fix
+  first.
+
+`internal/selfupdate/testdata/release-cert-v1.15.0.cert` pins the real published wire
+format so the historical assets stay covered even though new releases normalize.
+
 `Apply` runs a `sigstorePreflight` step once per call (between the `GreaterThan` check and
 the sidecar-write) that downloads the `.sig` + `.cert` next to the release archive on
 GitHub's release-asset CDN (~6 KB total), populating an in-memory cache keyed by asset

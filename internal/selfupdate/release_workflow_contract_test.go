@@ -150,6 +150,11 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 		"cosign verify-blob",
 		"--certificate-oidc-issuer 'https://token.actions.githubusercontent.com'",
 		`--certificate-identity-regexp '^https://github\.com/s3ntin3l8/branchdam-agent/\.github/workflows/release-binaries\.yml@'`,
+		// cosign emits base64(PEM); shipped updaters <= v1.15.0 only
+		// accept raw PEM, so the sidecar must be normalized before it
+		// is published -- see unwrapCertPEM in sigstore.go.
+		`base64 -d "$cert" > cert.pem.tmp`,
+		`grep -q -- '-----BEGIN CERTIFICATE-----' cert.pem.tmp`,
 	} {
 		if !strings.Contains(sign.Run, want) {
 			t.Errorf("release signing step is missing updater contract %q", want)
@@ -157,6 +162,12 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 	}
 	if signAt, verifyAt := strings.Index(sign.Run, "cosign sign-blob"), strings.Index(sign.Run, "cosign verify-blob"); signAt < 0 || verifyAt <= signAt {
 		t.Errorf("release workflow must verify after signing (sign=%d verify=%d)", signAt, verifyAt)
+	}
+	// The rewrite must happen before the verify so a cosign that rejects
+	// raw PEM fails the attest job instead of shipping an asset every
+	// installed agent refuses to accept.
+	if rewriteAt, verifyAt := strings.Index(sign.Run, "base64 -d \"$cert\""), strings.Index(sign.Run, "cosign verify-blob"); rewriteAt < 0 || verifyAt < rewriteAt {
+		t.Errorf("release workflow must rewrite .cert to PEM before verify-blob (rewrite=%d verify=%d)", rewriteAt, verifyAt)
 	}
 	_, storeIndex := workflowStep(t, attest, "Store complete release set")
 	if storeIndex <= signIndex {
