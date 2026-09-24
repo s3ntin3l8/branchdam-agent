@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.15.0...v1.15.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* accept base64 cosign .cert and publish raw PEM sidecars ([#264](https://github.com/s3ntin3l8/branchdam-agent/issues/264)) ([1e0a38d](https://github.com/s3ntin3l8/branchdam-agent/commit/1e0a38d926bead15ad42d2aa73685da3ed4c1860))
+
 ## [1.15.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.14.3...v1.15.0) (2026-09-22)
 
 
