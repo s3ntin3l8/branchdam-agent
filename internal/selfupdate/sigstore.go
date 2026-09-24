@@ -177,6 +177,7 @@ func verifyAttestation(archive, sig, cert []byte, identity verify.CertificateIde
 	// Decode the leaf cert. We accept only a single PEM block (the
 	// release workflow uses cosign sign-blob --output-certificate
 	// without --certificate-chain, so the .cert is exactly one leaf).
+	// unwrapCertPEM runs first because cosign emits base64(PEM).
 	leaf, err := parseLeafCert(cert)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrSigstoreVerificationFailed, err)
@@ -234,11 +235,60 @@ func verifyAttestation(archive, sig, cert []byte, identity verify.CertificateIde
 	return nil
 }
 
-// parseLeafCert decodes a single PEM CERTIFICATE block. The release
-// workflow emits exactly one block (cosign sign-blob --output-certificate
-// without --certificate-chain), so we reject anything else.
+// unwrapCertPEM normalizes the .cert payload to something pem.Decode
+// can read, accepting the two encodings cosign produces.
+//
+// cosign sign-blob --output-certificate writes a single-line
+// base64(PEM) blob; its own loader (loadCertFromPEM in cmd/cosign/
+// cli/verify) base64-decodes first and falls back to the raw bytes,
+// which is why the release workflow's verify-blob step accepts it. Our
+// parser did not, so every release from v1.10.0 through v1.15.0 --
+// all signed before the workflow started rewriting the sidecar to raw
+// PEM -- was rejected with ".cert is not PEM-encoded" and self-update
+// dead-ended on every platform.
+//
+// The unwrap is an encoding layer only: everything downstream (single
+// block, CERTIFICATE type, DER parse, Fulcio chain, OIDC issuer, SAN,
+// ECDSA over the archive) is unchanged, so nothing here is trusted
+// that was not trusted before. When neither encoding yields a PEM
+// CERTIFICATE the input is returned untouched, preserving the
+// original ".cert is not PEM-encoded" error.
+func unwrapCertPEM(in []byte) []byte {
+	if isPEMCertificate(in) {
+		return in
+	}
+	trimmed := bytes.TrimSpace(in)
+	if len(trimmed) == 0 {
+		return in
+	}
+	// Base64 with embedded newlines (a wrapped blob) is still a single
+	// logical line; strip all whitespace before decoding, the same way
+	// cosign's loader tolerates its own trailing newline.
+	flat := strings.Join(strings.Fields(string(trimmed)), "")
+	decoded, err := base64.StdEncoding.DecodeString(flat)
+	if err == nil && isPEMCertificate(decoded) {
+		return decoded
+	}
+	return in
+}
+
+// isPEMCertificate reports whether b contains exactly one PEM block of
+// type CERTIFICATE.
+func isPEMCertificate(b []byte) bool {
+	block, rest := pem.Decode(b)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return false
+	}
+	return len(bytes.TrimSpace(rest)) == 0
+}
+
+// parseLeafCert decodes a single PEM CERTIFICATE block, accepting both
+// raw PEM and cosign's base64(PEM) output (see unwrapCertPEM). The
+// release workflow emits exactly one block (cosign sign-blob
+// --output-certificate without --certificate-chain), so we reject
+// anything else.
 func parseLeafCert(pemBytes []byte) (*x509.Certificate, error) {
-	block, rest := pem.Decode(pemBytes)
+	block, rest := pem.Decode(unwrapCertPEM(pemBytes))
 	if block == nil {
 		return nil, fmt.Errorf(".cert is not PEM-encoded")
 	}

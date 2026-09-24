@@ -1,6 +1,7 @@
 package selfupdate
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -17,6 +18,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,6 +187,15 @@ func encodeCertPEM(t *testing.T, cert *x509.Certificate) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 }
 
+// encodeCertBase64 returns the .cert bytes cosign actually produces:
+// a single-line base64(PEM) blob. cosign's own loader base64-decodes
+// before PEM decoding, so this -- not raw PEM -- is what every
+// published release from v1.10.0 through v1.15.0 shipped.
+func encodeCertBase64(t *testing.T, cert *x509.Certificate) []byte {
+	t.Helper()
+	return []byte(base64.StdEncoding.EncodeToString(encodeCertPEM(t, cert)))
+}
+
 // encodeSigBase64 returns the .sig bytes cosign would produce (raw
 // signature bytes, base64-encoded with std encoding, trailing newline).
 func encodeSigBase64(t *testing.T, sig []byte) []byte {
@@ -232,6 +245,16 @@ func withTestTrustedRoot(t *testing.T, ca *x509.Certificate) {
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	// Materialize the lazy parse BEFORE swapping. loadTrustedRoot's
+	// sync.Once would otherwise fire after we assign cachedTrustedRoot
+	// and overwrite it with the production root, making whichever test
+	// happens to run first in the process fail with "does not chain to
+	// any trusted Fulcio root" -- an order-dependent flake that only
+	// surfaces when a chain-verifying test is selected in isolation.
+	if _, err := loadTrustedRoot(); err != nil {
+		t.Fatalf("load embedded trusted root: %v", err)
 	}
 
 	// Swap. The package's sync.Once makes normal swap impossible;
@@ -311,6 +334,111 @@ func TestSigstoreVerifyRejectsTamperedArchive(t *testing.T) {
 	}
 	if !errors.Is(err, ErrSigstoreVerificationFailed) {
 		t.Errorf("err = %v, want errors.Is ErrSigstoreVerificationFailed", err)
+	}
+}
+
+// TestSigstoreVerifyAcceptsBase64Cert is the regression test for the
+// self-update outage: cosign sign-blob --output-certificate writes a
+// single-line base64(PEM) blob, and every release from v1.10.0 through
+// v1.15.0 shipped exactly that. parseLeafCert used to hand the bytes
+// straight to pem.Decode, which returned nil for a base64 blob, so the
+// verify failed with ".cert is not PEM-encoded" and self-update
+// dead-ended on every platform. Everything else in this test is
+// identical to TestSigstoreVerifyAcceptsTestCA -- only the .cert
+// encoding differs.
+func TestSigstoreVerifyAcceptsBase64Cert(t *testing.T) {
+	ca, caPriv := testCAKeypair(t, "b64 cert CA")
+	leaf, leafPriv := signLeafWithCA(t, ca, caPriv, "b64 cert leaf")
+	archive := []byte("fake release archive bytes for the base64 cert case")
+	sig := signECDSAP256SHA256(t, leafPriv, archive)
+
+	withTestTrustedRoot(t, ca)
+
+	if err := verifyAttestation(archive, encodeSigBase64(t, sig), encodeCertBase64(t, leaf), permissiveTestIdentity); err != nil {
+		t.Fatalf("verifyAttestation rejected cosign's base64(PEM) .cert: %v", err)
+	}
+}
+
+// TestParseLeafCertEncoding covers both wire formats plus the
+// negatives: an unwrap that is too permissive would accept a blob that
+// is base64 but not a certificate, and an unwrap that is too strict
+// would re-break the base64 path this PR exists to fix.
+func TestParseLeafCertEncoding(t *testing.T) {
+	leaf, _ := testCertKeypair(t, "encoding-test")
+	rawPEM := encodeCertPEM(t, leaf)
+	b64PEM := encodeCertBase64(t, leaf)
+
+	cases := []struct {
+		name    string
+		in      []byte
+		wantErr bool
+	}{
+		{name: "raw PEM", in: rawPEM},
+		{name: "raw PEM with trailing newline", in: append(append([]byte{}, rawPEM...), '\n')},
+		{name: "base64 PEM (cosign output)", in: b64PEM},
+		{name: "base64 PEM with trailing newline", in: append(append([]byte{}, b64PEM...), '\n')},
+		{
+			name: "base64 of a non-certificate PEM block",
+			in: []byte(base64.StdEncoding.EncodeToString(
+				pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: []byte("not a cert")}),
+			)),
+			wantErr: true,
+		},
+		{name: "base64 of arbitrary bytes", in: []byte(base64.StdEncoding.EncodeToString([]byte("not a certificate at all"))), wantErr: true},
+		{name: "not base64, not PEM", in: []byte("not a certificate at all"), wantErr: true},
+		{name: "empty", in: nil, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseLeafCert(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("parseLeafCert succeeded, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseLeafCert: %v", err)
+			}
+			if !got.Equal(leaf) {
+				t.Errorf("parsed cert = %v, want %v", got, leaf)
+			}
+		})
+	}
+}
+
+// TestParseLeafCertGoldenReleaseFixture parses the real .cert asset
+// published with v1.15.0. It is committed verbatim (single-line
+// base64(PEM), sha256 94d840ac...316e5) so the historical wire format
+// of every already-published release stays covered by CI even after
+// the release workflow starts rewriting sidecars to raw PEM. If this
+// test ever fails, every installed agent older than the fix loses its
+// ability to verify those releases.
+func TestParseLeafCertGoldenReleaseFixture(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "release-cert-v1.15.0.cert"))
+	if err != nil {
+		t.Fatalf("read golden fixture: %v", err)
+	}
+	if bytes.Contains(raw, []byte("-----BEGIN CERTIFICATE-----")) {
+		t.Fatal("fixture is raw PEM; it must stay the base64(PEM) encoding cosign published")
+	}
+
+	leaf, err := parseLeafCert(raw)
+	if err != nil {
+		t.Fatalf("parseLeafCert rejected the real v1.15.0 .cert: %v", err)
+	}
+	if want := "CN=sigstore-intermediate"; !strings.Contains(leaf.Issuer.String(), want) {
+		t.Errorf("issuer = %q, want it to contain %q", leaf.Issuer.String(), want)
+	}
+	wantSAN := "https://github.com/s3ntin3l8/branchdam-agent/.github/workflows/release-binaries.yml@"
+	found := false
+	for _, u := range leaf.URIs {
+		if u != nil && strings.Contains(u.String(), wantSAN) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("SAN URIs = %v, want one containing %q", leaf.URIs, wantSAN)
 	}
 }
 

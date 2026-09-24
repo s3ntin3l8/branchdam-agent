@@ -319,6 +319,20 @@ jobs:
               --output-certificate "${asset}.cert"
             test -s "${asset}.sig"
             test -s "${asset}.cert"
+            # cosign writes the .cert as a single-line base64(PEM) blob
+            # (its own loader base64-decodes first). Shipped updaters
+            # <= v1.15.0 only accept raw PEM, so a base64 sidecar makes
+            # every already-installed agent refuse the update with
+            # ".cert is not PEM-encoded". Rewrite to raw PEM before
+            # verifying, so this job -- which runs before anything is
+            # published -- proves the normalized file is acceptable.
+            cert="${asset}.cert"
+            if base64 -d "$cert" > cert.pem.tmp 2>/dev/null \
+              && grep -q -- '-----BEGIN CERTIFICATE-----' cert.pem.tmp; then
+              mv cert.pem.tmp "$cert"
+            else
+              rm -f cert.pem.tmp
+            fi
             cosign verify-blob "$asset" \
               --signature "${asset}.sig" \
               --certificate "${asset}.cert" \
