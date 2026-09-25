@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.2](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.15.1...v1.15.2) (2026-09-25)
+
+
+### Bug Fixes
+
+* **config:** Patch creates a missing config.yaml so deep-link pairing works on fresh machines ([a54f8ce](https://github.com/s3ntin3l8/branchdam-agent/commit/a54f8cef72eb91e0c52d84cc966c68f56b7516d2))
+
 ## [1.15.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.15.0...v1.15.1) (2026-09-24)
 
 
