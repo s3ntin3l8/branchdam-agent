@@ -60,6 +60,11 @@ func runPairCmd(args []string) int {
 	}
 
 	cfg, err := config.Load(path)
+	if errors.Is(err, os.ErrNotExist) {
+		// Fresh machine: config.Load returned defaultConfig() alongside
+		// the error, and config.Patch creates the file.
+		err = nil
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "branchdam-agent pair: load config: %v\n", err)
 		return 1
@@ -163,10 +168,8 @@ func refuseIfPermsLeaky(path string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// config.Patch cannot create a missing config.yaml (it
-			// read-modify-writes the existing file), so the Patch below
-			// will fail with a clear error instead -- this refusal gate
-			// only guards pre-existing files.
+			// config.Patch creates a missing config.yaml at 0600, so
+			// this refusal gate only guards pre-existing files.
 			return nil
 		}
 		return fmt.Errorf("stat %s: %w", path, err)
