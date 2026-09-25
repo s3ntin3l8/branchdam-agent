@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
+	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 )
 
 // TestPairCmdPersistsCredentials covers the happy path: a stub server
@@ -279,4 +280,45 @@ func urlEscape(t *testing.T, s string) string {
 		b.WriteByte(hexChars[c&0x0F])
 	}
 	return b.String()
+}
+
+// TestPairCmdCreatesMissingConfig covers the deep-link-on-a-fresh-machine
+// case: no config.yaml (nor its directory) exists, and pair must create it
+// rather than fail on the Load/Patch read.
+func TestPairCmdCreatesMissingConfig(t *testing.T) {
+	const (
+		wantKey   = "01234567890123456789012345678901" // 32 chars
+		wantAgent = "dev-fresh"
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/agent/hello" || r.Header.Get("X-API-Key") != wantKey {
+			http.Error(w, "bad request", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(branchdam.HelloResponse{OK: true, Version: "v0.22.0"})
+	}))
+	defer srv.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "fresh", "config.yaml")
+	rawURL := "branchdam://?server=" + urlEscape(t, srv.URL) + "&key=" + wantKey + "&agent=" + wantAgent
+	if rc := runPairCmd([]string{"-config", cfgPath, rawURL}); rc != 0 {
+		t.Fatalf("runPairCmd rc = %d, want 0", rc)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load created config: %v", err)
+	}
+	if cfg.Server.BaseURL != srv.URL || cfg.Server.APIKey != wantKey || cfg.AgentID != wantAgent { // pragma: allowlist secret
+		t.Errorf("credentials not persisted: baseUrl=%q agentId=%q", cfg.Server.BaseURL, cfg.AgentID)
+	}
+	if p := firstBlockingProblem(cfg); p != nil {
+		t.Errorf("created config has blocking problem: %s", p)
+	}
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat(cfgPath); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("stat/mode = %v, %v; want 0600", fi, err)
+		}
+	}
 }

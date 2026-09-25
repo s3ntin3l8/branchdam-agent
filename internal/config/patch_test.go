@@ -249,3 +249,40 @@ func TestPatchRejectsNonMappingRoot(t *testing.T) {
 		t.Error("expected an error patching a non-mapping document root")
 	}
 }
+
+// TestPatchCreatesMissingFile covers a fresh machine: no config.yaml and
+// no parent directory yet. Patch must create both, write at 0600, and the
+// result must Load cleanly with defaultConfig()'s defaults intact.
+func TestPatchCreatesMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "branchdam-agent", "config.yaml")
+
+	if err := Patch(path, map[string]any{"agentId": "dev-1", "server.baseUrl": "https://example.com"}); err != nil {
+		t.Fatalf("Patch on missing file: %v", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if mode := fi.Mode().Perm(); mode != 0o600 {
+			t.Errorf("mode = %#o, want 0600", mode)
+		}
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentID != "dev-1" || cfg.Server.BaseURL != "https://example.com" {
+		t.Errorf("patched values not loaded: %+v", cfg)
+	}
+	if !cfg.SelfUpdate.Enabled || !cfg.Tray.ConfirmDestructive {
+		t.Errorf("defaultConfig defaults lost: %+v", cfg)
+	}
+	for _, p := range cfg.Validate() {
+		if !p.Advisory() {
+			t.Errorf("blocking Validate problem on created config: %s", p)
+		}
+	}
+}

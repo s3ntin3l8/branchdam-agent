@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,9 @@ import (
 // node) already survives untouched -- Patch never touches key nodes for an
 // existing entry, only swaps the value.
 //
+// A missing file is created (with its parent directory) from an empty
+// document, so callers never need to bootstrap config.yaml first.
+//
 // The file is written atomically (temp file in the same directory, mode
 // 0600, then rename) so a crash mid-write can never leave config.yaml
 // truncated or half-written. Mode 0600 matters here specifically because
@@ -43,7 +47,20 @@ import (
 // riskier for a purely cosmetic gap.
 func Patch(path string, changes map[string]any) error {
 	raw, err := os.ReadFile(path)
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
+		// A missing file is patched from an empty document: Load applies
+		// defaultConfig() under whatever keys are present, so the result
+		// is defaultConfig()-equivalent plus the requested changes (the
+		// same shape the tray's starter config has -- unset required
+		// fields are advisory-incomplete, not Validate failures). The
+		// parent directory is created because neither Load nor
+		// DefaultPath ever does. A fresh machine's first caller may be a
+		// deep-link `pair`, before any tray/init run.
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("config: patch: create config directory %s: %w", filepath.Dir(path), err)
+		}
+		raw = nil
+	} else if err != nil {
 		return fmt.Errorf("config: patch: read %s: %w", path, err)
 	}
 
