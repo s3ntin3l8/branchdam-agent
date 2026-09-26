@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.15.3](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.15.2...v1.15.3) (2026-09-26)
+
+
+### Bug Fixes
+
+* **tray:** handle branchdam:// deep links via Apple Event on macOS ([#268](https://github.com/s3ntin3l8/branchdam-agent/issues/268)) ([a3162b6](https://github.com/s3ntin3l8/branchdam-agent/commit/a3162b635ed13bf7ffea624a88e2ae8ad7f8ba99))
+* **windows:** register branchdam:// protocol and confirm deep-link pairing ([#269](https://github.com/s3ntin3l8/branchdam-agent/issues/269)) ([9836a37](https://github.com/s3ntin3l8/branchdam-agent/commit/9836a37fe14b8795c3dfc28ed9b0c0bc10819c76))
+
 ## [1.15.2](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.15.1...v1.15.2) (2026-09-25)
 
 
