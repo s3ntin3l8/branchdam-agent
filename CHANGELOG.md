@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.4](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.15.3...v1.15.4) (2026-09-26)
+
+
+### Bug Fixes
+
+* honest pairing errors and refresh the settings form after out-of-band pairing ([#271](https://github.com/s3ntin3l8/branchdam-agent/issues/271)) ([60b0abf](https://github.com/s3ntin3l8/branchdam-agent/commit/60b0abffb67d3aef93b23218bc1a13d5042696e7))
+
 ## [1.15.3](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.15.2...v1.15.3) (2026-09-26)
 
 
