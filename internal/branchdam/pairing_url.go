@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ErrPairingURLInvalid is returned by ParsePairingURL when the input is
@@ -119,6 +121,17 @@ func ParsePairingURL(rawURL string) (PairingURL, error) {
 		return PairingURL{}, fmt.Errorf("%w: missing required field (server=%q key=%q agent=%q)", ErrPairingURLInvalid, server, redactKey(key), agent)
 	}
 
+	// server and agent are shown verbatim in the deep-link confirmation
+	// dialog, the only control on a web-page-fired link, so they must not be
+	// able to forge lines (newlines) or visually rewrite the host (bidi
+	// overrides, zero-width characters). Neither appears in a real pairing.
+	if err := checkDisplayable("server", server, maxServerRunes); err != nil {
+		return PairingURL{}, err
+	}
+	if err := checkDisplayable("agent", agent, maxAgentRunes); err != nil {
+		return PairingURL{}, err
+	}
+
 	// Validate the server URL the same way client.New's constructor
 	// would: bad scheme, cleartext on a non-loopback host, or otherwise
 	// unparseable. Without this, a malformed server field would slip
@@ -164,6 +177,38 @@ func ParsePairingURL(rawURL string) (PairingURL, error) {
 	}
 
 	return PairingURL{Server: server, Key: key, Agent: agent}, nil
+}
+
+// Length caps for the two fields the confirmation dialog displays; generous
+// for real hosts/agent ids, small enough that a dialog stays readable.
+const (
+	maxServerRunes = 253
+	maxAgentRunes  = 100
+)
+
+// IsDisplayable reports whether v is safe to interpolate into a dialog: no
+// control characters (incl. CR/LF), no Unicode format characters (bidi
+// overrides/isolates, zero-width joiners) and no line/paragraph separators
+// (U+2028/U+2029, which Cocoa renders as line breaks).
+func IsDisplayable(v string) bool {
+	for _, r := range v {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkDisplayable rejects non-displayable and over-long values. The value is
+// deliberately not echoed in the error.
+func checkDisplayable(field, v string, maxRunes int) error {
+	if utf8.RuneCountInString(v) > maxRunes {
+		return fmt.Errorf("%w: %s is longer than %d characters", ErrPairingURLInvalid, field, maxRunes)
+	}
+	if !IsDisplayable(v) {
+		return fmt.Errorf("%w: %s contains control or invisible formatting characters", ErrPairingURLInvalid, field)
+	}
+	return nil
 }
 
 // pairingServerShape matches exactly scheme://authority: an absolute-URL

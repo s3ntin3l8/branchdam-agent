@@ -437,6 +437,54 @@ func TestPairPostsToActionRoute(t *testing.T) {
 	}
 }
 
+func TestPairDeepLinkMarksSourceAndAcceptsPending(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"source":"deeplink"`) {
+			t.Errorf("request body = %q, want source deeplink", string(body))
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"ok":true,"pending":true,"server":"http://example.com","agentId":"a"}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	got, err := newTestApp(t).PairDeepLink("branchdam://test")
+	if err != nil {
+		t.Fatalf("PairDeepLink: %v", err)
+	}
+	if !strings.Contains(got, `"pending":true`) {
+		t.Errorf("PairDeepLink() = %q, want the 202 body passed through", got)
+	}
+}
+
+func TestHandleOpenURLShowsDialogWhenTrayUnreachable(t *testing.T) {
+	withTempAgentDir(t) // no session token: the tray isn't running
+	withStatusServerAddr(t, "127.0.0.1:1")
+	var msg string
+	orig := messageDialogFunc
+	messageDialogFunc = func(_ context.Context, opts wailsruntime.MessageDialogOptions) (string, error) {
+		msg = opts.Message
+		return "", nil
+	}
+	t.Cleanup(func() { messageDialogFunc = orig })
+	a := newTestApp(t)
+	a.ctx = context.Background()
+
+	a.HandleOpenURL("branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x")
+
+	if !strings.Contains(msg, "start the tray app first") {
+		t.Errorf("dialog message = %q, want a start-the-tray hint", msg)
+	}
+	if strings.Contains(msg, "01234567890123456789012345678901") {
+		t.Error("dialog leaks the API key")
+	}
+}
+
 func TestCheckForUpdatePostsToActionRoute(t *testing.T) {
 	withTempAgentDir(t)
 	if _, err := sessiontoken.Generate(); err != nil {

@@ -9,12 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/s3ntin3l8/branchdam-agent/internal/agentlog"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/sessiontoken"
 )
@@ -242,6 +244,46 @@ func (a *App) Pair(rawURL string) (string, error) {
 	return string(body), nil
 }
 
+// PairDeepLink forwards a branchdam:// URL the OS handed to this process
+// (macOS delivers it to whichever process has focus -- this one while its
+// window is open) to the tray, marked as a deep link so the tray asks the
+// operator to confirm before writing any config. Returns immediately with
+// the tray's 202; the confirmation and outcome happen in the tray.
+func (a *App) PairDeepLink(rawURL string) (string, error) {
+	reqBody, err := json.Marshal(struct {
+		URL    string `json:"url"`
+		Source string `json:"source"`
+	}{URL: rawURL, Source: "deeplink"})
+	if err != nil {
+		return "", err
+	}
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/pair", reqBody)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// HandleOpenURL is the Wails OnUrlOpen callback: forward the link to the tray
+// and, if that fails (tray down or restarting), tell the operator -- a log line
+// alone would reproduce the original click-does-nothing. The message comes from
+// agentRequest's fixed wording and never contains the URL (it embeds the key).
+func (a *App) HandleOpenURL(rawURL string) {
+	_, err := a.PairDeepLink(rawURL)
+	if err == nil {
+		return
+	}
+	slog.Warn("could not forward branchdam:// link to the tray", "err", agentlog.Sanitize(err.Error()))
+	if a.ctx == nil {
+		return
+	}
+	_, _ = messageDialogFunc(a.ctx, runtime.MessageDialogOptions{
+		Type:    runtime.ErrorDialog,
+		Title:   "branchDAM",
+		Message: "Couldn't start pairing: " + err.Error(),
+	})
+}
+
 // CheckForUpdate runs one on-demand self-update check right now --
 // POST /api/actions/check-update's counterpart, the same no-request-body
 // shape as TestConnection above. Read-only (never touches the installed
@@ -428,7 +470,7 @@ func (a *App) agentRequest(method, path string, body []byte) ([]byte, error) {
 	}
 
 	switch resp.StatusCode {
-	case http.StatusOK:
+	case http.StatusOK, http.StatusAccepted:
 		if !json.Valid(respBody) {
 			return nil, errors.New("the agent returned a response that wasn't valid JSON")
 		}

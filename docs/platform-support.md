@@ -607,6 +607,29 @@ test. The geometry is hand-duplicated from `icon.go` rather than shared -- see t
 comment for why (neither is a natural place to add a build-time codegen step); a monogram change
 in one needs mirroring in the other by hand.
 
+### `branchdam://` deep links (macOS)
+
+The bundle registers the `branchdam://` scheme (`CFBundleURLTypes`), so the server's
+"Pair with local agent" button opens the agent. LaunchServices delivers the URL as a
+`kAEGetURL` Apple Event, **never in argv**, so `effectiveLaunchArgs`'s bare-URL rewrite does
+not apply on macOS. Two processes can receive it:
+
+- **The tray** installs a GetURL handler (`internal/tray/openurl_darwin.m`) before
+  `systray.Run`, so a cold launch by the link is not lost. URLs are queued to `Run`, which
+  calls `handleDeepLink`.
+- **The UI window** (`cmd/branchdam-agent-ui`, Wails `mac.Options.OnUrlOpen`) forwards the URL
+  to the tray's `POST /api/actions/pair` with `"source":"deeplink"`.
+
+Either way the tray **always** asks the operator to confirm the server and agent ID before
+writing config, regardless of `tray.confirmDestructive` -- any web page can fire a
+`branchdam://` link. With no dialog available the pair is refused. The confirmation and
+outcome run detached (the loopback endpoint answers `202` with `pending: true`), reported
+through a tray notification.
+
+After a self-update rewrites `Info.plist`, `updateBundleInfoPlist` also runs
+`lsregister -f` on the bundle (best-effort, logged on failure) so scheme/UTI changes take
+effect immediately.
+
 ### Ad-hoc signing (not notarization)
 
 The bundle is ad-hoc signed in CI (`codesign --force --sign - dist/branchdam-agent.app`, gated

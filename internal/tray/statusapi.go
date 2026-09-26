@@ -759,10 +759,16 @@ func (s *StatusServer) handleActionPause(w http.ResponseWriter, r *http.Request)
 
 type pairActionRequest struct {
 	URL string `json:"url"`
+	// Source is PairSourceDeepLink when the URL came from an OS protocol
+	// handoff; such requests always require operator confirmation.
+	Source string `json:"source,omitempty"`
 }
 
 type pairActionResult struct {
-	OK      bool   `json:"ok"`
+	OK bool `json:"ok"`
+	// Pending is set for deep-link requests: the operator confirmation and
+	// pairing continue in the tray after this response.
+	Pending bool   `json:"pending,omitempty"`
 	Server  string `json:"server"`
 	AgentID string `json:"agentId"`
 }
@@ -786,7 +792,20 @@ func (s *StatusServer) handleActionPair(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.Settings.Pair(parsed.Server, parsed.Key, parsed.Agent); err != nil {
+	if req.Source == PairSourceDeepLink {
+		// The operator confirmation dialog can outlive the caller's HTTP
+		// timeout, so confirm + pair run detached and report through the
+		// tray notification (handleDeepLink). The URL is already validated.
+		if s.PairConfirm == nil {
+			http.Error(w, ErrPairNoConfirm.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		go submitDeepLink(context.Background(), req.URL, s.Settings, s.PairConfirm, s.PairNotify)
+		s.writeJSON(w, http.StatusAccepted, pairActionResult{OK: true, Pending: true, Server: parsed.Server, AgentID: parsed.Agent})
+		return
+	}
+	err = s.Settings.Pair(parsed.Server, parsed.Key, parsed.Agent)
+	if err != nil {
 		// Differentiate client/credential problems (400) from internal
 		// errors (500) via typed errors only -- never message text:
 		// "config problem: ..." is emitted BOTH by pairConfig's

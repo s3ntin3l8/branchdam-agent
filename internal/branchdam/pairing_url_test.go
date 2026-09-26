@@ -362,3 +362,26 @@ func urlEncodeForTest(s string) string {
 	}
 	return b.String()
 }
+
+// The deep-link confirmation dialog shows server and agent verbatim, so
+// neither may forge lines or rewrite the host visually.
+func TestParsePairingURLRejectsUndisplayableFields(t *testing.T) {
+	longAgent := strings.Repeat("a", maxAgentRunes+1)
+	cases := map[string]string{
+		"newline in agent":    "branchdam://?server=https%3A%2F%2Fdam.example.com&key=k1&agent=dev-x%0AServer%3A%20https%3A%2F%2Fevil.example",
+		"bidi override host":  "branchdam://?server=https%3A%2F%2Fdam.example.com%E2%80%AE&key=k1&agent=dev-x",
+		"zero-width agent":    "branchdam://?server=https%3A%2F%2Fdam.example.com&key=k1&agent=dev%E2%80%8Bx",
+		"line separator":      "branchdam://?server=https%3A%2F%2Fdam.example.com&key=k1&agent=dev%E2%80%A8x",
+		"paragraph separator": "branchdam://?server=https%3A%2F%2Fdam.example.com&key=k1&agent=dev%E2%80%A9x",
+		"tab in agent":        "branchdam://?server=https%3A%2F%2Fdam.example.com&key=k1&agent=dev%09x",
+		"over-long agent":     "branchdam://?server=https%3A%2F%2Fdam.example.com&key=k1&agent=" + longAgent,
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParsePairingURL(in)
+			if !errors.Is(err, ErrPairingURLInvalid) {
+				t.Fatalf("err = %v, want ErrPairingURLInvalid", err)
+			}
+		})
+	}
+}
