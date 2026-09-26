@@ -553,6 +553,8 @@ func runTrayCmd(args []string) int {
 	statusSrv.Settings = settings
 	statusSrv.Updates = updater
 	statusSrv.UpdateApply = &trayUpdateApplier{runner: runner, updater: updater}
+	statusSrv.PairConfirm = trayConfirm(dialog)
+	statusSrv.PairNotify = trayNotifyOS(dialog)
 
 	// A fresh token every tray start -- see sessiontoken.Generate's own doc
 	// comment for why this is regenerated rather than persisted/reused.

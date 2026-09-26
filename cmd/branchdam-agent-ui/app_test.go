@@ -437,6 +437,31 @@ func TestPairPostsToActionRoute(t *testing.T) {
 	}
 }
 
+func TestPairDeepLinkMarksSourceAndAcceptsPending(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"source":"deeplink"`) {
+			t.Errorf("request body = %q, want source deeplink", string(body))
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"ok":true,"pending":true,"server":"http://example.com","agentId":"a"}`))
+	}))
+	defer srv.Close()
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	got, err := newTestApp(t).PairDeepLink("branchdam://test")
+	if err != nil {
+		t.Fatalf("PairDeepLink: %v", err)
+	}
+	if !strings.Contains(got, `"pending":true`) {
+		t.Errorf("PairDeepLink() = %q, want the 202 body passed through", got)
+	}
+}
+
 func TestCheckForUpdatePostsToActionRoute(t *testing.T) {
 	withTempAgentDir(t)
 	if _, err := sessiontoken.Generate(); err != nil {

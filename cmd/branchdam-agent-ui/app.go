@@ -242,6 +242,26 @@ func (a *App) Pair(rawURL string) (string, error) {
 	return string(body), nil
 }
 
+// PairDeepLink forwards a branchdam:// URL the OS handed to this process
+// (macOS delivers it to whichever process has focus -- this one while its
+// window is open) to the tray, marked as a deep link so the tray asks the
+// operator to confirm before writing any config. Returns immediately with
+// the tray's 202; the confirmation and outcome happen in the tray.
+func (a *App) PairDeepLink(rawURL string) (string, error) {
+	reqBody, err := json.Marshal(struct {
+		URL    string `json:"url"`
+		Source string `json:"source"`
+	}{URL: rawURL, Source: "deeplink"})
+	if err != nil {
+		return "", err
+	}
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/pair", reqBody)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
 // CheckForUpdate runs one on-demand self-update check right now --
 // POST /api/actions/check-update's counterpart, the same no-request-body
 // shape as TestConnection above. Read-only (never touches the installed
@@ -428,7 +448,7 @@ func (a *App) agentRequest(method, path string, body []byte) ([]byte, error) {
 	}
 
 	switch resp.StatusCode {
-	case http.StatusOK:
+	case http.StatusOK, http.StatusAccepted:
 		if !json.Valid(respBody) {
 			return nil, errors.New("the agent returned a response that wasn't valid JSON")
 		}

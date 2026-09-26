@@ -221,3 +221,45 @@ func TestRollbackSkipsResignWithoutInfoPlist(t *testing.T) {
 		t.Errorf("resignAppBundle called %d times for a non-bundle layout, want 0", calls)
 	}
 }
+
+func TestDefaultRegisterAppBundleNoOpsOffDarwin(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("darwin exercises the real lsregister call")
+	}
+	if err := defaultRegisterAppBundle(filepath.Join(t.TempDir(), "branchdam-agent.app")); err != nil {
+		t.Errorf("defaultRegisterAppBundle off darwin = %v, want nil", err)
+	}
+}
+
+func TestUpdateBundleInfoPlistRegistersAfterResignAndToleratesFailure(t *testing.T) {
+	dir := t.TempDir()
+	bundleDir := filepath.Join(dir, "branchdam-agent.app")
+	plistPath := filepath.Join(bundleDir, "Contents", "Info.plist")
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var order []string
+	withResignAppBundle(t, func(string) error {
+		order = append(order, "resign")
+		return errors.New("codesign: boom")
+	})
+	orig := registerAppBundle
+	var gotDir string
+	registerAppBundle = func(d string) error {
+		order = append(order, "register")
+		gotDir = d
+		return errors.New("lsregister: boom")
+	}
+	t.Cleanup(func() { registerAppBundle = orig })
+
+	if err := updateBundleInfoPlist(plistPath, "1.2.3"); err != nil {
+		t.Fatalf("updateBundleInfoPlist must not fail on resign/register errors: %v", err)
+	}
+	if strings.Join(order, ",") != "resign,register" {
+		t.Errorf("call order = %v, want resign then register", order)
+	}
+	if gotDir != bundleDir {
+		t.Errorf("registerAppBundle dir = %q, want %q", gotDir, bundleDir)
+	}
+}

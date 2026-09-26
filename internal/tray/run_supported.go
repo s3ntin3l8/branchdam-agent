@@ -130,6 +130,19 @@ func Run(
 		}
 		systray.SetTooltip("branchDAM agent")
 
+		// branchdam:// deep links (macOS Apple Event; nil channel on
+		// Windows). Serial consumer, so pairs never overlap.
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case u := <-openURLs:
+					handleDeepLink(ctx, u, settings, confirm, notify)
+				}
+			}
+		}()
+
 		statusItem := systray.AddMenuItem("Status: starting...", "Current tray status")
 		statusItem.Disable()
 		openUI := systray.AddMenuItem("Open branchDAM", "Open the native branchDAM window -- the single settings/status surface")
@@ -743,6 +756,9 @@ func Run(
 		close(errCh)
 	}
 
+	// Must precede systray.Run: the cold-launch GetURL event is delivered
+	// during [NSApp run]'s finishLaunching.
+	registerOpenURLs()
 	systray.Run(onReady, onExit)
 
 	select {

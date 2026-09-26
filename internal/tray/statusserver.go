@@ -72,6 +72,12 @@ type StatusServer struct {
 	// nil-tolerant like Updates so older/test-only StatusServers still serve
 	// the rest of the API unchanged.
 	UpdateApply UpdateApplier
+	// PairConfirm shows the operator confirmation dialog for deep-link
+	// pair requests (POST /api/actions/pair with source "deeplink"). Nil
+	// refuses such requests (fail closed).
+	PairConfirm func(ctx context.Context, title, body string) bool
+	// PairNotify reports the outcome of a deep-link pair (nil-tolerant).
+	PairNotify func(ctx context.Context, title, message string)
 	// Token, when set, is the shared secret every /api/* request must
 	// present as "Authorization: Bearer <Token>" -- see
 	// internal/sessiontoken.Generate and tokenValid. Left empty, every

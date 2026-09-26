@@ -47,6 +47,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/mac"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/agentlog"
@@ -102,6 +103,16 @@ func main() {
 		AssetServer: &assetserver.Options{Assets: assets},
 		OnStartup:   app.Startup,
 		Bind:        []interface{}{app},
+		Mac: &mac.Options{
+			// A branchdam:// link clicked while this window is open is
+			// delivered here (GetURL Apple Event), not to the tray.
+			// Hand it to the tray, which owns the confirm + pair flow.
+			OnUrlOpen: func(rawURL string) {
+				if _, err := app.PairDeepLink(rawURL); err != nil {
+					slog.Warn("could not forward branchdam:// link to the tray", "err", agentlog.Sanitize(err.Error()))
+				}
+			},
+		},
 		SingleInstanceLock: &options.SingleInstanceLock{
 			UniqueId: singleInstanceID,
 			// A second launch (double-clicking the app again, or a

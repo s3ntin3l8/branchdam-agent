@@ -42,8 +42,11 @@ func main() {
 // inside a macOS application bundle default to the tray.
 //
 // A deep-link launch (OS protocol association hands the process a bare
-// branchdam:// URL, sometimes alongside a LaunchServices "-psn_0_..." token
-// on darwin) is the ONE case rewritten to "pair": those argv carry no
+// branchdam:// URL) is the ONE case rewritten to "pair". This is the Windows/
+// Linux path: on macOS LaunchServices does NOT put the URL in argv, it sends
+// a GetURL Apple Event that internal/tray handles in-process (openurl_darwin.*).
+// The darwin "-psn_0_..." tolerance only covers a manual
+// `open -a ... --args`. The rewrite applies when those argv carry no
 // subcommand of their own. Anything else -- including an explicit
 // "pair -config <path> <url>" invocation, whose FlagSet parses the URL as a
 // positional arg natively -- passes through untouched, so a stray URL can

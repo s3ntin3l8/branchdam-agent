@@ -52,6 +52,28 @@ const resignTimeout = 30 * time.Second
 // seam, the same as everything else in this package.
 var resignAppBundle = defaultResignAppBundle
 
+// registerAppBundle re-registers bundleDir with LaunchServices so a rewritten
+// Info.plist (a new URL scheme such as branchdam://, or a changed UTI) takes
+// effect after an in-place update instead of whenever Finder next notices. A
+// package-level var for the same test-seam reason as resignAppBundle;
+// best-effort like it, and a no-op off darwin.
+var registerAppBundle = defaultRegisterAppBundle
+
+const lsregisterPath = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+func defaultRegisterAppBundle(bundleDir string) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), resignTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, lsregisterPath, "-f", bundleDir).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("selfupdate: lsregister %s: %w: %s", bundleDir, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func defaultResignAppBundle(bundleDir string) error {
 	if runtime.GOOS != "darwin" {
 		return nil
@@ -84,8 +106,14 @@ func updateBundleInfoPlist(infoPlist, version string) error {
 	if err := os.WriteFile(infoPlist, []byte(plist), 0o644); err != nil {
 		return fmt.Errorf("selfupdate: update %s: %w", infoPlist, err)
 	}
-	if err := resignAppBundle(filepath.Dir(filepath.Dir(infoPlist))); err != nil {
+	bundleDir := filepath.Dir(filepath.Dir(infoPlist))
+	if err := resignAppBundle(bundleDir); err != nil {
 		slog.Warn("selfupdate: could not re-sign app bundle", "path", infoPlist, "err", err)
+	}
+	// After the resign, so LaunchServices records the final signed bundle.
+	// Best-effort for the same reason as the resign above.
+	if err := registerAppBundle(bundleDir); err != nil {
+		slog.Warn("selfupdate: could not re-register app bundle with LaunchServices", "path", infoPlist, "err", err)
 	}
 	return nil
 }
