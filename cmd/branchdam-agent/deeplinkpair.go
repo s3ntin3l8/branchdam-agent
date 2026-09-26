@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -120,11 +121,24 @@ func forwardDeepLinkToTray(addr, rawURL string) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return errNoTray // stale token file from a tray that has since exited.
+		// Only a failed dial proves the request never reached a tray (stale
+		// token file from one that has exited). Anything later -- e.g. a
+		// timeout after the tray accepted the POST -- must NOT fall back to a
+		// second local confirmation.
+		var opErr *net.OpError
+		if errors.As(err, &opErr) && opErr.Op == "dial" {
+			return errNoTray
+		}
+		return fmt.Errorf("could not confirm the running tray received the request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusAccepted:
 		return nil
+	case http.StatusOK:
+		// Only a tray that predates deep-link confirmation answers 200: it
+		// ignored source and already wrote the pairing without asking.
+		return errors.New("the running tray is an older version that paired without asking for confirmation; update the agent")
 	}
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	return fmt.Errorf("the running tray rejected the request (%d): %s", resp.StatusCode, strings.TrimSpace(string(msg)))

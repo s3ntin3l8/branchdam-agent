@@ -206,13 +206,18 @@ Section "Install"
 
     ; branchdam:// protocol handler, so the server's "Pair with local agent"
     ; button opens the agent (per-user, no admin). The GUI-subsystem tray
-    ; binary avoids a console flash; a bare URL argument is routed to
-    ; `pair -deeplink` (cmd/branchdam-agent effectiveLaunchArgs), which asks
-    ; for confirmation before writing any config.
+    ; binary avoids a console flash. The command names `pair -deeplink`
+    ; explicitly (not a bare "%1"): this build confirms before writing any
+    ; config, while an older build that would rewrite a bare URL to an
+    ; unconfirmed `pair` (v1.15.2, e.g. after a self-update rollback that
+    ; leaves this key behind) rejects the unknown flag and writes nothing.
     WriteRegStr HKCU "Software\Classes\branchdam" "" "URL:branchDAM pairing"
     WriteRegStr HKCU "Software\Classes\branchdam" "URL Protocol" ""
     WriteRegStr HKCU "Software\Classes\branchdam\DefaultIcon" "" "$INSTDIR\branchdam-agent.exe,0"
-    WriteRegStr HKCU "Software\Classes\branchdam\shell\open\command" "" '"$INSTDIR\branchdam-agent-tray.exe" "%1"'
+    WriteRegStr HKCU "Software\Classes\branchdam\shell\open\command" "" '"$INSTDIR\branchdam-agent-tray.exe" pair -deeplink "%1"'
+    ; Tell Explorer the associations changed (MSDN: required after registering
+    ; a protocol, or the scheme may not be seen until reboot).
+    System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 
     ; Add/Remove Programs entry
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "DisplayName" "${PRODUCT_NAME}"
@@ -244,6 +249,7 @@ Section "Uninstall"
 
     ; Remove the branchdam:// protocol handler
     DeleteRegKey HKCU "Software\Classes\branchdam"
+    System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 
     ; Remove Run registry key
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "BranchDAMAgent"

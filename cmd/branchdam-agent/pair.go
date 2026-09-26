@@ -50,7 +50,14 @@ func runPairCmd(args []string) int {
 	}
 
 	if *deepLink {
-		return runDeepLinkPair(*configPath, rawURL, *timeout)
+		// The registered protocol command is `pair -deeplink "%1"`; a quote
+		// inside the URL could append further arguments (e.g. -config), so
+		// the ONLY accepted shape is exactly that flag plus one URL.
+		if fs.NFlag() != 1 || fs.NArg() != 1 {
+			fmt.Fprintln(os.Stderr, "branchdam-agent pair: -deeplink accepts exactly one URL and no other flags")
+			return 2
+		}
+		return runDeepLinkPair("", rawURL, *timeout)
 	}
 
 	parsed, err := branchdam.ParsePairingURL(rawURL)

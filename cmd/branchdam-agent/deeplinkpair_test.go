@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
+	"github.com/s3ntin3l8/branchdam-agent/internal/sessiontoken"
 )
 
 const deepLinkTestURL = "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
@@ -42,7 +45,7 @@ func newDeepLinkHarness(t *testing.T) *deepLinkHarness {
 }
 
 func (h *deepLinkHarness) run() int {
-	return runPairCmd([]string{"-deeplink", "-config", h.cfgPath, deepLinkTestURL})
+	return runDeepLinkPair(h.cfgPath, deepLinkTestURL, time.Second)
 }
 
 func (h *deepLinkHarness) kinds() string {
@@ -119,7 +122,7 @@ func TestDeepLinkPairNoDialogFailsClosed(t *testing.T) {
 func TestDeepLinkPairInvalidURLNeverLeaksKey(t *testing.T) {
 	h := newDeepLinkHarness(t)
 	bad := "branchdm://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901"
-	if rc := runPairCmd([]string{"-deeplink", "-config", h.cfgPath, bad}); rc == 0 {
+	if rc := runDeepLinkPair(h.cfgPath, bad, time.Second); rc == 0 {
 		t.Fatal("rc = 0, want failure")
 	}
 	for _, d := range h.dialogs {
@@ -129,5 +132,56 @@ func TestDeepLinkPairInvalidURLNeverLeaksKey(t *testing.T) {
 	}
 	if h.pairCalls != 0 || h.forwardCalls != 0 {
 		t.Error("an invalid URL must not reach the tray or pair")
+	}
+}
+
+// The registered command is `pair -deeplink "%1"`; a quote in the URL could
+// append flags, so anything but exactly that shape is refused before any work.
+func TestPairDeepLinkRejectsExtraFlagsAndArgs(t *testing.T) {
+	h := newDeepLinkHarness(t)
+	for name, args := range map[string][]string{
+		"config flag appended": {"-deeplink", deepLinkTestURL, "-config", h.cfgPath},
+		"config flag first":    {"-deeplink", "-config", h.cfgPath, deepLinkTestURL},
+		"second positional":    {"-deeplink", deepLinkTestURL, "extra"},
+		"no url":               {"-deeplink"},
+	} {
+		if rc := runPairCmd(args); rc == 0 {
+			t.Errorf("%s: rc = 0, want refusal", name)
+		}
+	}
+	if h.forwardCalls != 0 || h.pairCalls != 0 || len(h.dialogs) != 0 {
+		t.Errorf("refused invocations must do nothing: forward=%d pair=%d dialogs=%v", h.forwardCalls, h.pairCalls, h.dialogs)
+	}
+}
+
+func TestForwardDeepLinkToTrayStatusHandling(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		status  int
+		wantErr string // "" = success
+	}{
+		{http.StatusAccepted, ""},
+		{http.StatusOK, "older version"},
+		{http.StatusServiceUnavailable, "rejected"},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.status) }))
+		err := forwardDeepLinkToTray(strings.TrimPrefix(srv.URL, "http://"), deepLinkTestURL)
+		srv.Close()
+		if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+			t.Errorf("status %d: err = %v, want %q", tc.status, err, tc.wantErr)
+		}
+	}
+
+	// Nothing listening: a failed dial is the only case that falls back.
+	srv := httptest.NewServer(http.NotFoundHandler())
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close()
+	if err := forwardDeepLinkToTray(addr, deepLinkTestURL); !errors.Is(err, errNoTray) {
+		t.Errorf("connection refused: err = %v, want errNoTray", err)
 	}
 }
