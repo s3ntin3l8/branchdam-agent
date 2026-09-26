@@ -54,7 +54,10 @@ func main() {
 // are never silently dropped.
 func effectiveLaunchArgs(goos, executable string, args []string) []string {
 	if url, ok := bareDeepLinkArgs(goos, args); ok {
-		return []string{"pair", url}
+		// "-deeplink" marks an OS handoff (a web page can trigger one), which
+		// must be operator-confirmed -- see runDeepLinkPair. An explicit
+		// `pair <url>` typed in a terminal is deliberate and stays prompt-free.
+		return []string{"pair", "-deeplink", url}
 	}
 	if len(args) != 0 {
 		return args
