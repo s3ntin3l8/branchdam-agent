@@ -84,11 +84,11 @@ func handleDeepLink(
 	switch {
 	case err == nil:
 		slog.Info("paired via deep link", "server", agentlog.Sanitize(parsed.Server), "agent", agentlog.Sanitize(parsed.Agent))
-		say("Paired with " + parsed.Server)
+		say("Paired with " + agentlog.Sanitize(parsed.Server))
 	case errors.Is(err, ErrPairDeclined):
 		slog.Info("deep-link pairing declined")
 	default:
 		slog.Warn("deep-link pairing failed", "err", agentlog.Sanitize(err.Error()))
-		say("Pairing failed: " + err.Error())
+		say("Pairing failed: " + agentlog.Sanitize(err.Error()))
 	}
 }

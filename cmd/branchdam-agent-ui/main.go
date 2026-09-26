@@ -107,11 +107,7 @@ func main() {
 			// A branchdam:// link clicked while this window is open is
 			// delivered here (GetURL Apple Event), not to the tray.
 			// Hand it to the tray, which owns the confirm + pair flow.
-			OnUrlOpen: func(rawURL string) {
-				if _, err := app.PairDeepLink(rawURL); err != nil {
-					slog.Warn("could not forward branchdam:// link to the tray", "err", agentlog.Sanitize(err.Error()))
-				}
-			},
+			OnUrlOpen: app.HandleOpenURL,
 		},
 		SingleInstanceLock: &options.SingleInstanceLock{
 			UniqueId: singleInstanceID,

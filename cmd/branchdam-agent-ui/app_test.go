@@ -462,6 +462,28 @@ func TestPairDeepLinkMarksSourceAndAcceptsPending(t *testing.T) {
 	}
 }
 
+func TestHandleOpenURLShowsDialogWhenTrayUnreachable(t *testing.T) {
+	withTempAgentDir(t) // no session token: the tray isn't running
+	var msg string
+	orig := messageDialogFunc
+	messageDialogFunc = func(_ context.Context, opts wailsruntime.MessageDialogOptions) (string, error) {
+		msg = opts.Message
+		return "", nil
+	}
+	t.Cleanup(func() { messageDialogFunc = orig })
+	a := newTestApp(t)
+	a.ctx = context.Background()
+
+	a.HandleOpenURL("branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x")
+
+	if !strings.Contains(msg, "start the tray app first") {
+		t.Errorf("dialog message = %q, want a start-the-tray hint", msg)
+	}
+	if strings.Contains(msg, "01234567890123456789012345678901") {
+		t.Error("dialog leaks the API key")
+	}
+}
+
 func TestCheckForUpdatePostsToActionRoute(t *testing.T) {
 	withTempAgentDir(t)
 	if _, err := sessiontoken.Generate(); err != nil {
