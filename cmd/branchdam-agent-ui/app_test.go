@@ -464,6 +464,7 @@ func TestPairDeepLinkMarksSourceAndAcceptsPending(t *testing.T) {
 
 func TestHandleOpenURLShowsDialogWhenTrayUnreachable(t *testing.T) {
 	withTempAgentDir(t) // no session token: the tray isn't running
+	withStatusServerAddr(t, "127.0.0.1:1")
 	var msg string
 	orig := messageDialogFunc
 	messageDialogFunc = func(_ context.Context, opts wailsruntime.MessageDialogOptions) (string, error) {
