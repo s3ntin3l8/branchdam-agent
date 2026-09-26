@@ -630,6 +630,19 @@ After a self-update rewrites `Info.plist`, `updateBundleInfoPlist` also runs
 `lsregister -f` on the bundle (best-effort, logged on failure) so scheme/UTI changes take
 effect immediately.
 
+### `branchdam://` deep links (Windows)
+
+The NSIS installer registers `branchdam://` per-user (`HKCU\Software\Classes\branchdam`,
+command `branchdam-agent-tray.exe "%1"`; removed on uninstall), so the server's "Pair with
+local agent" button opens the agent. The URL arrives in argv, and `effectiveLaunchArgs`
+rewrites the bare URL to `pair -deeplink <url>` (the hidden flag exists only for OS handoffs;
+a `pair <url>` typed in a terminal stays prompt-free). Like macOS, it is never paired silently:
+
+1. A running tray gets the URL via `POST /api/actions/pair` (`source: "deeplink"`) and owns
+   the confirmation dialog and config reload.
+2. With no tray running, the process shows the confirmation itself, then pairs and reports
+   through dialogs (the GUI binary has no console). With no working dialog it refuses.
+
 ### Ad-hoc signing (not notarization)
 
 The bundle is ad-hoc signed in CI (`codesign --force --sign - dist/branchdam-agent.app`, gated

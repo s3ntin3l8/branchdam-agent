@@ -35,6 +35,8 @@ func runPairCmd(args []string) int {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config file (default: ./config.yaml if present, else the per-user config directory)")
 	timeout := fs.Duration("timeout", 10*time.Second, "server request timeout for the validation Hello() call")
+	// Set only by effectiveLaunchArgs for an OS protocol handoff; not for humans.
+	deepLink := fs.Bool("deeplink", false, "internal: URL came from an OS protocol handler; require operator confirmation")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -45,6 +47,10 @@ func runPairCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "Paste the branchdam:// URL from branchDAM's Companion Pairing modal\n")
 		fmt.Fprintf(os.Stderr, "(Settings -> Companion Pairing -> Pair new device -> copy URL).\n")
 		return 2
+	}
+
+	if *deepLink {
+		return runDeepLinkPair(*configPath, rawURL, *timeout)
 	}
 
 	parsed, err := branchdam.ParsePairingURL(rawURL)
