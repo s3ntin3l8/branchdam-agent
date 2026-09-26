@@ -1713,8 +1713,10 @@ async function loadSettings(retry = true) {
     // opens, or may still be restarting -- both normal cases (see
     // app.go's StatusJSON doc comment), and the status section already
     // self-heals the same way. Once a load succeeds, this stops
-    // rescheduling itself -- the settings form is still loaded once, not
-    // on a timer, so an in-progress edit is never overwritten.
+    // rescheduling itself. Later refreshes go through noteConfigRevision
+    // (only on a config revision change, and never under an in-flight
+    // action or a recent edit), not on a timer, so an in-progress edit is
+    // never overwritten.
     byId("settings-error").textContent = String(err);
     setTimeout(loadSettings, POLL_INTERVAL_MS);
   }

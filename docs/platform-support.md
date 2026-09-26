@@ -302,7 +302,8 @@ never mentions a `-config` id or calls `renderSettingsForm`. Breaking this would
 whatever an operator is mid-typing on the next poll tick, with no error and no crash -- the reason
 this is pinned by a test rather than left to code review alone.
 
-`renderSettingsForm` (Track 3d) reads `GET /api/settings` once at load and writes through
+`renderSettingsForm` (Track 3d) reads `GET /api/settings` at load (and again on a guarded config-revision
+change, see above) and writes through
 `App.SetSetting`/`SetIntegrationPath`/`SetIntegrationRewrites` -- see those methods' own doc
 comments in `app.go`. No field re-fetches on save either -- a text field keeps what was typed on a
 rejected save so it can be corrected and resubmitted, while a checkbox or `<select>` (no "keep

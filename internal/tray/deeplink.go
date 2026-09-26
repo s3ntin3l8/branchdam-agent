@@ -119,7 +119,7 @@ func submitDeepLink(
 // the end (the full Post "url": dial tcp ... chain is ~380 characters and would
 // push any hint out of view); the complete error is in the agent log.
 func pairFailureSummary(goos string, err error) string {
-	const pointer = " See the agent log for details."
+	const pointer = "\nSee the agent log for details."
 	var httpErr *branchdam.HTTPError
 	switch {
 	case errors.As(err, &httpErr) && (httpErr.StatusCode == 401 || httpErr.StatusCode == 403):
@@ -128,7 +128,11 @@ func pairFailureSummary(goos string, err error) string {
 		return fmt.Sprintf("Pairing failed: the server replied HTTP %d.", httpErr.StatusCode) + pointer
 	case errors.Is(err, branchdam.ErrPairingHelloFailed):
 		if goos == "darwin" && errors.Is(err, syscall.EHOSTUNREACH) {
-			return "Pairing failed: could not reach the server. Allow branchDAM in System Settings > Privacy & Security > Local Network, then try again."
+			// Newline-separated: zenity's darwin notify promotes the first line to
+			// the subtitle and the rest to the body, so a banner that clips from
+			// the end cannot hide the cause. "branchDAM Agent" is the name the
+			// Local Network pane lists (CFBundleDisplayName).
+			return "Pairing failed: could not reach the server.\nAllow branchDAM Agent in System Settings > Privacy & Security > Local Network, then try again."
 		}
 		return "Pairing failed: could not reach the server." + pointer
 	}

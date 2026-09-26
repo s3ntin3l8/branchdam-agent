@@ -104,7 +104,9 @@ func runPairCmd(args []string) int {
 // helloFailure words a failed validation Hello() by what actually happened.
 // Only a 401/403 from the server means the key was rejected (the same split
 // HTTPError.Retryable uses); any other status (a proxy's 502, a 404 from the
-// wrong path) means the server side is unhealthy or misrouted, and a dial/DNS/
+// wrong path, a 503 for a server-side key misconfiguration) is reported as the
+// bare status without claiming the operator's key is at fault -- or fine --
+// and a dial/DNS/
 // TLS/timeout error means the server was never reached. Saying "rejected the
 // key" for those sends the operator chasing the wrong problem. All wrap
 // ErrPairingHelloFailed (callers classify on it) and preserve err via %w (the
@@ -115,7 +117,7 @@ func helloFailure(server string, err error) error {
 		if httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden {
 			return fmt.Errorf("%w: server at %s rejected the key: %w", branchdam.ErrPairingHelloFailed, server, err)
 		}
-		return fmt.Errorf("%w: server at %s replied HTTP %d (not a key problem): %w", branchdam.ErrPairingHelloFailed, server, httpErr.StatusCode, err)
+		return fmt.Errorf("%w: server at %s replied HTTP %d: %w", branchdam.ErrPairingHelloFailed, server, httpErr.StatusCode, err)
 	}
 	return fmt.Errorf("%w: could not reach server at %s: %w%s", branchdam.ErrPairingHelloFailed, server, err, localNetworkHint(runtime.GOOS, err))
 }
@@ -125,7 +127,7 @@ func helloFailure(server string, err error) error {
 // EHOSTUNREACH ("no route to host") even though the route is fine.
 func localNetworkHint(goos string, err error) string {
 	if goos == "darwin" && errors.Is(err, syscall.EHOSTUNREACH) {
-		return " (on macOS, check System Settings > Privacy & Security > Local Network and allow branchdam-agent, then try again)"
+		return " (on macOS, check System Settings > Privacy & Security > Local Network and allow branchDAM Agent, then try again)"
 	}
 	return ""
 }

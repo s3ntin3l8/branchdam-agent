@@ -251,7 +251,7 @@ func TestPairFailureSummaryLeadsWithShortCauseAndHint(t *testing.T) {
 		err        error
 		want       string
 	}{
-		{"local network (darwin)", "darwin", longDial, "Local Network"},
+		{"local network (darwin)", "darwin", longDial, "branchDAM Agent in System Settings > Privacy & Security > Local Network"},
 		{"unreachable elsewhere", "linux", longDial, "could not reach the server"},
 		{"401 is a key problem", "linux", rejected, "rejected the key"},
 		{"502 is not a key problem", "linux", gateway, "HTTP 502"},
@@ -264,8 +264,10 @@ func TestPairFailureSummaryLeadsWithShortCauseAndHint(t *testing.T) {
 			if len([]rune(got)) > 200 {
 				t.Errorf("summary is %d chars; macOS truncates long banners", len([]rune(got)))
 			}
-			if idx := strings.Index(got, tc.want); idx > 150 {
-				t.Errorf("%q starts at char %d; the cause/hint must lead", tc.want, idx)
+			// The cause leads on its own first line (zenity's darwin notify makes
+			// the first line the subtitle), and the hint is a separate line.
+			if first, _, _ := strings.Cut(got, "\n"); !strings.HasPrefix(first, "Pairing failed: ") || len([]rune(first)) > 60 {
+				t.Errorf("first line %q must be a short cause", first)
 			}
 			if strings.Contains(got, "192.168") {
 				t.Errorf("summary %q must not carry the long dial chain (it is in the log)", got)
