@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
+	"syscall"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/agentlog"
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -112,6 +114,35 @@ func submitDeepLink(
 	}
 }
 
+// pairFailureSummary is the SHORT toast text for a failed deep-link pair. It
+// leads with the cause and the fix, because macOS truncates long banners from
+// the end (the full Post "url": dial tcp ... chain is ~380 characters and would
+// push any hint out of view); the complete error is in the agent log.
+func pairFailureSummary(goos string, err error) string {
+	const pointer = "\nSee the agent log for details."
+	var httpErr *branchdam.HTTPError
+	switch {
+	case errors.As(err, &httpErr) && (httpErr.StatusCode == 401 || httpErr.StatusCode == 403):
+		return "Pairing failed: the server rejected the key." + pointer
+	case errors.As(err, &httpErr):
+		return fmt.Sprintf("Pairing failed: the server replied HTTP %d.", httpErr.StatusCode) + pointer
+	case errors.Is(err, branchdam.ErrPairingHelloFailed):
+		if goos == "darwin" && errors.Is(err, syscall.EHOSTUNREACH) {
+			// Newline-separated: zenity's darwin notify promotes the first line to
+			// the subtitle and the rest to the body, so a banner that clips from
+			// the end cannot hide the cause. "branchDAM Agent" is the name the
+			// Local Network pane lists (CFBundleDisplayName).
+			return "Pairing failed: could not reach the server.\nAllow branchDAM Agent in System Settings > Privacy & Security > Local Network, then try again."
+		}
+		return "Pairing failed: could not reach the server." + pointer
+	}
+	msg := agentlog.Sanitize(err.Error())
+	if r := []rune(msg); len(r) > 120 {
+		msg = string(r[:120]) + "..."
+	}
+	return "Pairing failed: " + msg + pointer
+}
+
 // handleDeepLink pairs from a branchdam:// URL delivered by the OS and reports
 // the outcome through notify. The raw URL embeds the API key, so it is never
 // logged or shown; errors from ParsePairingURL already redact it.
@@ -138,6 +169,6 @@ func handleDeepLink(
 		slog.Info("deep-link pairing declined")
 	default:
 		slog.Warn("deep-link pairing failed", "err", agentlog.Sanitize(err.Error()))
-		say("Pairing failed: " + agentlog.Sanitize(err.Error()))
+		say(pairFailureSummary(runtime.GOOS, err))
 	}
 }

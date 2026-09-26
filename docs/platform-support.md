@@ -290,15 +290,20 @@ without it every panel renders simultaneously and clicking a nav item does nothi
 
 **The poll/settings split is a hard invariant, not just a layout choice.** The window polls
 `GET /api/status` every 5 seconds and rebuilds each live-status container's DOM from scratch
-(`render(view)` in `app.js`); the five settings containers are loaded exactly once, by
-`loadSettings()`, and `render(view)` never touches them. Every settings container's `id` ends
+(`render(view)` in `app.js`); the five settings containers are only ever (re)built by
+`loadSettings()`, and `render(view)` never touches them. `loadSettings()` runs at startup and again
+when `status.configRevision` (bumped on every config apply) differs from the revision the form was
+loaded at -- e.g. after a `branchdam://` pairing handled by the tray -- via `noteConfigRevision`
+in `poll()`, which skips while a settings action is in flight or within 15 seconds of the
+operator's last interaction with a settings field, so it can never overwrite an edit in progress. Every settings container's `id` ends
 `-config` for exactly this reason -- `TestStatusPollNeverRebuildsSettingsContainers`
 (`cmd/branchdam-agent-ui/app_test.go`) mechanically asserts `render(view)`'s own function body
 never mentions a `-config` id or calls `renderSettingsForm`. Breaking this would silently wipe out
 whatever an operator is mid-typing on the next poll tick, with no error and no crash -- the reason
 this is pinned by a test rather than left to code review alone.
 
-`renderSettingsForm` (Track 3d) reads `GET /api/settings` once at load and writes through
+`renderSettingsForm` (Track 3d) reads `GET /api/settings` at load (and again on a guarded config-revision
+change, see above) and writes through
 `App.SetSetting`/`SetIntegrationPath`/`SetIntegrationRewrites` -- see those methods' own doc
 comments in `app.go`. No field re-fetches on save either -- a text field keeps what was typed on a
 rejected save so it can be corrected and resubmitted, while a checkbox or `<select>` (no "keep

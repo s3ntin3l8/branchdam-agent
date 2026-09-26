@@ -2,13 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -320,5 +324,56 @@ func TestPairCmdCreatesMissingConfig(t *testing.T) {
 		if fi, err := os.Stat(cfgPath); err != nil || fi.Mode().Perm() != 0o600 {
 			t.Errorf("stat/mode = %v, %v; want 0600", fi, err)
 		}
+	}
+}
+
+// A server reply means the key was rejected; a dial failure means the server
+// was never reached and must not be described as a rejection.
+func TestPairConfigHelloFailureWording(t *testing.T) {
+	rejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "revoked", http.StatusUnauthorized)
+	}))
+	defer rejecting.Close()
+	badGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer badGateway.Close()
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close() // nothing listening: connection refused
+
+	cfg := config.Config{}
+	for _, tc := range []struct {
+		name, server, want, notWant string
+	}{
+		{"server replied 401", rejecting.URL, "rejected the key", "could not reach"},
+		{"proxy 502 is not a key problem", badGateway.URL, "replied HTTP 502", "rejected the key"},
+		{"server unreachable", deadURL, "could not reach server at " + deadURL, "rejected the key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := pairConfig(filepath.Join(t.TempDir(), "config.yaml"), tc.server, "01234567890123456789012345678901", "dev-x", 5*time.Second, cfg)
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if !errors.Is(err, branchdam.ErrPairingHelloFailed) {
+				t.Errorf("err %v must still wrap ErrPairingHelloFailed", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), tc.notWant) {
+				t.Errorf("err = %q, want it to contain %q and not %q", err, tc.want, tc.notWant)
+			}
+		})
+	}
+}
+
+func TestLocalNetworkHint(t *testing.T) {
+	ehostunreach := fmt.Errorf("dial tcp 192.168.2.204:443: %w", syscall.EHOSTUNREACH)
+	if got := localNetworkHint("darwin", ehostunreach); !strings.Contains(got, "Local Network") {
+		t.Errorf("darwin + EHOSTUNREACH: hint = %q, want the Local Network pointer", got)
+	}
+	if got := localNetworkHint("linux", ehostunreach); got != "" {
+		t.Errorf("hint off darwin = %q, want none", got)
+	}
+	if got := localNetworkHint("darwin", errors.New("x509: certificate signed by unknown authority")); got != "" {
+		t.Errorf("hint for an unrelated error = %q, want none", got)
 	}
 }

@@ -3249,3 +3249,20 @@ func TestConfigIncompleteConcurrentAccess(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// ConfigRevision lets the window notice a config change made outside it (a
+// deep-link pair, a hand edit + reload): it must advance on every reload
+// (SetConfigIncomplete is called by startup and each configSettings.reload).
+func TestStatusConfigRevisionAdvancesOnEveryConfigApply(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetConfigIncomplete(true, []string{"server.apiKey"})
+	first := r.Status(UpdateStatus{}).ConfigRevision
+	r.SetConfigIncomplete(false, nil)
+	second := r.Status(UpdateStatus{}).ConfigRevision
+	if second <= first {
+		t.Errorf("ConfigRevision %d -> %d, want it to increase on a config apply", first, second)
+	}
+	if again := r.Status(UpdateStatus{}).ConfigRevision; again != second {
+		t.Errorf("ConfigRevision changed without a config apply: %d -> %d", second, again)
+	}
+}

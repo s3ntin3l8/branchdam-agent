@@ -702,7 +702,12 @@ async function poll() {
   try {
     const json = await app.StatusJSON();
     clearError();
-    render(JSON.parse(json));
+    const view = JSON.parse(json);
+    render(view);
+    // Deliberately outside render(): the poll never touches the settings form
+    // itself; noteConfigRevision only asks loadSettings() to refresh it when
+    // the agent's config changed underneath an idle form.
+    noteConfigRevision(view.status ?? {});
   } catch (err) {
     showError(String(err));
   }
@@ -1685,27 +1690,79 @@ function renderSettingsForm(sv) {
   for (const iv of integrations) integrationsContainer.appendChild(renderIntegrationBlock(iv));
 }
 
-async function loadSettings() {
+async function loadSettings(retry = true) {
   const app = getApp();
   if (!app) {
-    setTimeout(loadSettings, 500);
+    if (retry) setTimeout(loadSettings, 500);
     return;
   }
+  // Stamp the revision seen BEFORE the fetch: a poll that advances
+  // latestConfigRevision while SettingsJSON is in flight must not mark that
+  // newer revision loaded when the response may be the older snapshot.
+  const revisionAtFetch = latestConfigRevision;
   try {
     const sv = JSON.parse(await app.SettingsJSON());
     byId("settings-error").textContent = "";
     renderSettingsForm(sv);
+    settingsLoaded = true;
+    loadedConfigRevision = revisionAtFetch;
   } catch (err) {
+    if (!retry) return; // a quiet refresh tries again on the next poll
     // Retry at the same cadence as the status poll rather than leaving a
     // dead error: the agent may not be running yet when this window
     // opens, or may still be restarting -- both normal cases (see
     // app.go's StatusJSON doc comment), and the status section already
     // self-heals the same way. Once a load succeeds, this stops
-    // rescheduling itself -- the settings form is still loaded once, not
-    // on a timer, so an in-progress edit is never overwritten.
+    // rescheduling itself. Later refreshes go through noteConfigRevision
+    // (only on a config revision change, and never under an in-flight
+    // action or a recent edit), not on a timer, so an in-progress edit is
+    // never overwritten.
     byId("settings-error").textContent = String(err);
     setTimeout(loadSettings, POLL_INTERVAL_MS);
   }
+}
+
+// --- Config changed underneath the form -------------------------------
+//
+// The form loads once (see renderSettingsForm) so the poll can never wipe an
+// edit in progress. But the agent's config can also change without this
+// window: a branchdam:// pairing handled by the tray, or a hand edit followed
+// by a reload. The status carries configRevision (bumped on every config
+// apply); when it differs from the revision the form was loaded at, refresh
+// the form -- but never under the operator's hands: not while a settings
+// action is in flight, and not within SETTINGS_QUIET_MS of their last
+// interaction with a settings field (which also covers the reload that their
+// own saves cause). A skipped tick simply retries on the next poll.
+let latestConfigRevision = null;
+let loadedConfigRevision = null;
+let settingsLoaded = false;
+let settingsReloading = false;
+let lastSettingsInteractionAt = 0;
+const SETTINGS_QUIET_MS = 15000;
+
+for (const ev of ["input", "change", "click", "keydown"]) {
+  document.addEventListener(
+    ev,
+    (e) => {
+      if (e.target instanceof Element && e.target.closest('[id$="-config"]')) {
+        lastSettingsInteractionAt = Date.now();
+      }
+    },
+    true,
+  );
+}
+
+function noteConfigRevision(status) {
+  if (typeof status.configRevision !== "number") return;
+  latestConfigRevision = status.configRevision;
+  if (!settingsLoaded || settingsReloading) return;
+  if (loadedConfigRevision === latestConfigRevision) return;
+  if (inFlightActions.size > 0) return;
+  if (Date.now() - lastSettingsInteractionAt < SETTINGS_QUIET_MS) return;
+  settingsReloading = true;
+  loadSettings(false).finally(() => {
+    settingsReloading = false;
+  });
 }
 
 loadSettings();

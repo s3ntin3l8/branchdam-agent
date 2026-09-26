@@ -5,9 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -99,6 +101,37 @@ func runPairCmd(args []string) int {
 	return 0
 }
 
+// helloFailure words a failed validation Hello() by what actually happened.
+// Only a 401/403 from the server means the key was rejected (the same split
+// HTTPError.Retryable uses); any other status (a proxy's 502, a 404 from the
+// wrong path, a 503 for a server-side key misconfiguration) is reported as the
+// bare status without claiming the operator's key is at fault -- or fine --
+// and a dial/DNS/
+// TLS/timeout error means the server was never reached. Saying "rejected the
+// key" for those sends the operator chasing the wrong problem. All wrap
+// ErrPairingHelloFailed (callers classify on it) and preserve err via %w (the
+// loopback endpoint's 400/500 mapping uses errors.As for *HTTPError).
+func helloFailure(server string, err error) error {
+	var httpErr *branchdam.HTTPError
+	if errors.As(err, &httpErr) {
+		if httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden {
+			return fmt.Errorf("%w: server at %s rejected the key: %w", branchdam.ErrPairingHelloFailed, server, err)
+		}
+		return fmt.Errorf("%w: server at %s replied HTTP %d: %w", branchdam.ErrPairingHelloFailed, server, httpErr.StatusCode, err)
+	}
+	return fmt.Errorf("%w: could not reach server at %s: %w%s", branchdam.ErrPairingHelloFailed, server, err, localNetworkHint(runtime.GOOS, err))
+}
+
+// localNetworkHint explains macOS's Local Network privacy gate: until the
+// operator answers the system prompt, a LAN connect from the app fails with
+// EHOSTUNREACH ("no route to host") even though the route is fine.
+func localNetworkHint(goos string, err error) string {
+	if goos == "darwin" && errors.Is(err, syscall.EHOSTUNREACH) {
+		return " (on macOS, check System Settings > Privacy & Security > Local Network and allow branchDAM Agent, then try again)"
+	}
+	return ""
+}
+
 // pairConfig is the single source of truth for validating credentials and
 // persisting them to config.yaml -- shared by runPairCmd (CLI) and
 // configSettings.Pair (Settings window / loopback API).
@@ -132,9 +165,9 @@ func pairConfig(path, server, key, agent string, timeout time.Duration, cfg conf
 		// Wrapped in ErrPairingHelloFailed so callers can classify a
 		// failed validation as client-side (400) whether the server
 		// replied (*HTTPError, preserved via the second %w) or never
-		// answered (bare dial/DNS/timeout error). The CLI message is
-		// unchanged.
-		return fmt.Errorf("%w: server at %s rejected the key: %w", branchdam.ErrPairingHelloFailed, server, err)
+		// answered (bare dial/DNS/timeout error). helloFailure words the
+		// message by which of those it was.
+		return helloFailure(server, err)
 	}
 
 	// Patch all three fields atomically. config.Patch writes back at mode
