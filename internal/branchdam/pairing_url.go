@@ -186,17 +186,27 @@ const (
 	maxAgentRunes  = 100
 )
 
-// checkDisplayable rejects control characters (incl. CR/LF) and Unicode
-// format characters (bidi overrides/isolates, zero-width joiners, ...) and
-// over-long values. The value is deliberately not echoed in the error.
+// IsDisplayable reports whether v is safe to interpolate into a dialog: no
+// control characters (incl. CR/LF), no Unicode format characters (bidi
+// overrides/isolates, zero-width joiners) and no line/paragraph separators
+// (U+2028/U+2029, which Cocoa renders as line breaks).
+func IsDisplayable(v string) bool {
+	for _, r := range v {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkDisplayable rejects non-displayable and over-long values. The value is
+// deliberately not echoed in the error.
 func checkDisplayable(field, v string, maxRunes int) error {
 	if utf8.RuneCountInString(v) > maxRunes {
 		return fmt.Errorf("%w: %s is longer than %d characters", ErrPairingURLInvalid, field, maxRunes)
 	}
-	for _, r := range v {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return fmt.Errorf("%w: %s contains control or invisible formatting characters", ErrPairingURLInvalid, field)
-		}
+	if !IsDisplayable(v) {
+		return fmt.Errorf("%w: %s contains control or invisible formatting characters", ErrPairingURLInvalid, field)
 	}
 	return nil
 }

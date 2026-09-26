@@ -50,6 +50,9 @@ func confirmAndPair(
 	}
 	body := fmt.Sprintf("Server: %s\nAgent ID: %s", parsed.Server, parsed.Agent)
 	if cur := settings.Snapshot().ServerBaseURL; cur != "" {
+		if !branchdam.IsDisplayable(cur) {
+			cur = "(unreadable)"
+		}
 		body += fmt.Sprintf("\n\nThis replaces the current server (%s).", cur)
 	}
 	body += "\n\nOnly continue if you just started this from your branchDAM server."
@@ -62,6 +65,52 @@ func confirmAndPair(
 // pairMu serializes deep-link pairs: the Apple Event consumer and the loopback
 // endpoint can both start one, and two confirmation dialogs must not overlap.
 var pairMu sync.Mutex
+
+// deepLinkQueue coalesces deep-link requests to the latest one. The Apple
+// Event consumer and every POST /api/actions/pair (source "deeplink") funnel
+// through submitDeepLink, so while a confirmation is open, further links
+// replace one another in a single pending slot instead of stacking a dialog
+// each -- a page firing many links cannot queue dialogs ahead of the
+// operator's own click.
+var deepLinkQueue struct {
+	mu      sync.Mutex
+	pending string
+	has     bool
+	running bool
+}
+
+// submitDeepLink runs handleDeepLink for rawURL, or, if another deep link is
+// already being handled, records rawURL as the single pending one (replacing
+// any earlier pending link) and returns; the running worker picks it up next.
+func submitDeepLink(
+	ctx context.Context,
+	rawURL string,
+	settings Settings,
+	confirm func(ctx context.Context, title, body string) bool,
+	notify func(ctx context.Context, title, message string),
+) {
+	q := &deepLinkQueue
+	q.mu.Lock()
+	q.pending, q.has = rawURL, true
+	if q.running {
+		q.mu.Unlock()
+		return
+	}
+	q.running = true
+	q.mu.Unlock()
+	for {
+		q.mu.Lock()
+		if !q.has {
+			q.running = false
+			q.mu.Unlock()
+			return
+		}
+		u := q.pending
+		q.pending, q.has = "", false
+		q.mu.Unlock()
+		handleDeepLink(ctx, u, settings, confirm, notify)
+	}
+}
 
 // handleDeepLink pairs from a branchdam:// URL delivered by the OS and reports
 // the outcome through notify. The raw URL embeds the API key, so it is never

@@ -800,7 +800,7 @@ func (s *StatusServer) handleActionPair(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, ErrPairNoConfirm.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		go handleDeepLink(context.Background(), req.URL, s.Settings, s.PairConfirm, s.PairNotify)
+		go submitDeepLink(context.Background(), req.URL, s.Settings, s.PairConfirm, s.PairNotify)
 		s.writeJSON(w, http.StatusAccepted, pairActionResult{OK: true, Pending: true, Server: parsed.Server, AgentID: parsed.Agent})
 		return
 	}

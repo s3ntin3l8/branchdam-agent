@@ -138,7 +138,7 @@ func Run(
 				case <-ctx.Done():
 					return
 				case u := <-openURLs:
-					handleDeepLink(ctx, u, settings, confirm, notify)
+					submitDeepLink(ctx, u, settings, confirm, notify)
 				}
 			}
 		}()

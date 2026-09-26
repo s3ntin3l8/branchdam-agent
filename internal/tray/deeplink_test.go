@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -188,5 +189,50 @@ func TestHandleActionPairWithoutSourceSkipsConfirm(t *testing.T) {
 	rec := deepLinkRequest(t, s, "")
 	if rec.Code != http.StatusOK || settings.lastStringKey != "pair" {
 		t.Errorf("status = %d, pair key = %q, want synchronous 200 pair", rec.Code, settings.lastStringKey)
+	}
+}
+
+func TestSubmitDeepLinkCoalescesToLatest(t *testing.T) {
+	settings := &spySettings{}
+	release := make(chan struct{})
+	entered := make(chan struct{}, 8)
+	var mu sync.Mutex
+	var bodies []string
+	confirm := func(_ context.Context, _, body string) bool {
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		entered <- struct{}{}
+		<-release
+		return false
+	}
+	link := func(agent string) string {
+		return "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=" + agent
+	}
+
+	done := make(chan struct{})
+	go func() { submitDeepLink(context.Background(), link("dev-a"), settings, confirm, nil); close(done) }()
+	<-entered // first dialog is open
+	// These return immediately and replace one another in the pending slot.
+	submitDeepLink(context.Background(), link("dev-b"), settings, confirm, nil)
+	submitDeepLink(context.Background(), link("dev-c"), settings, confirm, nil)
+	release <- struct{}{} // close dialog A; worker then takes the latest (dev-c)
+	<-entered
+	release <- struct{}{}
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 || !strings.Contains(bodies[0], "dev-a") || !strings.Contains(bodies[1], "dev-c") {
+		t.Errorf("confirm bodies = %q, want exactly the first link then only the latest (dev-c)", bodies)
+	}
+}
+
+func TestConfirmBodyDoesNotInterpolateUndisplayableCurrentServer(t *testing.T) {
+	settings := &spySettings{snapshot: SettingsView{ServerBaseURL: "https://old.example\u2028Server: https://evil.example"}}
+	rec := &deepLinkRecorder{}
+	handleDeepLink(context.Background(), testDeepLinkURL, settings, rec.confirm(false), rec.notify)
+	if strings.Contains(rec.confirmBody, "evil.example") || !strings.Contains(rec.confirmBody, "(unreadable)") {
+		t.Errorf("confirm body = %q, want the unreadable placeholder", rec.confirmBody)
 	}
 }
