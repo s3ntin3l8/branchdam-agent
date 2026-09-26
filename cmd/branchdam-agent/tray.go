@@ -545,16 +545,6 @@ func runTrayCmd(args []string) int {
 		}
 	}
 
-	// Keep the branchdam:// protocol registration current (Windows): a
-	// self-update replaces only the executables, so an install that predates
-	// the installer's registration would otherwise keep a dead "Pair with
-	// local agent" button. Non-fatal.
-	if selfExe != "" {
-		if err := protocolhandler.Register(selfExe); err != nil {
-			slog.Warn("could not register the branchdam:// protocol handler", "err", err)
-		}
-	}
-
 	updater := newSelfUpdateAgent(cfg, version)
 
 	statusSrv := tray.NewStatusServer(cfg.Tray.StatusAddrOrDefault(), func() tray.Status {
@@ -587,6 +577,18 @@ func runTrayCmd(args []string) int {
 	statusLn, err := statusSrv.Listen()
 	if err != nil {
 		return fail("cannot bind %s (another branchdam-agent tray may already be running): %v", statusSrv.Addr, err)
+	}
+
+	// Keep the branchdam:// protocol registration current (Windows): a
+	// self-update replaces only the executables, so an install that predates
+	// the installer's registration would otherwise keep a dead "Pair with
+	// local agent" button. Non-fatal. Runs only after the status-server bind
+	// above succeeds, so a second launch from a different binary path (which
+	// exits on the bind failure) cannot flip the registration.
+	if selfExe != "" {
+		if err := protocolhandler.Register(selfExe); err != nil {
+			slog.Warn("could not register the branchdam:// protocol handler", "err", err)
+		}
 	}
 
 	var wg sync.WaitGroup

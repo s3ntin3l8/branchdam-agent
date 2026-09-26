@@ -505,8 +505,11 @@ prompt-free.) Like macOS, it is never paired silently:
 
 1. A running tray gets the URL via `POST /api/actions/pair` (`source: "deeplink"`) and owns
    the confirmation dialog and config reload.
-2. With no tray running, the process shows the confirmation itself, then pairs and reports
-   through dialogs (the GUI binary has no console). With no working dialog it refuses.
+2. With no tray running (or when `tray.statusAddr` is widened off loopback, in which case the
+   pairing URL is never sent to it), the process shows the confirmation itself, then pairs and reports
+   through dialogs (the GUI binary has no console). With no working dialog it refuses. Note that
+in the widened-`statusAddr` case a running tray keeps its old in-memory credentials until it is
+restarted or reloads its config, because the fallback writes `config.yaml` directly.
 
 ## DaVinci Resolve hook menu (issue #68, removed in v1.9.0)
 
