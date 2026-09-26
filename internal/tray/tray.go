@@ -286,6 +286,11 @@ type Status struct {
 	// state, and the user configures through the Settings menu.
 	ConfigIncomplete bool     `json:"configIncomplete"`
 	MissingFields    []string `json:"missingFields,omitempty"`
+	// ConfigRevision increments every time the running config is (re)applied
+	// (startup and every reload). The window compares it with the revision
+	// its settings form was loaded at, so a change made elsewhere (a
+	// deep-link pair in the tray, a hand edit + reload) refreshes the form.
+	ConfigRevision int64 `json:"configRevision"`
 	// ServerProbe is the most recent on-demand "Test connection" result
 	// (nil if none has run yet this session, including the automatic
 	// startup/periodic checks -- see cmd/branchdam-agent's serverProbeInterval
@@ -479,6 +484,7 @@ type Runner struct {
 	// the icon/menu show a "not configured" state.
 	configIncomplete bool
 	missingFields    []string
+	configRevision   int64
 
 	// confirmDestructive controls whether destructive menu actions
 	// (drain, prune, install-and-restart, rollback) show a confirmation
@@ -539,6 +545,7 @@ func (r *Runner) SetConfigIncomplete(incomplete bool, missing []string) {
 	defer r.mu.Unlock()
 	r.configIncomplete = incomplete
 	r.missingFields = append([]string(nil), missing...)
+	r.configRevision++ // called on startup and on every settings reload
 }
 
 // ConfigIncomplete reports whether the tray is currently running with a
@@ -1703,6 +1710,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	inFlightPrune := r.inFlightPrune
 	configIncomplete := r.configIncomplete
 	missingFields := append([]string(nil), r.missingFields...)
+	configRevision := r.configRevision
 	lastProbe := r.lastProbe
 	inFlightProbe := r.inFlightProbe
 
@@ -1793,6 +1801,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		Hooks:            hooks,
 		ConfigIncomplete: configIncomplete,
 		MissingFields:    missingFields,
+		ConfigRevision:   configRevision,
 		ServerProbe:      lastProbe,
 		InFlightProbe:    inFlightProbe,
 	}

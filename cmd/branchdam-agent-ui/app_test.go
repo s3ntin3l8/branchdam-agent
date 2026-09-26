@@ -1080,3 +1080,47 @@ func TestSetupBannerContainerIsNotASettingsContainer(t *testing.T) {
 		t.Error("#setup-banner must not be a \"-config\" container -- it is rebuilt on every status poll, not loaded once by loadSettings()")
 	}
 }
+
+// The status poll may ask loadSettings() to refresh the form when the agent's
+// config changed underneath it (a deep-link pair handled by the tray), but only
+// through noteConfigRevision -- never from render(), and never under the
+// operator's hands. Mechanically pin the pieces so a refactor cannot turn this
+// into the mid-typing wipe TestStatusPollNeverRebuildsSettingsContainers exists
+// to prevent.
+func TestStatusPollRefreshesSettingsOnlyThroughGuardedRevisionCheck(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	start := strings.Index(body, "function render(view) {")
+	end := strings.Index(body[start:], "\nfunction showError(")
+	if start == -1 || end == -1 {
+		t.Fatal("app.js: could not extract render(view)")
+	}
+	if renderBody := body[start : start+end]; strings.Contains(renderBody, "loadSettings") || strings.Contains(renderBody, "noteConfigRevision") {
+		t.Error("render(view) must not refresh settings; only poll() may call noteConfigRevision")
+	}
+
+	pollStart := strings.Index(body, "async function poll() {")
+	pollEnd := strings.Index(body[pollStart:], "\npoll();")
+	if pollStart == -1 || pollEnd == -1 {
+		t.Fatal("app.js: could not extract poll()")
+	}
+	if !strings.Contains(body[pollStart:pollStart+pollEnd], "noteConfigRevision(") {
+		t.Error("poll() must call noteConfigRevision so out-of-band config changes reach the form")
+	}
+
+	nStart := strings.Index(body, "function noteConfigRevision(status) {")
+	nEnd := strings.Index(body[nStart:], "\nloadSettings();")
+	if nStart == -1 || nEnd == -1 {
+		t.Fatal("app.js: could not extract noteConfigRevision")
+	}
+	guard := body[nStart : nStart+nEnd]
+	for _, must := range []string{"configRevision", "loadedConfigRevision", "inFlightActions.size", "lastSettingsInteractionAt", "SETTINGS_QUIET_MS", "loadSettings(false)"} {
+		if !strings.Contains(guard, must) {
+			t.Errorf("noteConfigRevision must keep its guard %q (never refresh under an in-flight action or recent edit)", must)
+		}
+	}
+}

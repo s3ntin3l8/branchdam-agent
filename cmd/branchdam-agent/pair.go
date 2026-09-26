@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -99,6 +100,30 @@ func runPairCmd(args []string) int {
 	return 0
 }
 
+// helloFailure words a failed validation Hello() by what actually happened.
+// Only a server reply (*branchdam.HTTPError) means the key was rejected; a
+// dial/DNS/TLS/timeout error means the server was never reached, and saying
+// "rejected the key" then sends the operator chasing the wrong problem. Both
+// wrap ErrPairingHelloFailed (callers classify on it) and preserve err via %w
+// (the loopback endpoint's 400/500 mapping uses errors.As for *HTTPError).
+func helloFailure(server string, err error) error {
+	var httpErr *branchdam.HTTPError
+	if errors.As(err, &httpErr) {
+		return fmt.Errorf("%w: server at %s rejected the key: %w", branchdam.ErrPairingHelloFailed, server, err)
+	}
+	return fmt.Errorf("%w: could not reach server at %s: %w%s", branchdam.ErrPairingHelloFailed, server, err, localNetworkHint(runtime.GOOS, err))
+}
+
+// localNetworkHint explains macOS's Local Network privacy gate: until the
+// operator answers the system prompt, a LAN connect from the app fails with
+// EHOSTUNREACH ("no route to host") even though the route is fine.
+func localNetworkHint(goos string, err error) string {
+	if goos == "darwin" && errors.Is(err, syscall.EHOSTUNREACH) {
+		return " (on macOS, check System Settings > Privacy & Security > Local Network and allow branchdam-agent, then try again)"
+	}
+	return ""
+}
+
 // pairConfig is the single source of truth for validating credentials and
 // persisting them to config.yaml -- shared by runPairCmd (CLI) and
 // configSettings.Pair (Settings window / loopback API).
@@ -134,7 +159,7 @@ func pairConfig(path, server, key, agent string, timeout time.Duration, cfg conf
 		// replied (*HTTPError, preserved via the second %w) or never
 		// answered (bare dial/DNS/timeout error). The CLI message is
 		// unchanged.
-		return fmt.Errorf("%w: server at %s rejected the key: %w", branchdam.ErrPairingHelloFailed, server, err)
+		return helloFailure(server, err)
 	}
 
 	// Patch all three fields atomically. config.Patch writes back at mode

@@ -138,6 +138,6 @@ func handleDeepLink(
 		slog.Info("deep-link pairing declined")
 	default:
 		slog.Warn("deep-link pairing failed", "err", agentlog.Sanitize(err.Error()))
-		say("Pairing failed: " + agentlog.Sanitize(err.Error()))
+		say("Pairing failed: " + agentlog.Sanitize(err.Error()) + " (see the agent log for details)")
 	}
 }
