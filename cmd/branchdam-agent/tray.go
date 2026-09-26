@@ -26,6 +26,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
+	"github.com/s3ntin3l8/branchdam-agent/internal/protocolhandler"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 	"github.com/s3ntin3l8/branchdam-agent/internal/resolvehook"
 	runtimeState "github.com/s3ntin3l8/branchdam-agent/internal/runtime"
@@ -541,6 +542,16 @@ func runTrayCmd(args []string) int {
 			// tray this session, just without the login item registered.
 			slog.Warn(startOnLoginRegistrationFailed, "err", err)
 			writeStartOnLoginWarning(os.Stderr, err)
+		}
+	}
+
+	// Keep the branchdam:// protocol registration current (Windows): a
+	// self-update replaces only the executables, so an install that predates
+	// the installer's registration would otherwise keep a dead "Pair with
+	// local agent" button. Non-fatal.
+	if selfExe != "" {
+		if err := protocolhandler.Register(selfExe); err != nil {
+			slog.Warn("could not register the branchdam:// protocol handler", "err", err)
 		}
 	}
 

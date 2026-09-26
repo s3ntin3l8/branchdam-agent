@@ -493,7 +493,10 @@ as documented.
 The NSIS installer registers `branchdam://` per-user (`HKCU\Software\Classes\branchdam`,
 command `branchdam-agent-tray.exe pair -deeplink "%1"`; removed on uninstall, with a shell
 association-changed notification on both install and uninstall), so the server's "Pair with
-local agent" button opens the agent. The command names `-deeplink` explicitly rather than
+local agent" button opens the agent. A self-update only replaces the executables, so the tray also (re)writes the same
+registration at startup (`internal/protocolhandler`, idempotent, prefers the GUI
+`branchdam-agent-tray.exe` sibling), which repairs an install that predates the installer
+change. The command names `-deeplink` explicitly rather than
 passing a bare URL, so a build that predates this (which rewrote a bare URL to an unconfirmed
 `pair`, and could be restored by a self-update rollback that leaves the key behind) fails on
 the unknown flag and writes nothing. `-deeplink` accepts exactly one URL and no other flag, so a

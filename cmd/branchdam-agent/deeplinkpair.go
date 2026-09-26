@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -31,6 +30,13 @@ var (
 	deepLinkForward    = forwardDeepLinkToTray
 	deepLinkPairConfig = pairConfig
 )
+
+// trayForwardClient never follows redirects: the request body carries the API
+// key, and a 307 from whatever answers on the port would forward it elsewhere.
+var trayForwardClient = &http.Client{
+	Timeout:       deepLinkForwardTimeout,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
 
 // errNoTray means no tray answered on the loopback API; the caller falls back
 // to confirming and pairing in this process.
@@ -79,8 +85,13 @@ func runDeepLinkPair(configFlag, rawURL string, timeout time.Duration) int {
 	}
 
 	body := fmt.Sprintf("Server: %s\nAgent ID: %s", parsed.Server, parsed.Agent)
-	if cfg.Server.BaseURL != "" {
-		body += fmt.Sprintf("\n\nThis replaces the current server (%s).", cfg.Server.BaseURL)
+	if cur := cfg.Server.BaseURL; cur != "" {
+		// Same guard as tray.confirmAndPair: a stored baseUrl with bidi
+		// characters or a YAML newline must not forge the dialog.
+		if !branchdam.IsDisplayable(cur) {
+			cur = "(unreadable)"
+		}
+		body += fmt.Sprintf("\n\nThis replaces the current server (%s).", cur)
 	}
 	body += "\n\nOnly continue if you just started this from your branchDAM server."
 	// Direct confirm, not gated by tray.confirmDestructive: see tray.confirmAndPair.
@@ -100,6 +111,13 @@ func runDeepLinkPair(configFlag, rawURL string, timeout time.Duration) int {
 // means nothing answered (no token file, or connection refused); any other
 // error is the tray's own rejection and must not fall back to a local write.
 func forwardDeepLinkToTray(addr, rawURL string) error {
+	// The body carries the API key: never dial anything but this machine. A
+	// widened tray.statusAddr can't accept the hand-off anyway (the route is
+	// loopback-only), so fall back to the local confirmation.
+	if !isLoopbackAddr(addr) {
+		slog.Warn("tray status address is not loopback; not forwarding the pairing URL", "addr", agentlog.Sanitize(addr))
+		return errNoTray
+	}
 	token, err := sessiontoken.Read()
 	if err != nil {
 		return errNoTray
@@ -119,7 +137,7 @@ func forwardDeepLinkToTray(addr, rawURL string) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := trayForwardClient.Do(req)
 	if err != nil {
 		// Only a failed dial proves the request never reached a tray (stale
 		// token file from one that has exited). Anything later -- e.g. a
@@ -140,6 +158,20 @@ func forwardDeepLinkToTray(addr, rawURL string) error {
 		// ignored source and already wrote the pairing without asking.
 		return errors.New("the running tray is an older version that paired without asking for confirmation; update the agent")
 	}
-	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	return fmt.Errorf("the running tray rejected the request (%d): %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	// Deliberately not echoing the response body: a non-tray listener on the
+	// port could reflect the request (API key) onto the screen.
+	return fmt.Errorf("the running tray rejected the request (HTTP %d)", resp.StatusCode)
+}
+
+// isLoopbackAddr reports whether host:port names the local machine.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -15,6 +15,8 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/sessiontoken"
 )
 
+const testDeepLinkKey = "01234567890123456789012345678901"
+
 const deepLinkTestURL = "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
 
 type deepLinkHarness struct {
@@ -183,5 +185,72 @@ func TestForwardDeepLinkToTrayStatusHandling(t *testing.T) {
 	srv.Close()
 	if err := forwardDeepLinkToTray(addr, deepLinkTestURL); !errors.Is(err, errNoTray) {
 		t.Errorf("connection refused: err = %v, want errNoTray", err)
+	}
+}
+
+func TestForwardDeepLinkRefusesNonLoopbackBeforeDialing(t *testing.T) {
+	dialed := false
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { dialed = true }))
+	defer srv.Close()
+	for _, addr := range []string{"192.0.2.10:38080", "dam.example.com:38080", "0.0.0.0:38080", "not-an-addr"} {
+		if err := forwardDeepLinkToTray(addr, deepLinkTestURL); !errors.Is(err, errNoTray) {
+			t.Errorf("%s: err = %v, want errNoTray (refused, key never sent)", addr, err)
+		}
+	}
+	if dialed {
+		t.Error("a non-loopback address was dialed")
+	}
+	for _, addr := range []string{"127.0.0.1:38080", "[::1]:38080", "localhost:38080"} {
+		if !isLoopbackAddr(addr) {
+			t.Errorf("%s should count as loopback", addr)
+		}
+	}
+}
+
+func TestDeepLinkConfirmDoesNotInterpolateUndisplayableCurrentServer(t *testing.T) {
+	h := newDeepLinkHarness(t)
+	if err := os.WriteFile(h.cfgPath, []byte("server:\n  baseUrl: \"https://old.example\\u2028Server: https://evil.example\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.answer = dialogExitCanceled
+	_ = h.run()
+	if len(h.dialogs) == 0 {
+		t.Fatal("no confirmation shown")
+	}
+	msg := strings.Join(h.dialogs[0], " ")
+	if strings.Contains(msg, "evil.example") {
+		t.Errorf("confirmation interpolates the undisplayable current server: %s", msg)
+	}
+}
+
+func TestForwardDeepLinkNeverEchoesPeerBodyOrFollowsRedirects(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	followed := false
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed = true }))
+	defer target.Close()
+
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "echo: "+testDeepLinkKey, http.StatusBadRequest)
+	}))
+	defer echo.Close()
+	err := forwardDeepLinkToTray(strings.TrimPrefix(echo.URL, "http://"), deepLinkTestURL)
+	if err == nil || strings.Contains(err.Error(), testDeepLinkKey) {
+		t.Errorf("err = %v; must fail without echoing the peer body", err)
+	}
+
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redir.Close()
+	if err := forwardDeepLinkToTray(strings.TrimPrefix(redir.URL, "http://"), deepLinkTestURL); err == nil {
+		t.Error("a redirect response must not count as a successful hand-off")
+	}
+	if followed {
+		t.Error("the redirect was followed, forwarding the API key")
 	}
 }
