@@ -1696,12 +1696,16 @@ async function loadSettings(retry = true) {
     if (retry) setTimeout(loadSettings, 500);
     return;
   }
+  // Stamp the revision seen BEFORE the fetch: a poll that advances
+  // latestConfigRevision while SettingsJSON is in flight must not mark that
+  // newer revision loaded when the response may be the older snapshot.
+  const revisionAtFetch = latestConfigRevision;
   try {
     const sv = JSON.parse(await app.SettingsJSON());
     byId("settings-error").textContent = "";
     renderSettingsForm(sv);
     settingsLoaded = true;
-    loadedConfigRevision = latestConfigRevision;
+    loadedConfigRevision = revisionAtFetch;
   } catch (err) {
     if (!retry) return; // a quiet refresh tries again on the next poll
     // Retry at the same cadence as the status poll rather than leaving a

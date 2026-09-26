@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"runtime"
 	"strings"
@@ -101,15 +102,20 @@ func runPairCmd(args []string) int {
 }
 
 // helloFailure words a failed validation Hello() by what actually happened.
-// Only a server reply (*branchdam.HTTPError) means the key was rejected; a
-// dial/DNS/TLS/timeout error means the server was never reached, and saying
-// "rejected the key" then sends the operator chasing the wrong problem. Both
-// wrap ErrPairingHelloFailed (callers classify on it) and preserve err via %w
-// (the loopback endpoint's 400/500 mapping uses errors.As for *HTTPError).
+// Only a 401/403 from the server means the key was rejected (the same split
+// HTTPError.Retryable uses); any other status (a proxy's 502, a 404 from the
+// wrong path) means the server side is unhealthy or misrouted, and a dial/DNS/
+// TLS/timeout error means the server was never reached. Saying "rejected the
+// key" for those sends the operator chasing the wrong problem. All wrap
+// ErrPairingHelloFailed (callers classify on it) and preserve err via %w (the
+// loopback endpoint's 400/500 mapping uses errors.As for *HTTPError).
 func helloFailure(server string, err error) error {
 	var httpErr *branchdam.HTTPError
 	if errors.As(err, &httpErr) {
-		return fmt.Errorf("%w: server at %s rejected the key: %w", branchdam.ErrPairingHelloFailed, server, err)
+		if httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden {
+			return fmt.Errorf("%w: server at %s rejected the key: %w", branchdam.ErrPairingHelloFailed, server, err)
+		}
+		return fmt.Errorf("%w: server at %s replied HTTP %d (not a key problem): %w", branchdam.ErrPairingHelloFailed, server, httpErr.StatusCode, err)
 	}
 	return fmt.Errorf("%w: could not reach server at %s: %w%s", branchdam.ErrPairingHelloFailed, server, err, localNetworkHint(runtime.GOOS, err))
 }
@@ -157,8 +163,8 @@ func pairConfig(path, server, key, agent string, timeout time.Duration, cfg conf
 		// Wrapped in ErrPairingHelloFailed so callers can classify a
 		// failed validation as client-side (400) whether the server
 		// replied (*HTTPError, preserved via the second %w) or never
-		// answered (bare dial/DNS/timeout error). The CLI message is
-		// unchanged.
+		// answered (bare dial/DNS/timeout error). helloFailure words the
+		// message by which of those it was.
 		return helloFailure(server, err)
 	}
 

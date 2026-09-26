@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 )
 
 const testDeepLinkURL = "branchdam://?server=https%3A%2F%2Fdam.example.com&key=01234567890123456789012345678901&agent=dev-x123"
@@ -234,5 +238,41 @@ func TestConfirmBodyDoesNotInterpolateUndisplayableCurrentServer(t *testing.T) {
 	handleDeepLink(context.Background(), testDeepLinkURL, settings, rec.confirm(false), rec.notify)
 	if strings.Contains(rec.confirmBody, "evil.example") || !strings.Contains(rec.confirmBody, "(unreadable)") {
 		t.Errorf("confirm body = %q, want the unreadable placeholder", rec.confirmBody)
+	}
+}
+
+func TestPairFailureSummaryLeadsWithShortCauseAndHint(t *testing.T) {
+	longDial := fmt.Errorf("%w: could not reach server at https://branchdam.docker-01.in.example.de: branchdam: request /api/v1/agent/hello: Post \"https://branchdam.docker-01.in.example.de/api/v1/agent/hello\": dial tcp 192.168.2.204:443: %w",
+		branchdam.ErrPairingHelloFailed, syscall.EHOSTUNREACH)
+	rejected := fmt.Errorf("%w: rejected: %w", branchdam.ErrPairingHelloFailed, &branchdam.HTTPError{StatusCode: 401})
+	gateway := fmt.Errorf("%w: replied: %w", branchdam.ErrPairingHelloFailed, &branchdam.HTTPError{StatusCode: 502})
+	for _, tc := range []struct {
+		name, goos string
+		err        error
+		want       string
+	}{
+		{"local network (darwin)", "darwin", longDial, "Local Network"},
+		{"unreachable elsewhere", "linux", longDial, "could not reach the server"},
+		{"401 is a key problem", "linux", rejected, "rejected the key"},
+		{"502 is not a key problem", "linux", gateway, "HTTP 502"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pairFailureSummary(tc.goos, tc.err)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("summary = %q, want it to contain %q", got, tc.want)
+			}
+			if len([]rune(got)) > 200 {
+				t.Errorf("summary is %d chars; macOS truncates long banners", len([]rune(got)))
+			}
+			if idx := strings.Index(got, tc.want); idx > 150 {
+				t.Errorf("%q starts at char %d; the cause/hint must lead", tc.want, idx)
+			}
+			if strings.Contains(got, "192.168") {
+				t.Errorf("summary %q must not carry the long dial chain (it is in the log)", got)
+			}
+		})
+	}
+	if got := pairFailureSummary("linux", errors.New(strings.Repeat("x", 500))); len([]rune(got)) > 200 {
+		t.Errorf("unclassified error not capped: %d chars", len([]rune(got)))
 	}
 }

@@ -334,6 +334,10 @@ func TestPairConfigHelloFailureWording(t *testing.T) {
 		http.Error(w, "revoked", http.StatusUnauthorized)
 	}))
 	defer rejecting.Close()
+	badGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer badGateway.Close()
 	dead := httptest.NewServer(http.NotFoundHandler())
 	deadURL := dead.URL
 	dead.Close() // nothing listening: connection refused
@@ -343,6 +347,7 @@ func TestPairConfigHelloFailureWording(t *testing.T) {
 		name, server, want, notWant string
 	}{
 		{"server replied 401", rejecting.URL, "rejected the key", "could not reach"},
+		{"proxy 502 is not a key problem", badGateway.URL, "replied HTTP 502", "rejected the key"},
 		{"server unreachable", deadURL, "could not reach server at " + deadURL, "rejected the key"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
