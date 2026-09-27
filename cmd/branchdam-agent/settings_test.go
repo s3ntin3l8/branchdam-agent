@@ -1740,8 +1740,9 @@ func TestConfigSettingsPair(t *testing.T) {
 	if err := s.SetPathMappings([]tray.PathMappingEntry{{WorkstationPath: "/edit", ContainerPath: "/archive"}}); err != nil {
 		t.Fatalf("SetPathMappings: %v", err)
 	}
+	status = runner.Status(tray.UpdateStatus{})
 	if runner.ConfigIncomplete() {
-		t.Errorf("saving the final required field should clear setup incomplete state, missing=%v", runner.Status(tray.UpdateStatus{}).MissingFields)
+		t.Errorf("saving the final required field should clear setup incomplete state, missing=%v", status.MissingFields)
 	}
 
 	// Server rejects key

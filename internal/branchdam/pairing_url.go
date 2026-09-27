@@ -102,6 +102,9 @@ func ParsePairingURL(rawURL string) (PairingURL, error) {
 	body := strings.TrimPrefix(rawURL, scheme)
 	var values url.Values
 	query := body
+	if strings.HasPrefix(query, "//") {
+		return PairingURL{}, fmt.Errorf("%w: query-style expected %s, got %s", ErrPairingURLInvalid, scheme+"?<query>", safePrefix(rawURL))
+	}
 	if strings.HasPrefix(query, "/?") {
 		query = strings.TrimPrefix(query, "/")
 	}
