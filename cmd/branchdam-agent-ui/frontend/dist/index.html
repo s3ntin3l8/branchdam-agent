@@ -18,7 +18,9 @@
          can span multiple categories, so this needs to stay visible no
          matter which one the operator has open. Hidden while the
          Overview panel (which owns the full checklist this summarizes) is
-         itself on screen -- see hideSetupBannerOnOverview in app.js. -->
+         itself on screen -- see renderSetupBanner's own panel-overview
+         check in app.js, kept in sync with a manual nav click (not just
+         the 5s poll) by showCategory's own call to it. -->
     <div id="setup-banner"></div>
     <!-- Hoisted here (out of any one panel) because loadSettings() fills
          all five config panels from a single fetch -- a load failure needs

@@ -135,7 +135,12 @@ function renderSetupBanner(status) {
 // Kept in sync on every keystroke (an "input" listener below, not just
 // "change"), so unlike the settings form's once-only loadSettings() this
 // needs no separate quiet-window guard: pairingValue is always current by
-// the time the next 5s tick rebuilds the row.
+// the time the next 5s tick rebuilds the row. The VALUE surviving a
+// rebuild isn't the whole story, though -- renderServer's own
+// hadFocus/selStart/selEnd dance around its container.innerHTML rebuild is
+// what stops that same tick from silently kicking keyboard focus (and any
+// in-progress text selection) out of this field back to <body>, since a
+// fresh element has no memory of having been focused a moment ago.
 //
 // This inline control REPLACES a call this file used to make here to the
 // DOM's global prompt() dialog: Wails v2's macOS WKWebView (WailsContext.m)
@@ -167,6 +172,19 @@ function renderServer(status) {
   if (status.paused) rows.push(["Paused", raw(pill("yes — paused from the tray menu", "warn"))]);
 
   const container = byId("server-body");
+  // Preserve the pairing input's focus/caret across this rebuild --
+  // pairingValue alone (kept in sync on every keystroke, see the module
+  // doc comment above) survives a poll tick, but container.innerHTML
+  // below still destroys and replaces the actual <input> element. A plain
+  // DOM replacement kicks focus back to <body> with no memory of where it
+  // was, which would otherwise silently eject an operator's keyboard focus
+  // (and any in-progress text selection) every POLL_INTERVAL_MS while
+  // they're reviewing or editing the pasted URL.
+  const prevInput = container.querySelector(".pairing-row input[type=text]");
+  const hadFocus = !!prevInput && document.activeElement === prevInput;
+  const selStart = hadFocus ? prevInput.selectionStart : null;
+  const selEnd = hadFocus ? prevInput.selectionEnd : null;
+
   container.innerHTML = table(rows);
   container.appendChild(
     actionButtonRow("Server actions", "", [
@@ -216,10 +234,18 @@ function renderServer(status) {
           renderServer(status);
         },
       },
-    ]),
+    ], true),
   );
 
-  if (pairingOpen) container.appendChild(renderPairingRow(status));
+  if (pairingOpen) {
+    const pairingRow = renderPairingRow(status);
+    container.appendChild(pairingRow);
+    if (hadFocus) {
+      const input = pairingRow.querySelector('input[type="text"]');
+      input.focus();
+      if (selStart !== null) input.setSelectionRange(selStart, selEnd);
+    }
+  }
 }
 
 // renderPairingRow builds the inline "paste the branchdam:// URL" control
@@ -401,16 +427,25 @@ function refreshEnabledByID(sv) {
 // already true when the row is (re)built (see inFlightActions above)
 // starts disabled and shows its own busyText immediately, rather than
 // only reacting to a click on this particular DOM instance.
-function actionButtonRow(id, detailHtml, buttons) {
+// hideLabel (4th arg): true for a row whose `id` exists only to give the
+// row an aria-label (e.g. "Server actions", "Update check" -- filler text
+// that isn't a proper row title the way an integration/hook's own Title
+// is), so the visible <label> collapses to .sr-only instead of taking a
+// full 160px+ indent for nothing. The row itself still carries the same
+// text as an aria-label either way, so it stays announced to assistive
+// tech regardless.
+function actionButtonRow(id, detailHtml, buttons, hideLabel) {
   const row = document.createElement("div");
   // .action-row is a grid-column template distinct from the settings
   // form's .field-row shape (label/marker/input/browse/status) -- this
   // row is label/detail/actions/status instead. See style.css's own doc
   // comment on both classes for why they can't share one template.
   row.className = "field-row action-row";
+  row.setAttribute("aria-label", id);
 
   const label = document.createElement("label");
   label.textContent = id;
+  if (hideLabel) label.className = "sr-only";
   row.appendChild(label);
 
   const detail = document.createElement("span");
@@ -713,7 +748,7 @@ function renderSelfUpdate(status, settings) {
           await poll();
         },
       },
-    ]),
+    ], true),
   );
 }
 
@@ -750,10 +785,15 @@ function goToField(panelId, key) {
 }
 
 // setupStep renders one checklist row. `state` is "done", "needed", or
-// "optional" (done-but-skippable reads the same as "done" visually, just
-// with different copy at the call site). detailNode is only shown when
-// state !== "done" -- an operator who's already finished a step doesn't
-// need the explanation for why it used to matter.
+// "optional" -- "optional" gets its own neutral pill (distinct from
+// "done"'s ok-green one) since it covers two different things depending
+// on the call site: a step that's finished but was never REQUIRED (e.g.
+// "App integrations" with none enabled), or one that's skippable but not
+// yet finished (e.g. no watch folders configured, where detailNode still
+// explains what auto-import gets you and a jump button is still shown).
+// detailNode/the jump button are only shown when state !== "done" -- an
+// operator who's already finished a step doesn't need the explanation for
+// why it used to matter.
 function setupStep({ title, state, detailNode, panel, key, jumpLabel }) {
   const row = document.createElement("div");
   row.className = "setup-step";
@@ -798,12 +838,19 @@ function integrationIssues(iv, settings) {
   // resolvedb's own database URL is optional -- empty means auto-detect a
   // local Resolve database, not "not configured" (see its own field
   // descriptor's note in renderIntegrationBlock).
-  if (iv.ID !== "resolvedb" && !iv.CatalogPathSet && !iv.CatalogPath) {
+  const isResolveAutoDetect = iv.ID === "resolvedb" && !iv.CatalogPathSet;
+  if (!isResolveAutoDetect && !iv.CatalogPathSet && !iv.CatalogPath) {
     issues.push("needs a catalog path");
   }
   if (iv.DryRun) {
     issues.push("dry run is on, so nothing is being written to branchDAM yet");
-  } else if (!settings.NodeIndexPathSet) {
+  } else if (!settings.NodeIndexPathSet && !isResolveAutoDetect) {
+    // Mirrors cmd/branchdam-agent/integrations.go's own Ready func: a real
+    // (non-dry-run) sync needs the node index only when there's an
+    // explicit catalog/database path to resolve against. resolvedb's
+    // auto-detect mode (no database URL set) handles a missing node index
+    // gracefully via emptyNodeIndex{} instead of failing, so it must not
+    // be flagged here as "will fail".
     issues.push("dry run is off but no node index path is set, so a real sync will fail");
   }
   return issues;
@@ -1008,12 +1055,21 @@ async function loadUIVersion() {
 }
 loadUIVersion();
 
+// lastStatus caches the most recent poll's status for showCategory's own
+// use below (renderSetupBanner needs to react to a manual nav click
+// immediately, not wait for the next 5s poll tick) -- it is NEVER read by
+// anything settings-related, so it doesn't reopen the door
+// TestStatusPollNeverRebuildsSettingsContainers/TestCategorySwitchingNeverRerenders
+// both keep shut.
+let lastStatus = {};
+
 function render(view) {
   const agentVersion = view.version ? `agent v${view.version}` : "";
   const shownUIVersion = uiVersion && uiVersion !== view.version ? `UI v${uiVersion}` : "";
   byId("version").textContent = [agentVersion, shownUIVersion].filter(Boolean).join(" · ");
   const status = view.status ?? {};
   const settings = view.settings ?? {};
+  lastStatus = status;
   renderSetupBanner(status);
   renderOverview(status, settings);
   renderServer(status);
@@ -1089,6 +1145,15 @@ function showCategory(panelId) {
     else b.removeAttribute("aria-current");
   }
   byId("content").scrollTop = 0;
+  // renderSetupBanner lives in #app-header, not inside any .panel, and
+  // hides itself while panel-overview is the active one -- without this
+  // call, both the Overview checklist's own "Go to X" buttons and the
+  // banner's own "Open checklist" button would leave a stale banner
+  // state on screen for up to POLL_INTERVAL_MS after a manual nav click,
+  // instead of updating with it immediately. Not a re-render of panelId's
+  // own contents, so this doesn't reopen the door
+  // TestCategorySwitchingNeverRerenders exists to keep shut.
+  renderSetupBanner(lastStatus);
 }
 
 function initNav() {
@@ -1099,9 +1164,9 @@ function initNav() {
     b.addEventListener("click", () => showCategory(b.dataset.panel));
   }
   // No persistence across window reopens -- always defaults to whichever
-  // panel index.html marks "active" (Server). Operator's own call: simpler,
-  // and keeps steering a first-run operator back to setup rather than
-  // wherever they last clicked.
+  // panel index.html marks "active" (Overview). Operator's own call: simpler,
+  // and keeps steering a first-run operator back to the setup checklist
+  // rather than wherever they last clicked.
 }
 initNav();
 
@@ -1335,7 +1400,15 @@ function withNote(row, note) {
   if (!note) return row;
   const wrap = document.createElement("div");
   wrap.appendChild(row);
-  wrap.appendChild(fieldNote(note));
+  const noteEl = fieldNote(note);
+  // A checkbox-row is flex, not grid (see its own CSS doc comment), with
+  // the checkbox flush at the row's left edge instead of sitting at
+  // var(--field-label-w) the way a text/select field's input does --
+  // .field-note's default left margin lines up with the latter, not the
+  // former, so a note under a checkbox needs the smaller indent that
+  // matches its own .field-status sibling instead (see style.css).
+  if (row.classList.contains("checkbox-row")) noteEl.classList.add("checkbox-note");
+  wrap.appendChild(noteEl);
   return wrap;
 }
 

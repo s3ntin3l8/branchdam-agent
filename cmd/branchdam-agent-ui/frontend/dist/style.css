@@ -104,8 +104,9 @@ h3 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
    items left") plus a jump button, not the old bulleted key dump -- the
    full checklist itself lives on the Overview panel (#overview-setup),
    which is where the button sends the operator. Hidden while that panel
-   is already the one on screen (see hideSetupBannerOnOverview in app.js)
-   since repeating the same checklist right above itself is just noise. */
+   is already the one on screen (see renderSetupBanner's own check in
+   app.js) since repeating the same checklist right above itself is just
+   noise. */
 #setup-banner {
   display: none;
   align-items: center;
@@ -390,13 +391,24 @@ ul { margin: 4px 0; padding-left: 18px; }
    renderPathMappingField's "separate from Operator Path Rewrites") and
    the new per-field "what this does" note (f.note, most fields now carry
    one). Always a SIBLING of its .field-row inside a shared wrapper <div>
-   (fieldWithNote in app.js), never a grid child of the row itself -- the
+   (withNote in app.js), never a grid child of the row itself -- the
    fixed left margin below is what lines its text up under the row's own
-   input column without needing a grid slot for it. */
+   input column without needing a grid slot for it. See the
+   .checkbox-note modifier below for the one row shape (checkbox-row) this
+   margin doesn't fit. */
 .field-note {
   margin: 2px 0 8px var(--field-label-w);
   font-size: 11px;
   color: var(--muted);
+}
+/* withNote (app.js) adds this modifier when the row above is a
+   .checkbox-row -- that row is flex with the checkbox flush at the left
+   edge, not grid with an input starting at var(--field-label-w), so the
+   base rule's margin above would leave the note floating in space with no
+   visible relationship to the toggle it explains. 24px matches
+   .checkbox-row's own .field-status indent for the same toggle. */
+.field-note.checkbox-note {
+  margin-left: 24px;
 }
 
 /* renderChipListField's token editor: existing values render as pill-like
@@ -513,8 +525,18 @@ ul { margin: 4px 0; padding-left: 18px; }
   cursor: default;
 }
 
-.integration-block { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
-.integration-block:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
+/* The adjacent-sibling combinator (not a bare .integration-block rule plus
+   a :first-of-type override) is deliberate: renderSettingsForm now
+   prepends a plain, unclassed <div> (the shared "Node index path" field)
+   before the loop that appends one .integration-block per integration, so
+   the first .integration-block is no longer the first `div` CHILD of its
+   container -- :first-of-type matches by tag regardless of class, so it
+   would silently stop matching the actual first integration block the
+   moment that field was added, applying to nothing at all. Styling the
+   divider onto ".integration-block + .integration-block" instead applies
+   it exactly when one integration block immediately follows ANOTHER one,
+   which is true regardless of what (if anything) precedes the first. */
+.integration-block + .integration-block { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
 .integration-block h3 { font-size: 13px; margin: 0 0 6px; }
 
 /* --- Overview panel -------------------------------------------------- */
@@ -620,7 +642,8 @@ ul { margin: 4px 0; padding-left: 18px; }
 @media (max-width: 760px) {
   #nav { flex-basis: 132px; }
   /* Set on #content (not just .field-row/.action-row) so it also reaches
-     .field-note's own margin-left, which isn't always a .field-row
-     descendant (see the div > .field-note rule above). */
+     .field-note's own margin-left, which isn't a .field-row descendant
+     at all -- withNote (app.js) appends it as a SIBLING of .field-row,
+     one level up, inside their shared wrapper <div>. */
   #content { --field-label-w: 128px; }
 }
