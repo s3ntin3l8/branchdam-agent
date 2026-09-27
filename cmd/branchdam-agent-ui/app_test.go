@@ -785,13 +785,20 @@ func TestCategoryPanelsGroupSettingsWithTheirStatus(t *testing.T) {
 	}
 	body := string(src)
 
+	// panel-overview is deliberately excluded: it has no "-config" settings
+	// container of its own (renderOverview reads status+settings directly,
+	// never renderSettingsForm -- see TestOverviewIsPollRenderedNotSettings),
+	// so it doesn't fit this test's settings-then-status premise at all. It
+	// sits before panel-server in index.html, which doesn't disturb the span
+	// computation below since each category's span still runs from its own
+	// panel's start to the NEXT category's start (or </main> for the last).
 	categories := []struct {
 		panel  string
 		config string
 		live   []string
 	}{
 		{"panel-server", "settings-server-config", []string{"server-body"}},
-		{"panel-storage", "settings-storage-config", []string{"ingest-body", "queue-body", "watch-body"}},
+		{"panel-storage", "settings-storage-config", []string{"ingest-body", "queue-body"}},
 		{"panel-integrations", "settings-integrations-config", []string{"integrations-body", "hooks-body"}},
 		{"panel-behavior", "settings-behavior-config", nil},
 		{"panel-selfupdate", "settings-selfupdate-config", []string{"selfupdate-body"}},
@@ -896,11 +903,14 @@ func TestNavItemsAndPanelsCorrespond(t *testing.T) {
 }
 
 // TestExactlyOneDefaultPanel pins the operator's own decision: the window
-// always opens on the Server panel, with no persistence of the
+// always opens on the Overview panel (moved here from Server -- Overview's
+// own setup checklist is now where a first-run operator gets steered
+// through configuration, one step at a time, rather than landing directly
+// on the Server form with no context), with no persistence of the
 // last-viewed category across reopens (simpler, and keeps steering a
 // first-run operator back to setup rather than wherever they last
 // clicked). Exactly one panel/nav-item may start "active", and it must be
-// panel-server -- two active panels would show overlapping content, zero
+// panel-overview -- two active panels would show overlapping content, zero
 // would show a blank content pane, and the wrong one would silently
 // contradict this decision on every window open.
 func TestExactlyOneDefaultPanel(t *testing.T) {
@@ -922,8 +932,8 @@ func TestExactlyOneDefaultPanel(t *testing.T) {
 	if m == nil {
 		t.Fatal(`no panel matches class="panel active" id="..."`)
 	}
-	if m[1] != "panel-server" {
-		t.Errorf("default active panel is %q, want %q", m[1], "panel-server")
+	if m[1] != "panel-overview" {
+		t.Errorf("default active panel is %q, want %q", m[1], "panel-overview")
 	}
 
 	activeNavRe := regexp.MustCompile(`class="nav-item active"\s+data-panel="([^"]+)"`)
@@ -1122,5 +1132,82 @@ func TestStatusPollRefreshesSettingsOnlyThroughGuardedRevisionCheck(t *testing.T
 		if !strings.Contains(guard, must) {
 			t.Errorf("noteConfigRevision must keep its guard %q (never refresh under an in-flight action or recent edit)", must)
 		}
+	}
+}
+
+// TestOverviewIsPollRenderedNotSettings guards the Overview panel's own
+// split of the same invariant TestStatusPollNeverRebuildsSettingsContainers
+// pins for every other panel: renderOverview reads status+settings (both
+// already part of the poll's own StatusJSON response) and must NEVER touch
+// a "-config" container or call renderSettingsForm -- an operator's
+// mid-typing settings edit must survive a poll tick regardless of which
+// panel it landed a checklist "Go to" button on. #overview-setup/
+// #overview-health themselves must not end in "-config" for the same
+// reason #setup-banner's own dedicated test gives.
+func TestOverviewIsPollRenderedNotSettings(t *testing.T) {
+	html, err := os.ReadFile("frontend/dist/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"overview-setup", "overview-health"} {
+		needle := `id="` + id + `"`
+		if !strings.Contains(string(html), needle) {
+			t.Fatalf("index.html missing %s", needle)
+		}
+		if strings.Contains(string(html), `id="`+id+`-config"`) {
+			t.Errorf("%s must not be a \"-config\" container -- it is rebuilt on every status poll, not loaded once by loadSettings()", id)
+		}
+	}
+
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	renderStart := strings.Index(body, "function render(view) {")
+	renderEnd := strings.Index(body[renderStart:], "\nfunction showError(")
+	if renderStart == -1 || renderEnd == -1 {
+		t.Fatal("app.js: could not extract render(view)")
+	}
+	if !strings.Contains(body[renderStart:renderStart+renderEnd], "renderOverview(") {
+		t.Error("render(view) must call renderOverview so the Overview panel refreshes on every status poll")
+	}
+
+	start := strings.Index(body, "function renderOverview(status, settings) {")
+	if start == -1 {
+		t.Fatal("app.js: could not find `function renderOverview(status, settings) {`")
+	}
+	end := strings.Index(body[start:], "\n// uiVersion")
+	if end == -1 {
+		t.Fatal("app.js: could not find the end of renderOverview (expected the `// uiVersion` comment to follow it)")
+	}
+	overviewBody := body[start : start+end]
+	for _, bad := range []string{"-config", "renderSettingsForm", "loadSettings"} {
+		if strings.Contains(overviewBody, bad) {
+			t.Errorf("renderOverview must never reference %q -- it runs inside render(view)'s poll-only call graph", bad)
+		}
+	}
+}
+
+// TestPairingDoesNotUseWindowPrompt guards against reintroducing the
+// window.prompt() call this file used to make for "Pair with server":
+// Wails v2's macOS WKWebView (WailsContext.m) implements no WKUIDelegate
+// runJavaScriptTextInputPanel... method, so window.prompt() silently
+// returns null there and the button did nothing on macOS specifically --
+// a platform-only failure a Linux/Windows dev session would never catch by
+// hand, which is exactly why it's pinned mechanically here instead.
+func TestPairingDoesNotUseWindowPrompt(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+
+	if strings.Contains(body, "window.prompt(") {
+		t.Error("app.js must not call window.prompt() -- Wails' macOS WKWebView has no JS prompt() delegate, so it silently no-ops there; use the inline pairing-row control instead")
+	}
+	if !strings.Contains(body, "function renderPairingRow(status) {") {
+		t.Error("app.js no longer defines renderPairingRow -- the inline 'Pair with server' control this test guards seems to have been removed")
 	}
 }

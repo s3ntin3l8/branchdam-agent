@@ -8,6 +8,7 @@
 <body>
   <header id="app-header">
     <h1><strong>branchDAM</strong> <span id="version"></span></h1>
+    <p id="header-subtitle">Changes on this page save automatically as you edit them.</p>
     <div id="error-banner"></div>
     <!-- Rebuilt on every 5s status poll from Status.missingFields/
          configIncomplete (renderSetupBanner in app.js), not "-config" --
@@ -15,7 +16,9 @@
          every live-status container below. Lives in the header (not a
          panel) for the same reason #settings-error does: missing fields
          can span multiple categories, so this needs to stay visible no
-         matter which one the operator has open. -->
+         matter which one the operator has open. Hidden while the
+         Overview panel (which owns the full checklist this summarizes) is
+         itself on screen -- see hideSetupBannerOnOverview in app.js. -->
     <div id="setup-banner"></div>
     <!-- Hoisted here (out of any one panel) because loadSettings() fills
          all five config panels from a single fetch -- a load failure needs
@@ -24,13 +27,14 @@
   </header>
 
   <div id="layout">
-    <!-- Static, fixed five-entry nav -- not JS-generated, so it renders
+    <!-- Static, fixed six-entry nav -- not JS-generated, so it renders
          correctly before Wails' bindings land and stays plain-text
          greppable by app_test.go. class before data-panel on every button,
          and class before id on every panel below: app_test.go's
          correspondence/ordering checks depend on that attribute order. -->
     <nav id="nav" aria-label="Categories">
-      <button type="button" class="nav-item active" data-panel="panel-server" aria-controls="panel-server" aria-current="page">Server</button>
+      <button type="button" class="nav-item active" data-panel="panel-overview" aria-controls="panel-overview" aria-current="page">Overview</button>
+      <button type="button" class="nav-item" data-panel="panel-server" aria-controls="panel-server">Server</button>
       <button type="button" class="nav-item" data-panel="panel-storage" aria-controls="panel-storage">Storage &amp; ingest</button>
       <button type="button" class="nav-item" data-panel="panel-integrations" aria-controls="panel-integrations">Integrations</button>
       <button type="button" class="nav-item" data-panel="panel-behavior" aria-controls="panel-behavior">Behavior</button>
@@ -40,15 +44,30 @@
     <!-- Every panel stays in the DOM at all times (app.js's showCategory
          only toggles the "active" class) -- render(view)'s 5s poll and
          loadSettings()'s one-time fill both write into these containers by
-         id regardless of which panel is visible. Panel-server starts
+         id regardless of which panel is visible. Panel-overview starts
          "active" so exactly one panel is visible before any script runs;
          there is no persistence across window reopens -- it always resets
          here (operator's own call: simpler, and keeps steering a
-         first-run operator back to setup). -->
+         first-run operator back to setup via the Overview's own
+         checklist). -->
     <main id="content">
-      <div class="panel active" id="panel-server">
+      <div class="panel active" id="panel-overview">
+        <section id="sec-overview-setup">
+          <h2>Setup</h2>
+          <p class="section-intro">What's left before this agent is fully working, in order.</p>
+          <div id="overview-setup"></div>
+        </section>
+
+        <section id="sec-overview-health">
+          <h2>At a glance</h2>
+          <div id="overview-health"></div>
+        </section>
+      </div>
+
+      <div class="panel" id="panel-server">
         <section id="sec-settings-server">
           <h2>Server &amp; identity</h2>
+          <p class="section-intro">How this agent reaches your branchDAM server and identifies itself to it.</p>
           <div id="settings-server-config"></div>
         </section>
 
@@ -61,6 +80,7 @@
       <div class="panel" id="panel-storage">
         <section id="sec-settings-storage">
           <h2>Storage &amp; naming</h2>
+          <p class="section-intro">Where ingested files land on this computer and how they're named.</p>
           <div id="settings-storage-config"></div>
         </section>
 
@@ -73,16 +93,12 @@
           <h2>Queue</h2>
           <div id="queue-body"></div>
         </section>
-
-        <section id="sec-watch">
-          <h2>Watch directories</h2>
-          <div id="watch-body"></div>
-        </section>
       </div>
 
       <div class="panel" id="panel-integrations">
         <section id="sec-settings-integrations">
           <h2>Integration settings</h2>
+          <p class="section-intro">Syncs edits made in other apps (Luminar Neo, DaVinci Resolve) into branchDAM.</p>
           <div id="settings-integrations-config"></div>
         </section>
 
@@ -100,6 +116,7 @@
              this repo already fixed once. -->
         <section id="sec-hooks">
           <h2>Hooks</h2>
+          <p class="section-intro">Installs a small script into an editing app so it records which source clips went into each render.</p>
           <div id="hooks-body"></div>
         </section>
       </div>
@@ -107,6 +124,7 @@
       <div class="panel" id="panel-behavior">
         <section id="sec-settings-behavior">
           <h2>Behavior</h2>
+          <p class="section-intro">Toggles that change how the agent acts, not what it connects to or where it writes.</p>
           <div id="settings-behavior-config"></div>
         </section>
       </div>

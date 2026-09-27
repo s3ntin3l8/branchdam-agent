@@ -75,29 +75,39 @@ const FIELD_LABELS = {
   "server.baseUrl": "Server URL",
   "server.apiKey": "API key", // pragma: allowlist secret -- a UI label, not a credential
   agentId: "Agent ID",
-  "ingest.localEditRoot": "Local edit root",
-  "ingest.archiveRoot": "Archive root",
+  "ingest.localEditRoot": "Working copy folder",
+  "ingest.archiveRoot": "Archive folder",
   pathMappings: "Path mappings",
 };
 
-// renderSetupBanner names exactly which config fields are still missing --
-// status.missingFields is the same list cmd/branchdam-agent/tray.go's
-// startup log line already prints to agent.log, surfaced here instead of
-// making the operator go find that file. Rebuilt on every 5s poll like
-// every other render* function below (NOT "-config": see
-// TestStatusPollNeverRebuildsSettingsContainers, which pins that render()
-// must never touch a settings container the once-only loadSettings() owns).
+// renderSetupBanner is a one-line summary of status.missingFields (the
+// same list cmd/branchdam-agent/tray.go's startup log line already prints
+// to agent.log) plus a button that jumps to the Overview panel, where
+// renderOverview's own setup checklist spells out each item and where to
+// fix it. Rebuilt on every 5s poll like every other render* function below
+// (NOT "-config": see TestStatusPollNeverRebuildsSettingsContainers, which
+// pins that render() must never touch a settings container the once-only
+// loadSettings() owns). Hidden while the Overview panel is itself the one
+// on screen -- repeating the same checklist directly above itself would
+// just be noise, not a second source of truth (the checklist logic lives
+// in exactly one place, renderOverview).
 function renderSetupBanner(status) {
   const el = byId("setup-banner");
-  if (!status.configIncomplete || !(status.missingFields ?? []).length) {
+  const n = (status.missingFields ?? []).length;
+  if (!status.configIncomplete || !n || byId("panel-overview").classList.contains("active")) {
     el.innerHTML = "";
     el.classList.remove("visible");
     return;
   }
-  const items = status.missingFields
-    .map((f) => `<li>${escapeHtml(FIELD_LABELS[f] ?? f)} <code>${escapeHtml(f)}</code></li>`)
-    .join("");
-  el.innerHTML = `<p>Setup isn't finished yet — the sections below still need:</p><ul>${items}</ul>`;
+  el.innerHTML = "";
+  const p = document.createElement("p");
+  p.textContent = `Setup isn't finished yet — ${n} ${n === 1 ? "item" : "items"} left.`;
+  el.appendChild(p);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "Open checklist";
+  btn.addEventListener("click", () => showCategory("panel-overview"));
+  el.appendChild(btn);
   el.classList.add("visible");
 }
 
@@ -117,6 +127,27 @@ function renderSetupBanner(status) {
 // hiding a real "reachable" behind a blanket "not configured" here would
 // undo the exact fix TriggerServerProbe's independence from the offline
 // queue was for.
+// pairingOpen/pairingValue hold the "Pair with server" inline text field's
+// open/typed state across renderServer rebuilds -- renderServer runs on
+// EVERY 5s status poll (it's part of render(view)'s call graph, not a
+// once-only settings load), so without module-level state a poll tick
+// mid-typing would silently replace the input with a fresh, empty one.
+// Kept in sync on every keystroke (an "input" listener below, not just
+// "change"), so unlike the settings form's once-only loadSettings() this
+// needs no separate quiet-window guard: pairingValue is always current by
+// the time the next 5s tick rebuilds the row.
+//
+// This inline control REPLACES a call this file used to make here to the
+// DOM's global prompt() dialog: Wails v2's macOS WKWebView (WailsContext.m)
+// implements no WKUIDelegate runJavaScriptTextInputPanel... method, so that
+// dialog silently returns null there and the button did nothing (the same
+// family of bug renderSelfUpdate's own ConfirmApplyUpdate doc comment notes
+// for the DOM's confirm() dialog, which is why THAT one goes through a
+// native Go dialog instead -- prompt() has no equivalent native-dialog seam
+// here, so an inline field is the fix rather than a Go-side replacement).
+let pairingOpen = false;
+let pairingValue = "";
+
 function renderServer(status) {
   const rows = [];
   const probe = status.serverProbe;
@@ -133,7 +164,7 @@ function renderServer(status) {
   }
   const lastHandshake = fmtTime(status.lastHandshakeAt);
   if (lastHandshake) rows.push(["Last successful handshake", lastHandshake]);
-  rows.push(["Paused", raw(status.paused ? pill("yes", "bad") : pill("no", "ok"))]);
+  if (status.paused) rows.push(["Paused", raw(pill("yes — paused from the tray menu", "warn"))]);
 
   const container = byId("server-body");
   container.innerHTML = table(rows);
@@ -175,42 +206,94 @@ function renderServer(status) {
         },
       },
       {
-        label: "Pair with Server…",
+        label: "Pair with server…",
         busyText: "Pairing…",
         busy: inFlightActions.has("pairServer"),
         run: async (statusEl) => {
-          const rawURL = window.prompt(
-            "Paste the branchdam:// pairing URL from branchDAM's Companion Pairing page:",
-          );
-          if (!rawURL || !rawURL.trim()) return;
-
-          const app = getApp();
-          if (!app) return;
-
-          inFlightActions.add("pairServer");
-          let result;
-          try {
-            const raw = await app.Pair(rawURL.trim());
-            result = JSON.parse(raw);
-          } catch (err) {
-            setFieldStatus(statusEl, (err && err.message) || String(err) || "Pairing failed", "error");
-            return;
-          } finally {
-            inFlightActions.delete("pairServer");
-          }
-
-          if (!result || !result.ok) {
-            setFieldStatus(statusEl, (result && result.err) || "Pairing failed", "error");
-            return;
-          }
-          setFieldStatus(statusEl, `Paired with ${result.server}`, "saved");
-          await poll();
-          await loadSettings();
+          // Reveal the inline field instead of the DOM's prompt() dialog --
+          // see this block's own doc comment above renderServer.
+          pairingOpen = true;
+          renderServer(status);
         },
       },
     ]),
   );
 
+  if (pairingOpen) container.appendChild(renderPairingRow(status));
+}
+
+// renderPairingRow builds the inline "paste the branchdam:// URL" control
+// that replaces the prompt() dialog above. Built as real DOM (addEventListener,
+// not innerHTML) for the same CSP reason actionButtonRow's own doc comment
+// gives.
+function renderPairingRow(status) {
+  const row = document.createElement("div");
+  row.className = "pairing-row";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Paste the branchdam:// pairing URL from branchDAM's Companion Pairing page";
+  input.value = pairingValue;
+  input.addEventListener("input", () => {
+    pairingValue = input.value;
+  });
+  row.appendChild(input);
+
+  const status_ = document.createElement("span");
+  status_.className = "field-status";
+
+  const pairBtn = document.createElement("button");
+  pairBtn.type = "button";
+  pairBtn.textContent = "Pair";
+  const busy = inFlightActions.has("pairServer");
+  if (busy) {
+    pairBtn.disabled = true;
+    setFieldStatus(status_, "Pairing…");
+  }
+  pairBtn.addEventListener("click", async () => {
+    const url = pairingValue.trim();
+    if (!url) return;
+    const app = getApp();
+    if (!app) return;
+
+    pairBtn.disabled = true;
+    inFlightActions.add("pairServer");
+    let result;
+    try {
+      const raw = await app.Pair(url);
+      result = JSON.parse(raw);
+    } catch (err) {
+      setFieldStatus(status_, (err && err.message) || String(err) || "Pairing failed", "error");
+      return;
+    } finally {
+      inFlightActions.delete("pairServer");
+      pairBtn.disabled = false;
+    }
+
+    if (!result || !result.ok) {
+      setFieldStatus(status_, (result && result.err) || "Pairing failed", "error");
+      return;
+    }
+    pairingOpen = false;
+    pairingValue = "";
+    setFieldStatus(status_, `Paired with ${result.server}`, "saved");
+    await poll();
+    await loadSettings();
+  });
+  row.appendChild(pairBtn);
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.addEventListener("click", () => {
+    pairingOpen = false;
+    pairingValue = "";
+    renderServer(status);
+  });
+  row.appendChild(cancelBtn);
+
+  row.appendChild(status_);
+  return row;
 }
 
 function renderIngest(status) {
@@ -243,34 +326,33 @@ function renderIngest(status) {
   byId("ingest-body").innerHTML = table(rows);
 }
 
+// renderQueue shows the offline queue -- an operator-facing name for what
+// AGENTS.md calls "Offline Queue Safety (queue.db)". It's not a Settings
+// field in this window (offline.queueDbPath is hand-edit-only, see
+// STORAGE_NAMING_FIELDS' own requiredUnlessDirectUpload comment), so an
+// unconfigured queue gets a pointer to the config key rather than a dead
+// end.
 function renderQueue(status) {
   const q = status.queueStatus;
   if (!q || !q.Configured) {
-    byId("queue-body").innerHTML = `<p class="empty">Offline queue is not configured.</p>`;
+    byId("queue-body").innerHTML =
+      `<p class="empty">Offline queue is off. An ingest still runs normally when the server is reachable; ` +
+      `set <code>offline.queueDbPath</code> in config.yaml to keep queuing ingests while it isn't.</p>`;
     return;
   }
   const c = q.Counts ?? {};
   const rows = [
-    ["Awaiting upload", c.AwaitingUpload ?? 0],
-    ["Awaiting rebase", c.AwaitingRebase ?? 0],
+    ["Waiting to upload", c.AwaitingUpload ?? 0],
+    ["Uploaded, confirming archive", c.AwaitingRebase ?? 0],
     ["Failed", c.Failed ?? 0],
     ["Done", c.Done ?? 0],
-    ["Pending bytes", fmtBytes(c.PendingBytes)],
+    ["Still to upload", fmtBytes(c.PendingBytes)],
   ];
   if (q.Err) rows.push(["Error", raw(pill(q.Err, "bad"))]);
   let html = table(rows);
   if (status.inFlightDrain) html += `<p>${pill("drain running", "neutral")}</p>`;
   if (status.inFlightPrune) html += `<p>${pill("prune running", "neutral")}</p>`;
   byId("queue-body").innerHTML = html;
-}
-
-function renderWatch(status) {
-  const dirs = status.watchDirs ?? [];
-  let html = dirs.length
-    ? `<ul>${dirs.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}</ul>`
-    : `<p class="empty">No watch directories configured.</p>`;
-  if (status.scratchNote) html += `<p>${escapeHtml(status.scratchNote)}</p>`;
-  byId("watch-body").innerHTML = html;
 }
 
 // inFlightActions holds "kind:id" keys (e.g. "sync:luminar") for every
@@ -641,6 +723,268 @@ function table(rows) {
     .join("")}</table>`;
 }
 
+// --- Overview panel ----------------------------------------------------
+//
+// renderOverview is the Overview panel's own render* function: called from
+// render(view) on every 5s poll, same as renderServer/renderQueue/etc, and
+// reads ONLY from the status/settings snapshot it's handed -- never a
+// "-config" container, never renderSettingsForm. It has two halves: a
+// setup checklist (what's left before this agent is fully working, and a
+// button that jumps straight to the field that would fix it) and a health
+// grid (is it working right now).
+
+// goToField shows the named panel, then -- if a field with that key is on
+// screen -- scrolls to and focuses it. key is optional: several checklist
+// steps (e.g. "add a watch folder") only have a panel to send the operator
+// to, not one specific field. Field builders opt in by setting
+// row.dataset.key = f.key (renderTextField, renderCheckboxField); a field
+// kind that doesn't bother (folderList, chipList, pathMappings, selects)
+// still gets a working jump, just without the extra focus.
+function goToField(panelId, key) {
+  showCategory(panelId);
+  if (!key) return;
+  const row = document.querySelector(`[data-key="${CSS.escape(key)}"]`);
+  if (!row) return;
+  row.scrollIntoView({ block: "center" });
+  row.querySelector("input, select, textarea")?.focus();
+}
+
+// setupStep renders one checklist row. `state` is "done", "needed", or
+// "optional" (done-but-skippable reads the same as "done" visually, just
+// with different copy at the call site). detailNode is only shown when
+// state !== "done" -- an operator who's already finished a step doesn't
+// need the explanation for why it used to matter.
+function setupStep({ title, state, detailNode, panel, key, jumpLabel }) {
+  const row = document.createElement("div");
+  row.className = "setup-step";
+
+  const icon = document.createElement("span");
+  icon.innerHTML = state === "done" ? pill("done", "ok") : state === "optional" ? pill("optional", "neutral") : pill("needed", "warn");
+  row.appendChild(icon);
+
+  const body = document.createElement("div");
+  body.className = "setup-step-body";
+  const titleEl = document.createElement("div");
+  titleEl.className = "setup-step-title";
+  titleEl.textContent = title;
+  body.appendChild(titleEl);
+  if (state !== "done" && detailNode) {
+    const detail = document.createElement("div");
+    detail.className = "setup-step-detail";
+    detail.appendChild(detailNode);
+    body.appendChild(detail);
+  }
+  row.appendChild(body);
+
+  if (state !== "done" && panel) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = jumpLabel ?? "Go to setting";
+    btn.addEventListener("click", () => goToField(panel, key));
+    row.appendChild(btn);
+  }
+  return row;
+}
+
+// integrationIssues names, for one enabled integration, exactly what's
+// stopping it from doing a real (non-dry-run) sync -- mirrors the
+// conditions cmd/branchdam-agent/integrations.go's IntegrationBuilder
+// actually checks before registering a syncer, so this never claims a
+// blocker that isn't real. A disabled integration has nothing to report:
+// it isn't attempting to sync at all.
+function integrationIssues(iv, settings) {
+  if (!iv.Enabled) return [];
+  const issues = [];
+  // resolvedb's own database URL is optional -- empty means auto-detect a
+  // local Resolve database, not "not configured" (see its own field
+  // descriptor's note in renderIntegrationBlock).
+  if (iv.ID !== "resolvedb" && !iv.CatalogPathSet && !iv.CatalogPath) {
+    issues.push("needs a catalog path");
+  }
+  if (iv.DryRun) {
+    issues.push("dry run is on, so nothing is being written to branchDAM yet");
+  } else if (!settings.NodeIndexPathSet) {
+    issues.push("dry run is off but no node index path is set, so a real sync will fail");
+  }
+  return issues;
+}
+
+function renderOverview(status, settings) {
+  const setupEl = byId("overview-setup");
+  setupEl.innerHTML = "";
+
+  const missing = new Set(status.missingFields ?? []);
+  const serverMissing = [...missing].some((f) => f.startsWith("server.") || f === "agentId");
+  const probe = status.serverProbe;
+  const serverDone = !!(probe && probe.ok);
+
+  const serverDetail = document.createElement("span");
+  if (serverMissing) {
+    serverDetail.textContent = "Set Server URL, API key and Agent ID, or use Pair with server.";
+  } else if (probe && !probe.ok) {
+    serverDetail.textContent = probe.err ? `Not reachable: ${probe.err}` : "Not reachable.";
+  } else {
+    serverDetail.textContent = "Not checked yet.";
+  }
+  setupEl.appendChild(
+    setupStep({
+      title: "Connect to branchDAM",
+      state: serverDone ? "done" : "needed",
+      detailNode: serverDetail,
+      panel: "panel-server",
+      key: "server.baseUrl",
+      jumpLabel: "Go to Server",
+    }),
+  );
+
+  const storageMissing = ["ingest.localEditRoot", "ingest.archiveRoot", "pathMappings"].filter((k) => missing.has(k));
+  const storageDetail = document.createElement("span");
+  storageDetail.textContent = `Still needed: ${storageMissing.map((k) => FIELD_LABELS[k] ?? k).join(", ")}.`;
+  setupEl.appendChild(
+    setupStep({
+      title: "Choose where files go",
+      state: storageMissing.length ? "needed" : "done",
+      detailNode: storageDetail,
+      panel: "panel-storage",
+      key: storageMissing[0],
+      jumpLabel: "Go to Storage",
+    }),
+  );
+
+  const hasWatchDirs = (status.watchDirs ?? []).length > 0;
+  const watchDetail = document.createElement("span");
+  watchDetail.textContent = "No watch folders yet — add one to import cards automatically, or use “Import from folder…” from the tray menu.";
+  setupEl.appendChild(
+    setupStep({
+      title: "Auto-import cards when inserted",
+      state: hasWatchDirs ? "done" : "optional",
+      detailNode: watchDetail,
+      panel: "panel-storage",
+      key: "ingest.cardRoots",
+      jumpLabel: "Go to Storage",
+    }),
+  );
+
+  const integrations = settings.Integrations ?? [];
+  const enabled = integrations.filter((iv) => iv.Enabled);
+  const issuesByIv = enabled.map((iv) => [iv, integrationIssues(iv, settings)]).filter(([, issues]) => issues.length);
+  const integrationsDetail = document.createElement("div");
+  if (issuesByIv.length) {
+    const ul = document.createElement("ul");
+    for (const [iv, issues] of issuesByIv) {
+      const li = document.createElement("li");
+      li.textContent = `${iv.Title || iv.ID}: ${issues.join("; ")}`;
+      ul.appendChild(li);
+    }
+    integrationsDetail.appendChild(ul);
+  } else {
+    integrationsDetail.textContent = enabled.length
+      ? "Enabled integrations look ready."
+      : "No app integrations enabled — turn one on if you edit in Luminar Neo or DaVinci Resolve.";
+  }
+  setupEl.appendChild(
+    setupStep({
+      title: "App integrations",
+      state: issuesByIv.length ? "needed" : "optional",
+      detailNode: integrationsDetail,
+      panel: "panel-integrations",
+      jumpLabel: "Go to Integrations",
+    }),
+  );
+
+  // --- Health grid -------------------------------------------------------
+  const healthEl = byId("overview-health");
+  healthEl.innerHTML = "";
+  const tiles = [];
+
+  const serverSub = [];
+  if (probe?.version) serverSub.push(`v${probe.version}`);
+  const lastHandshake = fmtTime(status.lastHandshakeAt);
+  if (lastHandshake) serverSub.push(`last handshake ${lastHandshake}`);
+  tiles.push({
+    title: "Server",
+    main: !probe ? raw(pill("not checked", "neutral")) : probe.ok ? raw(pill("reachable", "ok")) : raw(pill("unreachable", "bad")),
+    sub: serverSub.join(" · "),
+  });
+
+  const watchDirs = status.watchDirs ?? [];
+  tiles.push({
+    title: "Card detection",
+    main: watchDirs.length ? `${watchDirs.length} folder${watchDirs.length === 1 ? "" : "s"} watched` : raw(pill("off", "neutral")),
+  });
+
+  if (status.busy) {
+    const p = status.ingestProgress;
+    tiles.push({
+      title: "Ingest",
+      main: "Importing…",
+      sub: status.busyCard ?? "",
+      progress: p?.totalBytes ? { value: p.bytesDone, max: p.totalBytes } : null,
+    });
+  } else if (status.lastIngest) {
+    const li = status.lastIngest;
+    tiles.push({
+      title: "Ingest",
+      main: `${li.submitted ?? 0} imported`,
+      sub: [li.skipped ? `${li.skipped} skipped` : null, li.failed ? `${li.failed} failed` : null, fmtTime(li.startedAt)]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  } else {
+    tiles.push({ title: "Ingest", main: raw(pill("no ingest yet", "neutral")) });
+  }
+
+  const q = status.queueStatus;
+  if (q?.Configured) {
+    const c = q.Counts ?? {};
+    const pending = (c.AwaitingUpload ?? 0) + (c.AwaitingRebase ?? 0);
+    tiles.push({
+      title: "Offline queue",
+      main: pending ? `${pending} pending` : "up to date",
+      sub: c.Failed ? raw(pill(`${c.Failed} failed`, "bad")) : "",
+    });
+  } else {
+    tiles.push({ title: "Offline queue", main: raw(pill("off", "neutral")) });
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "health-grid";
+  for (const t of tiles) {
+    const tile = document.createElement("div");
+    tile.className = "health-tile";
+    const title = document.createElement("p");
+    title.className = "health-tile-title";
+    title.textContent = t.title;
+    tile.appendChild(title);
+    const main = document.createElement("p");
+    main.className = "health-tile-main";
+    if (t.main && typeof t.main === "object" && "__raw" in t.main) main.innerHTML = t.main.__raw;
+    else main.textContent = t.main ?? "";
+    tile.appendChild(main);
+    if (t.sub) {
+      const sub = document.createElement("p");
+      sub.className = "health-tile-sub";
+      if (t.sub && typeof t.sub === "object" && "__raw" in t.sub) sub.innerHTML = t.sub.__raw;
+      else sub.textContent = t.sub;
+      tile.appendChild(sub);
+    }
+    if (t.progress) {
+      const prog = document.createElement("progress");
+      prog.max = t.progress.max;
+      prog.value = t.progress.value;
+      tile.appendChild(prog);
+    }
+    grid.appendChild(tile);
+  }
+  healthEl.appendChild(grid);
+
+  if (status.paused) {
+    const pausedTile = document.createElement("p");
+    pausedTile.innerHTML = pill("paused from the tray menu — nothing runs automatically", "warn");
+    healthEl.insertBefore(pausedTile, grid);
+  }
+}
+
 // uiVersion is this window's OWN binary version (App.Version), distinct
 // from view.version below (the AGENT's own reported version) -- fetched
 // once at startup, not on the status poll, since it can't change during a
@@ -669,11 +1013,12 @@ function render(view) {
   const shownUIVersion = uiVersion && uiVersion !== view.version ? `UI v${uiVersion}` : "";
   byId("version").textContent = [agentVersion, shownUIVersion].filter(Boolean).join(" · ");
   const status = view.status ?? {};
+  const settings = view.settings ?? {};
   renderSetupBanner(status);
+  renderOverview(status, settings);
   renderServer(status);
   renderIngest(status);
   renderQueue(status);
-  renderWatch(status);
   renderIntegrations(status);
   renderHooks(status);
   renderSelfUpdate(status, view.settings);
@@ -788,7 +1133,13 @@ initNav();
 // SERVER_IDENTITY_FIELDS: how this agent reaches the branchDAM server and
 // identifies itself.
 const SERVER_IDENTITY_FIELDS = [
-  { key: "server.baseUrl", label: "Server URL", get: (sv) => sv.ServerBaseURL, required: true },
+  {
+    key: "server.baseUrl",
+    label: "Server URL",
+    get: (sv) => sv.ServerBaseURL,
+    required: true,
+    note: "Address of your branchDAM server, e.g. https://dam.example.lan. Easiest: use “Pair with server…” below instead of typing this in.",
+  },
   {
     key: "server.apiKey",
     label: "API key",
@@ -796,8 +1147,15 @@ const SERVER_IDENTITY_FIELDS = [
     get: () => "",
     placeholder: (sv) => (sv.ServerAPIKeySet ? "(configured — leave blank to keep)" : "(not set)"),
     required: true,
+    note: "Shared secret from branchDAM's Companion Pairing page. Leave blank to keep the key already saved.",
   },
-  { key: "agentId", label: "Agent ID", get: (sv) => sv.AgentID, required: true },
+  {
+    key: "agentId",
+    label: "Agent ID",
+    get: (sv) => sv.AgentID,
+    required: true,
+    note: "Any name for this computer -- it only appears in the server's own logs.",
+  },
 ];
 
 // STORAGE_NAMING_FIELDS: where files land and how they're named. `list:
@@ -816,21 +1174,41 @@ const SERVER_IDENTITY_FIELDS = [
 // rather than evaluating it live.
 const requiredUnlessDirectUpload = "required unless direct-upload mode is on with no offline queue";
 
+// Field order deliberately puts the working copy folder first: it's
+// always required, where archive folder is conditional, and an operator
+// reading top-to-bottom should hit the one thing everyone needs before the
+// one thing some setups skip.
 const STORAGE_NAMING_FIELDS = [
-  { key: "ingest.archiveRoot", label: "Archive root", get: (sv) => sv.ArchiveRoot, browseDir: true, requiredNote: requiredUnlessDirectUpload },
-  { key: "ingest.localEditRoot", label: "Local edit root", get: (sv) => sv.LocalEditRoot, browseDir: true, required: true },
+  {
+    key: "ingest.localEditRoot",
+    label: "Working copy folder",
+    get: (sv) => sv.LocalEditRoot,
+    browseDir: true,
+    required: true,
+    note: "Fast local drive that gets the editable copy of every card. Never uploaded anywhere.",
+  },
+  {
+    key: "ingest.archiveRoot",
+    label: "Archive folder",
+    get: (sv) => sv.ArchiveRoot,
+    browseDir: true,
+    requiredNote: requiredUnlessDirectUpload,
+    note: "Mounted NAS folder that gets the verified archive copy. Not required if this agent uploads straight to the server instead (config.yaml's ingest.uploadStream).",
+  },
   {
     key: "ingest.cardRoots",
     label: "Watch folders",
     kind: "folderList",
     get: (sv) => sv.CardRoots ?? [],
     emptyNote: "No watch folders — card auto-detection is off.",
+    note: "Folders checked every couple of seconds for a newly inserted card. Empty means no auto-import; use “Import from folder…” in the tray menu instead.",
   },
   {
     key: "ingest.allowedExtensions",
     label: "Allowed extensions",
     kind: "chipList",
     get: (sv) => sv.AllowedExtensions ?? [],
+    note: "Only these file types are imported. Empty means everything is imported except OS metadata files.",
   },
   {
     key: "ingest.pathTemplate",
@@ -853,22 +1231,51 @@ const STORAGE_NAMING_FIELDS = [
     get: (sv) => sv.PathMappingEntries ?? [],
     requiredNote: requiredUnlessDirectUpload,
     note:
-      "Translates paths this agent writes into the container paths branchDAM sees, before an event is sent. " +
-      "Separate from the server's own Operator Path Rewrites, which resolve references inside project files. " +
-      "Set locally only -- the server never supplies these on handshake.",
+      "How branchDAM's server sees your archive folder, e.g. /Volumes/NAS/archive → /data/archive -- " +
+      "the archive folder above must fall under one mapping. Separate from the server's own Operator Path " +
+      "Rewrites, which resolve references inside project files. Set locally only -- the server never supplies these on handshake.",
   },
-  { key: "integrations.nodeIndexPath", label: "Node index path", get: (sv) => sv.NodeIndexPath, browseFile: ["*.json"] },
 ];
 
 // BEHAVIOR_FIELDS: toggles that change how the agent acts, not what it
-// connects to or where it writes.
-const BEHAVIOR_FIELDS = [
-  { key: "tray.startOnLogin", label: "Start on login", get: (sv) => sv.StartOnLogin },
-  { key: "tray.confirmDestructive", label: "Confirm destructive actions", get: (sv) => sv.ConfirmDestructive },
-  { key: "ingest.requireUnbuffered", label: "Require unbuffered writes", get: (sv) => sv.RequireUnbuffered },
-  { key: "ingest.requireDCIM", label: "Require DCIM folder", get: (sv) => sv.RequireDCIM },
-  { key: "ingest.pauseUploadOnMetered", label: "Pause upload on metered connection", get: (sv) => sv.PauseUploadOnMetered },
-  { key: "ingest.autoEject", label: "Auto-eject after successful ingest", get: (sv) => sv.AutoEject },
+// connects to or where it writes. Grouped into three short lists inside one
+// settings-behavior-config container (renderSettingsForm keeps a single
+// container id here, so TestStatusPollNeverRebuildsSettingsContainers'
+// "-config" convention is unaffected) -- "On this computer", "Card
+// handling", "Network" -- rather than one flat list of six unrelated
+// checkboxes.
+const BEHAVIOR_GROUPS = [
+  {
+    title: "On this computer",
+    fields: [
+      { key: "tray.startOnLogin", label: "Start on login", get: (sv) => sv.StartOnLogin, note: "Launches the tray automatically when you log in (macOS/Windows only)." },
+      { key: "tray.confirmDestructive", label: "Confirm destructive actions", get: (sv) => sv.ConfirmDestructive, note: "Asks before draining/pruning the offline queue, installing an update, or rolling one back." },
+    ],
+  },
+  {
+    title: "Card handling",
+    fields: [
+      { key: "ingest.requireDCIM", label: "Require DCIM folder", get: (sv) => sv.RequireDCIM, note: "Only auto-imports drives with a DCIM folder (camera cards) -- USB sticks and backup drives are ignored." },
+      { key: "ingest.autoEject", label: "Auto-eject after successful ingest", get: (sv) => sv.AutoEject, note: "Ejects the card once its ingest is fully verified. Never ejects after an error." },
+      {
+        key: "ingest.requireUnbuffered",
+        label: "Require unbuffered writes",
+        get: (sv) => sv.RequireUnbuffered,
+        note: "On: an ingest fails, and the card is not marked safe to eject, if verification can't bypass the OS's file cache. Off: that fallback is only logged.",
+      },
+    ],
+  },
+  {
+    title: "Network",
+    fields: [
+      {
+        key: "ingest.pauseUploadOnMetered",
+        label: "Pause upload on metered connection",
+        get: (sv) => sv.PauseUploadOnMetered,
+        note: "On a hotspot or cellular connection: local copies still run, but uploads and offline-queue syncing wait until you're back on a normal network.",
+      },
+    ],
+  },
 ];
 
 function setFieldStatus(el, text, kind) {
@@ -917,9 +1324,27 @@ async function saveSetting(key, value, statusEl) {
   }
 }
 
+// withNote wraps a field-row in a plain <div> together with an optional
+// fieldNote() line below it -- shared by every field builder that takes an
+// f.note, so a field can go from bare to noted (or back) by adding or
+// removing that one descriptor property, without each builder growing its
+// own wrap-or-don't branch. Field-row-specific CSS (.field-row > ...)
+// still matches through the wrapper, since it selects on the row's own
+// class, not its parent.
+function withNote(row, note) {
+  if (!note) return row;
+  const wrap = document.createElement("div");
+  wrap.appendChild(row);
+  wrap.appendChild(fieldNote(note));
+  return wrap;
+}
+
 function renderTextField(f, sv) {
   const row = document.createElement("div");
   row.className = "field-row";
+  // data-key backs goToField (renderOverview's checklist "Go to" buttons)
+  // -- harmless on a field nothing ever jumps to.
+  row.dataset.key = f.key;
 
   const label = document.createElement("label");
   label.textContent = f.label;
@@ -997,7 +1422,7 @@ function renderTextField(f, sv) {
   input.addEventListener("change", commit);
 
   row.appendChild(status);
-  return row;
+  return withNote(row, f.note);
 }
 
 // fieldNote renders f.note (if present) as a small muted line under a
@@ -1374,6 +1799,7 @@ function renderStorageField(f, sv) {
 function renderCheckboxField(f, sv) {
   const row = document.createElement("div");
   row.className = "field-row checkbox-row";
+  row.dataset.key = f.key;
 
   const input = document.createElement("input");
   input.type = "checkbox";
@@ -1404,10 +1830,10 @@ function renderCheckboxField(f, sv) {
   row.appendChild(input);
   row.appendChild(label);
   row.appendChild(status);
-  return row;
+  return withNote(row, f.note);
 }
 
-function renderSelectField(label, options, current, onChange) {
+function renderSelectField(label, options, current, onChange, note) {
   const row = document.createElement("div");
   row.className = "field-row";
 
@@ -1450,7 +1876,7 @@ function renderSelectField(label, options, current, onChange) {
   });
   row.appendChild(status);
 
-  return row;
+  return withNote(row, note);
 }
 
 // renderIntegrationBlock renders one Integrations() registry entry's own
@@ -1494,7 +1920,7 @@ function renderIntegrationBlock(iv) {
   detail.hidden = !iv.Enabled;
 
   // renderCheckboxField's second argument is the "sv" a top-level
-  // BEHAVIOR_FIELDS descriptor's own get(sv) reads from; these two
+  // BEHAVIOR_GROUPS descriptor's own get(sv) reads from; these two
   // descriptors close over iv directly instead (there is no top-level
   // settings snapshot to hand them), so {} is deliberately unused here.
   block.appendChild(
@@ -1503,6 +1929,7 @@ function renderIntegrationBlock(iv) {
         key: `integrations.${iv.ID}.enabled`,
         label: "Enabled",
         get: () => iv.Enabled,
+        note: "Syncs this app's edits into branchDAM on the schedule below.",
         // Fires after renderCheckboxField's own revert-on-failure, so a
         // rejected save leaves `detail` matching the reverted checkbox
         // state, never the optimistic click.
@@ -1514,7 +1941,15 @@ function renderIntegrationBlock(iv) {
     ),
   );
   detail.appendChild(
-    renderCheckboxField({ key: `integrations.${iv.ID}.dryRun`, label: "Dry run (log only)", get: () => iv.DryRun }, {}),
+    renderCheckboxField(
+      {
+        key: `integrations.${iv.ID}.dryRun`,
+        label: "Dry run (log only)",
+        get: () => iv.DryRun,
+        note: "On: only logs what would be sent, and contacts branchDAM for nothing. Turn off once the log looks right.",
+      },
+      {},
+    ),
   );
 
   const pathRow = document.createElement("div");
@@ -1525,7 +1960,11 @@ function renderIntegrationBlock(iv) {
   const pathInput = document.createElement("input");
   pathInput.type = isResolve ? "password" : "text";
   pathInput.value = isResolve ? "" : (iv.CatalogPath ?? "");
-  if (isResolve) pathInput.placeholder = iv.CatalogPathSet ? "(configured — leave blank to keep)" : "(not set)";
+  // Empty means auto-detect for resolvedb (it probes for a local Resolve
+  // database on every sync pass), not "not set" -- the old placeholder
+  // said "(not set)" here regardless of ID, which read as a blocker for a
+  // field that's actually fine left blank.
+  if (isResolve) pathInput.placeholder = iv.CatalogPathSet ? "(configured — leave blank to keep)" : "(auto-detect)";
   pathRow.appendChild(pathInput);
   const pathStatus = document.createElement("span");
   pathStatus.className = "field-status";
@@ -1575,7 +2014,14 @@ function renderIntegrationBlock(iv) {
   }
   pathInput.addEventListener("change", commit);
   pathRow.appendChild(pathStatus);
-  detail.appendChild(pathRow);
+  detail.appendChild(
+    withNote(
+      pathRow,
+      isResolve
+        ? "Empty auto-detects a local Resolve database. Or a Postgres URL, or a file: SQLite URI (opened read-only either way)."
+        : "Your Luminar catalog file (read-only).",
+    ),
+  );
 
   if (isResolve) {
     const rewriteRow = document.createElement("div");
@@ -1601,7 +2047,7 @@ function renderIntegrationBlock(iv) {
       }
     });
     rewriteRow.appendChild(rwStatus);
-    detail.appendChild(rewriteRow);
+    detail.appendChild(withNote(rewriteRow, "Resolve media path \u2192 server path, e.g. D:\\Footage:/storage/archive/footage."));
   }
 
   detail.appendChild(
@@ -1614,6 +2060,7 @@ function renderIntegrationBlock(iv) {
       ],
       iv.SyncIntervalMinutes || 60,
       (val, status) => saveSetting(`integrations.${iv.ID}.syncIntervalMinutes`, Number(val), status),
+      "How often this integration syncs on its own. \u201cSync now\u201d below always works regardless of this setting.",
     ),
   );
 
@@ -1634,6 +2081,7 @@ function renderIntegrationBlock(iv) {
       ],
       iv.TimeoutSecs || 30,
       (val, status) => saveSetting(`integrations.${iv.ID}.timeoutSecs`, Number(val), status),
+      "How long one sync pass is allowed to run before it's given up on.",
     ),
   );
 
@@ -1660,12 +2108,25 @@ function renderSettingsForm(sv) {
 
   const behaviorContainer = byId("settings-behavior-config");
   behaviorContainer.innerHTML = "";
-  for (const f of BEHAVIOR_FIELDS) behaviorContainer.appendChild(renderCheckboxField(f, sv));
+  for (const group of BEHAVIOR_GROUPS) {
+    const h3 = document.createElement("h3");
+    h3.textContent = group.title;
+    behaviorContainer.appendChild(h3);
+    for (const f of group.fields) behaviorContainer.appendChild(renderCheckboxField(f, sv));
+  }
 
   const selfUpdateContainer = byId("settings-selfupdate-config");
   selfUpdateContainer.innerHTML = "";
   selfUpdateContainer.appendChild(
-    renderCheckboxField({ key: "selfUpdate.enabled", label: "Enable self-update checks", get: (s) => s.SelfUpdateEnabled }, sv),
+    renderCheckboxField(
+      {
+        key: "selfUpdate.enabled",
+        label: "Enable self-update checks",
+        get: (s) => s.SelfUpdateEnabled,
+        note: "Checks GitHub for new releases. Never installs one without a click on “Install and restart” below. Off means no GitHub traffic at all.",
+      },
+      sv,
+    ),
   );
   selfUpdateContainer.appendChild(
     renderSelectField(
@@ -1682,9 +2143,28 @@ function renderSettingsForm(sv) {
 
   const integrationsContainer = byId("settings-integrations-config");
   integrationsContainer.innerHTML = "";
+  // Shared by every integration, so it lives once at the top of this
+  // container rather than inside renderIntegrationBlock -- and it must
+  // render BEFORE the empty-integrations early return below, since a real
+  // (non-dry-run) sync needs it regardless of which integrations exist.
+  integrationsContainer.appendChild(
+    renderTextField(
+      {
+        key: "integrations.nodeIndexPath",
+        label: "Node index path",
+        get: (s) => s.NodeIndexPath,
+        browseFile: ["*.json"],
+        note: "JSON file mapping local files to branchDAM nodes. Needed before any integration below can do a real (non-dry-run) sync.",
+      },
+      sv,
+    ),
+  );
   const integrations = sv.Integrations ?? [];
   if (!integrations.length) {
-    integrationsContainer.innerHTML = `<p class="empty">No integrations registered.</p>`;
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No integrations registered.";
+    integrationsContainer.appendChild(empty);
     return;
   }
   for (const iv of integrations) integrationsContainer.appendChild(renderIntegrationBlock(iv));
