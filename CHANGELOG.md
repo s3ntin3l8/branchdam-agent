@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.16.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.15.4...v1.16.0) (2026-09-27)
+
+
+### Features
+
+* **ui,tray:** graduate uploadStream/queueDbPath read access, implement working-copy disk usage ([#277](https://github.com/s3ntin3l8/branchdam-agent/issues/277)) ([4b30352](https://github.com/s3ntin3l8/branchdam-agent/commit/4b3035252d37cda3b9a7c663d76378cf06138f50))
+* **ui:** overview panel, per-field guidance, and layout polish ([#275](https://github.com/s3ntin3l8/branchdam-agent/issues/275)) ([be02431](https://github.com/s3ntin3l8/branchdam-agent/commit/be02431f6b28c97afa42606f9af46f9dfa7eaf5e))
+
 ## [1.15.4](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.15.3...v1.15.4) (2026-09-26)
 
 
