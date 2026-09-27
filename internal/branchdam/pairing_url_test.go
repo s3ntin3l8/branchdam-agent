@@ -102,6 +102,12 @@ func TestParsePairingURL(t *testing.T) {
 			errSubstr: "query-style expected",
 		},
 		{
+			name:      "multiple root slashes are rejected",
+			input:     "branchdam:////?server=https%3A%2F%2Fdam.example.com&key=k1&agent=dev-x",
+			wantErr:   true,
+			errSubstr: "query-style expected",
+		},
+		{
 			// Scheme matches (the URL starts with branchdam://), but the
 			// post-scheme body is CRLF + garbage. The error message must
 			// not echo the body at all -- post-Hermes-review, safePrefix
