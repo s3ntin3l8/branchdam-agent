@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.16.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.16.0...v1.16.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **windows:** parse root-path pairing deep links ([#278](https://github.com/s3ntin3l8/branchdam-agent/issues/278)) ([6cee17a](https://github.com/s3ntin3l8/branchdam-agent/commit/6cee17a58710022272d4a0f338ae742c8c7d9851))
+
 ## [1.16.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.15.4...v1.16.0) (2026-09-27)
 
 
