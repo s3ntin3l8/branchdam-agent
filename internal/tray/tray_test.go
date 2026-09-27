@@ -1402,6 +1402,78 @@ func TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir(t *testing.T) {
 	}
 }
 
+// TestScratchUsageClearingScratchDirDoesNotResurrectStalePath guards the
+// empty-dir branch of scratchUsageSnapshot: clearing ingest.localEditRoot
+// while a refresh for the OLD (now-abandoned) path is still in flight
+// must not let that refresh's late-arriving result write the old path's
+// free/total bytes back into the cache after the dir was cleared (Hermes
+// review finding on this PR -- the dir-mismatch guard scratchUsageSnapshot
+// already had for a Reconfigure to a NEW path didn't extend to the
+// "Reconfigure to no path at all" case).
+func TestScratchUsageClearingScratchDirDoesNotResurrectStalePath(t *testing.T) {
+	orig := diskUsageFunc
+	hangRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(hangRelease) }) }
+	hungCallStarted := make(chan struct{})
+	t.Cleanup(func() { diskUsageFunc = orig })
+	t.Cleanup(release) // let the hung goroutine finish (and get discarded) even if the test fails before its own explicit release() below
+
+	const hungDir = "/hung-dir-simulating-an-unmounted-network-share"
+	diskUsageFunc = func(dir string) (uint64, uint64, error) {
+		if dir == hungDir {
+			close(hungCallStarted)
+			<-hangRelease
+			return 123, 456, nil // a fabricated reading that must never be written
+		}
+		return orig(dir)
+	}
+
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	first := r.scratchUsageSnapshot(hungDir)
+	if !first.Configured {
+		t.Fatal("expected Configured=true immediately (a probe is in flight)")
+	}
+	<-hungCallStarted
+
+	// Clear the scratch dir (as a Reconfigure to an empty localEditRoot
+	// would) BEFORE the hung goroutine has had a chance to return.
+	cleared := r.scratchUsageSnapshot("")
+	if cleared.Configured {
+		t.Fatalf("got %+v, want Configured=false immediately after clearing", cleared)
+	}
+
+	// Release the hung goroutine and give it time to (attempt to) write
+	// its now-stale result.
+	release()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		r.scratchUsageMu.Lock()
+		inFlightCleared := r.scratchUsageInFlightDir == ""
+		r.scratchUsageMu.Unlock()
+		if inFlightCleared {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Read the cache's raw fields directly, NOT via another
+	// scratchUsageSnapshot("") call -- that method's own empty-dir branch
+	// unconditionally re-clears the cache on every call regardless of
+	// whether the bug this test guards is present, which would make this
+	// assertion pass either way (confirmed: an earlier version of this
+	// test using scratchUsageSnapshot("") here passed against the
+	// unfixed code too, a false negative).
+	r.scratchUsageMu.Lock()
+	gotDir := r.scratchUsageDir
+	got := r.scratchUsage
+	r.scratchUsageMu.Unlock()
+	if gotDir != "" || got.Configured || got.FreeBytes != 0 || got.TotalBytes != 0 {
+		t.Errorf("cache = {dir:%q usage:%+v} after the abandoned hung dir's late write, want dir=\"\" and a zero ScratchUsage -- the stale /hung-dir reading (123/456) must never resurface", gotDir, got)
+	}
+}
+
 func TestStatusWatchDirsIsACopy(t *testing.T) {
 	dirs := []string{"/media/a"}
 	r := NewRunner(&fakeIngester{}, dirs, "")

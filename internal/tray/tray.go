@@ -1781,6 +1781,15 @@ func (r *Runner) scratchUsageSnapshot(dir string) ScratchUsage {
 		r.scratchUsageDir = ""
 		r.scratchUsage = ScratchUsage{}
 		r.scratchUsageAt = time.Time{}
+		// Also abandon any refresh still in flight for whatever the OLD
+		// (non-empty) scratchDir was -- without this, that goroutine's
+		// eventual completion still finds scratchUsageInFlightDir naming
+		// its own dir (this branch never touched it) and writes the OLD
+		// path's free/total bytes back into the cache one Status() cycle
+		// after localEditRoot was cleared, resurrecting exactly the
+		// stale reading the dir-mismatch check below exists to prevent
+		// (Hermes review finding on this PR).
+		r.scratchUsageInFlightDir = ""
 		r.scratchUsageMu.Unlock()
 		return ScratchUsage{}
 	}
@@ -1791,9 +1800,11 @@ func (r *Runner) scratchUsageSnapshot(dir string) ScratchUsage {
 	current := r.scratchUsage
 	// Keyed by dir (scratchUsageInFlightDir), not a bare bool: see that
 	// field's own doc comment above for why a refresh hung on some OTHER
-	// path must never block one for THIS path.
-	alreadyRefreshingThisDir := r.scratchUsageInFlightDir == dir
-	needRefresh := !fresh && !alreadyRefreshingThisDir
+	// path must never block one for THIS path. Only one read of
+	// r.scratchUsageInFlightDir -- the assignment below doesn't need a
+	// second one, since nothing else can change it while this lock is
+	// held.
+	needRefresh := !fresh && r.scratchUsageInFlightDir != dir
 	if needRefresh {
 		r.scratchUsageInFlightDir = dir
 	}

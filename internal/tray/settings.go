@@ -87,7 +87,11 @@ type SettingsView struct {
 	// status.missingFields, the authoritative source for configIncomplete.
 	// UploadStream/OfflineQueueConfigured are exposed alongside it purely
 	// so a UI can explain WHY in a tooltip ("direct-upload mode is on" vs.
-	// "an offline queue is configured") without re-deriving the OR itself.
+	// "an offline queue is configured") without re-deriving the OR itself
+	// -- cmd/branchdam-agent-ui/frontend/dist/app.js's storageRequiredNote
+	// is the one place that does this: it branches on OfflineQueueConfigured
+	// only for that human-readable WHY, never for the required/optional
+	// decision itself, which always comes from ArchiveRootRequired alone.
 	UploadStream           bool
 	OfflineQueueConfigured bool
 	ArchiveRootRequired    bool
