@@ -1216,9 +1216,21 @@ func waitForScratchUsage(t *testing.T, r *Runner, dir string) ScratchUsage {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		usage := r.scratchUsageSnapshot(dir)
+		// scratchUsageSnapshot's return value is deliberately NOT used
+		// here -- only its side effect (kicking a background refresh
+		// when one is needed) matters on this call. The settled check
+		// and the value returned below must come from the SAME lock
+		// acquisition: reading scratchUsageSnapshot's return value and
+		// THEN separately re-locking to check "settled" leaves a gap a
+		// background refresh can complete inside, making an
+		// already-captured stale `usage` look settled (a real,
+		// reproducible flake this exact split used to have -- confirmed
+		// with `go test -race -count=200`, a review finding on this PR).
+		r.scratchUsageSnapshot(dir)
+
 		r.scratchUsageMu.Lock()
-		settled := r.scratchUsageDir == dir && !r.scratchUsageRefreshing
+		settled := r.scratchUsageDir == dir && r.scratchUsageInFlightDir != dir
+		usage := r.scratchUsage
 		r.scratchUsageMu.Unlock()
 		if settled {
 			return usage
@@ -1259,6 +1271,54 @@ func TestStatusScratchUsage(t *testing.T) {
 	}
 }
 
+// TestStatusScratchUsageJSONFieldCasing guards the exact bug an earlier
+// revision of this type had: explicit lowercase `json:"configured"`-style
+// tags on ScratchUsage's own fields, which silently broke from
+// QueueStatus's (this same file's sibling nested status type) established
+// untagged/PascalCase convention -- encoding/json emitted "configured"
+// while app.js's renderOverview kept reading "Configured", so the
+// Overview panel's "Working copy" tile could never see real data in the
+// shipped app. No Go-side test caught it (ScratchUsage's own Go fields
+// were read correctly throughout this file), only a JSON round-trip
+// checked against the actual wire keys would have -- which is what this
+// test is.
+func TestStatusScratchUsageJSONFieldCasing(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, t.TempDir())
+	st := waitForScratchUsage(t, r, r.scratchDir)
+	if !st.Configured || st.TotalBytes == 0 {
+		t.Fatalf("scratch usage never settled: %+v", st)
+	}
+
+	raw, err := json.Marshal(Status{ScratchUsage: st})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	var usage map[string]json.RawMessage
+	if err := json.Unmarshal(decoded["scratchUsage"], &usage); err != nil {
+		t.Fatalf("json.Unmarshal scratchUsage: %v", err)
+	}
+	// PascalCase keys -- matching app.js's su.Configured/su.FreeBytes/
+	// su.TotalBytes reads, NOT lowercase "configured"/"freeBytes"/
+	// "totalBytes".
+	for _, key := range []string{"Configured", "FreeBytes", "TotalBytes"} {
+		if _, ok := usage[key]; !ok {
+			t.Errorf("scratchUsage JSON is missing key %q (got keys: %v) -- app.js's renderOverview reads this exact casing", key, usageKeys(usage))
+		}
+	}
+}
+
+func usageKeys(m map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // TestScratchUsageSnapshotDoesNotLeakThePreviousPath guards the
 // scratchUsageDir mismatch check in scratchUsageSnapshot: a Reconfigure (or
 // any other change of scratchDir) must never relabel the OLD path's
@@ -1284,6 +1344,61 @@ func TestScratchUsageSnapshotDoesNotLeakThePreviousPath(t *testing.T) {
 	settledB := waitForScratchUsage(t, r, dirB)
 	if !settledB.Configured || settledB.TotalBytes == 0 {
 		t.Fatalf("dirB never settled: %+v", settledB)
+	}
+}
+
+// TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir guards the exact
+// scenario scratchUsageInFlightDir's own doc comment describes: a stat
+// hung on an OLD (e.g. unmounted network share) path must never block --
+// or, worse, later clobber -- a NEW path's own reading once a Reconfigure
+// has moved past the hung one. An earlier revision keyed the in-flight
+// guard on a single shared bool rather than the directory itself, which
+// let precisely this happen (review finding on this PR).
+func TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir(t *testing.T) {
+	orig := diskUsageFunc
+	hangRelease := make(chan struct{})
+	// hungCallStarted closes the instant the hung goroutine has actually
+	// dereferenced diskUsageFunc and entered this closure -- waiting on it
+	// below (before this test function can return into its own Cleanup,
+	// which reassigns diskUsageFunc) gives -race a real happens-before
+	// edge for that read. Without it, the read (in the still-blocked
+	// goroutine) and Cleanup's write race by Go's memory model even
+	// though the read always completes first in practice -- confirmed:
+	// an earlier version of this test without hungCallStarted reliably
+	// triggered `go test -race`.
+	hungCallStarted := make(chan struct{})
+	t.Cleanup(func() { diskUsageFunc = orig })
+	t.Cleanup(func() { close(hangRelease) }) // let the hung goroutine finish (and get discarded) before the test exits
+
+	const hungDir = "/hung-dir-simulating-an-unmounted-network-share"
+	diskUsageFunc = func(dir string) (uint64, uint64, error) {
+		if dir == hungDir {
+			close(hungCallStarted)
+			<-hangRelease // blocks here until this test's cleanup releases it
+			return 0, 0, errors.New("late arrival after abandonment -- must never be written")
+		}
+		return orig(dir)
+	}
+
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	// Kick a refresh for the "hung" dir -- it blocks inside diskUsageFunc
+	// until hangRelease closes.
+	first := r.scratchUsageSnapshot(hungDir)
+	if !first.Configured {
+		t.Fatal("expected Configured=true immediately (a probe is in flight)")
+	}
+	<-hungCallStarted
+
+	// A real, healthy dir must still settle promptly even while the hung
+	// dir's own goroutine is still blocked -- this is the bug the fix
+	// guards: a single shared in-flight flag used to make this
+	// impossible until the hung dir's stat eventually returned (which,
+	// per the whole reason this async design exists, may never happen).
+	dir := t.TempDir()
+	settled := waitForScratchUsage(t, r, dir)
+	if !settled.Configured || settled.TotalBytes == 0 {
+		t.Fatalf("healthy dir never settled while another dir was hung: %+v", settled)
 	}
 }
 

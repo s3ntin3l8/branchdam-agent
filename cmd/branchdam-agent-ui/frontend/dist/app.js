@@ -365,7 +365,7 @@ function renderIngest(status) {
 // renderQueue shows the offline queue -- an operator-facing name for what
 // AGENTS.md calls "Offline Queue Safety (queue.db)". offline.queueDbPath
 // itself is still hand-edit-only (issue #273 made it READABLE via
-// SettingsView.OfflineQueueConfigured -- see storageRequiredNote above --
+// SettingsView.OfflineQueueConfigured -- see storageRequiredNote below --
 // not editable: moving the queue DB file mid-run has real operational
 // consequences), so an unconfigured queue gets a pointer to the config key
 // rather than a dead end.
