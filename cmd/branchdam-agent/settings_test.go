@@ -153,6 +153,46 @@ func TestConfigSettingsSnapshot(t *testing.T) {
 	}
 }
 
+// TestConfigSettingsSnapshotExposesArchiveRootRequired guards issue #273:
+// UploadStream/OfflineQueueConfigured/ArchiveRootRequired must reach the
+// settings window read-only, and ArchiveRootRequired specifically must be
+// the exact same boolean missingRequiredFields uses -- never a second,
+// independently-derived copy of that condition that could silently drift.
+func TestConfigSettingsSnapshotExposesArchiveRootRequired(t *testing.T) {
+	path, cfg, runner := settingsTestFixture(t)
+
+	sv := newConfigSettings(path, cfg, runner).Snapshot()
+	if sv.UploadStream {
+		t.Error("expected UploadStream=false (fixture doesn't set ingest.uploadStream)")
+	}
+	if sv.OfflineQueueConfigured {
+		t.Error("expected OfflineQueueConfigured=false (fixture doesn't set offline.queueDbPath)")
+	}
+	if !sv.ArchiveRootRequired {
+		t.Error("expected ArchiveRootRequired=true (dual-write mode, no offline queue)")
+	}
+
+	direct := cfg
+	direct.Ingest.UploadStream = true
+	sv = newConfigSettings(path, direct, runner).Snapshot()
+	if !sv.UploadStream {
+		t.Error("expected UploadStream=true")
+	}
+	if sv.ArchiveRootRequired {
+		t.Error("expected ArchiveRootRequired=false in direct-upload mode with no offline queue")
+	}
+
+	directWithQueue := direct
+	directWithQueue.Offline.QueueDBPath = "/state/queue.db"
+	sv = newConfigSettings(path, directWithQueue, runner).Snapshot()
+	if !sv.OfflineQueueConfigured {
+		t.Error("expected OfflineQueueConfigured=true")
+	}
+	if !sv.ArchiveRootRequired {
+		t.Error("expected ArchiveRootRequired=true once an offline queue is configured, even in direct-upload mode")
+	}
+}
+
 func TestConfigSettingsSetBoolPersistsAndReloads(t *testing.T) {
 	path, cfg, runner := settingsTestFixture(t)
 	s := newConfigSettings(path, cfg, runner)
@@ -1258,6 +1298,9 @@ func TestMissingRequiredFieldsByIngestMode(t *testing.T) {
 		if !slices.Equal(got, want) {
 			t.Fatalf("missingRequiredFields() = %v, want %v", got, want)
 		}
+		if !archiveRootRequired(base) {
+			t.Error("archiveRootRequired() = false, want true (must agree with missingRequiredFields above)")
+		}
 	})
 
 	t.Run("direct upload does not require archive or mapping", func(t *testing.T) {
@@ -1265,6 +1308,9 @@ func TestMissingRequiredFieldsByIngestMode(t *testing.T) {
 		cfg.Ingest.UploadStream = true
 		if got := missingRequiredFields(cfg); len(got) != 0 {
 			t.Fatalf("missingRequiredFields() = %v, want none", got)
+		}
+		if archiveRootRequired(cfg) {
+			t.Error("archiveRootRequired() = true, want false (must agree with missingRequiredFields above)")
 		}
 	})
 
@@ -1276,6 +1322,9 @@ func TestMissingRequiredFieldsByIngestMode(t *testing.T) {
 		want := []string{"ingest.archiveRoot", "pathMappings"}
 		if !slices.Equal(got, want) {
 			t.Fatalf("missingRequiredFields() = %v, want %v", got, want)
+		}
+		if !archiveRootRequired(cfg) {
+			t.Error("archiveRootRequired() = false, want true (must agree with missingRequiredFields above)")
 		}
 	})
 

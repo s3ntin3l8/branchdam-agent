@@ -215,11 +215,11 @@ func (u UpdateStatus) Note() string {
 // Configured-vs-Err distinction that preserves the "never fabricate a
 // number" invariant the stub used to hold as a literal string.
 type Status struct {
-	WatchDirs   []string       `json:"watchDirs"`
-	ScratchNote string         `json:"scratchNote"`
-	QueueStatus QueueStatus    `json:"queueStatus"`
-	LastIngest  *IngestSummary `json:"lastIngest,omitempty"`
-	SelfUpdate  UpdateStatus   `json:"selfUpdate"`
+	WatchDirs    []string       `json:"watchDirs"`
+	ScratchUsage ScratchUsage   `json:"scratchUsage"`
+	QueueStatus  QueueStatus    `json:"queueStatus"`
+	LastIngest   *IngestSummary `json:"lastIngest,omitempty"`
+	SelfUpdate   UpdateStatus   `json:"selfUpdate"`
 	// Paused reflects Runner.Paused() (issue #83) -- manual ingest pause.
 	Paused bool `json:"paused"`
 	// Busy and BusyCard reflect Runner.Busy() -- shown on the status page
@@ -339,6 +339,32 @@ type Runner struct {
 	// TriggerPrune are.
 	probeMu sync.Mutex
 
+	// scratchUsageMu is its own dedicated mutex, same reasoning as
+	// drainMu/probeMu above -- but here the concern isn't lock ordering
+	// with an ingest/drain/update, it's that Status() must NEVER call the
+	// underlying OS stat (diskUsage) synchronously at all: statfs(2)/
+	// GetDiskFreeSpaceEx on an unmounted network share can hang
+	// uninterruptibly, with no context to bound it the way
+	// statusQueueReadTimeout bounds the queue.db read below -- and
+	// Status() runs on every tray menu refresh tick (5s) AND every
+	// status-page request, so a single hung scratch-dir stat would freeze
+	// the whole tray menu, including Quit. refreshScratchUsage is the
+	// only writer, single-flighted via scratchUsageRefreshing so a
+	// slow/hung stat can't pile up one goroutine per Status() call --
+	// scratchUsageSnapshot (Status()'s own reader) only ever returns the
+	// last completed reading and kicks a background refresh, never blocks
+	// on one.
+	scratchUsageMu sync.Mutex
+	// scratchUsageDir is the path the CURRENT scratchUsage/scratchUsageAt
+	// reading is actually for -- compared against the live scratchDir on
+	// every read (not just a TTL check) so a Reconfigure to a new
+	// localEditRoot can never show the OLD path's numbers relabeled as
+	// the new path's, even transiently within the staleness window.
+	scratchUsageDir        string
+	scratchUsage           ScratchUsage
+	scratchUsageAt         time.Time
+	scratchUsageRefreshing bool
+
 	// paused tracks whether manual ingest pause is active (shoot-mode, issue #83).
 	// Session-only, never persisted.
 	paused atomic.Bool
@@ -350,7 +376,7 @@ type Runner struct {
 	mu            sync.Mutex
 	ingester      Ingester
 	watchDirs     []string
-	scratchDir    string // LocalEditRoot -- described, not measured; see Status().
+	scratchDir    string // LocalEditRoot -- see scratchUsageMu's own block above for how its disk usage is measured.
 	last          *IngestSummary
 	busy          bool
 	busyCard      string
@@ -1689,6 +1715,93 @@ func (r *Runner) SetProgress(ev *ingest.ProgressEvent) {
 // that call site's comment for why this exists.
 const statusQueueReadTimeout = 5 * time.Second
 
+// scratchUsageTTL bounds how often Status() actually re-stats the working
+// copy volume -- free space doesn't change fast enough to need a fresh
+// syscall on every 5s poll tick, and this is purely a "don't hammer the
+// filesystem" cap, not a correctness requirement (scratchUsageSnapshot's
+// own dir-mismatch check below is what guarantees correctness across a
+// Reconfigure, independent of this TTL).
+const scratchUsageTTL = 30 * time.Second
+
+// ScratchUsage reports free/total disk space for the volume backing
+// ingest.localEditRoot (issue #274 -- replaces the old ScratchNote
+// placeholder field, which only ever said "usage tracking not yet
+// implemented"). Configured is false when localEditRoot itself is unset
+// -- there is nothing to stat. Configured true with Err set (FreeBytes/
+// TotalBytes left at their zero value) means localEditRoot IS set but the
+// OS-level stat call failed (permission error, an unmounted network
+// share): deliberately distinct from "not configured" so a renderer can
+// show "usage unavailable: <err>" instead of a misleading "0 B free".
+// FreeBytes/TotalBytes carry no `omitempty`: a nearly-full volume
+// legitimately reports 0 free, and omitempty would silently hide that
+// exact reading -- the one an operator most needs to see.
+type ScratchUsage struct {
+	Configured bool   `json:"configured"`
+	FreeBytes  uint64 `json:"freeBytes"`
+	TotalBytes uint64 `json:"totalBytes"`
+	Err        string `json:"err,omitempty"`
+}
+
+// scratchUsageSnapshot returns the current cached disk-usage reading for
+// dir, kicking off a background refresh when the cache is missing, stale,
+// or for a different path than dir -- see scratchUsageMu's own doc comment
+// on Runner for why this must never block on the OS-level stat itself.
+func (r *Runner) scratchUsageSnapshot(dir string) ScratchUsage {
+	if dir == "" {
+		r.scratchUsageMu.Lock()
+		r.scratchUsageDir = ""
+		r.scratchUsage = ScratchUsage{}
+		r.scratchUsageAt = time.Time{}
+		r.scratchUsageMu.Unlock()
+		return ScratchUsage{}
+	}
+
+	r.scratchUsageMu.Lock()
+	sameDir := r.scratchUsageDir == dir
+	fresh := sameDir && time.Since(r.scratchUsageAt) < scratchUsageTTL
+	current := r.scratchUsage
+	needRefresh := !fresh && !r.scratchUsageRefreshing
+	if needRefresh {
+		r.scratchUsageRefreshing = true
+	}
+	r.scratchUsageMu.Unlock()
+
+	if needRefresh {
+		go r.refreshScratchUsage(dir)
+	}
+	if !sameDir {
+		// Never show a stale reading for a path this isn't anymore: a
+		// Reconfigure to a new localEditRoot must not relabel the OLD
+		// path's free/total bytes as the new one's, even within the TTL
+		// window above. Configured stays true (a probe is in flight) with
+		// no numbers yet, rather than falling back to "not configured".
+		return ScratchUsage{Configured: true}
+	}
+	return current
+}
+
+// refreshScratchUsage performs the actual OS-level stat call for dir and
+// stores the result -- always called in its own goroutine
+// (scratchUsageSnapshot is the only caller), so a hung statfs/
+// GetDiskFreeSpaceEx blocks nothing but this one goroutine.
+func (r *Runner) refreshScratchUsage(dir string) {
+	free, total, err := diskUsage(dir)
+	usage := ScratchUsage{Configured: true}
+	if err != nil {
+		usage.Err = err.Error()
+	} else {
+		usage.FreeBytes = free
+		usage.TotalBytes = total
+	}
+
+	r.scratchUsageMu.Lock()
+	r.scratchUsageDir = dir
+	r.scratchUsage = usage
+	r.scratchUsageAt = time.Now()
+	r.scratchUsageRefreshing = false
+	r.scratchUsageMu.Unlock()
+}
+
 // Status returns a snapshot of the current state for the status page and
 // the tray tooltip. selfUpdate is passed in rather than computed here --
 // self-update's own check is async and gated by config the caller already
@@ -1751,10 +1864,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		prog = r.lastProgress.Load()
 	}
 
-	scratchNote := "not configured"
-	if scratchDir != "" {
-		scratchNote = fmt.Sprintf("%s (usage tracking not yet implemented)", scratchDir)
-	}
+	scratchUsage := r.scratchUsageSnapshot(scratchDir)
 
 	qs := QueueStatus{PruneEnabled: pruneEnabled, LastDrain: lastDrain, LastPrune: lastPrune}
 	if queueReader != nil {
@@ -1783,7 +1893,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 
 	return Status{
 		WatchDirs:        watchDirs,
-		ScratchNote:      scratchNote,
+		ScratchUsage:     scratchUsage,
 		QueueStatus:      qs,
 		LastIngest:       last,
 		SelfUpdate:       selfUpdate,

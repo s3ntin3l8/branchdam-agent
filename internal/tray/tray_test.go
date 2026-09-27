@@ -1207,16 +1207,83 @@ func TestStatusIntegrationsOrderedByRegistry(t *testing.T) {
 	}
 }
 
-func TestStatusScratchNote(t *testing.T) {
+// waitForScratchUsage polls scratchUsageSnapshot until it reflects dir (the
+// background refresh scratchUsageSnapshot itself kicks off has had time to
+// complete), or fails the test after a generous deadline -- the whole point
+// of the async design is that Status() never blocks for this, so a test
+// that wants the SETTLED reading has to poll for it instead.
+func waitForScratchUsage(t *testing.T, r *Runner, dir string) ScratchUsage {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		usage := r.scratchUsageSnapshot(dir)
+		r.scratchUsageMu.Lock()
+		settled := r.scratchUsageDir == dir && !r.scratchUsageRefreshing
+		r.scratchUsageMu.Unlock()
+		if settled {
+			return usage
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scratch usage for %q never settled within the test deadline", dir)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestStatusScratchUsage(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, nil, "")
-	if got := r.Status(UpdateStatus{}).ScratchNote; got != "not configured" {
-		t.Errorf("got %q, want 'not configured' for an empty ScratchDir", got)
+	if got := r.Status(UpdateStatus{}).ScratchUsage; got.Configured {
+		t.Errorf("got %+v, want Configured=false for an empty ScratchDir", got)
 	}
 
-	r2 := NewRunner(&fakeIngester{}, nil, "/local/scratch")
-	got := r2.Status(UpdateStatus{}).ScratchNote
-	if !strings.Contains(got, "/local/scratch") || !strings.Contains(got, "not yet implemented") {
-		t.Errorf("got %q, want the configured path plus an explicit not-yet-implemented note (never a fabricated usage number)", got)
+	r2 := NewRunner(&fakeIngester{}, nil, "/nonexistent/local/scratch")
+	got := waitForScratchUsage(t, r2, "/nonexistent/local/scratch")
+	if !got.Configured {
+		t.Errorf("got %+v, want Configured=true for a set (if unreachable) ScratchDir", got)
+	}
+	if !strings.Contains(got.Err, "/nonexistent/local/scratch") {
+		t.Errorf("Err = %q, want it to mention the unreachable path (never a fabricated usage number)", got.Err)
+	}
+	if got.FreeBytes != 0 || got.TotalBytes != 0 {
+		t.Errorf("got %+v, want zero bytes alongside a stat error", got)
+	}
+
+	dir := t.TempDir()
+	r3 := NewRunner(&fakeIngester{}, nil, dir)
+	got = waitForScratchUsage(t, r3, dir)
+	if !got.Configured || got.Err != "" {
+		t.Fatalf("got %+v, want Configured=true with no error for a real directory", got)
+	}
+	if got.TotalBytes == 0 {
+		t.Error("TotalBytes = 0, want a real filesystem size")
+	}
+}
+
+// TestScratchUsageSnapshotDoesNotLeakThePreviousPath guards the
+// scratchUsageDir mismatch check in scratchUsageSnapshot: a Reconfigure (or
+// any other change of scratchDir) must never relabel the OLD path's
+// free/total bytes as belonging to the new one, even transiently within
+// scratchUsageTTL.
+func TestScratchUsageSnapshotDoesNotLeakThePreviousPath(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	dirA := t.TempDir()
+	settledA := waitForScratchUsage(t, r, dirA)
+	if !settledA.Configured || settledA.TotalBytes == 0 {
+		t.Fatalf("dirA never settled: %+v", settledA)
+	}
+
+	dirB := t.TempDir()
+	immediate := r.scratchUsageSnapshot(dirB)
+	if !immediate.Configured {
+		t.Error("expected Configured=true immediately for dirB (a probe is in flight)")
+	}
+	if immediate.FreeBytes != 0 || immediate.TotalBytes != 0 || immediate.Err != "" {
+		t.Errorf("got %+v for dirB's FIRST read, want zero/empty -- dirA's numbers must never leak across a path change", immediate)
+	}
+
+	settledB := waitForScratchUsage(t, r, dirB)
+	if !settledB.Configured || settledB.TotalBytes == 0 {
+		t.Fatalf("dirB never settled: %+v", settledB)
 	}
 }
 
@@ -1470,9 +1537,10 @@ func TestReconfigureSwapsIngesterWatchDirsAndScratch(t *testing.T) {
 	if got := r.WatchDirs(); len(got) != 2 || got[0] != "/new-a" || got[1] != "/new-b" {
 		t.Errorf("WatchDirs() after Reconfigure = %v, want [/new-a /new-b]", got)
 	}
+	waitForScratchUsage(t, r, "/new-scratch")
 	st := r.Status(UpdateStatus{})
-	if !strings.Contains(st.ScratchNote, "/new-scratch") {
-		t.Errorf("ScratchNote after Reconfigure = %q, want it to mention /new-scratch", st.ScratchNote)
+	if !st.ScratchUsage.Configured || !strings.Contains(st.ScratchUsage.Err, "/new-scratch") {
+		t.Errorf("ScratchUsage after Reconfigure = %+v, want Configured=true and Err mentioning /new-scratch", st.ScratchUsage)
 	}
 
 	r.TriggerIngest(context.Background(), "/new-a")
