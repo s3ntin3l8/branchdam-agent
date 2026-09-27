@@ -300,9 +300,19 @@ function renderPairingRow(status) {
       setFieldStatus(status_, (result && result.err) || "Pairing failed", "error");
       return;
     }
+    // Show "Paired with X" for a beat before tearing the row down --
+    // closing it immediately (pairingOpen = false) means the very next
+    // render (inside poll(), a couple lines below) no longer reappends
+    // this row at all, so the success message would otherwise never be
+    // seen (Hermes review finding on this PR). A brief pause, well under
+    // setFieldStatus's own 2000ms auto-clear, gives it a moment on screen;
+    // the server card's own "reachable"/"last successful handshake" row is
+    // the durable confirmation that follows once poll()/loadSettings()
+    // actually run.
+    setFieldStatus(status_, `Paired with ${result.server}`, "saved");
+    await new Promise((r) => setTimeout(r, 1200));
     pairingOpen = false;
     pairingValue = "";
-    setFieldStatus(status_, `Paired with ${result.server}`, "saved");
     await poll();
     await loadSettings();
   });
@@ -932,7 +942,15 @@ function renderOverview(status, settings) {
   setupEl.appendChild(
     setupStep({
       title: "App integrations",
-      state: issuesByIv.length ? "needed" : "optional",
+      // "needed": an enabled integration has a real blocker. "done": at
+      // least one is enabled and none do -- a working configuration
+      // should read as accomplished, not as merely "optional" (Hermes
+      // review finding on this PR: a neutral "optional" pill next to
+      // "Enabled integrations look ready." read as if the setup were
+      // still skippable rather than finished). "optional": nothing is
+      // enabled at all, which is a legitimate, unfinished-but-fine state
+      // this app never requires an operator to leave "done".
+      state: issuesByIv.length ? "needed" : enabled.length ? "done" : "optional",
       detailNode: integrationsDetail,
       panel: "panel-integrations",
       jumpLabel: "Go to Integrations",
