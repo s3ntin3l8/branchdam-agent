@@ -95,14 +95,18 @@ func ParsePairingURL(rawURL string) (PairingURL, error) {
 	}
 
 	// Strip the scheme. The remainder is either "?...query" (query-style,
-	// what the server emits today) or a path-style legacy form. Parse as
-	// a URL first; if that fails (because the input is just "key/value"
-	// without the "?") fall back to splitting on "/" to honor the legacy
-	// fragment-style form the mobile app still accepts.
+	// what the server emits today), a "/?...query" form (some Windows
+	// protocol handoffs normalize the empty authority to a root path), or a
+	// path-style legacy form. Parse query-style forms directly; the older
+	// "key/value" form without "?" is handled by splitting on "/" below.
 	body := strings.TrimPrefix(rawURL, scheme)
 	var values url.Values
-	if strings.HasPrefix(body, "?") {
-		v, err := url.ParseQuery(strings.TrimPrefix(body, "?"))
+	query := body
+	if strings.HasPrefix(query, "/?") {
+		query = strings.TrimPrefix(query, "/")
+	}
+	if strings.HasPrefix(query, "?") {
+		v, err := url.ParseQuery(strings.TrimPrefix(query, "?"))
 		if err != nil {
 			return PairingURL{}, fmt.Errorf("%w: %v", ErrPairingURLInvalid, err)
 		}

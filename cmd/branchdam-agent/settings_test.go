@@ -1725,6 +1725,24 @@ func TestConfigSettingsPair(t *testing.T) {
 	if reloaded.AgentID != "paired-agent" {
 		t.Errorf("expected AgentID %q, got %q", "paired-agent", reloaded.AgentID)
 	}
+	if !runner.ConfigIncomplete() {
+		t.Fatal("expected pairing reload to retain the incomplete storage setup state")
+	}
+	status := runner.Status(tray.UpdateStatus{})
+	if slices.Contains(status.MissingFields, "agentId") ||
+		slices.Contains(status.MissingFields, "server.apiKey") ||
+		slices.Contains(status.MissingFields, "server.baseUrl") {
+		t.Errorf("pairing reload left server identity fields missing: %v", status.MissingFields)
+	}
+	if !slices.Contains(status.MissingFields, "pathMappings") {
+		t.Errorf("pairing reload must preserve the remaining storage setup requirement, missing=%v", status.MissingFields)
+	}
+	if err := s.SetPathMappings([]tray.PathMappingEntry{{WorkstationPath: "/edit", ContainerPath: "/archive"}}); err != nil {
+		t.Fatalf("SetPathMappings: %v", err)
+	}
+	if runner.ConfigIncomplete() {
+		t.Errorf("saving the final required field should clear setup incomplete state, missing=%v", runner.Status(tray.UpdateStatus{}).MissingFields)
+	}
 
 	// Server rejects key
 	err = s.Pair("http://127.0.0.1:1", validKey, "some-agent")

@@ -24,6 +24,15 @@ func TestParsePairingURL(t *testing.T) {
 			},
 		},
 		{
+			name:  "query-style with normalized root path",
+			input: "branchdam:///?server=https%3A%2F%2Fdam.example.com%3A8443&key=secret-key-xyz&agent=iphone-abc",
+			want: PairingURL{
+				Server: "https://dam.example.com:8443",
+				Key:    "secret-key-xyz",
+				Agent:  "iphone-abc",
+			},
+		},
+		{
 			name:  "with port",
 			input: "branchdam://?server=https%3A%2F%2Fdam.example.com&key=k1&agent=dev-d2610219",
 			want: PairingURL{
@@ -83,6 +92,12 @@ func TestParsePairingURL(t *testing.T) {
 		{
 			name:      "garbage body",
 			input:     "branchdam://not-a-url",
+			wantErr:   true,
+			errSubstr: "query-style expected",
+		},
+		{
+			name:      "root path without query",
+			input:     "branchdam:///",
 			wantErr:   true,
 			errSubstr: "query-style expected",
 		},
