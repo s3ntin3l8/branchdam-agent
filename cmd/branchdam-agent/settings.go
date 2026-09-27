@@ -185,6 +185,9 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		RestartRequired:            s.restartRequired,
 		NodeIndexPath:              cfg.Integrations.NodeIndexPath,
 		NodeIndexPathSet:           cfg.Integrations.NodeIndexPath != "",
+		UploadStream:               cfg.Ingest.UploadStream,
+		OfflineQueueConfigured:     strings.TrimSpace(cfg.Offline.QueueDBPath) != "",
+		ArchiveRootRequired:        archiveRootRequired(cfg),
 		Integrations:               integrations,
 	}
 }
@@ -467,13 +470,25 @@ func firstBlockingProblem(cfg config.Config) *config.Problem {
 	return nil
 }
 
+// archiveRootRequired reports whether this config's ingest.archiveRoot and
+// pathMappings are required at all -- filesystem dual-write needs both;
+// direct HTTP upload does not, UNLESS offline queueing is also configured,
+// since its outage fallback is the existing archive-backed queue path and
+// therefore still needs both. Extracted out of missingRequiredFields (not
+// duplicated) so configSettings.Snapshot can expose the SAME boolean the
+// settings window's Storage panel needs to render its archiveRoot/
+// pathMappings required-marker live instead of as static prose (issue
+// #273) -- missingRequiredFields and Snapshot must never be able to
+// silently disagree about which fields are actually required for a given
+// install.
+func archiveRootRequired(cfg config.Config) bool {
+	return !cfg.Ingest.UploadStream || strings.TrimSpace(cfg.Offline.QueueDBPath) != ""
+}
+
 // missingRequiredFields returns the list of required config fields that
 // are empty. Used by both runTrayCmd and reload to compute the
 // configIncomplete flag consistently, AFTER the server handshake (if any)
-// has had a chance to run -- see resolveServerConfig. Filesystem dual-write
-// needs archiveRoot/pathMappings. Direct HTTP upload does not use either
-// unless offline queueing is configured: its outage fallback is the existing
-// archive-backed queue path and therefore still needs both.
+// has had a chance to run -- see resolveServerConfig.
 func missingRequiredFields(cfg config.Config) []string {
 	var missing []string
 	if strings.TrimSpace(cfg.Server.APIKey) == "" {
@@ -488,7 +503,7 @@ func missingRequiredFields(cfg config.Config) []string {
 	if strings.TrimSpace(cfg.Ingest.LocalEditRoot) == "" {
 		missing = append(missing, "ingest.localEditRoot")
 	}
-	if !cfg.Ingest.UploadStream || strings.TrimSpace(cfg.Offline.QueueDBPath) != "" {
+	if archiveRootRequired(cfg) {
 		if strings.TrimSpace(cfg.Ingest.ArchiveRoot) == "" {
 			missing = append(missing, "ingest.archiveRoot")
 		}

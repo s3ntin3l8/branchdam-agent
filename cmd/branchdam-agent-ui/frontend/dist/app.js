@@ -363,11 +363,12 @@ function renderIngest(status) {
 }
 
 // renderQueue shows the offline queue -- an operator-facing name for what
-// AGENTS.md calls "Offline Queue Safety (queue.db)". It's not a Settings
-// field in this window (offline.queueDbPath is hand-edit-only, see
-// STORAGE_NAMING_FIELDS' own requiredUnlessDirectUpload comment), so an
-// unconfigured queue gets a pointer to the config key rather than a dead
-// end.
+// AGENTS.md calls "Offline Queue Safety (queue.db)". offline.queueDbPath
+// itself is still hand-edit-only (issue #273 made it READABLE via
+// SettingsView.OfflineQueueConfigured -- see storageRequiredNote below --
+// not editable: moving the queue DB file mid-run has real operational
+// consequences), so an unconfigured queue gets a pointer to the config key
+// rather than a dead end.
 function renderQueue(status) {
   const q = status.queueStatus;
   if (!q || !q.Configured) {
@@ -978,6 +979,33 @@ function renderOverview(status, settings) {
     main: watchDirs.length ? `${watchDirs.length} folder${watchDirs.length === 1 ? "" : "s"} watched` : raw(pill("off", "neutral")),
   });
 
+  // Working copy folder disk usage (issue #274 -- replaces the old
+  // scratchNote placeholder, which only ever said "usage tracking not yet
+  // implemented"). su.Err (a stat failure on a CONFIGURED path -- a
+  // permission error, an unmounted network share) is distinct from
+  // !su.Configured (localEditRoot itself unset): both are real, but only
+  // the former is actually alarming, so only it gets the "bad" pill.
+  const su = status.scratchUsage;
+  if (!su?.Configured) {
+    tiles.push({ title: "Working copy", main: raw(pill("not configured", "neutral")) });
+  } else if (su.Err) {
+    tiles.push({ title: "Working copy", main: raw(pill("usage unavailable", "bad")), sub: su.Err });
+  } else if (su.TotalBytes === 0 && su.FreeBytes === 0) {
+    // Configured=true with zero/zero and no Err is the transient
+    // "probe in flight, first read for this path" state
+    // scratchUsageSnapshot returns immediately after a Reconfigure --
+    // not an error, just not settled yet.
+    tiles.push({ title: "Working copy", main: raw(pill("checking…", "neutral")) });
+  } else {
+    const pctFree = su.TotalBytes ? su.FreeBytes / su.TotalBytes : 0;
+    const low = pctFree < 0.1;
+    tiles.push({
+      title: "Working copy",
+      main: low ? raw(pill(`${fmtBytes(su.FreeBytes)} free — low`, "bad")) : `${fmtBytes(su.FreeBytes)} free`,
+      sub: `of ${fmtBytes(su.TotalBytes)}`,
+    });
+  }
+
   if (status.busy) {
     const p = status.ingestProgress;
     tiles.push({
@@ -1246,16 +1274,28 @@ const SERVER_IDENTITY_FIELDS = [
 // (SetStringSlice, the canonical wire shape for a list per statusapi.go's
 // settingsPatchRequest doc comment), not a comma-separated string.
 
-// requiredUnlessDirectUpload documents the one conditional requirement
-// missingRequiredFields (cmd/branchdam-agent/settings.go) actually applies:
-// ingest.archiveRoot and pathMappings are only required when
-// ingest.uploadStream is false, or when it's true but an offline queue is
-// also configured -- see config.example.yaml's own ingest.uploadStream
-// comment. Neither of those two conditions is visible to this window today
-// (uploadStream/offline.queueDbPath are both hand-edit-only config keys,
-// per docs/tray-settings-inventory.md), so the marker states the rule
-// rather than evaluating it live.
-const requiredUnlessDirectUpload = "required unless direct-upload mode is on with no offline queue";
+// storageRequiredNote computes the SAME conditional requirement
+// missingRequiredFields (cmd/branchdam-agent/settings.go) actually applies
+// to ingest.archiveRoot and pathMappings: required unless
+// ingest.uploadStream is on with no offline queue configured -- see
+// config.example.yaml's own ingest.uploadStream comment. Returns null when
+// NOT required for this install (renderTextField/renderPathMappingField
+// then render no "*" marker at all), or the exact reason otherwise, so the
+// tooltip states a real fact about THIS config rather than a static rule
+// every install saw regardless of whether it currently applies (issue
+// #273 -- sv.UploadStream/sv.OfflineQueueConfigured are read-only fields
+// SettingsView didn't carry before that issue; sv.ArchiveRootRequired is
+// the exact boolean cmd/branchdam-agent/settings.go's own
+// archiveRootRequired helper computes, so this can never disagree with
+// status.missingFields, the authoritative source for configIncomplete --
+// this function only adds the human-readable WHY on top of that same
+// precomputed answer, it never re-derives the OR itself).
+function storageRequiredNote(sv) {
+  if (!sv.ArchiveRootRequired) return null;
+  return sv.OfflineQueueConfigured
+    ? "Required — an offline queue is configured, which still needs an archive-backed fallback path."
+    : "Required — this agent writes directly to local and archive storage (direct-upload mode is off).";
+}
 
 // Field order deliberately puts the working copy folder first: it's
 // always required, where archive folder is conditional, and an operator
@@ -1275,7 +1315,7 @@ const STORAGE_NAMING_FIELDS = [
     label: "Archive folder",
     get: (sv) => sv.ArchiveRoot,
     browseDir: true,
-    requiredNote: requiredUnlessDirectUpload,
+    requiredNote: storageRequiredNote,
     note: "Mounted NAS folder that gets the verified archive copy. Not required if this agent uploads straight to the server instead (config.yaml's ingest.uploadStream).",
   },
   {
@@ -1312,7 +1352,7 @@ const STORAGE_NAMING_FIELDS = [
     label: "Path mappings",
     kind: "pathMappings",
     get: (sv) => sv.PathMappingEntries ?? [],
-    requiredNote: requiredUnlessDirectUpload,
+    requiredNote: storageRequiredNote,
     note:
       "How branchDAM's server sees your archive folder, e.g. /Volumes/NAS/archive → /data/archive -- " +
       "the archive folder above must fall under one mapping. Separate from the server's own Operator Path " +
@@ -1430,6 +1470,20 @@ function withNote(row, note) {
   return wrap;
 }
 
+// resolveRequiredNote evaluates f.requiredNote against the current
+// settings snapshot -- most fields carry a static string (always
+// required-with-this-explanation), but a conditionally-required field
+// (storageRequiredNote above, for archiveRoot/pathMappings) carries a
+// function instead, called with sv so the required-marker reflects
+// whether the condition actually applies to THIS install rather than
+// showing a fixed rule regardless (issue #273). Returns null when a
+// conditional field ISN'T required right now -- callers must render no
+// "*" marker at all in that case, not a marker with no tooltip.
+function resolveRequiredNote(f, sv) {
+  if (typeof f.requiredNote === "function") return f.requiredNote(sv);
+  return f.requiredNote ?? null;
+}
+
 function renderTextField(f, sv) {
   const row = document.createElement("div");
   row.className = "field-row";
@@ -1442,17 +1496,18 @@ function renderTextField(f, sv) {
   row.appendChild(label);
 
   // f.required (always) vs. f.requiredNote (conditionally, e.g.
-  // ingest.archiveRoot's "unless direct-upload mode..." -- see
-  // requiredUnlessDirectUpload above) are both surfaced the same way: a
-  // "*" marker whose title carries the exact condition, so a static
-  // render (this form loads once via loadSettings(), see its own doc
-  // comment) still communicates the conditional case without evaluating
-  // uploadStream/offline.queueDbPath live.
-  if (f.required || f.requiredNote) {
+  // storageRequiredNote above for archiveRoot/pathMappings) are both
+  // surfaced the same way: a "*" marker whose title carries the exact
+  // condition. This form loads once via loadSettings() (see its own doc
+  // comment), so a conditional field's marker reflects whichever value
+  // sv held at that load -- accurate as of the last load/reload, same
+  // freshness every other field in this form gets.
+  const requiredNote = resolveRequiredNote(f, sv);
+  if (f.required || requiredNote) {
     const marker = document.createElement("span");
     marker.className = "req";
     marker.textContent = "*";
-    marker.title = f.requiredNote ?? "required";
+    marker.title = requiredNote ?? "required";
     row.appendChild(marker);
   }
 
@@ -1792,6 +1847,11 @@ function renderPathMappingField(f, sv) {
 
   function render() {
     rows.innerHTML = "";
+    // Computed once per render, outside the forEach below -- both this
+    // loop's own i===0 marker and the "Add mapping" row's empty-state
+    // marker further down need the SAME evaluation, not two independent
+    // (and potentially inconsistent) calls.
+    const requiredNote = resolveRequiredNote(f, sv);
 
     entries.forEach((entry, i) => {
       const row = document.createElement("div");
@@ -1799,10 +1859,10 @@ function renderPathMappingField(f, sv) {
       const label = document.createElement("label");
       label.textContent = i === 0 ? f.label : "";
       row.appendChild(label);
-      if (i === 0 && (f.required || f.requiredNote)) {
+      if (i === 0 && (f.required || requiredNote)) {
         const marker = document.createElement("span");
         marker.className = "req";
-        marker.title = f.requiredNote ?? "required";
+        marker.title = requiredNote ?? "required";
         marker.textContent = "*";
         row.appendChild(marker);
       }
@@ -1845,10 +1905,10 @@ function renderPathMappingField(f, sv) {
     const addLabel = document.createElement("label");
     addLabel.textContent = entries.length === 0 ? f.label : "";
     addRow.appendChild(addLabel);
-    if (entries.length === 0 && (f.required || f.requiredNote)) {
+    if (entries.length === 0 && (f.required || requiredNote)) {
       const marker = document.createElement("span");
       marker.className = "req";
-      marker.title = f.requiredNote ?? "required";
+      marker.title = requiredNote ?? "required";
       marker.textContent = "*";
       addRow.appendChild(marker);
     }

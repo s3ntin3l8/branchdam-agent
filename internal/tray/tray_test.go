@@ -1207,16 +1207,270 @@ func TestStatusIntegrationsOrderedByRegistry(t *testing.T) {
 	}
 }
 
-func TestStatusScratchNote(t *testing.T) {
+// waitForScratchUsage polls scratchUsageSnapshot until it reflects dir (the
+// background refresh scratchUsageSnapshot itself kicks off has had time to
+// complete), or fails the test after a generous deadline -- the whole point
+// of the async design is that Status() never blocks for this, so a test
+// that wants the SETTLED reading has to poll for it instead.
+func waitForScratchUsage(t *testing.T, r *Runner, dir string) ScratchUsage {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		// scratchUsageSnapshot's return value is deliberately NOT used
+		// here -- only its side effect (kicking a background refresh
+		// when one is needed) matters on this call. The settled check
+		// and the value returned below must come from the SAME lock
+		// acquisition: reading scratchUsageSnapshot's return value and
+		// THEN separately re-locking to check "settled" leaves a gap a
+		// background refresh can complete inside, making an
+		// already-captured stale `usage` look settled (a real,
+		// reproducible flake this exact split used to have -- confirmed
+		// with `go test -race -count=200`, a review finding on this PR).
+		r.scratchUsageSnapshot(dir)
+
+		r.scratchUsageMu.Lock()
+		settled := r.scratchUsageDir == dir && r.scratchUsageInFlightDir != dir
+		usage := r.scratchUsage
+		r.scratchUsageMu.Unlock()
+		if settled {
+			return usage
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scratch usage for %q never settled within the test deadline", dir)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestStatusScratchUsage(t *testing.T) {
 	r := NewRunner(&fakeIngester{}, nil, "")
-	if got := r.Status(UpdateStatus{}).ScratchNote; got != "not configured" {
-		t.Errorf("got %q, want 'not configured' for an empty ScratchDir", got)
+	if got := r.Status(UpdateStatus{}).ScratchUsage; got.Configured {
+		t.Errorf("got %+v, want Configured=false for an empty ScratchDir", got)
 	}
 
-	r2 := NewRunner(&fakeIngester{}, nil, "/local/scratch")
-	got := r2.Status(UpdateStatus{}).ScratchNote
-	if !strings.Contains(got, "/local/scratch") || !strings.Contains(got, "not yet implemented") {
-		t.Errorf("got %q, want the configured path plus an explicit not-yet-implemented note (never a fabricated usage number)", got)
+	r2 := NewRunner(&fakeIngester{}, nil, "/nonexistent/local/scratch")
+	got := waitForScratchUsage(t, r2, "/nonexistent/local/scratch")
+	if !got.Configured {
+		t.Errorf("got %+v, want Configured=true for a set (if unreachable) ScratchDir", got)
+	}
+	if !strings.Contains(got.Err, "/nonexistent/local/scratch") {
+		t.Errorf("Err = %q, want it to mention the unreachable path (never a fabricated usage number)", got.Err)
+	}
+	if got.FreeBytes != 0 || got.TotalBytes != 0 {
+		t.Errorf("got %+v, want zero bytes alongside a stat error", got)
+	}
+
+	dir := t.TempDir()
+	r3 := NewRunner(&fakeIngester{}, nil, dir)
+	got = waitForScratchUsage(t, r3, dir)
+	if !got.Configured || got.Err != "" {
+		t.Fatalf("got %+v, want Configured=true with no error for a real directory", got)
+	}
+	if got.TotalBytes == 0 {
+		t.Error("TotalBytes = 0, want a real filesystem size")
+	}
+}
+
+// TestStatusScratchUsageJSONFieldCasing guards the exact bug an earlier
+// revision of this type had: explicit lowercase `json:"configured"`-style
+// tags on ScratchUsage's own fields, which silently broke from
+// QueueStatus's (this same file's sibling nested status type) established
+// untagged/PascalCase convention -- encoding/json emitted "configured"
+// while app.js's renderOverview kept reading "Configured", so the
+// Overview panel's "Working copy" tile could never see real data in the
+// shipped app. No Go-side test caught it (ScratchUsage's own Go fields
+// were read correctly throughout this file), only a JSON round-trip
+// checked against the actual wire keys would have -- which is what this
+// test is.
+func TestStatusScratchUsageJSONFieldCasing(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, t.TempDir())
+	st := waitForScratchUsage(t, r, r.scratchDir)
+	if !st.Configured || st.TotalBytes == 0 {
+		t.Fatalf("scratch usage never settled: %+v", st)
+	}
+
+	raw, err := json.Marshal(Status{ScratchUsage: st})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	var usage map[string]json.RawMessage
+	if err := json.Unmarshal(decoded["scratchUsage"], &usage); err != nil {
+		t.Fatalf("json.Unmarshal scratchUsage: %v", err)
+	}
+	// PascalCase keys -- matching app.js's su.Configured/su.FreeBytes/
+	// su.TotalBytes reads, NOT lowercase "configured"/"freeBytes"/
+	// "totalBytes".
+	for _, key := range []string{"Configured", "FreeBytes", "TotalBytes"} {
+		if _, ok := usage[key]; !ok {
+			t.Errorf("scratchUsage JSON is missing key %q (got keys: %v) -- app.js's renderOverview reads this exact casing", key, usageKeys(usage))
+		}
+	}
+}
+
+func usageKeys(m map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// TestScratchUsageSnapshotDoesNotLeakThePreviousPath guards the
+// scratchUsageDir mismatch check in scratchUsageSnapshot: a Reconfigure (or
+// any other change of scratchDir) must never relabel the OLD path's
+// free/total bytes as belonging to the new one, even transiently within
+// scratchUsageTTL.
+func TestScratchUsageSnapshotDoesNotLeakThePreviousPath(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	dirA := t.TempDir()
+	settledA := waitForScratchUsage(t, r, dirA)
+	if !settledA.Configured || settledA.TotalBytes == 0 {
+		t.Fatalf("dirA never settled: %+v", settledA)
+	}
+
+	dirB := t.TempDir()
+	immediate := r.scratchUsageSnapshot(dirB)
+	if !immediate.Configured {
+		t.Error("expected Configured=true immediately for dirB (a probe is in flight)")
+	}
+	if immediate.FreeBytes != 0 || immediate.TotalBytes != 0 || immediate.Err != "" {
+		t.Errorf("got %+v for dirB's FIRST read, want zero/empty -- dirA's numbers must never leak across a path change", immediate)
+	}
+
+	settledB := waitForScratchUsage(t, r, dirB)
+	if !settledB.Configured || settledB.TotalBytes == 0 {
+		t.Fatalf("dirB never settled: %+v", settledB)
+	}
+}
+
+// TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir guards the exact
+// scenario scratchUsageInFlightDir's own doc comment describes: a stat
+// hung on an OLD (e.g. unmounted network share) path must never block --
+// or, worse, later clobber -- a NEW path's own reading once a Reconfigure
+// has moved past the hung one. An earlier revision keyed the in-flight
+// guard on a single shared bool rather than the directory itself, which
+// let precisely this happen (review finding on this PR).
+func TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir(t *testing.T) {
+	orig := diskUsageFunc
+	hangRelease := make(chan struct{})
+	// hungCallStarted closes the instant the hung goroutine has actually
+	// dereferenced diskUsageFunc and entered this closure -- waiting on it
+	// below (before this test function can return into its own Cleanup,
+	// which reassigns diskUsageFunc) gives -race a real happens-before
+	// edge for that read. Without it, the read (in the still-blocked
+	// goroutine) and Cleanup's write race by Go's memory model even
+	// though the read always completes first in practice -- confirmed:
+	// an earlier version of this test without hungCallStarted reliably
+	// triggered `go test -race`.
+	hungCallStarted := make(chan struct{})
+	t.Cleanup(func() { diskUsageFunc = orig })
+	t.Cleanup(func() { close(hangRelease) }) // let the hung goroutine finish (and get discarded) before the test exits
+
+	const hungDir = "/hung-dir-simulating-an-unmounted-network-share"
+	diskUsageFunc = func(dir string) (uint64, uint64, error) {
+		if dir == hungDir {
+			close(hungCallStarted)
+			<-hangRelease // blocks here until this test's cleanup releases it
+			return 0, 0, errors.New("late arrival after abandonment -- must never be written")
+		}
+		return orig(dir)
+	}
+
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	// Kick a refresh for the "hung" dir -- it blocks inside diskUsageFunc
+	// until hangRelease closes.
+	first := r.scratchUsageSnapshot(hungDir)
+	if !first.Configured {
+		t.Fatal("expected Configured=true immediately (a probe is in flight)")
+	}
+	<-hungCallStarted
+
+	// A real, healthy dir must still settle promptly even while the hung
+	// dir's own goroutine is still blocked -- this is the bug the fix
+	// guards: a single shared in-flight flag used to make this
+	// impossible until the hung dir's stat eventually returned (which,
+	// per the whole reason this async design exists, may never happen).
+	dir := t.TempDir()
+	settled := waitForScratchUsage(t, r, dir)
+	if !settled.Configured || settled.TotalBytes == 0 {
+		t.Fatalf("healthy dir never settled while another dir was hung: %+v", settled)
+	}
+}
+
+// TestScratchUsageClearingScratchDirDoesNotResurrectStalePath guards the
+// empty-dir branch of scratchUsageSnapshot: clearing ingest.localEditRoot
+// while a refresh for the OLD (now-abandoned) path is still in flight
+// must not let that refresh's late-arriving result write the old path's
+// free/total bytes back into the cache after the dir was cleared (Hermes
+// review finding on this PR -- the dir-mismatch guard scratchUsageSnapshot
+// already had for a Reconfigure to a NEW path didn't extend to the
+// "Reconfigure to no path at all" case).
+func TestScratchUsageClearingScratchDirDoesNotResurrectStalePath(t *testing.T) {
+	orig := diskUsageFunc
+	hangRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(hangRelease) }) }
+	hungCallStarted := make(chan struct{})
+	t.Cleanup(func() { diskUsageFunc = orig })
+	t.Cleanup(release) // let the hung goroutine finish (and get discarded) even if the test fails before its own explicit release() below
+
+	const hungDir = "/hung-dir-simulating-an-unmounted-network-share"
+	diskUsageFunc = func(dir string) (uint64, uint64, error) {
+		if dir == hungDir {
+			close(hungCallStarted)
+			<-hangRelease
+			return 123, 456, nil // a fabricated reading that must never be written
+		}
+		return orig(dir)
+	}
+
+	r := NewRunner(&fakeIngester{}, nil, "")
+
+	first := r.scratchUsageSnapshot(hungDir)
+	if !first.Configured {
+		t.Fatal("expected Configured=true immediately (a probe is in flight)")
+	}
+	<-hungCallStarted
+
+	// Clear the scratch dir (as a Reconfigure to an empty localEditRoot
+	// would) BEFORE the hung goroutine has had a chance to return.
+	cleared := r.scratchUsageSnapshot("")
+	if cleared.Configured {
+		t.Fatalf("got %+v, want Configured=false immediately after clearing", cleared)
+	}
+
+	// Release the hung goroutine and give it time to (attempt to) write
+	// its now-stale result.
+	release()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		r.scratchUsageMu.Lock()
+		inFlightCleared := r.scratchUsageInFlightDir == ""
+		r.scratchUsageMu.Unlock()
+		if inFlightCleared {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Read the cache's raw fields directly, NOT via another
+	// scratchUsageSnapshot("") call -- that method's own empty-dir branch
+	// unconditionally re-clears the cache on every call regardless of
+	// whether the bug this test guards is present, which would make this
+	// assertion pass either way (confirmed: an earlier version of this
+	// test using scratchUsageSnapshot("") here passed against the
+	// unfixed code too, a false negative).
+	r.scratchUsageMu.Lock()
+	gotDir := r.scratchUsageDir
+	got := r.scratchUsage
+	r.scratchUsageMu.Unlock()
+	if gotDir != "" || got.Configured || got.FreeBytes != 0 || got.TotalBytes != 0 {
+		t.Errorf("cache = {dir:%q usage:%+v} after the abandoned hung dir's late write, want dir=\"\" and a zero ScratchUsage -- the stale /hung-dir reading (123/456) must never resurface", gotDir, got)
 	}
 }
 
@@ -1470,9 +1724,10 @@ func TestReconfigureSwapsIngesterWatchDirsAndScratch(t *testing.T) {
 	if got := r.WatchDirs(); len(got) != 2 || got[0] != "/new-a" || got[1] != "/new-b" {
 		t.Errorf("WatchDirs() after Reconfigure = %v, want [/new-a /new-b]", got)
 	}
+	waitForScratchUsage(t, r, "/new-scratch")
 	st := r.Status(UpdateStatus{})
-	if !strings.Contains(st.ScratchNote, "/new-scratch") {
-		t.Errorf("ScratchNote after Reconfigure = %q, want it to mention /new-scratch", st.ScratchNote)
+	if !st.ScratchUsage.Configured || !strings.Contains(st.ScratchUsage.Err, "/new-scratch") {
+		t.Errorf("ScratchUsage after Reconfigure = %+v, want Configured=true and Err mentioning /new-scratch", st.ScratchUsage)
 	}
 
 	r.TriggerIngest(context.Background(), "/new-a")

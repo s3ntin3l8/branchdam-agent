@@ -68,6 +68,34 @@ type SettingsView struct {
 	NodeIndexPath    string
 	NodeIndexPathSet bool
 
+	// UploadStream/OfflineQueueConfigured/ArchiveRootRequired surface two
+	// hand-edit-only config keys (ingest.uploadStream, offline.queueDbPath
+	// -- see docs/tray-settings-inventory.md's "Fields deliberately
+	// hand-edit only" section) read-only, plus the boolean they jointly
+	// decide (issue #273). Neither key gets a setter here -- both have
+	// real operational consequences (switching upload mode or moving the
+	// queue DB file mid-run) that keep them out of this window's editable
+	// form -- but a settings window needs SOME way to tell whether
+	// ArchiveRoot/PathMappingEntries are actually required for THIS
+	// install, rather than showing every install the same static "*
+	// required unless direct-upload mode is on with no offline queue"
+	// prose regardless of whether that condition currently applies.
+	// ArchiveRootRequired is the exact same boolean
+	// cmd/branchdam-agent/settings.go's missingRequiredFields already
+	// computes (both call the shared archiveRootRequired helper), so the
+	// window's required-marker can never silently drift from
+	// status.missingFields, the authoritative source for configIncomplete.
+	// UploadStream/OfflineQueueConfigured are exposed alongside it purely
+	// so a UI can explain WHY in a tooltip ("direct-upload mode is on" vs.
+	// "an offline queue is configured") without re-deriving the OR itself
+	// -- cmd/branchdam-agent-ui/frontend/dist/app.js's storageRequiredNote
+	// is the one place that does this: it branches on OfflineQueueConfigured
+	// only for that human-readable WHY, never for the required/optional
+	// decision itself, which always comes from ArchiveRootRequired alone.
+	UploadStream           bool
+	OfflineQueueConfigured bool
+	ArchiveRootRequired    bool
+
 	// Integrations is CONFIG state only, ordered to match the compile-time
 	// Integrations() registry -- paired with Runner's own
 	// Status.Integrations (RUNTIME state: last sync, registered) by the
@@ -216,6 +244,15 @@ type Settings interface {
 	//     same shape -- changing the SQLite path or the staging
 	//     container root mid-run breaks in-flight drain state, and
 	//     drainIntervalSecs is a tuning knob operators rarely touch.
+	//     Issue #273 (read-only, not editable): queueDbPath's SET-ness
+	//     graduated as SettingsView.OfflineQueueConfigured -- the path
+	//     value itself still never reaches SettingsView.
+	//   * ingest.uploadStream: switches filesystem dual-write vs. direct
+	//     HTTP upload; a mid-run change has real consequences (an
+	//     in-flight ingest built its writer set from whichever mode was
+	//     active at IngestCard call time), so it stays hand-edit only.
+	//     Issue #273 (read-only, not editable): graduated as
+	//     SettingsView.UploadStream.
 	//   * selfUpdate.repo: a typo in the "owner/name" slug causes the
 	//     next update check to fetch from a non-existent or wrong
 	//     repo; the hand-edit gate (with a selfupdate log line naming
