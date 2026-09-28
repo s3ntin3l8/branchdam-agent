@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -560,6 +561,45 @@ func TestConfirmApplyUpdateUsesNativeQuestionDialog(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(got.Buttons, ","), "Install and restart") {
 		t.Errorf("dialog buttons = %v, want install action", got.Buttons)
+	}
+}
+
+func TestConfirmApplyUpdateResponses(t *testing.T) {
+	orig := messageDialogFunc
+	t.Cleanup(func() { messageDialogFunc = orig })
+
+	tests := []struct {
+		name      string
+		dialogRet string
+		dialogErr error
+		want      bool
+		wantErr   bool
+	}{
+		{name: "macOS custom button", dialogRet: "Install and restart", want: true},
+		{name: "Windows MB_YESNO Yes", dialogRet: "Yes", want: true},
+		{name: "Windows MB_YESNO uppercase", dialogRet: "YES", want: true},
+		{name: "Windows MB_YESNO whitespace", dialogRet: " yes ", want: true},
+		{name: "Win32 MB_OK", dialogRet: "Ok", want: true},
+		{name: "macOS Cancel", dialogRet: "Cancel", want: false},
+		{name: "Windows MB_YESNO No", dialogRet: "No", want: false},
+		{name: "Empty response", dialogRet: "", want: false},
+		{name: "Dialog error", dialogErr: errors.New("dialog failed"), wantErr: true},
+	}
+
+	a := newTestApp(t)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			messageDialogFunc = func(_ context.Context, _ wailsruntime.MessageDialogOptions) (string, error) {
+				return tc.dialogRet, tc.dialogErr
+			}
+			got, err := a.ConfirmApplyUpdate("1.16.1")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ConfirmApplyUpdate err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ConfirmApplyUpdate = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
