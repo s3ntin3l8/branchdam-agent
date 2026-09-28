@@ -316,7 +316,8 @@ func (a *App) ApplyUpdate() (string, error) {
 // so this stays in the Go binding and uses the platform-native dialog API.
 // Note: on Windows, Wails maps QuestionDialog to Win32 MessageBox(MB_YESNO),
 // which ignores custom button labels and returns "Yes" / "No". On macOS, Wails
-// returns the custom button label ("Install and restart"). Both are accepted.
+// returns the custom button label ("Install and restart"). Both are accepted
+// (along with "Ok" as defense-in-depth if dialog types ever change).
 func (a *App) ConfirmApplyUpdate(latestVersion string) (bool, error) {
 	ctx := a.ctx
 	if ctx == nil {
@@ -334,7 +335,7 @@ func (a *App) ConfirmApplyUpdate(latestVersion string) (bool, error) {
 		return false, err
 	}
 	switch strings.ToLower(strings.TrimSpace(selected)) {
-	case "install and restart", "yes", "ok":
+	case "install and restart", "yes", "ok": // "ok" is defensive in case dialog options or bindings change
 		return true, nil
 	default:
 		return false, nil
