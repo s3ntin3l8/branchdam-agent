@@ -314,6 +314,9 @@ func (a *App) ApplyUpdate() (string, error) {
 // ConfirmApplyUpdate renders a native question dialog before the destructive
 // update action. Browser confirm() is not reliable in Wails' macOS WKWebView,
 // so this stays in the Go binding and uses the platform-native dialog API.
+// Note: on Windows, Wails maps QuestionDialog to Win32 MessageBox(MB_YESNO),
+// which ignores custom button labels and returns "Yes" / "No". On macOS, Wails
+// returns the custom button label ("Install and restart"). Both are accepted.
 func (a *App) ConfirmApplyUpdate(latestVersion string) (bool, error) {
 	ctx := a.ctx
 	if ctx == nil {
@@ -330,7 +333,12 @@ func (a *App) ConfirmApplyUpdate(latestVersion string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return selected == "Install and restart", nil
+	switch strings.ToLower(strings.TrimSpace(selected)) {
+	case "install and restart", "yes", "ok":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 // TriggerHookInstall installs (or reinstalls) id's render hook right now --
