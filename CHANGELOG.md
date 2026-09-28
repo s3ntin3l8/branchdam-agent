@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.16.2](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.16.1...v1.16.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* **ui:** accept platform-specific confirmation in ConfirmApplyUpdate ([#280](https://github.com/s3ntin3l8/branchdam-agent/issues/280)) ([eca46ed](https://github.com/s3ntin3l8/branchdam-agent/commit/eca46eda22e418bb25a3552fdb1aae1d641e3ec2))
+
 ## [1.16.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.16.0...v1.16.1) (2026-09-27)
 
 
