@@ -451,7 +451,7 @@ function actionButtonRow(id, detailHtml, buttons, hideLabel) {
   // form's .field-row shape (label/marker/input/browse/status) -- this
   // row is label/detail/actions/status instead. See style.css's own doc
   // comment on both classes for why they can't share one template.
-  row.className = "field-row action-row";
+  row.className = "field-row action-row" + (hideLabel ? " action-row-unlabeled" : "");
   row.setAttribute("aria-label", id);
 
   const label = document.createElement("label");
@@ -1636,7 +1636,7 @@ function renderFolderListField(f, sv) {
 
     if (values.length === 0) {
       const empty = document.createElement("p");
-      empty.className = "empty";
+      empty.className = "empty field-list-empty";
       empty.textContent = f.emptyNote ?? "";
       rows.appendChild(empty);
     }
@@ -1672,7 +1672,7 @@ function renderFolderListField(f, sv) {
     });
 
     const addRow = document.createElement("div");
-    addRow.className = "field-row";
+    addRow.className = "field-row field-row-add";
     const addLabel = document.createElement("label");
     addLabel.textContent = values.length === 0 ? f.label : "";
     addRow.appendChild(addLabel);
@@ -1901,7 +1901,7 @@ function renderPathMappingField(f, sv) {
     });
 
     const addRow = document.createElement("div");
-    addRow.className = "field-row";
+    addRow.className = "field-row field-row-add";
     const addLabel = document.createElement("label");
     addLabel.textContent = entries.length === 0 ? f.label : "";
     addRow.appendChild(addLabel);
