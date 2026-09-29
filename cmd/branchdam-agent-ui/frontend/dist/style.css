@@ -183,7 +183,7 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
   overflow-y: auto;
 }
 
-.panel { max-width: 1160px; }
+.panel { max-width: 1160px; margin-inline: auto; }
 
 .panel { display: none; }
 .panel.active { display: block; }
@@ -205,6 +205,8 @@ td { padding: 4px 8px 4px 0; vertical-align: top; overflow-wrap: anywhere; }
 /* Same fixed width as a settings row's own label column, so a status
    table's labels line up with the form above it in the same panel instead
    of each table sizing its label column independently. */
+/* Allow wrapping: status labels can be longer than form labels, and keeping
+   them on one line would force the table beyond its panel on narrow windows. */
 td.label { color: var(--muted); width: var(--field-control-offset); }
 
 ul { margin: 4px 0; padding-left: 18px; }
@@ -523,6 +525,8 @@ ul { margin: 4px 0; padding-left: 18px; }
    room a reserved side column used to take from it. */
 .action-row {
   grid-template-columns:
+    /* No action row renders .req; reserve its field-row space so details
+       start at the same control offset as settings inputs. */
     [label] var(--field-label-w) [req] 14px [detail] minmax(0, 1fr)
     [actions] auto;
 }
