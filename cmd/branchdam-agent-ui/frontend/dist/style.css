@@ -25,6 +25,7 @@
   --bad: #b3261e;
   --warn: #9a6700;
   --field-label-w: 176px;
+  --field-control-offset: calc(var(--field-label-w) + 30px);
 
   /* aliases -- see doc comment above */
   --fg: var(--text-primary);
@@ -71,20 +72,20 @@ h1 { font-size: 18px; font-weight: 700; margin: 0 0 2px; }
    margin-top: 0 so it sits flush with the section's own padding instead of
    leaving a dead band above it (the section box itself supplies spacing
    from its neighbors via margin-bottom below). */
-h2 { font-size: 14px; font-weight: 600; color: var(--fg); margin: 0 0 4px; }
-h3 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
+h2 { font-size: 16px; font-weight: 600; color: var(--fg); margin: 0 0 6px; }
+h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
 
 /* .section-intro is one static sentence of standing copy under a card's
    <h2>, saying what the card is for -- distinct from a field's own
    .field-note, which explains ONE setting's consequence. Used by
    index.html only (a handful of hand-written sentences), never generated
    from JS. */
-.section-intro { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
+.section-intro { margin: 0 0 14px; font-size: 13px; line-height: 1.45; color: var(--muted); }
 
 #version { color: var(--muted); font-size: 12px; }
 #header-subtitle { margin: 2px 0 0; font-size: 11px; color: var(--muted); }
 
-#app-header { flex: 0 0 auto; padding: 16px 20px 12px; border-bottom: 1px solid var(--border); }
+#app-header { flex: 0 0 auto; padding: 18px 24px 14px; border-bottom: 1px solid var(--border); }
 
 #error-banner {
   display: none;
@@ -145,8 +146,8 @@ h3 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
   flex: 1 1 auto;
   min-height: 0; /* without this #layout never shrinks below its content and #content can't scroll */
   display: flex;
-  gap: 14px;
-  padding: 0 20px 20px;
+  gap: 18px;
+  padding: 14px 24px 20px;
 }
 
 /* 172px, not the old 150px -- at 150px "Storage & ingest" wraps onto two
@@ -168,7 +169,7 @@ h3 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
   border: 1px solid transparent;
   border-left: 2px solid transparent;
   border-radius: 6px;
-  padding: 6px 10px;
+  padding: 8px 10px;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
 }
@@ -182,27 +183,31 @@ h3 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
   overflow-y: auto;
 }
 
+.panel { max-width: 1160px; margin-inline: auto; }
+
 .panel { display: none; }
 .panel.active { display: block; }
 
 section {
   background: var(--surface-raised);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 16px 18px;
-  margin-bottom: 16px;
+  border-radius: 12px;
+  padding: 20px 22px;
+  margin-bottom: 18px;
   box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
 @media (prefers-color-scheme: dark) {
   section { box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
 }
 
-table { width: 100%; border-collapse: collapse; }
-td { padding: 3px 6px 3px 0; vertical-align: top; overflow-wrap: anywhere; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+td { padding: 4px 8px 4px 0; vertical-align: top; overflow-wrap: anywhere; }
 /* Same fixed width as a settings row's own label column, so a status
    table's labels line up with the form above it in the same panel instead
    of each table sizing its label column independently. */
-td.label { color: var(--muted); white-space: nowrap; width: var(--field-label-w); }
+/* Allow wrapping: status labels can be longer than form labels, and keeping
+   them on one line would force the table beyond its panel on narrow windows. */
+td.label { color: var(--muted); width: var(--field-control-offset); }
 
 ul { margin: 4px 0; padding-left: 18px; }
 
@@ -318,7 +323,16 @@ ul { margin: 4px 0; padding-left: 18px; }
   border-radius: 6px;
   padding: 5px 10px;
   font-size: 12px;
+  font-family: inherit;
+  line-height: 1.25;
   cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.mapping-pair button,
+.pairing-row button,
+.setup-step > button {
+  font-family: inherit;
+  line-height: 1.25;
   transition: background 0.15s, border-color 0.15s;
 }
 .field-row > button:hover,
@@ -343,7 +357,10 @@ ul { margin: 4px 0; padding-left: 18px; }
   outline-offset: 1px;
 }
 .field-row > button:focus-visible,
-.row-actions > button:focus-visible {
+.row-actions > button:focus-visible,
+.mapping-pair button:focus-visible,
+.pairing-row button:focus-visible,
+.setup-step > button:focus-visible {
   outline: 2px solid var(--color-brand);
   outline-offset: 1px;
 }
@@ -397,8 +414,9 @@ ul { margin: 4px 0; padding-left: 18px; }
    .checkbox-note modifier below for the one row shape (checkbox-row) this
    margin doesn't fit. */
 .field-note {
-  margin: 2px 0 8px var(--field-label-w);
-  font-size: 11px;
+  margin: 3px 0 10px var(--field-control-offset);
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--muted);
 }
 /* withNote (app.js) adds this modifier when the row above is a
@@ -481,6 +499,12 @@ ul { margin: 4px 0; padding-left: 18px; }
   font-size: 12px;
   cursor: pointer;
 }
+.mapping-pair button:hover,
+.pairing-row button:hover,
+.setup-step > button:hover { background: var(--surface-sunken); }
+
+.field-row.field-row-add > button { grid-column: input; justify-self: start; }
+.field-list-empty { margin: 4px 0 8px var(--field-control-offset); }
 
 /* [hidden] is load-bearing, not decoration: once .field-row declares
    display:grid, the user-agent's own default "[hidden] { display: none }"
@@ -501,7 +525,9 @@ ul { margin: 4px 0; padding-left: 18px; }
    room a reserved side column used to take from it. */
 .action-row {
   grid-template-columns:
-    [label] var(--field-label-w) [detail] minmax(0, 1fr)
+    /* No action row renders .req; reserve its field-row space so details
+       start at the same control offset as settings inputs. */
+    [label] var(--field-label-w) [req] 14px [detail] minmax(0, 1fr)
     [actions] auto;
 }
 .action-row > .row-detail { grid-column: detail; }
@@ -511,6 +537,12 @@ ul { margin: 4px 0; padding-left: 18px; }
   gap: 6px;
 }
 .action-row > .field-status { grid-column: detail / span 2; }
+.action-row.action-row-unlabeled {
+  grid-template-columns: [detail] minmax(0, 1fr) [actions] auto;
+}
+.action-row.action-row-unlabeled > .row-detail { grid-column: detail; }
+.action-row.action-row-unlabeled > .row-actions { grid-column: actions; }
+.action-row.action-row-unlabeled > .field-status { grid-column: detail / span 2; }
 .action-row > .row-actions > button:first-child {
   background: var(--color-brand-solid);
   color: var(--color-brand-contrast);
@@ -546,19 +578,25 @@ ul { margin: 4px 0; padding-left: 18px; }
    concrete blocker (when not done), and a "Go to" button that jumps to
    the panel/field that would fix it. */
 .setup-step {
-  display: flex;
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) auto;
   align-items: flex-start;
-  gap: 10px;
-  padding: 8px 0;
+  column-gap: 12px;
+  row-gap: 5px;
+  padding: 10px 0;
   border-bottom: 1px solid var(--border);
 }
 .setup-step:last-child { border-bottom: none; padding-bottom: 0; }
-.setup-step .setup-step-body { flex: 1 1 auto; min-width: 0; }
+.setup-step > span:first-child { grid-column: 1; grid-row: 1; }
+.setup-step .setup-step-body { grid-column: 2; min-width: 0; }
 .setup-step .setup-step-title { font-weight: 600; }
-.setup-step .setup-step-detail { color: var(--muted); font-size: 12px; margin-top: 2px; }
-.setup-step .setup-step-detail ul { margin: 4px 0 0; padding-left: 16px; }
+.setup-step .setup-step-detail { color: var(--muted); font-size: 13px; line-height: 1.45; margin-top: 2px; }
+.setup-step .setup-step-detail ul { list-style: none; margin: 2px 0 0; padding: 0; }
+.setup-step .setup-step-detail li + li { margin-top: 3px; }
 .setup-step > button {
-  flex: 0 0 auto;
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: start;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--fg);
@@ -567,25 +605,22 @@ ul { margin: 4px 0; padding-left: 18px; }
   font-size: 12px;
   cursor: pointer;
 }
-.setup-step > button:hover { background: var(--surface-sunken); }
 
-/* .health-grid: a responsive card grid of small at-a-glance tiles
-   (Server, Card detection, Ingest, Offline queue) -- deliberately
-   auto-fit/minmax rather than a fixed column count, so it reflows sanely
-   both at the 640px MinWidth floor and on a much wider window. */
+/* .health-grid: a balanced two-column grid for the Overview's status
+   tiles. A single column at the narrowest widths keeps each label readable. */
 .health-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 .health-tile {
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: 10px;
+  padding: 14px 16px;
   background: var(--surface-sunken);
 }
 .health-tile .health-tile-title {
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.03em;
   color: var(--muted);
@@ -628,15 +663,43 @@ ul { margin: 4px 0; padding-left: 18px; }
   cursor: pointer;
 }
 
-/* main.go's Wails MinWidth is 640 -- 40px of body/#layout padding leaves
-   600, narrow enough that the nav's default flex-basis starts eating
-   noticeably into .field-row's own label column width. Shrink both down
-   together rather than letting the content column get squeezed first. */
+/* At the window's 640px minimum, a horizontal category strip gives the
+   forms and status tables the full width they need. */
 @media (max-width: 760px) {
-  #nav { flex-basis: 132px; }
-  /* Set on #content (not just .field-row/.action-row) so it also reaches
-     .field-note's own margin-left, which isn't a .field-row descendant
-     at all -- withNote (app.js) appends it as a SIBLING of .field-row,
-     one level up, inside their shared wrapper <div>. */
-  #content { --field-label-w: 128px; }
+  #layout { flex-direction: column; gap: 8px; padding: 10px 16px 16px; }
+  #nav {
+    flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+    overflow: visible;
+  }
+  .nav-item { text-align: center; padding: 7px 5px; border-left-width: 1px; }
+  .nav-item.active { border-left-color: var(--border); border-bottom: 2px solid var(--color-brand); }
+  section { padding: 16px; }
+  .setup-step { grid-template-columns: 72px minmax(0, 1fr); }
+  .setup-step > button { grid-column: 2; grid-row: auto; }
+  .action-row { grid-template-columns: [label] var(--field-label-w) [req] 14px [detail] minmax(0, 1fr) [actions] auto; }
+  .action-row.action-row-unlabeled { grid-template-columns: [detail] minmax(0, 1fr) [actions] auto; }
+}
+
+@media (min-width: 900px) {
+  /* Keep Browse/Remove beside the field they belong to on roomy windows;
+     the flexible tail absorbs spare width after the 520px input cap. */
+  .field-row:not(.action-row) {
+    grid-template-columns:
+      [label] var(--field-label-w) [req] 14px
+      [input] minmax(0, 520px) [browse] auto [rest] minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 520px) {
+  #app-header { padding: 14px 16px 12px; }
+  #layout { padding-inline: 10px; }
+  section { padding: 14px 12px; }
+  :root { --field-label-w: 34%; --field-control-offset: calc(34% + 24px); }
+  .field-row { grid-template-columns: [label] minmax(96px, 34%) [req] 12px [input] minmax(0, 1fr) [browse] auto; column-gap: 6px; }
+  .action-row { grid-template-columns: [label] minmax(96px, 34%) [req] 12px [detail] minmax(0, 1fr) [actions] auto; column-gap: 6px; }
+  .action-row > .row-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .health-grid { grid-template-columns: minmax(0, 1fr); }
 }
