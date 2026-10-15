@@ -287,7 +287,9 @@ reporting configured watch directories, the local scratch directory, queue statu
 integration's config/last-sync state, and the DaVinci Resolve render hook's installed state -- see
 "Open branchDAM" below for the actual settings/status UI. The
 tray menu's "Ingest now" and its automatic card-insertion trigger both call the same
-`internal/ingest.Engine.IngestCard` the headless `ingest` subcommand uses.
+`internal/ingest.Engine.IngestCard` the headless `ingest` subcommand uses. "Ingest now" ingests
+each card volume currently mounted under `ingest.cardRoots` (honouring `ingest.requireDCIM`), never
+the `cardRoots` directories themselves, and skips any volume holding the archive or local edit root.
 
 **Offline queue.** When `offline.queueDbPath` is set, the tray opens `queue.db` itself and runs
 drain and prune passes on their own background timers (`offline.drainIntervalSecs`, default 5s;

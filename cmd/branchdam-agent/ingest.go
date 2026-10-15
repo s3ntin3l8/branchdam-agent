@@ -240,13 +240,17 @@ func printIngestReport(w io.Writer, cardPath string, result ingest.CardResult, e
 	_, _ = fmt.Fprintf(w, "card: %s\n\n", cardPath)
 
 	ok := true
-	submitted, skipped, failed := 0, 0, 0
+	submitted, skipped, failed, deferred := 0, 0, 0, 0
 	for _, f := range result.Files {
 		switch {
 		case f.Err != nil:
 			failed++
 			ok = false
 			_, _ = fmt.Fprintf(w, "[FAIL] %s: %v\n", f.SourcePath, f.Err)
+		case f.Deferred:
+			deferred++
+			ok = false
+			_, _ = fmt.Fprintf(w, "[DEFERRED] %s: %s\n", f.SourcePath, f.SkipReason)
 		case f.Skipped:
 			skipped++
 			_, _ = fmt.Fprintf(w, "[SKIP] %s: %s\n", f.SourcePath, f.SkipReason)
@@ -262,11 +266,14 @@ func printIngestReport(w io.Writer, cardPath string, result ingest.CardResult, e
 	}
 
 	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintf(w, "%d submitted, %d skipped, %d failed (%s)\n", submitted, skipped, failed, elapsed.Round(time.Millisecond))
-	if ok {
+	_, _ = fmt.Fprintf(w, "%d submitted, %d skipped, %d deferred, %d failed (%s)\n", submitted, skipped, deferred, failed, elapsed.Round(time.Millisecond))
+	switch {
+	case ok:
 		_, _ = fmt.Fprintln(w, "safe to eject")
-	} else {
+	case failed > 0:
 		_, _ = fmt.Fprintln(w, "NOT safe to eject -- one or more files failed")
+	default:
+		_, _ = fmt.Fprintln(w, "NOT safe to eject -- uploads deferred on a metered connection; re-run on an unmetered connection")
 	}
 	return ok
 }

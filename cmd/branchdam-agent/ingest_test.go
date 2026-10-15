@@ -484,3 +484,24 @@ func TestPrintOfflineIngestReportBucketsResumes(t *testing.T) {
 		t.Errorf("report should fail /card/c.jpg and withhold eject:\n%s", out)
 	}
 }
+
+// TestPrintIngestReportWithholdsEjectOnMeteredDeferral: a file whose
+// upload was deferred on a metered connection still lives only on the card
+// (and the edit SSD), so the report must not say "safe to eject" and must
+// return false -- which is what gates `ingest`'s own auto-eject.
+func TestPrintIngestReportWithholdsEjectOnMeteredDeferral(t *testing.T) {
+	result := ingest.CardResult{Files: []ingest.FileResult{
+		{SourcePath: "/card/a.jpg"},
+		{SourcePath: "/card/b.jpg", Skipped: true, Deferred: true, SkipReason: "upload skipped on metered connection -- re-insert card to retry"},
+	}}
+	var buf bytes.Buffer
+	if printIngestReport(&buf, "/card", result, time.Second) {
+		t.Fatalf("printIngestReport returned ok=true with a deferred upload:\n%s", buf.String())
+	}
+	out := buf.String()
+	for _, want := range []string{"[DEFERRED] /card/b.jpg", "1 submitted, 0 skipped, 1 deferred, 0 failed", "NOT safe to eject -- uploads deferred"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
+	}
+}

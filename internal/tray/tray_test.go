@@ -3365,7 +3365,7 @@ func TestAutoEjectOnSuccessfulIngest(t *testing.T) {
 		notifMsg = message
 	})
 
-	summary := r.TriggerIngest(context.Background(), "/media/CANON R5")
+	summary := r.TriggerDetectedIngest(context.Background(), "/media/CANON R5")
 	if !summary.OK() {
 		t.Fatalf("expected summary.OK()=true, got %+v", summary)
 	}
@@ -3398,7 +3398,7 @@ func TestAutoEjectFailureNotification(t *testing.T) {
 		notifMsg = message
 	})
 
-	summary := r.TriggerIngest(context.Background(), "/media/SONY")
+	summary := r.TriggerDetectedIngest(context.Background(), "/media/SONY")
 	if !summary.OK() {
 		t.Fatalf("expected summary.OK()=true, got %+v", summary)
 	}
@@ -3418,7 +3418,7 @@ func TestAutoEjectFailureSanitizesLogAttributes(t *testing.T) {
 	r.SetAutoEject(true)
 	r.SetEjectFunc(func(string) error { return errors.New("device busy\nforged entry") })
 
-	r.TriggerIngest(context.Background(), "/media/card\r\nforged entry")
+	r.TriggerDetectedIngest(context.Background(), "/media/card\r\nforged entry")
 
 	got := logs.String()
 	if strings.Count(got, "\n") != 1 {

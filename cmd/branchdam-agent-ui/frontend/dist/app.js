@@ -357,7 +357,8 @@ function renderIngest(status) {
     ["Started", fmtTime(last.startedAt) ?? "—"],
     ["Submitted / Skipped / Failed", `${last.submitted ?? 0} / ${last.skipped ?? 0} / ${last.failed ?? 0}`],
   ];
-  if (last.resumed) rows.push(["Resumed from earlier run", `${last.resumed}`]);
+  if (last.resumed) rows.push(["Resumed from earlier run", `${last.resumed ?? 0}`]);
+  if (last.deferred) rows.push(["Waiting for unmetered connection", raw(pill(`${last.deferred} on card -- not ejected`, "warn"))]);
   if (last.offline) rows.push(["Mode", raw(pill("offline queue", "neutral"))]);
   if (last.err) rows.push(["Error", raw(pill(last.err, "bad"))]);
   byId("ingest-body").innerHTML = table(rows);
@@ -1020,7 +1021,7 @@ function renderOverview(status, settings) {
     tiles.push({
       title: "Ingest",
       main: `${li.submitted ?? 0} imported`,
-      sub: [li.resumed ? `${li.resumed} resumed` : null, li.skipped ? `${li.skipped} skipped` : null, li.failed ? `${li.failed} failed` : null, fmtTime(li.startedAt)]
+      sub: [li.resumed ? `${li.resumed} resumed` : null, li.skipped ? `${li.skipped} skipped` : null, li.failed ? `${li.failed} failed` : null, li.deferred ? `${li.deferred} deferred` : null, fmtTime(li.startedAt)]
         .filter(Boolean)
         .join(" · "),
     });
