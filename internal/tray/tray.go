@@ -61,10 +61,15 @@ type IngestSummary struct {
 	StartedAt time.Time     `json:"startedAt"`
 	Elapsed   time.Duration `json:"elapsed"`
 	Submitted int           `json:"submitted"`
-	Skipped   int           `json:"skipped"`
-	Failed    int           `json:"failed"`
-	Err       error         `json:"-"`
-	Offline   bool          `json:"offline"`
+	// Resumed counts offline-ingest files an earlier, interrupted run had
+	// already copied and queued (same source path, size and mtime) -- kept
+	// apart from Submitted so a re-run over a half-ingested card doesn't
+	// read as fresh imports. Always 0 for an online ingest.
+	Resumed int   `json:"resumed"`
+	Skipped int   `json:"skipped"`
+	Failed  int   `json:"failed"`
+	Err     error `json:"-"`
+	Offline bool  `json:"offline"`
 }
 
 // MarshalJSON renders Err as its message string rather than encoding the
@@ -776,12 +781,14 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 			summary.Err = err
 		} else {
 			for _, f := range result.Files {
-				switch {
-				case f.Err != nil:
+				switch f.Outcome() {
+				case ingest.OfflineOutcomeFailed:
 					summary.Failed++
-				case f.Skipped:
+				case ingest.OfflineOutcomeResumed:
+					summary.Resumed++
+				case ingest.OfflineOutcomeSkipped:
 					summary.Skipped++
-				default:
+				case ingest.OfflineOutcomeQueued:
 					summary.Submitted++
 				}
 			}

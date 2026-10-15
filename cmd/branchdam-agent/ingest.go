@@ -189,33 +189,37 @@ func printOfflineIngestReport(w io.Writer, cardPath string, result ingest.Offlin
 	_, _ = fmt.Fprintf(w, "card: %s\n\n", cardPath)
 
 	ok := true
-	queued, skipped, failed := 0, 0, 0
+	queued, resumed, skipped, failed := 0, 0, 0, 0
 	for _, f := range result.Files {
-		switch {
-		case f.Err != nil:
+		switch f.Outcome() {
+		case ingest.OfflineOutcomeFailed:
 			failed++
 			ok = false
-			_, _ = fmt.Fprintf(w, "[FAIL] %s: %v\n", f.SourcePath, f.Err)
-		case f.Skipped:
+			if f.Err != nil {
+				_, _ = fmt.Fprintf(w, "[FAIL] %s: %v\n", f.SourcePath, f.Err)
+			} else {
+				_, _ = fmt.Fprintf(w, "[FAIL] %s: neither copied nor resumed from a previous run\n", f.SourcePath)
+			}
+		case ingest.OfflineOutcomeResumed:
+			resumed++
+			_, _ = fmt.Fprintf(w, "[RESUMED] %s -> %s (nodeUuid=%s, already queued by a previous run with the same size and mtime)\n",
+				f.SourcePath, f.LocalPath, f.NodeUUID)
+		case ingest.OfflineOutcomeSkipped:
 			skipped++
 			_, _ = fmt.Fprintf(w, "[SKIP] %s: %s\n", f.SourcePath, f.SkipReason)
-		default:
+		case ingest.OfflineOutcomeQueued:
 			queued++
-			resumed := ""
-			if f.AlreadyQueued {
-				resumed = " (resumed from a previous run)"
-			}
 			inline := "not yet submitted"
 			if f.SubmittedInline {
 				inline = "submitted"
 			}
-			_, _ = fmt.Fprintf(w, "[QUEUED] %s -> %s (nodeUuid=%s, EVENT_NODE_CREATED %s, localVerify=%s%s)\n",
-				f.SourcePath, f.LocalPath, f.NodeUUID, inline, f.LocalVerify.Method, resumed)
+			_, _ = fmt.Fprintf(w, "[QUEUED] %s -> %s (nodeUuid=%s, EVENT_NODE_CREATED %s, localVerify=%s)\n",
+				f.SourcePath, f.LocalPath, f.NodeUUID, inline, f.LocalVerify.Method)
 		}
 	}
 
 	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintf(w, "%d queued, %d skipped, %d failed (%s)\n", queued, skipped, failed, elapsed.Round(time.Millisecond))
+	_, _ = fmt.Fprintf(w, "%d queued, %d resumed, %d skipped, %d failed (%s)\n", queued, resumed, skipped, failed, elapsed.Round(time.Millisecond))
 	if ok {
 		_, _ = fmt.Fprintln(w, "safe to eject -- archive copy and server rebase are pending; run `branchdam-agent queue-drain` on reconnect")
 	} else {

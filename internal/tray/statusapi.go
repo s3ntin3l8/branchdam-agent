@@ -379,6 +379,7 @@ type ingestActionResult struct {
 	StartedAt time.Time `json:"startedAt,omitempty"`
 	ElapsedMs int64     `json:"elapsedMs"`
 	Submitted int       `json:"submitted"`
+	Resumed   int       `json:"resumed"`
 	Skipped   int       `json:"skipped"`
 	Failed    int       `json:"failed"`
 	Offline   bool      `json:"offline"`
@@ -391,6 +392,7 @@ func newIngestActionResult(sum IngestSummary) ingestActionResult {
 		StartedAt: sum.StartedAt,
 		ElapsedMs: sum.Elapsed.Milliseconds(),
 		Submitted: sum.Submitted,
+		Resumed:   sum.Resumed,
 		Skipped:   sum.Skipped,
 		Failed:    sum.Failed,
 		Offline:   sum.Offline,

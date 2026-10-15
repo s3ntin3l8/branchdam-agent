@@ -91,7 +91,7 @@ func TestTriggerIngestOfflineFallbackWhenArchiveUnreachable(t *testing.T) {
 	fi := &fakeIngester{
 		offlineResult: ingest.OfflineCardResult{
 			Files: []ingest.OfflineFileResult{
-				{SourcePath: "a.jpg", LocalPath: "/scratch/a.jpg"},
+				{SourcePath: "a.jpg", LocalPath: "/scratch/a.jpg", Queued: true},
 				{SourcePath: "b.xmp", Skipped: true},
 			},
 		},
@@ -226,10 +226,56 @@ func TestTriggerIngestProberTrueButIngestFails(t *testing.T) {
 	}
 }
 
+// TestTriggerIngestOfflineCountsResumedSeparately pins the offline
+// summary's bucketing: a resume of an earlier run is reported as Resumed,
+// not as fresh work, and a result that is neither queued, resumed nor
+// deliberately skipped counts as Failed -- so OK() is false and the card
+// is never auto-ejected on its strength.
+func TestTriggerIngestOfflineCountsResumedSeparately(t *testing.T) {
+	fi := &fakeIngester{
+		offlineResult: ingest.OfflineCardResult{
+			Files: []ingest.OfflineFileResult{
+				{SourcePath: "a.jpg", Queued: true},
+				{SourcePath: "b.jpg", Queued: true, AlreadyQueued: true},
+				{SourcePath: "c.xmp", Queued: true, Skipped: true, IsSidecar: true},
+			},
+		},
+	}
+	r := NewRunner(fi, []string{"/media/card"}, "/scratch")
+	r.SetArchiveProber(func(context.Context, string) bool { return false })
+	r.SetQueueDeps(&fakeQueueReader{}, nil, nil)
+
+	summary := r.TriggerIngest(context.Background(), "/media/card")
+	if summary.Submitted != 1 || summary.Resumed != 1 || summary.Skipped != 1 || summary.Failed != 0 {
+		t.Fatalf("got %+v, want 1 submitted, 1 resumed, 1 skipped, 0 failed", summary)
+	}
+	if !summary.OK() {
+		t.Error("expected OK()=true: every file was queued, resumed or deliberately skipped")
+	}
+
+	fi.offlineResult = ingest.OfflineCardResult{Files: []ingest.OfflineFileResult{
+		{SourcePath: "a.jpg", Queued: true},
+		{SourcePath: "d.jpg"}, // neither written nor resumed
+	}}
+	r.SetAutoEject(true)
+	ejected := false
+	r.SetEjectFunc(func(string) error { ejected = true; return nil })
+	summary = r.TriggerIngest(context.Background(), "/media/card")
+	if summary.Failed != 1 {
+		t.Fatalf("got %+v, want the unqueued, unresumed file counted as failed", summary)
+	}
+	if summary.OK() {
+		t.Error("expected OK()=false when a file was neither written nor resumed")
+	}
+	if ejected {
+		t.Error("card must not be ejected when a file was neither written nor resumed")
+	}
+}
+
 func TestTriggerIngestOfflineFallbackUsesOfflineNotification(t *testing.T) {
 	fi := &fakeIngester{
 		offlineResult: ingest.OfflineCardResult{
-			Files: []ingest.OfflineFileResult{{SourcePath: "a.jpg", LocalPath: "/scratch/a.jpg"}},
+			Files: []ingest.OfflineFileResult{{SourcePath: "a.jpg", LocalPath: "/scratch/a.jpg", Queued: true}},
 		},
 	}
 	r := NewRunner(fi, []string{"/media/card"}, "/scratch")

@@ -39,8 +39,12 @@ type OfflineFileResult struct {
 	// or re-minting NodeUUID (see ingestFileOffline's doc comment).
 	Queued bool
 	// AlreadyQueued is true when this run found an existing queue.db row for
-	// SourcePath (a resume of a previous, interrupted run over the same
-	// card) rather than writing a fresh local copy.
+	// SourcePath whose recorded size and mtime still match the file on the
+	// card (a resume of a previous, interrupted run over the same card)
+	// rather than writing a fresh local copy. A row for the same path whose
+	// size or mtime differs is NOT a resume -- it describes a different file
+	// that happened to have the same path (a reformatted card whose camera
+	// restarted its file counter), and that file is copied as new work.
 	AlreadyQueued bool
 	// SubmittedInline is true if EVENT_NODE_CREATED was accepted (202)
 	// during this call itself -- an opportunistic fast path for when the
@@ -56,6 +60,48 @@ type OfflineFileResult struct {
 // OfflineCardResult is one IngestCardOffline call's full outcome.
 type OfflineCardResult struct {
 	Files []OfflineFileResult
+}
+
+// OfflineOutcome is the single bucket an OfflineFileResult is reported
+// under by the CLI's `ingest -offline` report and the tray's IngestSummary
+// -- one classification shared by both, so the two can't drift on what
+// counts as safe-to-eject.
+type OfflineOutcome int
+
+const (
+	// OfflineOutcomeFailed: the file was neither written and queued in this
+	// run nor genuinely resumed from an earlier one, and wasn't deliberately
+	// skipped either. Any file in this bucket means the card is NOT safe to
+	// eject.
+	OfflineOutcomeFailed OfflineOutcome = iota
+	// OfflineOutcomeQueued: a fresh local copy was written, verified and
+	// durably queued in this run.
+	OfflineOutcomeQueued
+	// OfflineOutcomeResumed: an earlier run already copied and queued this
+	// exact file (same path, size and mtime); nothing was re-copied.
+	OfflineOutcomeResumed
+	// OfflineOutcomeSkipped: a deliberate skip (OS metadata, extension
+	// filter, identical copy already at the destination, server-side
+	// duplicate, or a freshly queued sidecar).
+	OfflineOutcomeSkipped
+)
+
+// Outcome classifies f. Err always wins; a resume is reported separately
+// from new work; and a result that is none of failed/resumed/skipped/queued
+// is treated as a failure rather than silently counted as success.
+func (f OfflineFileResult) Outcome() OfflineOutcome {
+	switch {
+	case f.Err != nil:
+		return OfflineOutcomeFailed
+	case f.AlreadyQueued && f.Queued:
+		return OfflineOutcomeResumed
+	case f.Skipped:
+		return OfflineOutcomeSkipped
+	case f.Queued:
+		return OfflineOutcomeQueued
+	default:
+		return OfflineOutcomeFailed
+	}
 }
 
 // IngestCardOffline walks cardRoot exactly like IngestCard, but never
@@ -82,7 +128,8 @@ type OfflineCardResult struct {
 // ingestFileOffline runs inline inside the WalkDir callback, so a
 // mid-walk error leaves already-queued rows durable and a re-run
 // is always safe (BySourcePath at the top of each per-file path
-// short-circuits the re-run, no work redone).
+// short-circuits the re-run when the queued row's size and mtime still
+// match the source file, no work redone).
 func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (OfflineCardResult, error) {
 	if e.Queue == nil {
 		return OfflineCardResult{}, fmt.Errorf("ingest: IngestCardOffline requires a non-nil Engine.Queue")
@@ -146,11 +193,19 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 // entire point of this function, so it is spelled out here rather than left
 // implicit:
 //
-//  1. Check queue.db for an existing row keyed by this source path -- a
+//  1. Check queue.db for an existing row keyed by this source path whose
+//     recorded size and mtime match the source file as it is now -- a
 //     restart resuming a previously-interrupted run over the same card. If
 //     found, trust it (the row only exists because step 5 below already
 //     completed on the earlier run) and return without touching the
-//     filesystem again.
+//     filesystem again. Queue rows are never deleted and cameras restart
+//     their file counters after a format, so a path match alone is not
+//     evidence of a resume: a row whose size or mtime differs belongs to a
+//     different file that used to live at this path, and the current file
+//     is ingested as new work (it gets its own row, NodeUUID and, via
+//     ResolveDestination, its own suffixed destination). Size+mtime come
+//     from the stat this function already does; no extra read of the card
+//     is needed (invariant 1: the card is read once, by WriteLocal).
 //  2. If ResolveDestination finds an identical file already at destination,
 //     skip.
 //  3. Pre-flight content dedup check: if server is reachable and pre-flight
@@ -187,22 +242,37 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 	ext := extNoDot(srcPath)
 	fr.IsSidecar = ext == "xmp" || ext == "srt"
 
-	if existing, ok, err := e.Queue.BySourcePath(ctx, srcPath); err == nil && ok {
-		fr.AlreadyQueued = true
-		fr.Queued = true
-		fr.NodeUUID = existing.NodeUUID
-		fr.LocalPath = existing.LocalPath
-		fr.Skipped = fr.IsSidecar
-		if fr.IsSidecar {
-			fr.SkipReason = "sidecar file (.xmp/.srt): copied to both destinations eventually, no EVENT_NODE_CREATED submitted"
-		}
-		return fr
-	}
-
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {
 		fr.Err = fmt.Errorf("stat source: %w", err)
 		return fr
+	}
+
+	existing, found, err := e.Queue.BySourcePath(ctx, srcPath)
+	if err != nil {
+		// Fail closed: without the lookup we can't tell a resume from new
+		// work, and guessing either way is wrong (a false resume loses the
+		// file; a false "new" duplicates it). Failing the file keeps the
+		// card from being reported safe to eject.
+		fr.Err = fmt.Errorf("queue lookup by source path: %w", err)
+		return fr
+	}
+	if found {
+		if sameSourceFile(existing, srcInfo) {
+			fr.AlreadyQueued = true
+			fr.Queued = true
+			fr.NodeUUID = existing.NodeUUID
+			fr.LocalPath = existing.LocalPath
+			fr.Skipped = fr.IsSidecar
+			if fr.IsSidecar {
+				fr.SkipReason = "sidecar file (.xmp/.srt): copied to both destinations eventually, no EVENT_NODE_CREATED submitted"
+			}
+			return fr
+		}
+		slog.Info("ingest: offline queue has a row for this source path with a different size/mtime -- ingesting as a new file",
+			"source", srcPath,
+			"queuedSize", existing.SizeBytes, "queuedMtime", existing.MtimeUnix,
+			"size", srcInfo.Size(), "mtime", srcInfo.ModTime().Unix())
 	}
 
 	var exif *ExifResult
@@ -445,6 +515,15 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 	}
 
 	return fr
+}
+
+// sameSourceFile reports whether rec (the newest queue.db row recorded for
+// a source path) describes the file currently at that path, by the size and
+// whole-second mtime ingestFileOffline stored from its own pre-copy stat.
+// Whole seconds because that is what the row stores (MtimeUnix), and the
+// value is compared against the same filesystem's own stat on both sides.
+func sameSourceFile(rec queue.Record, info os.FileInfo) bool {
+	return rec.SizeBytes == info.Size() && rec.MtimeUnix == info.ModTime().Unix()
 }
 
 // joinContainerPath joins a container-path root and a slash-separated

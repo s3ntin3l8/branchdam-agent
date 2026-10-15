@@ -76,6 +76,16 @@ nothing to notice it happened (there is no agent-reachable lookup-by-path/uuid e
 gap 5). `MinRebaseDwell` is a heuristic, not a proof, chosen as roughly 2x the server's own poll
 interval to make this astronomically unlikely without depending on anything the server promises.
 
+**5. A re-run resumes a file only when its queue row still describes it.** `ingestFileOffline`
+looks up the newest row for the file's source path and treats it as a resume (no copy, no new
+`NodeUUID`, reported as *resumed* rather than *queued*) only when the row's `size_bytes` and
+`mtime_unix` match the file on the card. Rows are never deleted and cameras restart their file
+counters after a format, so a second card mounted at the same path presents the same source paths
+with different files; those are ingested as new work under their own suffixed destination. The
+size and mtime come from the stat the ingest already does -- the card is still read once, by the
+copy (invariant 1). A file that ends up neither copied, resumed nor deliberately skipped counts as
+failed, so the card is never reported safe to eject on its strength.
+
 ## Retry policy
 
 Each of the three steps has its own attempt counter and `next_attempt_unix` column. A failure
