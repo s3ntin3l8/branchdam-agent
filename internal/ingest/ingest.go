@@ -225,31 +225,39 @@ func isLiveLifecycleState(state string) bool {
 // rejected and why. They do NOT become media_nodes rows and do NOT
 // trigger an exiftool subprocess.
 //
+// OS metadata directories (.Trashes, .Spotlight-V100, .fseventsd,
+// System Volume Information, $RECYCLE.BIN, any dot-directory -- see
+// shouldSkipDir) are not descended at all; each appears once in the
+// result as a Skipped entry naming the directory.
+//
 // Partial-application semantics: ingestFile runs inline inside the
-// WalkDir callback, so a mid-walk error (permission denied on a
-// later directory, card yanked mid-scan, ...) propagates back as
-// the returned err. By the time the walk errors, files already
-// visited have already been DualWrite'd and submitted -- side
-// effects are NOT rolled back. The function returns
-// (CardResult{...}, err) where result.Files reflects whatever was
-// processed before the error. The previous two-phase design
-// (collect paths, then process after WalkDir returned) avoided
-// this by collecting no side effects during the walk, at the
-// cost of holding every path in memory and re-walking the dir's
-// metadata twice. The current design favors throughput over
-// atomicity: re-running on the same card is always safe (the
-// queue.db BySourcePath check in offline's twin path; the
-// AlreadyIngested fast-path in this one), so a partial run
-// followed by a re-run is a known-good recovery.
+// WalkDir callback, so by the time anything goes wrong mid-walk, files
+// already visited have already been DualWrite'd and submitted -- side
+// effects are NOT rolled back. An unreadable entry below cardRoot
+// (permission denied on a subdirectory, a flaky card reader) is
+// therefore recorded as a failed FileResult and the walk continues, so
+// the result keeps every file already processed and still covers the
+// rest of the card; the failed entry is what keeps the run from reading
+// OK. Only an error on cardRoot itself returns (CardResult{}, err).
+// Re-running on the same card is always safe (the AlreadyIngested
+// fast-path here; queue.db's BySourcePath check in the offline twin).
 func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, error) {
 	stemSuffix := make(map[string]string)
 	var dedupUnavailable bool
 	var result CardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return err
+			entryErr, fatal := walkEntryError(cardRoot, path, err)
+			if entryErr != nil {
+				result.Files = append(result.Files, FileResult{SourcePath: path, Err: entryErr})
+			}
+			return fatal
 		}
 		if d.IsDir() {
+			if skip, reason := shouldSkipDir(cardRoot, path); skip {
+				result.Files = append(result.Files, FileResult{SourcePath: path, Skipped: true, SkipReason: reason})
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if skip, reason := shouldSkipByName(path); skip {
