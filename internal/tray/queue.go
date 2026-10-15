@@ -56,13 +56,14 @@ type DrainSummary struct {
 	// when HandshakeOK is true, and Runner.TriggerDrain additionally
 	// preserves the prior successful stamp when a newer pass's handshake
 	// failed -- a fresh failed pass must not erase "successful 4h ago".
-	LastHandshakeAt   time.Time `json:"lastHandshakeAt,omitempty"`
-	NodeCreatedSent   int
-	ArchiveCopiesDone int
-	RebasesDone       int
-	RebasesFailed     int
-	Remaining         int
-	Err               error
+	LastHandshakeAt     time.Time `json:"lastHandshakeAt,omitempty"`
+	NodeCreatedSent     int
+	ArchiveCopiesDone   int
+	ArchiveCopiesFailed int
+	RebasesDone         int
+	RebasesFailed       int
+	Remaining           int
+	Err                 error
 }
 
 // MarshalJSON renders Err as a string -- see

@@ -74,9 +74,13 @@ type DrainStats struct {
 	HandshakeErr      error
 	NodeCreatedSent   int
 	ArchiveCopiesDone int
-	RebasesDone       int
-	RebasesFailed     int
-	Remaining         int // rows still not Done() after this pass
+	// ArchiveCopiesFailed counts rows whose archive copy was marked
+	// permanently FAILED this pass (ErrArchiveConflict /
+	// ErrLocalCopyMismatch): retrying can't fix them, an operator has to.
+	ArchiveCopiesFailed int
+	RebasesDone         int
+	RebasesFailed       int
+	Remaining           int // rows still not Done() after this pass
 }
 
 // Drain runs exactly one pass over store's pending rows: an opportunistic
@@ -165,6 +169,17 @@ func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID 
 			})}
 		}
 		if err := CopyToArchive(r.LocalPath, r.ArchivePath, r.FullHash, copyOpts...); err != nil {
+			// A conflicting file at the archive path, or a local copy that
+			// no longer matches its queued hash, can't clear by retrying --
+			// and CopyToArchive will never resolve either by deleting
+			// something. Fail the step so it stops cycling and shows up
+			// in Counts().Failed with the reason in archive_copy_last_error.
+			if errors.Is(err, ErrArchiveConflict) || errors.Is(err, ErrLocalCopyMismatch) {
+				if markErr := store.MarkArchiveCopyFailed(ctx, r.NodeUUID, err.Error()); markErr == nil {
+					stats.ArchiveCopiesFailed++
+				}
+				continue
+			}
 			_ = store.MarkArchiveCopyAttempt(ctx, r.NodeUUID, err.Error(), backoffFor(r.ArchiveCopyAttempts+1, nowT))
 			continue
 		}

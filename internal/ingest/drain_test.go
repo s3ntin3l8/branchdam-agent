@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -658,5 +659,115 @@ func TestDrainNodeCreatedIdempotentEventUUIDAcrossRetries(t *testing.T) {
 	}
 	if client.nodeCreatedUUIDCalls[1] != expectedEventUUID {
 		t.Errorf("call 1 eventUUID = %q, want %q", client.nodeCreatedUUIDCalls[1], expectedEventUUID)
+	}
+}
+
+// TestDrainNeverReplacesExistingArchiveMaster is the regression test for
+// the offline drain deleting a Tier-3 master: offline collision checks
+// could only see the local edit root, so a queued file could be given an
+// archive name another card's verified master already held, and
+// CopyToArchive removed any non-matching file at the archive path and put
+// the new one there. The master must survive byte-for-byte, the row must
+// fail its archive copy terminally with an actionable error (no retry
+// loop, no rebase), and it must show up as failed.
+func TestDrainNeverReplacesExistingArchiveMaster(t *testing.T) {
+	dir := t.TempDir()
+	store := openStoreT(t)
+	seedMediaRow(t, store, dir, "uuid-collide", []byte("new-card-bytes"))
+
+	master := filepath.Join(dir, "archive", "uuid-collide.bin")
+	if err := os.MkdirAll(filepath.Dir(master), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(master, []byte("someone-elses-verified-master"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeDrainClient{}
+	t0 := time.Unix(1_800_000_000, 0)
+	stats, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ArchiveCopiesDone != 0 || stats.ArchiveCopiesFailed != 1 {
+		t.Errorf("stats = %+v, want 0 archive copies done and 1 failed", stats)
+	}
+
+	got, err := os.ReadFile(master)
+	if err != nil {
+		t.Fatalf("existing archive master is gone: %v", err)
+	}
+	if string(got) != "someone-elses-verified-master" {
+		t.Fatalf("existing archive master was overwritten: %q", got)
+	}
+	if _, err := os.Stat(tempArchiveName(master)); !os.IsNotExist(err) {
+		t.Errorf("archive temp file left behind: %v", err)
+	}
+
+	rec, ok, err := store.ByNodeUUID(context.Background(), "uuid-collide")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if rec.ArchiveCopyStatus != queue.StatusFailed {
+		t.Errorf("ArchiveCopyStatus = %q, want FAILED", rec.ArchiveCopyStatus)
+	}
+	if !strings.Contains(rec.ArchiveCopyLastError, "exists with different content") || !strings.Contains(rec.ArchiveCopyLastError, master) {
+		t.Errorf("ArchiveCopyLastError = %q, want an actionable message naming %s", rec.ArchiveCopyLastError, master)
+	}
+
+	// No retry loop: later passes leave the row alone and never rebase it.
+	for i := 1; i <= 3; i++ {
+		if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0.Add(time.Duration(i)*time.Hour))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec2, _, _ := store.ByNodeUUID(context.Background(), "uuid-collide")
+	if rec2.ArchiveCopyAttempts != rec.ArchiveCopyAttempts {
+		t.Errorf("archive copy re-attempted after a terminal failure: attempts %d -> %d", rec.ArchiveCopyAttempts, rec2.ArchiveCopyAttempts)
+	}
+	if len(client.rebaseCalls) != 0 {
+		t.Errorf("rebase called %d times for a row whose archive copy failed", len(client.rebaseCalls))
+	}
+	if got, _ := os.ReadFile(master); string(got) != "someone-elses-verified-master" {
+		t.Errorf("master changed on a later pass: %q", got)
+	}
+	counts, err := store.Counts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Failed != 1 || counts.Pending() != 0 {
+		t.Errorf("Counts() = %+v, want 1 failed and nothing pending", counts)
+	}
+}
+
+// TestDrainFailsRowWhenLocalCopyWasEdited: a local copy that no longer
+// matches its queued hash is never copied into the archive (not even
+// transiently at the final name) and fails the row instead of looping.
+func TestDrainFailsRowWhenLocalCopyWasEdited(t *testing.T) {
+	dir := t.TempDir()
+	store := openStoreT(t)
+	seedMediaRow(t, store, dir, "uuid-edited", []byte("as-ingested"))
+	local := filepath.Join(dir, "local", "uuid-edited.bin")
+	if err := os.WriteFile(local, []byte("edited-in-place"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := Drain(context.Background(), &fakeDrainClient{}, store, "agent-1", fixedNow(time.Unix(1_800_000_000, 0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ArchiveCopiesFailed != 1 {
+		t.Errorf("ArchiveCopiesFailed = %d, want 1", stats.ArchiveCopiesFailed)
+	}
+	archive := filepath.Join(dir, "archive", "uuid-edited.bin")
+	if _, err := os.Stat(archive); !os.IsNotExist(err) {
+		t.Errorf("mismatching local copy reached the archive path: %v", err)
+	}
+	if _, err := os.Stat(tempArchiveName(archive)); !os.IsNotExist(err) {
+		t.Errorf("archive temp left behind: %v", err)
+	}
+	rec, _, _ := store.ByNodeUUID(context.Background(), "uuid-edited")
+	if rec.ArchiveCopyStatus != queue.StatusFailed {
+		t.Errorf("ArchiveCopyStatus = %q, want FAILED", rec.ArchiveCopyStatus)
 	}
 }

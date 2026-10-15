@@ -52,13 +52,14 @@ func (d *queueDrainer) Drain(ctx context.Context) (tray.DrainSummary, error) {
 		lastHandshakeAt = time.Now()
 	}
 	return tray.DrainSummary{
-		HandshakeOK:       stats.HandshakeOK,
-		LastHandshakeAt:   lastHandshakeAt,
-		NodeCreatedSent:   stats.NodeCreatedSent,
-		ArchiveCopiesDone: stats.ArchiveCopiesDone,
-		RebasesDone:       stats.RebasesDone,
-		RebasesFailed:     stats.RebasesFailed,
-		Remaining:         stats.Remaining,
+		HandshakeOK:         stats.HandshakeOK,
+		LastHandshakeAt:     lastHandshakeAt,
+		NodeCreatedSent:     stats.NodeCreatedSent,
+		ArchiveCopiesDone:   stats.ArchiveCopiesDone,
+		ArchiveCopiesFailed: stats.ArchiveCopiesFailed,
+		RebasesDone:         stats.RebasesDone,
+		RebasesFailed:       stats.RebasesFailed,
+		Remaining:           stats.Remaining,
 	}, err
 }
 

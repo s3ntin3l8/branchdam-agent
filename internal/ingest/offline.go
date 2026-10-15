@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -155,6 +156,14 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 		}
 	}
 
+	// Probed once per card, not per file: whether ResolveDestination may
+	// also look at the archive for name collisions (see
+	// resolveOfflineDestination). Offline ingest usually runs precisely
+	// because the archive is unreachable; when it isn't (an explicit
+	// `ingest -offline` with the NAS mounted), checking it up front means a
+	// new file never gets a name an existing master already holds.
+	archiveReachable := e.archiveReachable(ctx)
+
 	stemSuffix := make(map[string]string)
 	var result OfflineCardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
@@ -180,7 +189,7 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 			})
 			return nil
 		}
-		result.Files = append(result.Files, e.ingestFileOffline(ctx, path, stemSuffix, &dedupUnavailable))
+		result.Files = append(result.Files, e.ingestFileOffline(ctx, path, stemSuffix, &dedupUnavailable, archiveReachable))
 		return nil
 	})
 	if err != nil {
@@ -206,37 +215,47 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 //     ResolveDestination, its own suffixed destination). Size+mtime come
 //     from the stat this function already does; no extra read of the card
 //     is needed (invariant 1: the card is read once, by WriteLocal).
-//  2. If ResolveDestination finds an identical file already at destination,
-//     skip.
+//     A resumed row whose local copy never made it to its final name (a
+//     crash between step 6 and step 7 below) is completed here: the
+//     agent's own temp copy is verified and renamed into place, or
+//     re-copied from the card if it's missing or bad.
+//  2. Pick the destination name (resolveOfflineDestination): if an
+//     identical file is already at the destination AND a queue row claims
+//     it (or the reachable archive holds the same file), skip. A name
+//     occupied by anything else -- an online-ingest edit copy, a file the
+//     user put there, another card's master in the reachable archive -- is
+//     never reused and never deleted; the new file gets the next suffix.
 //  3. Pre-flight content dedup check: if server is reachable and pre-flight
 //     is enabled, query GET /api/v1/agent/check-content with fastHash and
 //     fullHash. If confirmed duplicate with active lifecycle state, skip
 //     without writing local copy or deleting existing files.
-//  4. Otherwise, before writing anything: if localPath already exists on
-//     disk but no queue row claims it, it's an orphaned partial from a run
-//     that crashed between step 5 and step 6 below -- remove it so
-//     WriteLocal's O_EXCL doesn't wedge forever (mirrors DualWrite's own
-//     "caller must clean up a surviving partial before retrying" contract).
-//  5. Write and verify the local copy. This step has no server-durable side
-//     effect yet -- if the process dies here, restart lands back at step 4
-//     with nothing to resume, which is correct: nothing was ever promised
-//     to branchDAM about this file.
+//  4. Remove the agent's own leftover temp copy for this destination, if
+//     any (its name, localTempName, marks it as the agent's: nothing else
+//     is ever deleted).
+//  5. Write and verify the local copy under that temp name. This step has
+//     no durable side effect yet -- if the process dies here, restart lands
+//     back at step 4 with nothing to resume, which is correct: nothing was
+//     ever promised to branchDAM about this file, and no file sits at a
+//     final name for a later run to mistake for an ingested one.
 //  6. Mint NodeUUID, build both container paths and the NodeCreatedPayload,
 //     and INSERT the queue.db row. This commit is the durability boundary:
 //     once it returns, the file's identity and intent are permanent, and
 //     every step after this point is safe to retry indefinitely because it
 //     is idempotent against that same NodeUUID.
-//  7. Only after the row is durably queued, make one best-effort attempt at
+//  7. Rename the temp copy to its final local name, refusing to replace
+//     anything already there. Only now does a file appear at a final name,
+//     and it is already claimed by the row from step 6.
+//  8. Only after the row is durably queued, make one best-effort attempt at
 //     POST EVENT_NODE_CREATED. Whether this succeeds or fails is not
 //     load-bearing for correctness -- Drain retries it either way -- it
 //     just means a workstation that's actually online (just missing the NAS
 //     mount, say) doesn't wait for the next Drain pass to start tracking the
 //     node server-side.
 //
-// Sidecars (.xmp/.srt) skip steps 6-7 entirely: no NodeCreatedPayload, no
+// Sidecars (.xmp/.srt) skip step 8 entirely: no NodeCreatedPayload, no
 // EVENT_NODE_CREATED, no rebase -- only the local write and the archive-copy
 // queue row, mirroring IngestCard's sidecar handling.
-func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuffix map[string]string, dedupUnavailable *bool) OfflineFileResult {
+func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuffix map[string]string, dedupUnavailable *bool, archiveReachable bool) OfflineFileResult {
 	fr := OfflineFileResult{SourcePath: srcPath}
 
 	ext := extNoDot(srcPath)
@@ -267,6 +286,9 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 			if fr.IsSidecar {
 				fr.SkipReason = "sidecar file (.xmp/.srt): copied to both destinations eventually, no EVENT_NODE_CREATED submitted"
 			}
+			if err := e.completeResumedLocalCopy(srcPath, srcInfo, existing); err != nil {
+				fr.Err = fmt.Errorf("resume: restore local copy %s: %w", existing.LocalPath, err)
+			}
 			return fr
 		}
 		slog.Info("ingest: offline queue has a row for this source path with a different size/mtime -- ingesting as a new file",
@@ -292,16 +314,6 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		vars.CameraModel = exif.CameraModel
 	}
 
-	primaryRel := RenderPath(e.Ingest.PathTemplate, vars)
-	primaryLocal := filepath.Join(e.Ingest.LocalEditRoot, primaryRel)
-	if _, err := os.Stat(primaryLocal); err == nil {
-		if e.Queue != nil {
-			if _, claimed, err := e.Queue.ByLocalPath(ctx, primaryLocal); err == nil && !claimed {
-				_ = os.Remove(primaryLocal)
-			}
-		}
-	}
-
 	stem, _ := splitBase(filepath.Base(srcPath))
 	stemKey := filepath.Join(filepath.Dir(srcPath), stem)
 	knownSuffix := ""
@@ -309,8 +321,11 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		knownSuffix = stemSuffix[stemKey]
 	}
 
-	roots := []string{e.Ingest.LocalEditRoot}
-	resolution := ResolveDestination(roots, e.Ingest.PathTemplate, vars, srcPath, knownSuffix)
+	resolution, err := e.resolveOfflineDestination(ctx, vars, srcPath, knownSuffix, archiveReachable)
+	if err != nil {
+		fr.Err = fmt.Errorf("resolve destination: %w", err)
+		return fr
+	}
 	if stemSuffix != nil && resolution.Suffix != "" {
 		stemSuffix[stemKey] = resolution.Suffix
 	}
@@ -336,15 +351,32 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		}
 	}
 
-	// An orphaned partial from a run that crashed after WriteLocal but
-	// before the queue row was inserted: nothing durable promised this file
-	// exists yet, so it's safe -- and necessary, or O_EXCL below wedges
-	// forever -- to remove it and start over.
-	if _, err := os.Stat(localPath); err == nil {
-		_ = os.Remove(localPath)
+	// The local copy is written under the agent's own temp name and only
+	// renamed to localPath after the queue row claiming it is committed
+	// (see placeLocal below). A leftover at this temp name is the agent's
+	// own, from a run that died before its row was inserted -- removing it
+	// is the only cleanup this path ever does. Until the row is in,
+	// every early return removes the temp again (rowInserted guards that).
+	tmpLocal := localTempName(localPath)
+	_ = os.Remove(tmpLocal)
+	rowInserted := false
+	defer func() {
+		if !rowInserted {
+			_ = os.Remove(tmpLocal)
+		}
+	}()
+	placeLocal := func() bool {
+		if err := renameNoClobber(tmpLocal, localPath); err != nil {
+			// The row is in; keep the temp copy. A re-run over this card
+			// resumes the row and retries the rename
+			// (completeResumedLocalCopy).
+			fr.Err = fmt.Errorf("move local copy into place: %w", err)
+			return false
+		}
+		return true
 	}
 
-	writeRes, err := WriteLocal(srcPath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
+	writeRes, err := WriteLocal(srcPath, tmpLocal, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
 	if err != nil {
 		fr.Err = fmt.Errorf("write local copy: %w", err)
 		return fr
@@ -353,17 +385,17 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 	// prune.go's TOCTOU re-stat reads back, so a silently-swallowed
 	// Chtimes failure here means the prune-safety half of invariant
 	// #8 quietly stops catching anything. Log it; don't fail ingest.
-	preserveMtimeAt(srcPath, localPath, srcInfo.ModTime())
+	// (The rename into place below keeps the mtime.)
+	preserveMtimeAt(srcPath, tmpLocal, srcInfo.ModTime())
 
-	localVerify, err := Verify(localPath, writeRes.FullHash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+	localVerify, err := Verify(tmpLocal, writeRes.FullHash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 	if err != nil {
-		_ = os.Remove(localPath)
 		fr.Err = fmt.Errorf("verify local copy: %w", err)
 		return fr
 	}
+	localVerify.Path = localPath
 	fr.LocalVerify = localVerify
 	if !localVerify.Verified {
-		_ = os.Remove(localPath)
 		fr.Err = fmt.Errorf("ingest: local copy verification failed for %s -- safe-eject withheld", srcPath)
 		return fr
 	}
@@ -404,13 +436,15 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 			fr.Err = err
 			return fr
 		}
+		rowInserted = true
 		fr.NodeUUID = rec.NodeUUID
 		fr.Queued = true
+		placeLocal()
 		return fr
 	}
 
 	if e.Exiftool != nil && isImageExt(ext) {
-		if ph, err := phash.Extract(ctx, e.Exiftool.Pool(), localPath); err == nil {
+		if ph, err := phash.Extract(ctx, e.Exiftool.Pool(), tmpLocal); err == nil {
 			fr.PHash = ph
 		}
 	}
@@ -502,11 +536,15 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		fr.Err = err
 		return fr
 	}
+	rowInserted = true
 	fr.Queued = true
+	if !placeLocal() {
+		return fr
+	}
 
 	// Opportunistic fast path, strictly best-effort: failure here changes
 	// nothing about correctness, since Drain will retry regardless (see this
-	// function's doc comment, step 5).
+	// function's doc comment, step 8).
 	resp, postErr := e.Client.PostNodeCreatedWithUUID(ctx, e.AgentID, payload, rec.NodeCreatedEventUUID)
 	if postErr == nil {
 		if markErr := e.Queue.MarkNodeCreatedSubmitted(ctx, nodeUUID, resp.EventID, e.now()); markErr == nil {
@@ -536,4 +574,176 @@ func joinContainerPath(root, relPath string) string {
 		return root
 	}
 	return root + "/" + relPath
+}
+
+// localTempName is the agent's temp name for an offline local edit copy:
+// agentTempName plus the original extension again, so exiftool-based
+// pHash extraction (which runs before the copy is renamed into place) can
+// still tell a RAW from a JPEG by name.
+func localTempName(localPath string) string {
+	return agentTempName(localPath) + filepath.Ext(localPath)
+}
+
+// archiveProbeTimeout bounds archiveReachable's stat: a dead SMB/NFS mount
+// can block a stat for minutes, and the probe must never stall an ingest
+// that is offline precisely because the NAS is gone. Matches the tray's
+// own archive probe (cmd/branchdam-agent's probeArchive).
+const archiveProbeTimeout = 2 * time.Second
+
+// archiveReachable reports whether Ingest.ArchiveRoot is currently a
+// usable directory, via e.ArchiveReachable when set (tests) or a stat
+// bounded by archiveProbeTimeout.
+func (e *Engine) archiveReachable(ctx context.Context) bool {
+	if e.ArchiveReachable != nil {
+		return e.ArchiveReachable(ctx, e.Ingest.ArchiveRoot)
+	}
+	root := e.Ingest.ArchiveRoot
+	if root == "" {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, archiveProbeTimeout)
+	defer cancel()
+	ch := make(chan bool, 1)
+	go func() {
+		info, err := os.Stat(root)
+		ch <- err == nil && info.IsDir()
+	}()
+	select {
+	case ok := <-ch:
+		return ok
+	case <-probeCtx.Done():
+		return false
+	}
+}
+
+// resolveOfflineDestination picks the relative destination for an offline
+// ingest. It starts from ResolveDestination over the local edit root (the
+// root every offline copy is written to), then vets the answer with
+// offlineSlotUsable; if the slot isn't usable it walks the suffix space for
+// one that is. Nothing found at a candidate name is ever deleted -- an
+// occupied name is simply not used.
+func (e *Engine) resolveOfflineDestination(ctx context.Context, vars TemplateVars, srcPath, knownSuffix string, archiveReachable bool) (DestinationResolution, error) {
+	tpl := e.Ingest.PathTemplate
+	res := ResolveDestination([]string{e.Ingest.LocalEditRoot}, tpl, vars, srcPath, knownSuffix)
+	ok, err := e.offlineSlotUsable(ctx, res, srcPath, archiveReachable)
+	if err != nil {
+		return DestinationResolution{}, err
+	}
+	if ok {
+		return res, nil
+	}
+
+	for counter := 1; counter <= 10000; counter++ {
+		suffix := ""
+		if counter > 1 {
+			suffix = fmt.Sprintf("_%d", counter)
+		}
+		cv := vars
+		cv.OriginalName = SuffixedFilename(vars.OriginalName, suffix)
+		cand := DestinationResolution{RelPath: RenderPath(tpl, cv), Suffix: suffix}
+		if _, err := os.Lstat(filepath.Join(e.Ingest.LocalEditRoot, cand.RelPath)); err == nil {
+			continue
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return DestinationResolution{}, fmt.Errorf("stat local destination candidate: %w", err)
+		}
+		ok, err := e.offlineSlotUsable(ctx, cand, srcPath, archiveReachable)
+		if err != nil {
+			return DestinationResolution{}, err
+		}
+		if ok {
+			return cand, nil
+		}
+	}
+	return DestinationResolution{}, fmt.Errorf("no free destination name for %s after 10000 suffixes", srcPath)
+}
+
+// offlineSlotUsable vets one ResolveDestination answer for the offline path:
+//
+//   - AlreadyIngested (an identical file already sits at the local name) is
+//     trusted only when that local file is claimed by a queue row -- it is
+//     then already on its way to the archive -- or when the reachable
+//     archive holds the same file at the same name. An identical local file
+//     nobody queued (a copy from a run that predates the agent's temp-name
+//     discipline, or one the user made) proves nothing about the archive,
+//     and "skipping" on its strength would let the card be ejected with the
+//     file never archived.
+//   - A free local name is usable unless a queue row already claims it (that
+//     row's copy is not in place yet and must keep its name) or, with the
+//     archive reachable, a different file occupies the same archive name.
+//     An identical archive file is fine: Drain finds it verified and copies
+//     nothing. An archive stat error other than "not there" is treated as
+//     "unknown" -- CopyToArchive refuses a conflicting name at drain time.
+func (e *Engine) offlineSlotUsable(ctx context.Context, res DestinationResolution, srcPath string, archiveReachable bool) (bool, error) {
+	localPath := filepath.Join(e.Ingest.LocalEditRoot, res.RelPath)
+	archivePath := filepath.Join(e.Ingest.ArchiveRoot, res.RelPath)
+
+	_, claimed, err := e.Queue.ByLocalPath(ctx, localPath)
+	if err != nil {
+		return false, fmt.Errorf("queue lookup by local path: %w", err)
+	}
+
+	if res.AlreadyIngested {
+		if claimed {
+			return true, nil
+		}
+		return archiveReachable && filesMatch(srcPath, archivePath), nil
+	}
+
+	if claimed {
+		return false, nil
+	}
+	if archiveReachable && e.Ingest.ArchiveRoot != "" {
+		if _, err := os.Lstat(archivePath); err == nil {
+			return filesMatch(srcPath, archivePath), nil
+		}
+	}
+	return true, nil
+}
+
+// completeResumedLocalCopy makes sure a resumed row still has its local
+// copy at rec.LocalPath while the archive copy -- which reads it -- is
+// pending. The row is inserted before the copy is renamed into place
+// (ingestFileOffline's steps 6-7), so a run that died in between leaves the
+// row claiming a name nothing sits at yet. Recovery, in order: the agent's
+// own temp copy, if it verifies against the queued hash, is renamed into
+// place; otherwise (missing or bad) the file is copied again from the card
+// -- this re-run's single read of it -- and must hash to the queued value.
+// A row whose archive copy is no longer pending is left alone: prune may
+// legitimately have removed its local copy.
+func (e *Engine) completeResumedLocalCopy(srcPath string, srcInfo os.FileInfo, rec queue.Record) error {
+	if rec.ArchiveCopyStatus != queue.StatusPending {
+		return nil
+	}
+	if _, err := os.Lstat(rec.LocalPath); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	tmp := localTempName(rec.LocalPath)
+	if info, err := os.Stat(tmp); err == nil && info.Mode().IsRegular() && info.Size() == rec.SizeBytes {
+		if vr, verr := Verify(tmp, rec.FullHash); verr == nil && vr.Verified {
+			return renameNoClobber(tmp, rec.LocalPath)
+		}
+	}
+	_ = os.Remove(tmp) // the agent's own temp name: missing, short or corrupt
+
+	writeRes, err := WriteLocal(srcPath, tmp, e.progressOpts(rec.LocalPath, ProgressPhaseCopying, srcInfo.Size())...)
+	if err != nil {
+		return err
+	}
+	if writeRes.FullHash != rec.FullHash {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("card file now hashes to %s, queued as %s", writeRes.FullHash, rec.FullHash)
+	}
+	preserveMtimeAt(srcPath, tmp, srcInfo.ModTime())
+	vr, err := Verify(tmp, writeRes.FullHash, e.progressOpts(rec.LocalPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+	if err != nil || !vr.Verified {
+		_ = os.Remove(tmp)
+		if err == nil {
+			err = fmt.Errorf("re-copied local file did not verify")
+		}
+		return err
+	}
+	return renameNoClobber(tmp, rec.LocalPath)
 }

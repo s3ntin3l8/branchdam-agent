@@ -403,3 +403,45 @@ func TestPassNotFoundOrUnverifiedNeverPruned(t *testing.T) {
 		t.Errorf("expected unverified/wrong-tier file untouched: %v", err)
 	}
 }
+
+// TestPassNeverPrunesAfterArchiveCopyFailed: a row whose archive copy
+// FAILED terminally is Done() (Pending() stops returning it) but its local
+// copy may be the only one outside the card -- even a node-status answer
+// claiming a verified Tier-3 master must not get it deleted.
+func TestPassNeverPrunesAfterArchiveCopyFailed(t *testing.T) {
+	cfg, store, root := pruneTestFixture(t)
+	cfg.Prune = config.PruneConfig{Enabled: true, MinAgeHours: 24}
+	uuid := "0190f1a2-0000-7000-8000-0000000000af"
+	path := filepath.Join(root, "conflict.mov")
+	if err := os.WriteFile(path, []byte("only-copy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mtime := time.Now().Add(-48 * time.Hour)
+	_ = os.Chtimes(path, mtime, mtime)
+	if err := store.InsertPending(context.Background(), queue.NewRecord{
+		NodeUUID: uuid, Kind: queue.KindMedia, SourcePath: "/c/conflict.mov", LocalPath: path,
+		ArchivePath: "/tmp/a/conflict.mov", ArchiveContainerPath: "/storage/archive/conflict.mov",
+		FileName: "conflict.mov", FileExt: ".mov", SizeBytes: int64(len("only-copy")), MtimeUnix: mtime.Unix(),
+		FullHash: strings.Repeat("cd", 32), FastHash: "abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkArchiveCopyFailed(context.Background(), uuid, "archive destination exists with different content"); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, asked := nodeStatusServer(t, map[string]branchdam.NodeStatusEntry{uuid: verifiedEntry(uuid)})
+	client := branchdam.New(srv.URL, "test-key")
+
+	var buf bytes.Buffer
+	stats, err := Pass(context.Background(), &buf, client, store, cfg, time.Now(), false)
+	if err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if stats.Pruned != 0 || len(*asked) != 0 {
+		t.Errorf("stats = %+v, asked = %v: an archive-copy-FAILED row must never be a prune candidate", stats, *asked)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("local copy of an archive-copy-FAILED row was removed: %v", err)
+	}
+}

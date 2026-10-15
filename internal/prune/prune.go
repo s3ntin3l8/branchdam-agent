@@ -90,7 +90,11 @@ func Pass(ctx context.Context, w io.Writer, client *branchdam.Client, store *que
 	var candidates []candidate
 
 	for _, r := range rows {
-		if !r.Done() {
+		// Done() is also true for a row whose archive copy FAILED
+		// terminally -- that local file may be the only copy outside the
+		// card, so only a row whose archive copy actually completed is
+		// ever a candidate (node-status is checked on top of this).
+		if !r.Done() || r.ArchiveCopyStatus != queue.StatusDone {
 			continue
 		}
 		// Sidecars (.xmp/.srt) never get their own EVENT_NODE_CREATED (see

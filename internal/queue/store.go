@@ -47,12 +47,17 @@ const (
 	// behavior, preserved here), so those two steps never run for them --
 	// only archive_copy does.
 	StatusSkipped = "SKIPPED"
-	// StatusFailed applies to rebase only: a classified-fatal server error
-	// (e.g. ArchivedNode) that retrying cannot fix. Terminal -- Drain never
-	// reattempts a FAILED row. node_created/archive_copy have no FAILED
-	// state; they retry indefinitely with backoff, since every failure mode
-	// on those two steps (network down, NAS unmounted) is expected to
-	// eventually clear.
+	// StatusFailed is terminal -- Drain never reattempts a FAILED step.
+	// On rebase it means a classified-fatal server error (e.g.
+	// ArchivedNode) that retrying cannot fix. On archive_copy it means the
+	// copy can never succeed without an operator: a different file already
+	// occupies the final archive path (the agent never overwrites one), or
+	// the local copy no longer matches the hash recorded at ingest (see
+	// internal/ingest's ErrArchiveConflict / ErrLocalCopyMismatch). A row
+	// whose archive copy FAILED never reaches rebase. node_created has no
+	// FAILED state; it retries indefinitely with backoff, as do every other
+	// archive_copy failure (network down, NAS unmounted), since those are
+	// expected to eventually clear.
 	StatusFailed = "FAILED"
 )
 
@@ -102,11 +107,22 @@ type Record struct {
 
 // Done reports whether every step this record needs has reached a terminal
 // state (DONE/SKIPPED for archive_copy+rebase; FAILED counts as terminal
-// too, even though it is not success, so Pending() stops returning it).
+// too, even though it is not success, so Pending() stops returning it -- a
+// FAILED archive copy ends the row outright, since rebase never runs
+// without one). Done is not success: check Failed() too.
 func (r Record) Done() bool {
+	if r.ArchiveCopyStatus == StatusFailed {
+		return true
+	}
 	archiveDone := r.ArchiveCopyStatus == StatusDone
 	rebaseDone := r.RebaseStatus == StatusDone || r.RebaseStatus == StatusSkipped || r.RebaseStatus == StatusFailed
 	return archiveDone && rebaseDone
+}
+
+// Failed reports whether the row ended in a terminal failure on either
+// its archive copy or its rebase.
+func (r Record) Failed() bool {
+	return r.ArchiveCopyStatus == StatusFailed || r.RebaseStatus == StatusFailed
 }
 
 // Store wraps queue.db. A single *sql.DB with SetMaxOpenConns(1): SQLite
@@ -282,7 +298,10 @@ func (s *Store) ByLocalPath(ctx context.Context, localPath string) (Record, bool
 // can't drift out of sync the way Record.Done() and Pending's own
 // previously-inline SQL already had (a real duplication found while
 // building Counts).
-const terminalSQL = `archive_copy_status = 'DONE' AND rebase_status IN ('DONE', 'SKIPPED', 'FAILED')`
+const terminalSQL = `(archive_copy_status = 'DONE' AND rebase_status IN ('DONE', 'SKIPPED', 'FAILED')) OR archive_copy_status = 'FAILED'`
+
+// failedSQL is the row-level predicate matching Record.Failed().
+const failedSQL = `(archive_copy_status = 'FAILED' OR rebase_status = 'FAILED')`
 
 // Pending returns every row not yet Done(), oldest first -- the set Drain
 // works through on each pass.
@@ -333,12 +352,13 @@ func (s *Store) All(ctx context.Context) ([]Record, error) {
 // paying to scan and marshal thousands of rows just to show a badge.
 //
 // Failed is reported separately from Done on purpose: Record.Done() (and
-// terminalSQL above) treats a permanently FAILED rebase as terminal so
-// Pending() stops returning it, but that is not the same as success --
-// a badge driven off "Pending() is empty, so we're done" would read
-// green while rows sit permanently broken. Done here means genuinely
+// terminalSQL above) treats a permanently FAILED archive copy or rebase as
+// terminal so Pending() stops returning it, but that is not the same as
+// success -- a badge driven off "Pending() is empty, so we're done" would
+// read green while rows sit permanently broken. Done here means genuinely
 // succeeded (archive_copy DONE, rebase DONE or SKIPPED); Failed means
-// rebase_status = FAILED, whichever else is true of the row.
+// archive_copy_status or rebase_status = FAILED, whichever else is true of
+// the row.
 type Counts struct {
 	// AwaitingUpload counts rows whose archive copy hasn't started
 	// (archive_copy_status = PENDING) -- MEDIA and SIDECAR rows alike.
@@ -347,8 +367,9 @@ type Counts struct {
 	// rebase hasn't happened yet. A SIDECAR row's rebase_status is
 	// SKIPPED from insert (see InsertPending), so it never appears here.
 	AwaitingRebase int
-	// Failed counts rows with a permanently failed (terminal) rebase --
-	// see the type doc comment for why this is never folded into Done.
+	// Failed counts rows with a permanently failed (terminal) archive copy
+	// or rebase -- see the type doc comment for why this is never folded
+	// into Done.
 	Failed int
 	// Done counts rows that genuinely completed: archive copy done and
 	// rebase done or skipped -- explicitly NOT failed.
@@ -373,8 +394,8 @@ func (s *Store) Counts(ctx context.Context) (Counts, error) {
 SELECT
 	COALESCE(SUM(CASE WHEN archive_copy_status = 'PENDING' THEN 1 ELSE 0 END), 0),
 	COALESCE(SUM(CASE WHEN archive_copy_status = 'DONE' AND rebase_status = 'PENDING' THEN 1 ELSE 0 END), 0),
-	COALESCE(SUM(CASE WHEN rebase_status = 'FAILED' THEN 1 ELSE 0 END), 0),
-	COALESCE(SUM(CASE WHEN (`+terminalSQL+`) AND rebase_status != 'FAILED' THEN 1 ELSE 0 END), 0),
+	COALESCE(SUM(CASE WHEN `+failedSQL+` THEN 1 ELSE 0 END), 0),
+	COALESCE(SUM(CASE WHEN (`+terminalSQL+`) AND NOT `+failedSQL+` THEN 1 ELSE 0 END), 0),
 	COALESCE(SUM(CASE WHEN archive_copy_status = 'PENDING' THEN size_bytes ELSE 0 END), 0)
 FROM queue_nodes`)
 
@@ -430,6 +451,19 @@ func (s *Store) MarkArchiveCopyAttempt(ctx context.Context, nodeUUID, errMsg str
 		errMsg, nextAttempt.Unix(), nodeUUID)
 	if err != nil {
 		return fmt.Errorf("queue: record archive_copy attempt for %s: %w", nodeUUID, err)
+	}
+	return nil
+}
+
+// MarkArchiveCopyFailed records a terminal archive-copy failure -- one
+// that retrying cannot fix (see StatusFailed). Drain never reattempts it;
+// errMsg (archive_copy_last_error) says what an operator has to resolve.
+func (s *Store) MarkArchiveCopyFailed(ctx context.Context, nodeUUID, errMsg string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE queue_nodes SET archive_copy_status = ?, archive_copy_last_error = ? WHERE node_uuid = ?`,
+		StatusFailed, errMsg, nodeUUID)
+	if err != nil {
+		return fmt.Errorf("queue: mark archive_copy failed for %s: %w", nodeUUID, err)
 	}
 	return nil
 }

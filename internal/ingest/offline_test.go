@@ -376,55 +376,255 @@ func TestIngestCardOfflineResumeAfterRestart(t *testing.T) {
 	}
 }
 
-// TestIngestCardOfflineCleansUpOrphanedPartial simulates a crash between
-// WriteLocal succeeding and InsertPending committing: a local file exists
-// with no queue row referencing it. A restart must not treat that as
-// "already done" -- it must clean up and redo the local write, since
-// nothing was ever durably promised for that file.
-func TestIngestCardOfflineCleansUpOrphanedPartial(t *testing.T) {
+// TestIngestCardOfflineNeverDeletesUnclaimedLocalFile is the regression
+// test for offline ingest deleting a legitimate local edit copy: a file at
+// the rendered destination with no queue row claiming it used to be
+// treated as this agent's own "orphaned partial" and os.Remove'd. Online
+// ingest never writes queue rows, so that was every online-ingested edit
+// copy (and anything the user put there). It must survive untouched and
+// the new file must take the next suffix.
+func TestIngestCardOfflineNeverDeletesUnclaimedLocalFile(t *testing.T) {
+	cases := []struct {
+		name     string
+		existing string
+	}{
+		{"different content", "someone-elses-edit-copy"},
+		// Identical but unclaimed: proves nothing about the archive, so it
+		// is not trusted as "already ingested" either.
+		{"identical content", "real-data"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cardRoot := filepath.Join(dir, "card")
+			if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cardRoot, "a.jpg"), []byte("real-data"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			localRoot := filepath.Join(dir, "local")
+			existingPath := filepath.Join(localRoot, "a.jpg")
+			if err := os.MkdirAll(localRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(existingPath, []byte(tc.existing), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			store := openStoreT(t)
+			e := newOfflineTestEngine(t, failingClient{}, filepath.Join(dir, "archive"), localRoot, "/storage/staging/agent-1", store)
+
+			res, err := e.IngestCardOffline(context.Background(), cardRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fr := res.Files[0]
+			if fr.Err != nil {
+				t.Fatalf("unexpected error: %v", fr.Err)
+			}
+			if got := fr.Outcome(); got != OfflineOutcomeQueued {
+				t.Fatalf("Outcome() = %v, want OfflineOutcomeQueued (skip reason %q)", got, fr.SkipReason)
+			}
+
+			got, err := os.ReadFile(existingPath)
+			if err != nil {
+				t.Fatalf("the pre-existing local file was removed: %v", err)
+			}
+			if string(got) != tc.existing {
+				t.Errorf("pre-existing local file = %q, want it untouched (%q)", got, tc.existing)
+			}
+
+			wantNew := filepath.Join(localRoot, "a_2.jpg")
+			if fr.LocalPath != wantNew {
+				t.Errorf("new file's LocalPath = %s, want the suffixed %s", fr.LocalPath, wantNew)
+			}
+			if got, err := os.ReadFile(wantNew); err != nil || string(got) != "real-data" {
+				t.Errorf("new local copy = %q, %v; want the source content", got, err)
+			}
+			if _, err := os.Stat(localTempName(wantNew)); !os.IsNotExist(err) {
+				t.Errorf("temp copy left behind after a successful ingest: %v", err)
+			}
+		})
+	}
+}
+
+// TestIngestCardOfflineReplacesCrashLeftTemp: a run that died after writing
+// its temp copy but before inserting the queue row leaves only the agent's
+// own temp name behind -- never a file at the final name. The next run
+// overwrites that temp and completes normally.
+func TestIngestCardOfflineReplacesCrashLeftTemp(t *testing.T) {
 	dir := t.TempDir()
 	cardRoot := filepath.Join(dir, "card")
 	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	srcPath := filepath.Join(cardRoot, "a.jpg")
-	if err := os.WriteFile(srcPath, []byte("real-data"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cardRoot, "a.jpg"), []byte("real-data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
 	localRoot := filepath.Join(dir, "local")
-	// Pre-create a bogus partial local file at the destination the engine
-	// will compute, with no matching queue row -- exactly what WriteLocal
-	// would leave behind if the process died before InsertPending.
-	orphanPath := filepath.Join(localRoot, "a.jpg")
+	final := filepath.Join(localRoot, "a.jpg")
 	if err := os.MkdirAll(localRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(orphanPath, []byte("garbage-partial-bytes"), 0o644); err != nil {
+	if err := os.WriteFile(localTempName(final), []byte("half-written"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	store := openStoreT(t)
 	e := newOfflineTestEngine(t, failingClient{}, filepath.Join(dir, "archive"), localRoot, "/storage/staging/agent-1", store)
-
 	res, err := e.IngestCardOffline(context.Background(), cardRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fr := res.Files[0]
-	if fr.Err != nil {
-		t.Fatalf("expected the orphan to be cleaned up and the file re-ingested, got error: %v", fr.Err)
+	if fr.Err != nil || fr.LocalPath != final {
+		t.Fatalf("got LocalPath=%s err=%v, want %s and no error", fr.LocalPath, fr.Err, final)
 	}
-	if !fr.LocalVerify.Verified {
-		t.Error("expected the freshly-rewritten local copy to verify")
+	if got, _ := os.ReadFile(final); string(got) != "real-data" {
+		t.Errorf("local copy = %q, want the source content", got)
 	}
+	if _, err := os.Stat(localTempName(final)); !os.IsNotExist(err) {
+		t.Errorf("crash-left temp still present: %v", err)
+	}
+}
 
-	got, err := os.ReadFile(orphanPath)
-	if err != nil {
-		t.Fatal(err)
+// TestIngestCardOfflineResumeFinishesUnplacedLocalCopy covers a run that
+// died after inserting the queue row but before renaming its temp copy
+// into place: the row claims a local path nothing sits at. Re-ingesting the
+// card resumes the row (same NodeUUID, no new row) and puts the local copy
+// in place -- from the verified temp when it survived, from the card when
+// it didn't -- so Drain has something to archive.
+func TestIngestCardOfflineResumeFinishesUnplacedLocalCopy(t *testing.T) {
+	cases := []struct {
+		name string
+		// prepare mutates the on-disk state after the first ingest to
+		// simulate the crash.
+		prepare func(t *testing.T, final string)
+	}{
+		{"temp survived", func(t *testing.T, final string) {
+			if err := os.Rename(final, localTempName(final)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"temp truncated", func(t *testing.T, final string) {
+			if err := os.Remove(final); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(localTempName(final), []byte("trunc"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"nothing on disk", func(t *testing.T, final string) {
+			if err := os.Remove(final); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	}
-	if string(got) != "real-data" {
-		t.Errorf("local copy = %q, want the real source content, not the orphaned garbage", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cardRoot := filepath.Join(dir, "card")
+			if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cardRoot, "a.jpg"), []byte("real-data"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			store := openStoreT(t)
+			e := newOfflineTestEngine(t, failingClient{}, filepath.Join(dir, "archive"), filepath.Join(dir, "local"), "/storage/staging/agent-1", store)
+			res1, err := e.IngestCardOffline(context.Background(), cardRoot)
+			if err != nil || res1.Files[0].Err != nil {
+				t.Fatalf("first ingest: %v / %v", err, res1.Files[0].Err)
+			}
+			final := res1.Files[0].LocalPath
+			tc.prepare(t, final)
+
+			e.NewNodeUUID = func() (string, error) {
+				t.Fatal("NewNodeUUID must not be called on resume")
+				return "", nil
+			}
+			res2, err := e.IngestCardOffline(context.Background(), cardRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fr := res2.Files[0]
+			if got := fr.Outcome(); got != OfflineOutcomeResumed {
+				t.Fatalf("Outcome() = %v, want resumed (err=%v)", got, fr.Err)
+			}
+			if got, err := os.ReadFile(final); err != nil || string(got) != "real-data" {
+				t.Errorf("local copy after resume = %q, %v; want the source content in place", got, err)
+			}
+			if _, err := os.Stat(localTempName(final)); !os.IsNotExist(err) {
+				t.Errorf("temp copy left behind after resume: %v", err)
+			}
+			all, _ := store.All(context.Background())
+			if len(all) != 1 {
+				t.Errorf("got %d rows, want 1", len(all))
+			}
+		})
+	}
+}
+
+// TestIngestCardOfflineAvoidsReachableArchiveCollision: when the archive is
+// reachable at offline-ingest time, a name another file already holds in
+// the archive is not handed to the new file (which would only make the
+// drain fail the row later); an identical archive file is fine to share.
+func TestIngestCardOfflineAvoidsReachableArchiveCollision(t *testing.T) {
+	cases := []struct {
+		name        string
+		archived    string
+		reachable   bool
+		wantLocal   string
+		wantArchive string
+	}{
+		{"different master in reachable archive", "another-cards-master", true, "a_2.jpg", "a_2.jpg"},
+		{"identical master in reachable archive", "real-data", true, "a.jpg", "a.jpg"},
+		{"archive unreachable", "another-cards-master", false, "a.jpg", "a.jpg"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cardRoot := filepath.Join(dir, "card")
+			if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cardRoot, "a.jpg"), []byte("real-data"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			archiveRoot := filepath.Join(dir, "archive")
+			if err := os.MkdirAll(archiveRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			master := filepath.Join(archiveRoot, "a.jpg")
+			if err := os.WriteFile(master, []byte(tc.archived), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			store := openStoreT(t)
+			e := newOfflineTestEngine(t, failingClient{}, archiveRoot, filepath.Join(dir, "local"), "/storage/staging/agent-1", store)
+			e.ArchiveReachable = func(context.Context, string) bool { return tc.reachable }
+
+			res, err := e.IngestCardOffline(context.Background(), cardRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fr := res.Files[0]
+			if fr.Err != nil || !fr.Queued {
+				t.Fatalf("got %+v, want a queued file", fr)
+			}
+			if want := filepath.Join(dir, "local", tc.wantLocal); fr.LocalPath != want {
+				t.Errorf("LocalPath = %s, want %s", fr.LocalPath, want)
+			}
+			rec, _, _ := store.ByNodeUUID(context.Background(), fr.NodeUUID)
+			if want := filepath.Join(archiveRoot, tc.wantArchive); rec.ArchivePath != want {
+				t.Errorf("ArchivePath = %s, want %s", rec.ArchivePath, want)
+			}
+			if got, _ := os.ReadFile(master); string(got) != tc.archived {
+				t.Errorf("existing archive file = %q, want it untouched", got)
+			}
+		})
 	}
 }
 
@@ -765,7 +965,9 @@ func TestIngestCardOfflineChtimesFailureIsLogged(t *testing.T) {
 		t.Error("expected local copy to verify")
 	}
 
-	wantDest := filepath.Join(dir, "local", "IMG_0001.jpg")
+	// The mtime is set on the agent's temp copy before it is renamed into
+	// place (the rename keeps it), so that is the destination logged.
+	wantDest := localTempName(filepath.Join(dir, "local", "IMG_0001.jpg"))
 	warn := findCHtimesWarn(t, logBuf, wantDest)
 	if warn == nil {
 		t.Fatalf("expected slog.Warn for local destination %q; got log: %s", wantDest, logBuf.String())
