@@ -25,12 +25,17 @@ import (
 // backoff (queue.Store's next-attempt columns, internal/ingest/drain.go's
 // backoffFor) is what keeps repeated passes from hammering a server or NAS
 // mount that's still down -- Drain itself is stateless across calls.
+// -retry-failed first resets every archive copy and rebase the drainer
+// marked permanently FAILED back to pending (queue.Store.ResetFailed), for
+// use once an operator has fixed the cause recorded in
+// archive_copy_last_error / rebase_last_error.
 func runQueueDrainCmd(args []string) int {
 	fs := flag.NewFlagSet("queue-drain", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to config file (default: ./config.yaml if present, else the per-user config directory)")
 	watch := fs.Bool("watch", false, "keep draining in a loop (Ctrl-C to stop) instead of a single pass")
 	interval := fs.Duration("interval", 5*time.Second, "poll interval between passes when -watch is set")
 	timeout := fs.Duration("timeout", 2*time.Minute, "per-pass timeout")
+	retryFailed := fs.Bool("retry-failed", false, "first put every permanently FAILED archive copy and rebase back to pending, then drain (use after fixing the cause recorded in archive_copy_last_error / rebase_last_error)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -61,6 +66,12 @@ func runQueueDrainCmd(args []string) int {
 	}
 	defer func() { _ = store.Close() }()
 
+	if *retryFailed {
+		if code := resetFailed(os.Stdout, store, *timeout); code != 0 {
+			return code
+		}
+	}
+
 	client := branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
 
 	if !*watch {
@@ -81,6 +92,20 @@ func runQueueDrainCmd(args []string) int {
 	}
 }
 
+// resetFailed implements -retry-failed: queue.Store's ResetFailed,
+// reported on w.
+func resetFailed(w io.Writer, store *queue.Store, timeout time.Duration) int {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	n, err := store.ResetFailed(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "[FAIL] reset failed rows: %v\n", err)
+		return 1
+	}
+	_, _ = fmt.Fprintf(w, "retry-failed: reset %d failed archive copies and %d failed rebases to pending\n", n.ArchiveCopies, n.Rebases)
+	return 0
+}
+
 func runDrainPass(w io.Writer, client *branchdam.Client, store *queue.Store, agentID string, timeout time.Duration) int {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -99,10 +124,10 @@ func runDrainPass(w io.Writer, client *branchdam.Client, store *queue.Store, age
 	_, _ = fmt.Fprintf(w, "node_created submitted: %d, archive copies done: %d, archive copies permanently failed: %d, rebases done: %d, rebases permanently failed: %d, still pending: %d\n",
 		stats.NodeCreatedSent, stats.ArchiveCopiesDone, stats.ArchiveCopiesFailed, stats.RebasesDone, stats.RebasesFailed, stats.Remaining)
 	if stats.ArchiveCopiesFailed > 0 {
-		_, _ = fmt.Fprintln(w, "one or more archive copies hit a permanent failure (a different file already at the archive path, or a local copy edited since ingest) -- nothing was overwritten; see queue.db's archive_copy_last_error column")
+		_, _ = fmt.Fprintln(w, "one or more archive copies hit a permanent failure (a different file already at the archive path, or a local copy edited since ingest) -- nothing was overwritten; see queue.db's archive_copy_last_error column; fix the cause, then run queue-drain -retry-failed")
 	}
 	if stats.RebasesFailed > 0 {
-		_, _ = fmt.Fprintln(w, "one or more rows hit a permanent (non-retryable) rebase failure -- see queue.db's rebase_last_error column; these require operator intervention, not another drain pass")
+		_, _ = fmt.Fprintln(w, "one or more rows hit a permanent (non-retryable) rebase failure -- see queue.db's rebase_last_error column; fix the cause, then run queue-drain -retry-failed")
 	}
 	return 0
 }

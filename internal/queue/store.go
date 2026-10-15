@@ -497,7 +497,7 @@ func (s *Store) MarkRebaseAttempt(ctx context.Context, nodeUUID, errMsg string, 
 
 // MarkRebaseFailed records a terminal (classified-fatal) rebase failure --
 // e.g. the node is ARCHIVED server-side. Drain never reattempts a FAILED
-// row; an operator has to intervene.
+// row; an operator has to intervene, then ResetFailed re-queues it.
 func (s *Store) MarkRebaseFailed(ctx context.Context, nodeUUID, errMsg string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE queue_nodes SET rebase_status = ?, rebase_last_error = ? WHERE node_uuid = ?`,
@@ -506,6 +506,61 @@ func (s *Store) MarkRebaseFailed(ctx context.Context, nodeUUID, errMsg string) e
 		return fmt.Errorf("queue: mark rebase failed for %s: %w", nodeUUID, err)
 	}
 	return nil
+}
+
+// ResetCounts reports how many FAILED steps ResetFailed put back to
+// PENDING.
+type ResetCounts struct {
+	ArchiveCopies int64
+	Rebases       int64
+}
+
+// ResetFailed puts every FAILED archive_copy and every FAILED rebase back
+// to PENDING with a fresh attempt counter and no backoff, so the next Drain
+// pass retries them, in one transaction. FAILED is terminal to Drain, but
+// a "permanent" failure is only permanent until an operator fixes its
+// cause: moving aside the file that occupied the archive path or
+// restoring the local copy (archive_copy), re-pairing a device, correcting
+// a path mapping or restoring a node (rebase) -- and before error
+// classification was status-aware, a rejected key or a 503 also failed
+// rebases. The *_last_error columns are kept as a record of why the step
+// failed until the retry overwrites them. A row whose archive copy was
+// FAILED never reached rebase, so resetting it alone re-runs the row from
+// the copy onward.
+func (s *Store) ResetFailed(ctx context.Context) (ResetCounts, error) {
+	var c ResetCounts
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return c, fmt.Errorf("queue: reset failed: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE queue_nodes SET archive_copy_status = ?, archive_copy_attempts = 0, archive_copy_next_attempt_unix = 0
+WHERE archive_copy_status = ?`,
+		StatusPending, StatusFailed)
+	if err != nil {
+		return c, fmt.Errorf("queue: reset failed archive copies: %w", err)
+	}
+	if c.ArchiveCopies, err = res.RowsAffected(); err != nil {
+		return c, fmt.Errorf("queue: reset failed archive copies: rows affected: %w", err)
+	}
+
+	res, err = tx.ExecContext(ctx,
+		`UPDATE queue_nodes SET rebase_status = ?, rebase_attempts = 0, rebase_next_attempt_unix = 0
+WHERE rebase_status = ?`,
+		StatusPending, StatusFailed)
+	if err != nil {
+		return c, fmt.Errorf("queue: reset failed rebases: %w", err)
+	}
+	if c.Rebases, err = res.RowsAffected(); err != nil {
+		return c, fmt.Errorf("queue: reset failed rebases: rows affected: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return ResetCounts{}, fmt.Errorf("queue: reset failed: commit: %w", err)
+	}
+	return c, nil
 }
 
 const selectCols = `SELECT

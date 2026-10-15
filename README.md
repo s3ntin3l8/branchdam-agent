@@ -223,6 +223,10 @@ go run ./cmd/branchdam-agent ingest -config config.yaml -card /media/$USER/UNTIT
 go run ./cmd/branchdam-agent queue-drain -config config.yaml
 # Or keep draining until connectivity returns:
 go run ./cmd/branchdam-agent queue-drain -config config.yaml -watch
+# After fixing whatever a permanently failed archive copy or rebase reported
+# (archive_copy_last_error / rebase_last_error in queue.db),
+# put those rows back to pending and drain again:
+go run ./cmd/branchdam-agent queue-drain -config config.yaml -retry-failed
 ```
 
 `-offline` requires `offline.queueDbPath` and `offline.tier0ContainerRoot` set in `config.yaml`
