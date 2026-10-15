@@ -1070,3 +1070,173 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 		}
 	})
 }
+
+// TestIngestCardOfflineReformattedCardIsNotAResume is the regression test
+// for the "reformatted card reads as already queued" data-loss bug: a
+// camera restarts its file counter after a format, so a second card
+// mounted at the same path yields the same source paths with different
+// content. queue.db rows are never deleted, so a source-path-only match
+// used to report every such file as AlreadyQueued without copying it --
+// the summary read as success, auto-eject fired, and the photos were only
+// ever on the card. A path match must count as a resume only when the
+// stored size and mtime also match.
+func TestIngestCardOfflineReformattedCardIsNotAResume(t *testing.T) {
+	cases := []struct {
+		name          string
+		first, second string
+		secondMtime   time.Time
+	}{
+		{
+			name:        "same size, different mtime",
+			first:       "card-one-bytes",
+			second:      "card-two-bytes",
+			secondMtime: time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC),
+		},
+		{
+			name:        "different size, same mtime",
+			first:       "card-one-bytes",
+			second:      "card-two-has-more-bytes",
+			secondMtime: time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC),
+		},
+	}
+	firstMtime := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// Both "cards" mount at the same path, as two SD cards from the
+			// same camera do (/Volumes/EOS_DIGITAL).
+			cardRoot := filepath.Join(dir, "EOS_DIGITAL")
+			srcRel := filepath.Join("DCIM", "100CANON", "IMG_0001.jpg")
+			srcPath := filepath.Join(cardRoot, srcRel)
+			writeCardFile := func(content string, mtime time.Time) {
+				t.Helper()
+				if err := os.RemoveAll(cardRoot); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(srcPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(srcPath, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(srcPath, mtime, mtime); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			localRoot := filepath.Join(dir, "local")
+			store := openStoreT(t)
+			e := newOfflineTestEngine(t, failingClient{}, filepath.Join(dir, "archive"), localRoot, "/storage/staging/agent-1", store)
+			e.Ingest.PathTemplate = "{original_name}"
+			var minted int
+			e.NewNodeUUID = func() (string, error) {
+				minted++
+				return fmt.Sprintf("node-%d", minted), nil
+			}
+
+			writeCardFile(tc.first, firstMtime)
+			res1, err := e.IngestCardOffline(context.Background(), cardRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res1.Files) != 1 || res1.Files[0].Outcome() != OfflineOutcomeQueued {
+				t.Fatalf("first card: got %+v, want one freshly queued file", res1.Files)
+			}
+
+			// Second card, same path, different file.
+			writeCardFile(tc.second, tc.secondMtime)
+			res2, err := e.IngestCardOffline(context.Background(), cardRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res2.Files) != 1 {
+				t.Fatalf("second card: got %d files, want 1", len(res2.Files))
+			}
+			fr2 := res2.Files[0]
+			if fr2.Err != nil {
+				t.Fatalf("second card: unexpected error: %v", fr2.Err)
+			}
+			if fr2.AlreadyQueued {
+				t.Fatal("second card's file was reported AlreadyQueued -- a different file at the same source path is not a resume")
+			}
+			if got := fr2.Outcome(); got != OfflineOutcomeQueued {
+				t.Fatalf("second card: Outcome() = %v, want OfflineOutcomeQueued", got)
+			}
+			if fr2.NodeUUID == res1.Files[0].NodeUUID {
+				t.Error("second card's file reused the first card's NodeUUID")
+			}
+			if fr2.LocalPath == res1.Files[0].LocalPath {
+				t.Errorf("second card's file landed on the first card's local path %s", fr2.LocalPath)
+			}
+
+			// Both files exist locally with their own content.
+			for path, want := range map[string]string{res1.Files[0].LocalPath: tc.first, fr2.LocalPath: tc.second} {
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("local copy %s: %v", path, err)
+				}
+				if string(got) != want {
+					t.Errorf("local copy %s = %q, want %q", path, got, want)
+				}
+			}
+
+			all, err := store.All(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(all) != 2 {
+				t.Fatalf("got %d queue rows, want 2 (one per card)", len(all))
+			}
+
+			// A genuine resume of the second card (same file, e.g. a re-run
+			// after a crash) still resumes against the newest row: no new
+			// copy, no new row, no new NodeUUID.
+			e.NewNodeUUID = func() (string, error) {
+				t.Fatal("NewNodeUUID must not be called when resuming an already-queued file")
+				return "", nil
+			}
+			res3, err := e.IngestCardOffline(context.Background(), cardRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fr3 := res3.Files[0]
+			if got := fr3.Outcome(); got != OfflineOutcomeResumed {
+				t.Fatalf("re-run: Outcome() = %v, want OfflineOutcomeResumed (err=%v)", got, fr3.Err)
+			}
+			if fr3.NodeUUID != fr2.NodeUUID {
+				t.Errorf("re-run resumed NodeUUID %q, want the second card's %q", fr3.NodeUUID, fr2.NodeUUID)
+			}
+			all, err = store.All(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(all) != 2 {
+				t.Fatalf("got %d queue rows after resume, want still 2", len(all))
+			}
+		})
+	}
+}
+
+func TestOfflineFileResultOutcome(t *testing.T) {
+	cases := []struct {
+		name string
+		fr   OfflineFileResult
+		want OfflineOutcome
+	}{
+		{"error wins", OfflineFileResult{Err: errors.New("boom"), Queued: true, AlreadyQueued: true}, OfflineOutcomeFailed},
+		{"fresh queue", OfflineFileResult{Queued: true}, OfflineOutcomeQueued},
+		{"resume", OfflineFileResult{Queued: true, AlreadyQueued: true}, OfflineOutcomeResumed},
+		{"resumed sidecar", OfflineFileResult{Queued: true, AlreadyQueued: true, Skipped: true, IsSidecar: true}, OfflineOutcomeResumed},
+		{"fresh sidecar", OfflineFileResult{Queued: true, Skipped: true, IsSidecar: true}, OfflineOutcomeSkipped},
+		{"deliberate skip", OfflineFileResult{Skipped: true, SkipReason: "OS metadata"}, OfflineOutcomeSkipped},
+		{"neither written nor resumed", OfflineFileResult{SourcePath: "a.jpg"}, OfflineOutcomeFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.fr.Outcome(); got != tc.want {
+				t.Errorf("Outcome() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

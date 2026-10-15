@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,10 +9,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
+	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 )
 
 func TestRunIngestOfflineRequiresArchiveContractInUploadMode(t *testing.T) {
@@ -445,5 +449,38 @@ func TestRunIngestUploadStreaming(t *testing.T) {
 	}
 	if string(data) != "sample-photo" {
 		t.Errorf("local file data = %q, want 'sample-photo'", string(data))
+	}
+}
+
+// TestPrintOfflineIngestReportBucketsResumes pins the offline report's
+// per-file buckets: a resume is printed and counted apart from fresh work,
+// and a file that was neither copied nor resumed fails the run (exit 1,
+// "NOT safe to eject") even without a per-file error.
+func TestPrintOfflineIngestReportBucketsResumes(t *testing.T) {
+	ok := ingest.OfflineCardResult{Files: []ingest.OfflineFileResult{
+		{SourcePath: "/card/a.jpg", LocalPath: "/edit/a.jpg", NodeUUID: "n1", Queued: true},
+		{SourcePath: "/card/b.jpg", LocalPath: "/edit/b.jpg", NodeUUID: "n2", Queued: true, AlreadyQueued: true},
+	}}
+	var buf bytes.Buffer
+	if code := printOfflineIngestReport(&buf, "/card", ok, time.Second); code != 0 {
+		t.Fatalf("exit code = %d, want 0\n%s", code, buf.String())
+	}
+	out := buf.String()
+	for _, want := range []string{"[QUEUED] /card/a.jpg", "[RESUMED] /card/b.jpg", "1 queued, 1 resumed, 0 skipped, 0 failed", "safe to eject"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
+	}
+
+	bad := ingest.OfflineCardResult{Files: []ingest.OfflineFileResult{
+		{SourcePath: "/card/a.jpg", Queued: true},
+		{SourcePath: "/card/c.jpg"},
+	}}
+	buf.Reset()
+	if code := printOfflineIngestReport(&buf, "/card", bad, time.Second); code != 1 {
+		t.Fatalf("exit code = %d, want 1 when a file was neither copied nor resumed\n%s", code, buf.String())
+	}
+	if out := buf.String(); !strings.Contains(out, "[FAIL] /card/c.jpg") || !strings.Contains(out, "NOT safe to eject") {
+		t.Errorf("report should fail /card/c.jpg and withhold eject:\n%s", out)
 	}
 }
