@@ -560,6 +560,12 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 // whole-second mtime ingestFileOffline stored from its own pre-copy stat.
 // Whole seconds because that is what the row stores (MtimeUnix), and the
 // value is compared against the same filesystem's own stat on both sides.
+//
+// Residual risk, accepted: a different file with the same size that lands at
+// the same path within the same wall-clock second as the queued one is taken
+// for a resume and not copied. Telling them apart would need a content hash
+// of the source, i.e. a second read of the card, which Key Invariant 1
+// forbids.
 func sameSourceFile(rec queue.Record, info os.FileInfo) bool {
 	return rec.SizeBytes == info.Size() && rec.MtimeUnix == info.ModTime().Unix()
 }
