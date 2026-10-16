@@ -491,3 +491,43 @@ func TestStaleKeyRequestRetriedWithCurrentKey(t *testing.T) {
 		t.Fatal("a 401 on the current key must not be retried")
 	}
 }
+
+// TestConcurrentHandshakesAdoptOnce: the tray can handshake from the
+// detector-ingest and drain goroutines at once. Both see the rotation; one
+// adopts it (adoptMu, then the stale check), the key is stored once, and
+// both end on the new key. Run under -race.
+func TestConcurrentHandshakesAdoptOnce(t *testing.T) {
+	k1, k2 := randomKey(t), randomKey(t)
+	rs, srv := newRotationServer(t, k1, k2)
+	var mu sync.Mutex
+	var stored []string
+	c := New(srv.URL, k1, WithKeyPersister(func(_ context.Context, apiKey string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		stored = append(stored, apiKey)
+		return nil
+	}))
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = c.Handshake(context.Background(), HandshakeRequest{AgentID: "agent-1"})
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(stored, []string{k2}) {
+		t.Fatalf("stored %d keys, want the rotated key exactly once", len(stored))
+	}
+	if c.currentKey() != k2 {
+		t.Fatal("client did not end on the rotated key")
+	}
+	_ = rs
+}

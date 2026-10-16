@@ -71,14 +71,16 @@ var syncDirFn = syncDir
 func Patch(path string, changes map[string]any) error {
 	patchMu.Lock()
 	defer patchMu.Unlock()
-	return patchLocked(path, changes)
+	return patchLocked(path, changes, nil)
 }
 
 // patchLocked is Patch's body; the caller holds patchMu. SetRotatedAPIKey
 // (rotate.go) calls it under the same lock, so a rotated API key arriving
 // on a background handshake and a Settings save cannot drop one another's
-// change.
-func patchLocked(path string, changes map[string]any) error {
+// change. A non-nil check runs on the document root as read for this
+// patch, before any change: an error from it aborts the patch, so a
+// condition decided from the file holds for the bytes that get rewritten.
+func patchLocked(path string, changes map[string]any, check func(root *yaml.Node) error) error {
 	path, err := resolveSymlinks(path)
 	if err != nil {
 		return fmt.Errorf("config: patch: %w", err)
@@ -116,6 +118,11 @@ func patchLocked(path string, changes map[string]any) error {
 	root := doc.Content[0]
 	if root.Kind != yaml.MappingNode {
 		return fmt.Errorf("config: patch: %s: document root is not a YAML mapping", path)
+	}
+	if check != nil {
+		if err := check(root); err != nil {
+			return err
+		}
 	}
 
 	// Sorted purely for deterministic output across repeated calls with the

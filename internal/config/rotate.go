@@ -3,8 +3,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -33,46 +31,28 @@ func SetRotatedAPIKey(path, apiKey string) error {
 	patchMu.Lock()
 	defer patchMu.Unlock()
 
-	placeholder, err := apiKeyIsPlaceholder(path)
-	if err != nil {
-		return err
-	}
-	if placeholder {
-		return fmt.Errorf("%w in %s, so the agent left it untouched: set that environment variable to this device's new API key (shown in branchDAM under Companion Pairing -> the device's credentials) and restart the agent before the current key expires", ErrAPIKeyPlaceholder, path)
-	}
-	return patchLocked(path, map[string]any{"server.apiKey": apiKey})
+	// The placeholder check runs on the same read the patch rewrites, so
+	// an edit that lands between two reads can't get a ${VAR} overwritten.
+	return patchLocked(path, map[string]any{"server.apiKey": apiKey}, func(root *yaml.Node) error {
+		if apiKeyIsPlaceholder(root) {
+			return fmt.Errorf("%w in %s, so the agent left it untouched: set that environment variable to this device's new API key (shown in branchDAM under Companion Pairing -> the device's credentials) and restart the agent before the current key expires", ErrAPIKeyPlaceholder, path)
+		}
+		return nil
+	})
 }
 
 // apiKeyIsPlaceholder reports whether the raw (unexpanded) server.apiKey
-// scalar in the file at path contains a ${VAR} placeholder. A missing file
-// or key is not a placeholder.
-func apiKeyIsPlaceholder(path string) (bool, error) {
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("config: read %s: %w", path, err)
-	}
-	if len(strings.TrimSpace(string(raw))) == 0 {
-		return false, nil
-	}
-	var doc yaml.Node
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return false, fmt.Errorf("config: parse %s: %w", path, err)
-	}
-	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
-		return false, nil
-	}
-	root := doc.Content[0]
+// scalar under root contains a ${VAR} placeholder. A missing key is not a
+// placeholder.
+func apiKeyIsPlaceholder(root *yaml.Node) bool {
 	i := findKey(root, "server")
 	if i < 0 || root.Content[i+1].Kind != yaml.MappingNode {
-		return false, nil
+		return false
 	}
 	server := root.Content[i+1]
 	j := findKey(server, "apiKey")
 	if j < 0 {
-		return false, nil
+		return false
 	}
-	return envVarRe.MatchString(server.Content[j+1].Value), nil
+	return envVarRe.MatchString(server.Content[j+1].Value)
 }
