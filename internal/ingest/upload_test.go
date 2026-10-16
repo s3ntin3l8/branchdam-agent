@@ -600,6 +600,56 @@ func TestUploadStreamReinsertMovesASuffixedDeferredCopy(t *testing.T) {
 	noAgentTemps(t, localRoot)
 }
 
+// TestUploadStreamReinsertMovesADeferredCopyPastAGap: suffixes are
+// taken in order, but a copy can be deleted by hand afterwards; a missing
+// _2 must not hide a live _3.
+func TestUploadStreamReinsertMovesADeferredCopyPastAGap(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	localRoot := filepath.Join(dir, "local")
+	const content = "card bytes"
+	writeUploadCardFile(t, cardRoot, "IMG_0001.JPG", content, time.Time{})
+	other := filepath.Join(localRoot, "2026", "IMG_0001.JPG")
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte("a user's own file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	u := &recordingUploader{relPath: func(branchdam.UploadOptions) string { return "2026/IMG_0001_7.JPG" }}
+	e := newUploadEngine(u, localRoot)
+	e.Ingest.PauseUploadOnMetered = true
+	e.IsMetered = func() (bool, error) { return true, nil }
+	if _, err := e.IngestCard(context.Background(), cardRoot); err != nil {
+		t.Fatalf("metered IngestCard: %v", err)
+	}
+	// The deferred copy took _2; move it to _3 as if _2 had been deleted
+	// by hand after an earlier copy took _3.
+	second := filepath.Join(localRoot, "2026", "IMG_0001_2.JPG")
+	third := filepath.Join(localRoot, "2026", "IMG_0001_3.JPG")
+	if err := os.Rename(second, third); err != nil {
+		t.Fatal(err)
+	}
+
+	e.IsMetered = func() (bool, error) { return false, nil }
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("unmetered IngestCard: %v", err)
+	}
+	if fr := res.Files[0]; fr.Err != nil {
+		t.Fatalf("file error: %v", fr.Err)
+	}
+	server := filepath.Join(localRoot, "2026", "IMG_0001_7.JPG")
+	if b, err := os.ReadFile(server); err != nil || string(b) != content {
+		t.Errorf("copy at the server's path = %q, %v; want %q", b, err, content)
+	}
+	if _, err := os.Stat(third); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("deferred copy past the gap still in place (err %v); want it moved", err)
+	}
+	noAgentTemps(t, localRoot)
+}
+
 // TestUploadStreamReinsertWarnsForEveryDeferredCopyLeftBehind: when the
 // server's path is already taken, no deferred copy can move there; each
 // verified copy found is named in its own WARN rather than the sweep

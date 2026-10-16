@@ -139,9 +139,11 @@ type PathRebasedPayload struct {
 	TargetStorageLocationID int64   `json:"targetStorageLocationId,omitempty"`
 	MtimeUnix               int64   `json:"mtimeUnix,omitempty"`
 	FastHash                *string `json:"fastHash,omitempty"`
-	// FullHash (BLAKE3-256, 64 hex) lets the server fill a known node's
-	// missing full_hash on rebase -- what POST /api/v1/agent/node-status
-	// keys "verified" on -- and is validated server-side the same way as
+	// FullHash (BLAKE3-256, 64 hex) mirrors the server's
+	// EVENT_PATH_REBASED payload, which can fill a known node's missing
+	// full_hash. Wire parity only: no production path emits
+	// EVENT_PATH_REBASED today (the live rebase is Client.Rebase /
+	// RebaseRequest). Validated server-side the same way as
 	// NodeCreatedPayload.FullHash.
 	FullHash  *string `json:"fullHash,omitempty"`
 	SizeBytes int64   `json:"sizeBytes,omitempty"`

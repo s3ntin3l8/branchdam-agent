@@ -54,8 +54,12 @@ func (r *Runner) SetTelemetry(sender TelemetrySender, agentID, clientVersion str
 // Gated on the session pause (AGENTS.md invariant 15's paused gate): an
 // operator who paused the tray mid-shoot gets no background network calls
 // from it. Called from its own timer goroutine (cmd/branchdam-agent's
-// telemetry loop), never from the menu loop -- the disk-usage syscall
-// and the POST may both block.
+// telemetry loop), never from the menu loop -- the POST may block. The
+// disk usage comes from the same cached reading Status() uses
+// (scratchUsageSnapshot): statfs on an unreachable share can hang with no
+// context to bound it, and a hung call here would stall every later tick.
+// Before the first background reading lands the snapshot reports zero
+// capacity, which the server treats as "no verdict", not "disk full".
 //
 // The mirror/render-cache/proxy/prunable breakdown fields stay zero: the
 // agent does not walk localEditRoot to size them, and a made-up number
@@ -90,16 +94,16 @@ func (r *Runner) TriggerTelemetry(ctx context.Context) (ran bool, err error) {
 		TimestampUnix:  time.Now().Unix(),
 		ScratchStorage: branchdam.AgentScratchStorageDTO{MountPath: scratchDir},
 	}
-	if free, total, uErr := diskUsageFunc(scratchDir); uErr != nil {
+	if usage := r.scratchUsageSnapshot(scratchDir); usage.Err != "" {
 		// Still send: the prune stats and the "agent is alive" timestamp
 		// are useful on their own, and the dashboard shows zero capacity
 		// rather than a stale reading.
-		slog.Debug("telemetry: scratch disk usage unavailable", "path", scratchDir, "err", uErr)
+		slog.Debug("telemetry: scratch disk usage unavailable", "path", scratchDir, "err", usage.Err)
 	} else {
-		in.ScratchStorage.TotalBytes = clampInt64(total)
-		in.ScratchStorage.FreeBytes = clampInt64(free)
-		if total >= free {
-			in.ScratchStorage.UsedBytes = clampInt64(total - free)
+		in.ScratchStorage.TotalBytes = clampInt64(usage.TotalBytes)
+		in.ScratchStorage.FreeBytes = clampInt64(usage.FreeBytes)
+		if usage.TotalBytes >= usage.FreeBytes {
+			in.ScratchStorage.UsedBytes = clampInt64(usage.TotalBytes - usage.FreeBytes)
 		}
 	}
 	if lastPrune != nil {

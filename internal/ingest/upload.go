@@ -494,8 +494,9 @@ func (e *Engine) streamUpload(ctx context.Context, fr FileResult, it uploadItem)
 // own base name (what deferUpload rendered) and, for a sidecar, the
 // master-derived upload name -- each unsuffixed and with the collision
 // suffixes (_2, _3, ...) ResolveDestination gives a copy whose name was
-// taken. The sweep Lstats each render and stops at the first suffix that
-// is absent; only a regular file of the uploaded size is compared, against
+// taken. The sweep Lstats each render and stops after a run of
+// maxDeferredSuffixGap absent suffixes (a hand-deleted _2 doesn't hide a
+// live _3); only a regular file of the uploaded size is compared, against
 // the hash already in hand, so the card is not read again.
 func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath, wantHash string, wantSize int64) bool {
 	names := []string{it.vars.OriginalName}
@@ -503,6 +504,7 @@ func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath,
 		names = append(names, it.uploadName)
 	}
 	for _, name := range names {
+		misses := 0
 		for counter := 1; counter <= maxDeferredSuffix; counter++ {
 			if ctx.Err() != nil {
 				return false
@@ -519,11 +521,19 @@ func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath,
 			}
 			info, err := os.Lstat(prior)
 			if err != nil {
+				// ResolveDestination takes suffixes in order, but a copy
+				// can be deleted by hand afterwards (a missing _2 with a
+				// live _3), so a short gap doesn't end the sweep; a run of
+				// maxDeferredSuffixGap misses does.
 				if counter > 1 {
-					break // suffixes are taken in order; none further along
+					misses++
+					if misses >= maxDeferredSuffixGap {
+						break
+					}
 				}
 				continue
 			}
+			misses = 0
 			if !info.Mode().IsRegular() || info.Size() != wantSize {
 				continue
 			}
@@ -560,6 +570,10 @@ func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath,
 // maxDeferredSuffix bounds moveDeferredCopy's suffix sweep at the same
 // counter ResolveDestination's own collision loop stops at.
 const maxDeferredSuffix = 10000
+
+// maxDeferredSuffixGap is how many consecutive absent suffixes end
+// moveDeferredCopy's sweep of one name.
+const maxDeferredSuffixGap = 8
 
 // uploadLocalCopy streams the verified local copy at p to the server.
 func (e *Engine) uploadLocalCopy(ctx context.Context, p string, w WriteResult, it uploadItem) (*branchdam.UploadResponse, error) {

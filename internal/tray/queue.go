@@ -89,8 +89,9 @@ type Drainer interface {
 type PruneSummary struct {
 	At time.Time
 	// Duration is how long the pass took (stamped by TriggerPrune), what
-	// telemetry reports as lastPruneDurationMs.
-	Duration   time.Duration
+	// telemetry reports as lastPruneDurationMs. JSON carries it as
+	// durationMs (see MarshalJSON), never as raw nanoseconds.
+	Duration   time.Duration `json:"-"`
 	Evaluated  int
 	Pruned     int
 	FreedBytes int64
@@ -103,8 +104,9 @@ func (s PruneSummary) MarshalJSON() ([]byte, error) {
 	type alias PruneSummary
 	return json.Marshal(struct {
 		alias
-		Err string `json:"Err,omitempty"`
-	}{alias: alias(s), Err: errString(s.Err)})
+		DurationMs int64  `json:"durationMs,omitempty"`
+		Err        string `json:"Err,omitempty"`
+	}{alias: alias(s), DurationMs: s.Duration.Milliseconds(), Err: errString(s.Err)})
 }
 
 // Pruner is the subset of internal/prune.Pass's behavior the tray runs on
