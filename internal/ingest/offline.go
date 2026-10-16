@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,25 +135,9 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 		return OfflineCardResult{}, fmt.Errorf("ingest: IngestCardOffline requires a non-nil Engine.Queue")
 	}
 
-	var dedupUnavailable bool
-	if checker, ok := e.Client.(contentChecker); ok && e.Ingest.PreflightTimeoutSecs >= 0 {
-		probeTimeout := time.Duration(config.DefaultOfflinePreflightTimeoutSecs) * time.Second
-		if e.Ingest.PreflightTimeoutSecs > 0 {
-			probeTimeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
-		}
-		probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
-		_, probeErr := checker.CheckContent(probeCtx, "", "")
-		probeCancel()
-		if probeErr != nil {
-			var he *branchdam.HTTPError
-			if !errors.As(probeErr, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented || he.StatusCode == http.StatusBadRequest) {
-				dedupUnavailable = true
-				slog.Warn("ingest: offline pre-flight dedup endpoint unavailable -- skipping pre-flight checks for this run", "err", probeErr)
-			} else {
-				slog.Warn("ingest: offline pre-flight probe returned error (proceeding per-file)", "err", probeErr)
-			}
-		}
-	}
+	// Per-pass content-dedup state: cleared for every card, since the
+	// server may become reachable (or be upgraded) between cards.
+	var dedup dedupState
 
 	// Probed once per card, not per file: whether ResolveDestination may
 	// also look at the archive for name collisions (see
@@ -200,7 +183,7 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		result.Files = append(result.Files, e.ingestFileOffline(ctx, path, stemSuffix, &dedupUnavailable, archiveReachable))
+		result.Files = append(result.Files, e.ingestFileOffline(ctx, path, stemSuffix, &dedup, archiveReachable))
 		return nil
 	})
 	if err != nil {
@@ -219,7 +202,7 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 //  1. Check queue.db for an existing row keyed by this source path whose
 //     recorded size and mtime match the source file as it is now -- a
 //     restart resuming a previously-interrupted run over the same card. If
-//     found, trust it (the row only exists because step 5 below already
+//     found, trust it (the row only exists because step 4 below already
 //     completed on the earlier run) and return without touching the
 //     filesystem again. Finished queue rows are kept for months
 //     (queue.GCRetention) and cameras restart their file counters after a format, so a path match alone is not
@@ -230,7 +213,7 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 //     from the stat this function already does; no extra read of the card
 //     is needed (invariant 1: the card is read once, by WriteLocal).
 //     A resumed row whose local copy never made it to its final name (a
-//     crash between step 6 and step 7 below) is completed here: the
+//     crash between step 5 and step 6 below) is completed here: the
 //     agent's own temp copy is verified and renamed into place, or
 //     re-copied from the card if it's missing or bad.
 //  2. Pick the destination name (resolveOfflineDestination): if an
@@ -239,37 +222,37 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 //     occupied by anything else -- an online-ingest edit copy, a file the
 //     user put there, another card's master in the reachable archive -- is
 //     never reused and never deleted; the new file gets the next suffix.
-//  3. Pre-flight content dedup check: if server is reachable and pre-flight
-//     is enabled, query GET /api/v1/agent/check-content with fastHash and
-//     fullHash. If confirmed duplicate with active lifecycle state, skip
-//     without writing local copy or deleting existing files.
-//  4. Remove the agent's own leftover temp copy for this destination, if
+//  3. Remove the agent's own leftover temp copy for this destination, if
 //     any (its name, localTempName, marks it as the agent's: nothing else
 //     is ever deleted).
-//  5. Write and verify the local copy under that temp name. This step has
-//     no durable side effect yet -- if the process dies here, restart lands
-//     back at step 4 with nothing to resume, which is correct: nothing was
-//     ever promised to branchDAM about this file, and no file sits at a
-//     final name for a later run to mistake for an ingested one.
-//  6. Mint NodeUUID, build both container paths and the NodeCreatedPayload,
+//  4. Write the local copy under that temp name, hashing it in flight;
+//     run the content dedup check (checkContentDedup: fast-hash
+//     pre-screen, full-hash confirm only on a possible match) on those
+//     hashes, and if the server confirms a live duplicate, remove the temp
+//     copy and skip; otherwise verify the copy. This step has no durable
+//     side effect yet -- if the process dies here, restart lands back at
+//     step 3 with nothing to resume, which is correct: nothing was ever
+//     promised to branchDAM about this file, and no file sits at a final
+//     name for a later run to mistake for an ingested one.
+//  5. Mint NodeUUID, build both container paths and the NodeCreatedPayload,
 //     and INSERT the queue.db row. This commit is the durability boundary:
 //     once it returns, the file's identity and intent are permanent, and
 //     every step after this point is safe to retry indefinitely because it
 //     is idempotent against that same NodeUUID.
-//  7. Rename the temp copy to its final local name, refusing to replace
+//  6. Rename the temp copy to its final local name, refusing to replace
 //     anything already there. Only now does a file appear at a final name,
-//     and it is already claimed by the row from step 6.
-//  8. Only after the row is durably queued, make one best-effort attempt at
+//     and it is already claimed by the row from step 5.
+//  7. Only after the row is durably queued, make one best-effort attempt at
 //     POST EVENT_NODE_CREATED. Whether this succeeds or fails is not
 //     load-bearing for correctness -- Drain retries it either way -- it
 //     just means a workstation that's actually online (just missing the NAS
 //     mount, say) doesn't wait for the next Drain pass to start tracking the
 //     node server-side.
 //
-// Sidecars (.xmp/.srt) skip step 8 entirely: no NodeCreatedPayload, no
+// Sidecars (.xmp/.srt) skip step 7 entirely: no NodeCreatedPayload, no
 // EVENT_NODE_CREATED, no rebase -- only the local write and the archive-copy
 // queue row, mirroring IngestCard's sidecar handling.
-func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuffix map[string]string, dedupUnavailable *bool, archiveReachable bool) OfflineFileResult {
+func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuffix map[string]string, dedup *dedupState, archiveReachable bool) OfflineFileResult {
 	fr := OfflineFileResult{SourcePath: srcPath}
 
 	ext := extNoDot(srcPath)
@@ -355,16 +338,6 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		return fr
 	}
 
-	// Pre-flight BLAKE3 content dedup check before WriteLocal.
-	if !fr.IsSidecar {
-		if skip, existingUUID, skipReason := e.checkContentDedup(ctx, srcPath, srcInfo.Size(), config.DefaultOfflinePreflightTimeoutSecs, dedupUnavailable); skip {
-			fr.Skipped = true
-			fr.SkipReason = skipReason
-			fr.ExistingNodeUUID = existingUUID
-			return fr
-		}
-	}
-
 	// The local copy is written under the agent's own temp name and only
 	// renamed to localPath after the queue row claiming it is committed
 	// (see placeLocal below). A leftover at this temp name is the agent's
@@ -397,6 +370,19 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		fr.Err = fmt.Errorf("write local copy: %w", err)
 		return fr
 	}
+	// Content dedup on the hashes WriteLocal computed in flight (the card
+	// is read once, invariant 1). A confirmed live duplicate returns here,
+	// before the queue row: the deferred cleanup removes the temp copy,
+	// the only file this path wrote, and nothing is queued.
+	if !fr.IsSidecar {
+		if skip, existingUUID, skipReason := e.checkContentDedup(ctx, srcPath, writeRes, "", config.DefaultOfflinePreflightTimeoutSecs, dedup); skip {
+			fr.Skipped = true
+			fr.SkipReason = skipReason
+			fr.ExistingNodeUUID = existingUUID
+			return fr
+		}
+	}
+
 	// Soft contract (issue #103): the local-path mtime is what
 	// prune.go's TOCTOU re-stat reads back, so a silently-swallowed
 	// Chtimes failure here means the prune-safety half of invariant
@@ -560,7 +546,7 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 
 	// Opportunistic fast path, strictly best-effort: failure here changes
 	// nothing about correctness, since Drain will retry regardless (see this
-	// function's doc comment, step 8).
+	// function's doc comment, step 7).
 	resp, postErr := e.Client.PostNodeCreatedWithUUID(ctx, e.AgentID, payload, rec.NodeCreatedEventUUID)
 	if postErr == nil {
 		if markErr := e.Queue.MarkNodeCreatedSubmitted(ctx, nodeUUID, resp.EventID, e.now()); markErr == nil {

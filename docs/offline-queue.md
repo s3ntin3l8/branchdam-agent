@@ -60,17 +60,23 @@ Two more online-ingest rules close the "copied but never registered" gap without
   mapping fails the file while both destinations are still empty.
 - A re-run that finds identical copies already at both destinations no longer takes that as proof
   of registration. It skips only when a queue row claims the copies or `check-content` finds a live
-  node with their BLAKE3 (hashed from the local copy, not the card); otherwise it verifies the
-  archive copy against that hash -- honouring `ingest.requireUnbuffered` -- and registers the copies
-  (the server ignores an `EVENT_NODE_CREATED` whose `full_hash` a live node already has). A fresh
-  copy that fails a required unbuffered verify is removed, so the next run copies and checks again
-  instead of finding it "already ingested".
+  (`ACTIVE` or `HIDDEN`) node with their BLAKE3 (hashed from the local copy, not the card, and looked
+  up by full hash directly, with the fast hash and size alongside; the same per-pass rules as the
+  fresh-copy dedup apply -- a 400 retries as a plain full-hash lookup, a 404/501 or transport error
+  stops asking for the rest of the pass). A live node at the file's own archive path is its own
+  registration, not a duplicate. Otherwise it verifies the archive copy against that hash --
+  honouring `ingest.requireUnbuffered` -- and registers the copies (the server ignores an
+  `EVENT_NODE_CREATED` whose `full_hash` a live node already has). A fresh copy that fails a
+  required unbuffered verify is removed, so the next run copies and checks again instead of finding
+  it "already ingested".
 
 ## Ordering invariants
 
-**1. `queue.db`'s row commits before any network mutation.** `Engine.ingestFileOffline` optionally
-queries `GET /api/v1/agent/check-content` (pre-flight BLAKE3 content dedup), writes and verifies the
-local copy, then `Store.InsertPending` -- the durability boundary -- *then* makes one best-effort
+**1. `queue.db`'s row commits before any network mutation.** `Engine.ingestFileOffline` writes the
+local copy under its temp name (hashing it in flight), optionally queries `GET
+/api/v1/agent/check-content` with those hashes (fast-hash pre-screen, then a full-hash confirm only
+on a possible match; a confirmed live duplicate removes the temp copy and queues nothing), verifies
+the copy, then `Store.InsertPending` -- the durability boundary -- *then* makes one best-effort
 opportunistic `PostNodeCreated` attempt. A crash between the POST succeeding and the row being written
 would leave a server-side node nothing local remembers, with no read endpoint to recover it; getting
 the order backwards was the first thing worth getting wrong here, so it isn't.

@@ -1200,14 +1200,19 @@ appropriate:
     data plus the `phase` field under the busy-card header. Confirm the
     tooltip clears (reverts to the default "branchDAM agent" string) within
     one tick of ingest completion.
-14. **Pre-flight BLAKE3 dedup (#88):** ingest a card. Then re-insert the same
+14. **Content dedup (#88):** ingest a card. Then re-insert the same
     card. Confirm the second ingest reports every file as
-    `duplicate: already in library as node X` with zero bytes written to
-    `archiveRoot`. Then disconnect from the server (simulate offline: pull
-    the network cable / disable Wi-Fi), re-insert the card -- confirm the
-    pre-flight times out within 5s (`PreflightTimeoutSecs`), the ingest
-    proceeds normally, and the server-side dedup fires on the next
-    `PostNodeCreated` once connectivity is restored.
+    `duplicate: already in library as node X`, leaves no new file under
+    `archiveRoot` or `localEditRoot` (each copy is written once, while
+    hashing, and removed when the server confirms the duplicate), and
+    submits no `EVENT_NODE_CREATED`. The card is read once per file. Then
+    disconnect from the server (simulate offline: pull the network cable /
+    disable Wi-Fi), re-insert the card -- confirm the check times out
+    within 5s (`PreflightTimeoutSecs`), the ingest proceeds normally, and
+    the server-side dedup fires on the next `PostNodeCreated` once
+    connectivity is restored. Against a server older than the fast-hash
+    pre-screen (branchDAM #538), the first file logs "server rejected the
+    fast-hash pre-screen" and dedup still works via the full-hash lookup.
 15. **Safe eject after verified ingest (#87):** with `autoEject: true` set,
     insert a camera card -- confirm the volume unmounts/ejects after the
     verified ingest completes and an OS notification appears. Only a

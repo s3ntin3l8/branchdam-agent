@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -594,7 +595,7 @@ func TestClientCheckContent(t *testing.T) {
 			}`))
 		})
 
-		res, err := c.CheckContent(context.Background(), "fasthash123", "fullhash456")
+		res, err := c.CheckContent(context.Background(), ContentCheckQuery{FastHash: "fasthash123", FullHash: "fullhash456"})
 		if err != nil {
 			t.Fatalf("CheckContent: %v", err)
 		}
@@ -606,6 +607,9 @@ func TestClientCheckContent(t *testing.T) {
 		}
 		if !strings.Contains(gotQuery, "fastHash=fasthash123") || !strings.Contains(gotQuery, "fullHash=fullhash456") {
 			t.Errorf("query = %q, want fastHash and fullHash params", gotQuery)
+		}
+		if strings.Contains(gotQuery, "sizeBytes") {
+			t.Errorf("query = %q, sizeBytes 0 (unknown) must not be sent", gotQuery)
 		}
 		if gotAPIKey == "" {
 			t.Error("expected X-API-Key header to be set")
@@ -630,18 +634,44 @@ func TestClientCheckContent(t *testing.T) {
 		}
 	})
 
-	t.Run("not found", func(t *testing.T) {
+	t.Run("fast pre-screen sends fastHash and sizeBytes and decodes possibleMatch", func(t *testing.T) {
+		var gotQuery url.Values
 		_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			gotQuery = r.URL.Query()
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"found": false}`))
+			_, _ = w.Write([]byte(`{"found": false, "possibleMatch": true}`))
 		})
 
-		res, err := c.CheckContent(context.Background(), "fasthash123", "")
+		res, err := c.CheckContent(context.Background(), ContentCheckQuery{FastHash: "0123456789abcdef", SizeBytes: 4096})
 		if err != nil {
 			t.Fatalf("CheckContent: %v", err)
 		}
-		if res.Found {
-			t.Errorf("res.Found = %v, want false", res.Found)
+		if gotQuery.Get("fastHash") != "0123456789abcdef" || gotQuery.Get("sizeBytes") != "4096" {
+			t.Errorf("query = %v, want fastHash and sizeBytes=4096", gotQuery)
+		}
+		if gotQuery.Has("fullHash") {
+			t.Errorf("query = %v, a pre-screen must not send fullHash", gotQuery)
+		}
+		if res.Found || !res.PossibleMatch {
+			t.Errorf("res = %+v, want found=false possibleMatch=true", res)
+		}
+		if res.NodeUUID != "" || res.FilePath != "" {
+			t.Errorf("res = %+v, a pre-screen answer carries no node details", res)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"found": false, "possibleMatch": false}`))
+		})
+
+		res, err := c.CheckContent(context.Background(), ContentCheckQuery{FastHash: "fasthash123"})
+		if err != nil {
+			t.Fatalf("CheckContent: %v", err)
+		}
+		if res.Found || res.PossibleMatch {
+			t.Errorf("res = %+v, want found=false possibleMatch=false", res)
 		}
 		if res.NodeUUID != "" {
 			t.Errorf("res.NodeUUID = %q, want empty", res.NodeUUID)
@@ -653,7 +683,7 @@ func TestClientCheckContent(t *testing.T) {
 			http.Error(w, "server unavailable", http.StatusServiceUnavailable)
 		})
 
-		_, err := c.CheckContent(context.Background(), "fast", "full")
+		_, err := c.CheckContent(context.Background(), ContentCheckQuery{FastHash: "fast", FullHash: "full"})
 		if err == nil {
 			t.Fatal("expected error on 503 response, got nil")
 		}

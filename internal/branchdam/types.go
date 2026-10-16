@@ -333,8 +333,15 @@ type NodeStatusResponse struct {
 }
 
 // ContentCheckResult is the response body for GET /api/v1/agent/check-content.
+//
+// Found is true only for a definitive full-hash match, and only then are
+// NodeUUID, FilePath and LifecycleState set. PossibleMatch answers the fast
+// pre-screen (a fastHash, and size when both sides know it, matches a live
+// ACTIVE or HIDDEN node); on a full-hash request it mirrors Found. Servers
+// predating the pre-screen never send it.
 type ContentCheckResult struct {
 	Found          bool   `json:"found"`
+	PossibleMatch  bool   `json:"possibleMatch"`
 	NodeUUID       string `json:"nodeUuid,omitempty"`
 	FilePath       string `json:"filePath,omitempty"`
 	LifecycleState string `json:"lifecycleState,omitempty"`
