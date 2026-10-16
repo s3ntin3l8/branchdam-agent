@@ -40,6 +40,7 @@ type Stats struct {
 	Pruned                   int
 	FreedBytes               int64
 	SkippedSidecar           int
+	SkippedOnlineIngest      int
 	SkippedAlreadyGone       int
 	SkippedTooYoung          int
 	SkippedNotVerified       int
@@ -50,9 +51,10 @@ type Stats struct {
 }
 
 // Pass implements one prune pass end to end. Deliberately narrow in scope:
-// only queue.db rows (offline-ingested files) are ever considered -- a
-// plain online `ingest` has no durable local-path ledger to work from at
-// all. Two independent safety gates run before any deletion, neither of
+// only offline-ingested queue.db rows are ever considered. Online `ingest`
+// also records a row per file (queue.OriginOnline, so a failed
+// registration is retried), but its local edit copies have never been
+// prune's to delete, and still aren't. Two independent safety gates run before any deletion, neither of
 // which trusts the server response alone:
 //
 //  1. A containment check (filepath.EvalSymlinks on both LocalEditRoot and
@@ -104,6 +106,10 @@ func Pass(ctx context.Context, w io.Writer, client *branchdam.Client, store *que
 		// can never succeed.
 		if r.Kind != queue.KindMedia {
 			stats.SkippedSidecar++
+			continue
+		}
+		if r.Origin == queue.OriginOnline {
+			stats.SkippedOnlineIngest++
 			continue
 		}
 		stats.Evaluated++
@@ -238,8 +244,8 @@ func PrintReport(w io.Writer, s Stats, dryRun bool) {
 		_, _ = fmt.Fprintln(w, "branchdam-agent prune")
 	}
 	_, _ = fmt.Fprintf(w, "  evaluated: %d, pruned: %d, freed: %d bytes\n", s.Evaluated, s.Pruned, s.FreedBytes)
-	_, _ = fmt.Fprintf(w, "  skipped: sidecar=%d already-gone=%d too-young=%d not-verified=%d file-changed=%d outside-root=%d unexpected-symlink=%d\n",
-		s.SkippedSidecar, s.SkippedAlreadyGone, s.SkippedTooYoung, s.SkippedNotVerified, s.SkippedFileChanged, s.SkippedOutsideRoot, s.SkippedUnexpectedSymlink)
+	_, _ = fmt.Fprintf(w, "  skipped: sidecar=%d online-ingest=%d already-gone=%d too-young=%d not-verified=%d file-changed=%d outside-root=%d unexpected-symlink=%d\n",
+		s.SkippedSidecar, s.SkippedOnlineIngest, s.SkippedAlreadyGone, s.SkippedTooYoung, s.SkippedNotVerified, s.SkippedFileChanged, s.SkippedOutsideRoot, s.SkippedUnexpectedSymlink)
 	if s.Errors > 0 {
 		_, _ = fmt.Fprintf(w, "  errors: %d -- see [ERROR] lines above\n", s.Errors)
 	}

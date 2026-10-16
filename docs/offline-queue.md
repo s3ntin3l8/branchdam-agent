@@ -41,6 +41,31 @@ A `SIDECAR`-kind row (`.xmp`/`.srt`) only ever needs `archive_copy`: `node_creat
 are `SKIPPED` at insert time, matching the online path's own "sidecars are copied but never
 tracked as their own node" behavior.
 
+### Online ingest rows (`origin = ONLINE`)
+
+When `offline.queueDbPath` is set, online ingest (`IngestCard`, the tray's normal path and plain
+`ingest`) also writes one row per media file, with `origin = ONLINE`. By then both copies are
+written and verified and `EVENT_NODE_CREATED` already targets the Tier-3 archive path, so the row
+starts with `archive_copy = DONE` and `rebase = SKIPPED`; only `node_created` is left. The row is
+inserted before the POST (ordering invariant 1 below applies to online ingest too). If the POST is
+not accepted -- server down, a 5xx, the ingest cancelled -- the file is reported as queued, not
+failed, and `Drain`'s `node_created` phase retries it with the same `nodeUuid` and event UUID. An
+`ONLINE` row is pending until the registration is accepted (it counts in the "uploaded, confirming
+archive" bucket meanwhile) and is never a `prune` candidate: online ingest keeps its edit copies.
+Rows written before schema v3 are `OFFLINE`.
+
+Two more online-ingest rules close the "copied but never registered" gap without a queue:
+
+- The archive path's container mapping (`pathMappings`) is resolved before the copy, so a missing
+  mapping fails the file while both destinations are still empty.
+- A re-run that finds identical copies already at both destinations no longer takes that as proof
+  of registration. It skips only when a queue row claims the copies or `check-content` finds a live
+  node with their BLAKE3 (hashed from the local copy, not the card); otherwise it verifies the
+  archive copy against that hash -- honouring `ingest.requireUnbuffered` -- and registers the copies
+  (the server ignores an `EVENT_NODE_CREATED` whose `full_hash` a live node already has). A fresh
+  copy that fails a required unbuffered verify is removed, so the next run copies and checks again
+  instead of finding it "already ingested".
+
 ## Ordering invariants
 
 **1. `queue.db`'s row commits before any network mutation.** `Engine.ingestFileOffline` optionally

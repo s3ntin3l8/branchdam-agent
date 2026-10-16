@@ -27,7 +27,7 @@ import (
 // currentSchemaVersion is the latest schema version Open/migrate must bring
 // a queue.db to. Bump this and add a migration entry to the migrations
 // slice whenever the schema changes in a backward-incompatible way.
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 // Status values for the three independent per-step columns.
 const (
@@ -75,6 +75,24 @@ const (
 	KindSidecar = "SIDECAR"
 )
 
+// Origin says which ingest path wrote a row.
+const (
+	// OriginOffline is IngestCardOffline's row: only the local edit copy
+	// exists at insert time; Drain copies it to the archive, submits
+	// EVENT_NODE_CREATED against the Tier-0 path, then rebases it.
+	OriginOffline = "OFFLINE"
+	// OriginOnline is IngestCard's row: both copies were already written
+	// and verified at insert time and EVENT_NODE_CREATED points straight
+	// at the Tier-3 archive path, so archive_copy starts DONE and rebase
+	// starts SKIPPED. The row exists so the registration survives a POST
+	// that fails (server down, process killed, ingest cancelled) --
+	// Drain's node_created phase retries it until the server accepts it.
+	// Prune never touches an ONLINE row's local copy: online ingest has
+	// always kept its edit copies, and pruning them is an offline-only
+	// feature (see internal/config.PruneConfig).
+	OriginOnline = "ONLINE"
+)
+
 // Record is one queue_nodes row.
 type Record struct {
 	ID                         int64
@@ -108,14 +126,20 @@ type Record struct {
 	RebaseNextAttemptUnix      int64
 	RebaseLastError            string
 	CreatedAtUnix              int64
+	Origin                     string // OriginOffline or OriginOnline
 }
 
 // Done reports whether every step this record needs has reached a terminal
 // state (DONE/SKIPPED for archive_copy+rebase; FAILED counts as terminal
 // too, even though it is not success, so Pending() stops returning it -- a
 // FAILED archive copy ends the row outright, since rebase never runs
-// without one). Done is not success: check Failed() too.
+// without one). Done is not success: check Failed() too. An ONLINE row is
+// not done until its EVENT_NODE_CREATED has been accepted: that
+// registration is the only step it is waiting on.
 func (r Record) Done() bool {
+	if r.Origin == OriginOnline && r.NodeCreatedStatus == StatusPending {
+		return false
+	}
 	if r.ArchiveCopyStatus == StatusFailed {
 		return true
 	}
@@ -207,12 +231,17 @@ type NewRecord struct {
 	FastHash               string
 	NodeCreatedPayloadJSON string
 	NodeCreatedEventUUID   string
+	// Origin is OriginOffline (the default when empty) or OriginOnline.
+	Origin string
 }
 
 // InsertPending inserts rec as a fresh row with every step status at its
 // initial value (PENDING for MEDIA's three steps; PENDING for SIDECAR's
 // archive_copy, SKIPPED for the other two, since a sidecar never gets a
-// tracked node). This is the durability boundary the whole package exists
+// tracked node). An OriginOnline row starts with archive_copy DONE and
+// rebase SKIPPED -- IngestCard wrote and verified both copies before
+// inserting it and registers the Tier-3 path directly -- so only
+// node_created is left for Drain. This is the durability boundary the whole package exists
 // for: the caller must not attempt any network call for this file before
 // this insert has returned successfully -- see internal/ingest/offline.go's
 // ingestFileOffline for the call site and why the ordering matters (a crash
@@ -220,10 +249,22 @@ type NewRecord struct {
 // nothing local remembers, with no read endpoint to recover it).
 func (s *Store) InsertPending(ctx context.Context, rec NewRecord) error {
 	nodeCreatedStatus := StatusPending
+	archiveCopyStatus := StatusPending
 	rebaseStatus := StatusPending
 	if rec.Kind == KindSidecar {
 		nodeCreatedStatus = StatusSkipped
 		rebaseStatus = StatusSkipped
+	}
+	origin := rec.Origin
+	switch origin {
+	case "":
+		origin = OriginOffline
+	case OriginOffline:
+	case OriginOnline:
+		archiveCopyStatus = StatusDone
+		rebaseStatus = StatusSkipped
+	default:
+		return fmt.Errorf("queue: insert pending row for %s: unknown origin %q", rec.SourcePath, rec.Origin)
 	}
 
 	eventUUID := rec.NodeCreatedEventUUID
@@ -240,11 +281,13 @@ func (s *Store) InsertPending(ctx context.Context, rec NewRecord) error {
 INSERT INTO queue_nodes (
 	node_uuid, kind, source_path, local_path, archive_path, archive_container_path,
 	tier0_container_path, file_name, file_ext, size_bytes, mtime_unix, full_hash, fast_hash,
-	node_created_payload_json, node_created_event_uuid, node_created_status, archive_copy_status, rebase_status, created_at_unix
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	node_created_payload_json, node_created_event_uuid, node_created_status, archive_copy_status, rebase_status, created_at_unix,
+	origin
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.NodeUUID, rec.Kind, rec.SourcePath, rec.LocalPath, rec.ArchivePath, rec.ArchiveContainerPath,
 		rec.Tier0ContainerPath, rec.FileName, rec.FileExt, rec.SizeBytes, rec.MtimeUnix, rec.FullHash, rec.FastHash,
-		rec.NodeCreatedPayloadJSON, eventUUID, nodeCreatedStatus, StatusPending, rebaseStatus, time.Now().Unix(),
+		rec.NodeCreatedPayloadJSON, eventUUID, nodeCreatedStatus, archiveCopyStatus, rebaseStatus, time.Now().Unix(),
+		origin,
 	)
 	if err != nil {
 		return fmt.Errorf("queue: insert pending row for %s: %w", rec.SourcePath, err)
@@ -302,8 +345,9 @@ func (s *Store) ByLocalPath(ctx context.Context, localPath string) (Record, bool
 // Counts' aggregate below, rather than each re-deriving it, so the two
 // can't drift out of sync the way Record.Done() and Pending's own
 // previously-inline SQL already had (a real duplication found while
-// building Counts).
-const terminalSQL = `(archive_copy_status = 'DONE' AND rebase_status IN ('DONE', 'SKIPPED', 'FAILED')) OR archive_copy_status = 'FAILED'`
+// building Counts). An ONLINE row whose EVENT_NODE_CREATED is still
+// PENDING is never terminal (see Record.Done).
+const terminalSQL = `((archive_copy_status = 'DONE' AND rebase_status IN ('DONE', 'SKIPPED', 'FAILED')) OR archive_copy_status = 'FAILED') AND NOT (origin = 'ONLINE' AND node_created_status = 'PENDING')`
 
 // failedSQL is the row-level predicate matching Record.Failed().
 const failedSQL = `(archive_copy_status = 'FAILED' OR rebase_status = 'FAILED')`
@@ -369,7 +413,9 @@ type Counts struct {
 	// (archive_copy_status = PENDING) -- MEDIA and SIDECAR rows alike.
 	AwaitingUpload int
 	// AwaitingRebase counts MEDIA rows whose archive copy is done but
-	// rebase hasn't happened yet. A SIDECAR row's rebase_status is
+	// whose server-side confirmation hasn't happened yet: the rebase of an
+	// offline row, or the EVENT_NODE_CREATED registration of an ONLINE row
+	// whose POST failed at ingest time. A SIDECAR row's rebase_status is
 	// SKIPPED from insert (see InsertPending), so it never appears here.
 	AwaitingRebase int
 	// Failed counts rows with a permanently failed (terminal) archive copy
@@ -398,7 +444,7 @@ func (s *Store) Counts(ctx context.Context) (Counts, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT
 	COALESCE(SUM(CASE WHEN archive_copy_status = 'PENDING' THEN 1 ELSE 0 END), 0),
-	COALESCE(SUM(CASE WHEN archive_copy_status = 'DONE' AND rebase_status = 'PENDING' THEN 1 ELSE 0 END), 0),
+	COALESCE(SUM(CASE WHEN archive_copy_status = 'DONE' AND NOT (`+terminalSQL+`) THEN 1 ELSE 0 END), 0),
 	COALESCE(SUM(CASE WHEN `+failedSQL+` THEN 1 ELSE 0 END), 0),
 	COALESCE(SUM(CASE WHEN (`+terminalSQL+`) AND NOT `+failedSQL+` THEN 1 ELSE 0 END), 0),
 	COALESCE(SUM(CASE WHEN archive_copy_status = 'PENDING' THEN size_bytes ELSE 0 END), 0)
@@ -570,7 +616,7 @@ const selectCols = `SELECT
 	node_created_submitted_at_unix, node_created_attempts, node_created_next_attempt_unix, node_created_last_error,
 	archive_copy_status, archive_copy_attempts, archive_copy_next_attempt_unix, archive_copy_last_error,
 	rebase_status, rebase_attempts, rebase_next_attempt_unix, rebase_last_error,
-	created_at_unix
+	created_at_unix, origin
 FROM queue_nodes`
 
 // rowScanner is the subset of *sql.Row / *sql.Rows this package needs, so
@@ -596,7 +642,7 @@ func scan(s rowScanner) (Record, error) {
 		&r.NodeCreatedSubmittedAtUnix, &r.NodeCreatedAttempts, &r.NodeCreatedNextAttemptUnix, &r.NodeCreatedLastError,
 		&r.ArchiveCopyStatus, &r.ArchiveCopyAttempts, &r.ArchiveCopyNextAttemptUnix, &r.ArchiveCopyLastError,
 		&r.RebaseStatus, &r.RebaseAttempts, &r.RebaseNextAttemptUnix, &r.RebaseLastError,
-		&r.CreatedAtUnix,
+		&r.CreatedAtUnix, &r.Origin,
 	)
 	return r, err
 }

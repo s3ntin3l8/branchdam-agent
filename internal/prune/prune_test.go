@@ -445,3 +445,51 @@ func TestPassNeverPrunesAfterArchiveCopyFailed(t *testing.T) {
 		t.Errorf("local copy of an archive-copy-FAILED row was removed: %v", err)
 	}
 }
+
+// TestPassNeverPrunesOnlineIngestRows: online ingest records a queue row
+// per file so a failed registration is retried, but its local edit copies
+// are not prune's to delete -- even verified, aged and registered.
+func TestPassNeverPrunesOnlineIngestRows(t *testing.T) {
+	cfg, store, root := pruneTestFixture(t)
+	cfg.Prune = config.PruneConfig{Enabled: true, MinAgeHours: 24}
+	uuid := "0190f1a2-0000-7000-8000-0000000000aa"
+	path := filepath.Join(root, "online.jpg")
+	if err := os.WriteFile(path, []byte("online-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.InsertPending(ctx, queue.NewRecord{
+		NodeUUID: uuid, Kind: queue.KindMedia, Origin: queue.OriginOnline,
+		SourcePath: "/Volumes/CARD/online.jpg", LocalPath: path,
+		ArchivePath: "/tmp/archive/online.jpg", ArchiveContainerPath: "/storage/archive/online.jpg",
+		Tier0ContainerPath: "/storage/archive/online.jpg", FileName: "online.jpg", FileExt: "jpg",
+		SizeBytes: info.Size(), MtimeUnix: info.ModTime().Unix(), FullHash: strings.Repeat("ab", 32), FastHash: "abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkNodeCreatedSubmitted(ctx, uuid, "evt-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, asked := nodeStatusServer(t, map[string]branchdam.NodeStatusEntry{uuid: verifiedEntry(uuid)})
+	client := branchdam.New(srv.URL, "test-key")
+	var buf bytes.Buffer
+	stats, err := Pass(ctx, &buf, client, store, cfg, time.Now(), false)
+	if err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if stats.SkippedOnlineIngest != 1 || stats.Pruned != 0 || len(*asked) != 0 {
+		t.Errorf("stats = %+v asked = %v, want the online row skipped without a lookup", stats, *asked)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("online-ingested local copy was deleted: %v", err)
+	}
+}

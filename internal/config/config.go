@@ -103,8 +103,10 @@ func (c Config) StrictConfigPermissionsEffective() (bool, strictConfigPermission
 type OfflineConfig struct {
 	// QueueDBPath is where queue.db is created/opened. Must be writable and
 	// persistent across a restart -- this is the entire crash-safety
-	// contract's storage. Required for `ingest -offline` and `queue-drain`;
-	// unused otherwise.
+	// contract's storage. Required for `ingest -offline` and `queue-drain`.
+	// When set, online ingest also records each file's registration here
+	// before POSTing it, so one the server doesn't accept is retried by the
+	// drain instead of being lost.
 	QueueDBPath string `yaml:"queueDbPath"`
 	// Tier0ContainerRoot is the server-container path prefix
 	// EVENT_NODE_CREATED targets while a file's archive bytes don't exist
@@ -141,8 +143,8 @@ func (o OfflineConfig) DrainIntervalSecsOrDefault() int {
 // deleting this workstation's own LocalEditRoot mirror of a file once
 // POST /api/v1/agent/node-status confirms the Tier-3 archive copy is live
 // and hash-verified. Only applies to offline-ingested files tracked in
-// queue.db -- a plain online `ingest` leaves no durable local-path ledger,
-// so it is out of scope. This is NOT real Tier-1 LOCAL_SCRATCH pruning
+// queue.db -- online `ingest` records rows too (origin ONLINE, for
+// registration retries), but its edit copies are kept and out of scope. This is NOT real Tier-1 LOCAL_SCRATCH pruning
 // (Resolve caches/proxies) -- that stays architecturally blocked; see
 // branchdam's docs/workflow-coverage.md item 12.
 type PruneConfig struct {

@@ -39,8 +39,8 @@ func TestShouldSkipDir(t *testing.T) {
 			if got != c.skip {
 				t.Errorf("shouldSkipDir(%q) = %v, want %v", c.path, got, c.skip)
 			}
-			if got && !strings.HasPrefix(reason, "OS metadata directory:") {
-				t.Errorf("reason = %q, want an \"OS metadata directory:\" reason", reason)
+			if got && !strings.HasPrefix(reason, "OS metadata directory:") && !strings.HasPrefix(reason, "hidden dot-directory:") {
+				t.Errorf("reason = %q, want an \"OS metadata directory:\" or \"hidden dot-directory:\" reason", reason)
 			}
 		})
 	}

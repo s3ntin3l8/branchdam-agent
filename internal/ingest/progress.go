@@ -1,6 +1,9 @@
 package ingest
 
-import "io"
+import (
+	"context"
+	"io"
+)
 
 // ProgressPhase distinguishes a copy from a verify byte-progress sample.
 // Verify re-reads the whole file a second time (verify.go's cache-defeating
@@ -27,7 +30,7 @@ type ProgressEvent struct {
 }
 
 // WriteOption configures optional behavior on DualWrite/WriteLocal/
-// CopyToArchive/Verify -- currently just progress reporting. A
+// CopyToArchive/Verify -- progress reporting and cancellation. A
 // functional-options shape even for one option, so every existing call
 // site (3 positional args for DualWrite, 2 for Verify, etc., asserted by
 // writer_test.go/parity_test.go) keeps compiling unchanged.
@@ -35,6 +38,7 @@ type WriteOption func(*writeOptions)
 
 type writeOptions struct {
 	onBytes func(int64)
+	ctx     context.Context
 }
 
 // WithProgress reports the cumulative byte count written or read so far,
@@ -43,6 +47,40 @@ type writeOptions struct {
 // responsive without per-call overhead.
 func WithProgress(fn func(int64)) WriteOption {
 	return func(o *writeOptions) { o.onBytes = fn }
+}
+
+// WithContext makes the copy or verify loop check ctx before every read
+// of the source (one buffer -- at most a few MiB -- per check), so a
+// cancelled ingest stops mid-file instead of finishing a multi-GB copy
+// first. The interrupted call returns ctx's error; DualWrite/WriteLocal
+// remove the destination files they created, exactly as for any other
+// mid-copy failure.
+func WithContext(ctx context.Context) WriteOption {
+	return func(o *writeOptions) { o.ctx = ctx }
+}
+
+// wrapReader returns r wrapped in a cancellation check when o carries a
+// context, and r unchanged otherwise.
+func (o writeOptions) wrapReader(r io.Reader) io.Reader {
+	if o.ctx == nil {
+		return r
+	}
+	return &ctxReader{ctx: o.ctx, r: r}
+}
+
+// ctxReader fails the next Read once ctx is done. It never changes the
+// buffer it is handed, so Verify's page-aligned O_DIRECT buffer reaches
+// the underlying file unchanged.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(b []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(b)
 }
 
 func applyWriteOptions(opts []WriteOption) writeOptions {

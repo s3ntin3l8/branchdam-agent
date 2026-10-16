@@ -785,3 +785,100 @@ func TestCountsBucketsWithArchiveCopyFailedMix(t *testing.T) {
 		t.Errorf("buckets sum to %d, want the row count %d", sum, len(all))
 	}
 }
+
+// TestOnlineRowLifecycle: an ONLINE row starts with its archive copy done
+// and no rebase, stays pending (and counted) until EVENT_NODE_CREATED is
+// accepted, and is then done.
+func TestOnlineRowLifecycle(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	rec := sampleRecord("uuid-online", "online.jpg")
+	rec.Origin = OriginOnline
+	if err := s.InsertPending(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.ByNodeUUID(ctx, "uuid-online")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Origin != OriginOnline || got.NodeCreatedStatus != StatusPending || got.ArchiveCopyStatus != StatusDone || got.RebaseStatus != StatusSkipped {
+		t.Fatalf("initial row = %+v", got)
+	}
+	if got.Done() {
+		t.Error("Done() = true before the registration was accepted")
+	}
+	pending, err := s.Pending(ctx)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("Pending() = %d rows (err=%v), want the unregistered online row", len(pending), err)
+	}
+	if c, err := s.Counts(ctx); err != nil || c != (Counts{AwaitingRebase: 1}) {
+		t.Errorf("Counts() = %+v (err=%v), want it awaiting the server", c, err)
+	}
+
+	if err := s.MarkNodeCreatedSubmitted(ctx, "uuid-online", "evt", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ = s.ByNodeUUID(ctx, "uuid-online")
+	if !got.Done() || got.Failed() {
+		t.Errorf("after submission Done()=%v Failed()=%v, want done", got.Done(), got.Failed())
+	}
+	if pending, _ := s.Pending(ctx); len(pending) != 0 {
+		t.Errorf("Pending() = %d rows after submission, want 0", len(pending))
+	}
+	if c, _ := s.Counts(ctx); c != (Counts{Done: 1}) {
+		t.Errorf("Counts() = %+v after submission, want Done=1", c)
+	}
+
+	// Default and unknown origins.
+	off := sampleRecord("uuid-offline", "offline.jpg")
+	if err := s.InsertPending(ctx, off); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := s.ByNodeUUID(ctx, "uuid-offline"); got.Origin != OriginOffline || got.ArchiveCopyStatus != StatusPending {
+		t.Errorf("default-origin row = %+v, want OFFLINE with archive_copy PENDING", got)
+	}
+	bad := sampleRecord("uuid-bad", "bad.jpg")
+	bad.Origin = "SIDEWAYS"
+	if err := s.InsertPending(ctx, bad); err == nil {
+		t.Error("InsertPending accepted an unknown origin")
+	}
+}
+
+// TestMigrateV2ToV3AddsOriginDefaultingToOffline: every row written before
+// v3 came from offline ingest, so it migrates as OFFLINE.
+func TestMigrateV2ToV3AddsOriginDefaultingToOffline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v2_queue.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations[:2] {
+		if _, err := db.Exec(m.sql); err != nil {
+			t.Fatalf("apply v%d migration: %v", m.fromVersion, err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO queue_nodes (
+		node_uuid, kind, source_path, local_path, archive_path, archive_container_path,
+		file_name, file_ext, size_bytes, mtime_unix, full_hash, fast_hash, created_at_unix
+	) VALUES ('v2-uuid', 'MEDIA', 'p', 'l', 'a', 'ac', 'f.jpg', 'jpg', 10, 100, 'fh', 'fast', 100)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	rec, ok, err := s.ByNodeUUID(context.Background(), "v2-uuid")
+	if err != nil || !ok {
+		t.Fatalf("ByNodeUUID: ok=%v err=%v", ok, err)
+	}
+	if rec.Origin != OriginOffline {
+		t.Errorf("Origin = %q, want %q", rec.Origin, OriginOffline)
+	}
+}

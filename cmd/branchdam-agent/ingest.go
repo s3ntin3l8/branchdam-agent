@@ -111,6 +111,20 @@ func runIngestCmd(args []string) int {
 		return runIngestOffline(ctx, engine, cfg, *cardPath)
 	}
 
+	// With a queue configured, online ingest records each file's
+	// registration in queue.db before POSTing it, so one the server
+	// doesn't accept is retried by `queue-drain` (or the tray's drain
+	// timer) instead of leaving a copied-but-unregistered file.
+	if cfg.Offline.QueueDBPath != "" {
+		store, err := queue.Open(cfg.Offline.QueueDBPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "branchdam-agent ingest: open queue db %q: %v\n", cfg.Offline.QueueDBPath, err)
+			return 1
+		}
+		defer func() { _ = store.Close() }()
+		engine.Queue = store
+	}
+
 	start := time.Now()
 	result, err := engine.IngestCard(ctx, *cardPath)
 	if err != nil {
@@ -274,8 +288,12 @@ func printIngestReport(w io.Writer, cardPath string, result ingest.CardResult, e
 			if f.GPSSource != "" {
 				gps = fmt.Sprintf(", gps=%s", f.GPSSource)
 			}
+			eventID := f.EventID
+			if f.Queued {
+				eventID = "pending (queued for queue-drain)"
+			}
 			_, _ = fmt.Fprintf(w, "[OK]   %s -> %s (eventId=%s, archiveVerify=%s, localVerify=%s%s)\n",
-				f.SourcePath, f.ArchivePath, f.EventID, f.ArchiveVerify.Method, f.LocalVerify.Method, gps)
+				f.SourcePath, f.ArchivePath, eventID, f.ArchiveVerify.Method, f.LocalVerify.Method, gps)
 		}
 	}
 

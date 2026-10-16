@@ -16,6 +16,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
+	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 )
 
 func TestRunIngestOfflineRequiresArchiveContractInUploadMode(t *testing.T) {
@@ -547,5 +548,67 @@ func TestMaybeAutoEjectOnlyEjectsCardVolumeRoots(t *testing.T) {
 				t.Errorf("a refused eject should say why, got %q", buf.String())
 			}
 		})
+	}
+}
+
+// TestRunIngestQueuesRegistrationTheServerRejects: with offline.queueDbPath
+// set, an online ingest whose EVENT_NODE_CREATED the server doesn't accept
+// still succeeds -- both copies are verified -- and leaves the
+// registration in queue.db for queue-drain.
+func TestRunIngestQueuesRegistrationTheServerRejects(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/events", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "drainer offline", http.StatusServiceUnavailable)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	archiveRoot := filepath.Join(dir, "archive")
+	localRoot := filepath.Join(dir, "local")
+	queuePath := filepath.Join(dir, "queue.db")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "IMG_0001.jpg"), []byte("fixture-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "" +
+		"server:\n" +
+		"  baseUrl: \"" + srv.URL + "\"\n" +
+		"  apiKey: \"0123456789abcdef0123456789abcdef\"\n" +
+		"agentId: \"test-agent\"\n" +
+		"pathMappings:\n" +
+		"  - workstationPath: " + yamlQuote(archiveRoot) + "\n" +
+		"    containerPath: \"/storage/archive\"\n" +
+		"ingest:\n" +
+		"  archiveRoot: " + yamlQuote(archiveRoot) + "\n" +
+		"  localEditRoot: " + yamlQuote(localRoot) + "\n" +
+		"  pathTemplate: \"{original_name}\"\n" +
+		"offline:\n" +
+		"  queueDbPath: " + yamlQuote(queuePath) + "\n" +
+		"  tier0ContainerRoot: \"/storage/staging/test\"\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := run([]string{"ingest", "-config", cfgPath, "-card", cardRoot, "-timeout", "30s"}); got != 0 {
+		t.Fatalf("run([ingest]) = %d, want 0: the file is archived and its registration queued", got)
+	}
+
+	store, err := queue.Open(queuePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	rows, err := store.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Origin != queue.OriginOnline || rows[0].NodeCreatedStatus != queue.StatusPending ||
+		rows[0].ArchiveContainerPath != "/storage/archive/IMG_0001.jpg" {
+		t.Fatalf("queue rows = %+v, want one ONLINE row awaiting registration of /storage/archive/IMG_0001.jpg", rows)
 	}
 }

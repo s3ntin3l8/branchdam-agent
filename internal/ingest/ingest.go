@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -124,17 +125,18 @@ func (e *Engine) mintEventUUID() string {
 	return branchdam.MintEventUUID()
 }
 
-// progressOpts builds the WriteOption a DualWrite/WriteLocal/Verify call
-// needs to report progress for path/phase/total through e.Progress -- nil
-// (no options) when Progress itself is unset, so every call site stays a
-// plain, zero-overhead call in the common case.
-func (e *Engine) progressOpts(path string, phase ProgressPhase, total int64) []WriteOption {
+// progressOpts builds the WriteOptions every DualWrite/WriteLocal/Verify
+// call in this package passes: WithContext(ctx), so a cancelled ingest
+// stops within one buffer of the copy or verify it is in, and -- when
+// e.Progress is set -- WithProgress reporting path/phase/total through it.
+func (e *Engine) progressOpts(ctx context.Context, path string, phase ProgressPhase, total int64) []WriteOption {
+	opts := []WriteOption{WithContext(ctx)}
 	if e.Progress == nil {
-		return nil
+		return opts
 	}
-	return []WriteOption{WithProgress(func(n int64) {
+	return append(opts, WithProgress(func(n int64) {
 		e.Progress(ProgressEvent{Path: path, Phase: phase, BytesDone: n, TotalBytes: total})
-	})}
+	}))
 }
 
 // NewEngine builds an Engine with real clock/UUID/exiftool dependencies.
@@ -186,7 +188,15 @@ type FileResult struct {
 	// a Deferred file as unfinished -- never "safe to eject" -- even though
 	// it carries no Err.
 	Deferred bool
-	Err      error
+	// Queued is set when both copies landed and verified but
+	// EVENT_NODE_CREATED could not be submitted during this run (server
+	// down, request failed, ingest cancelled): the registration is
+	// durably recorded in queue.db and Drain submits it. The file is safe
+	// -- archived and verified -- so this is not a failure, and EventID is
+	// empty. Only possible when Engine.Queue is set; without a queue a
+	// failed submission is an Err.
+	Queued bool
+	Err    error
 }
 
 // CardResult is one IngestCard call's full outcome.
@@ -239,6 +249,9 @@ func isLiveLifecycleState(state string) bool {
 // the result keeps every file already processed and still covers the
 // rest of the card; the failed entry is what keeps the run from reading
 // OK. Only an error on cardRoot itself returns (CardResult{}, err).
+// A cancelled ctx stops the walk before the next file (and
+// DualWrite/Verify within one buffer of the file in flight); IngestCard
+// then returns the files already processed together with ctx's error.
 // Re-running on the same card is always safe (the AlreadyIngested
 // fast-path here; queue.db's BySourcePath check in the offline twin).
 func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, error) {
@@ -276,10 +289,16 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 			})
 			return nil
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		result.Files = append(result.Files, e.ingestFile(ctx, path, stemSuffix, &dedupUnavailable))
 		return nil
 	})
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return result, fmt.Errorf("ingest: card %s: stopped before the remaining files: %w", cardRoot, err)
+		}
 		return CardResult{}, fmt.Errorf("ingest: walk card root %s: %w", cardRoot, err)
 	}
 	return result, nil
@@ -287,7 +306,17 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 
 // ingestFile runs the full pipeline for one source file: metadata
 // extraction (needed up front to fill the naming template), dual-copy
-// write, verify, DJI .srt GPS, and (for non-sidecar files) submission.
+// write, verify, DJI .srt GPS, and (for non-sidecar files) registration.
+//
+// Ordering matters for what a failure leaves behind. Everything that can
+// fail without touching the destinations -- naming, the archive path's
+// container mapping, the pre-flight dedup -- runs before DualWrite. A
+// failed verify (or an unbuffered verify the config requires but didn't
+// get) removes both copies this call just created. Once both copies are
+// verified the file is registered by registerNode, which records the
+// intent in queue.db before the POST. And a later run that finds the
+// copies already in place does not take that as proof of registration
+// (confirmRegistered).
 func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string, dedupUnavailable *bool) FileResult {
 	// UploadStream mode sends bytes directly to the server upload endpoint;
 	// server-side dedup is the backstop for that path.
@@ -343,9 +372,26 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	fr.LocalPath = localPath
 
 	if resolution.AlreadyIngested {
-		fr.Skipped = true
-		fr.SkipReason = "already ingested (identical file exists at destination)"
-		return fr
+		if fr.IsSidecar {
+			fr.Skipped = true
+			fr.SkipReason = alreadyIngestedReason
+			return fr
+		}
+		return e.confirmRegistered(ctx, fr, srcInfo, exif, dedupUnavailable)
+	}
+
+	// Map the archive path to its container path before anything is
+	// written: a missing or wrong pathMappings entry must fail the file
+	// while both destinations are still empty, not after the copy, when it
+	// would leave two verified files nothing ever registered.
+	var containerPath string
+	if !fr.IsSidecar {
+		cp, err := ToContainerPath(e.Mappings, archivePath)
+		if err != nil {
+			fr.Err = err
+			return fr
+		}
+		containerPath = cp
 	}
 
 	// Pre-flight BLAKE3 content dedup check before DualWrite.
@@ -358,7 +404,7 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 		}
 	}
 
-	writeRes, err := DualWrite(srcPath, archivePath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
+	writeRes, err := DualWrite(srcPath, archivePath, localPath, e.progressOpts(ctx, localPath, ProgressPhaseCopying, srcInfo.Size())...)
 	if err != nil {
 		fr.Err = fmt.Errorf("dual write: %w", err)
 		return fr
@@ -378,7 +424,7 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	preserveMtimeAt(srcPath, archivePath, srcInfo.ModTime())
 	preserveMtimeAt(srcPath, localPath, srcInfo.ModTime())
 
-	archiveVerify, err := Verify(archivePath, writeRes.FullHash, e.progressOpts(archivePath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+	archiveVerify, err := Verify(archivePath, writeRes.FullHash, e.progressOpts(ctx, archivePath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 	if err != nil {
 		_ = os.Remove(archivePath)
 		_ = os.Remove(localPath)
@@ -386,7 +432,7 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 		return fr
 	}
 	fr.ArchiveVerify = archiveVerify
-	localVerify, err := Verify(localPath, writeRes.FullHash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+	localVerify, err := Verify(localPath, writeRes.FullHash, e.progressOpts(ctx, localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 	if err != nil {
 		_ = os.Remove(archivePath)
 		_ = os.Remove(localPath)
@@ -403,7 +449,14 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	}
 
 	if e.Ingest.RequireUnbuffered && (archiveVerify.Method == VerifyMethodBufferedFloor || localVerify.Method == VerifyMethodBufferedFloor) {
-		fr.Err = fmt.Errorf("ingest: unbuffered verify required by config, but verify fell back to buffered floor (archive=%s, local=%s) -- safe-eject withheld", archiveVerify.Method, localVerify.Method)
+		// Both files were created by this call's DualWrite (O_EXCL) and
+		// are not registered. Leaving them would let the next run find
+		// them as already ingested and pass them without the unbuffered
+		// verify the operator asked for; removing them means the next run
+		// copies again and meets this same check.
+		_ = os.Remove(archivePath)
+		_ = os.Remove(localPath)
+		fr.Err = fmt.Errorf("ingest: unbuffered verify required by config, but verify fell back to buffered floor (archive=%s, local=%s) -- copies removed, safe-eject withheld", archiveVerify.Method, localVerify.Method)
 		return fr
 	}
 
@@ -412,6 +465,27 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 		fr.SkipReason = "sidecar file (.xmp/.srt): copied to both destinations, no EVENT_NODE_CREATED submitted"
 		return fr
 	}
+
+	e.registerNode(ctx, &fr, srcInfo, exif, containerPath, writeRes)
+	return fr
+}
+
+// alreadyIngestedReason is the SkipReason prefix for a file whose
+// identical copies are already at both destinations.
+const alreadyIngestedReason = "already ingested (identical file exists at destination)"
+
+// registerNode registers a file whose two copies are in place at
+// fr.ArchivePath/fr.LocalPath and verified against w.FullHash: it builds
+// EVENT_NODE_CREATED (pHash from the local copy, GPS from EXIF or a DJI
+// .srt sidecar), records the intent in queue.db when e.Queue is set, and
+// only then POSTs it (invariant 3). A POST that fails leaves the row
+// PENDING for Drain to retry and marks fr.Queued; it is an Err only when
+// there is no queue to fall back on. The queue writes ignore ctx's
+// cancellation: the copies are already in place, and recording that is
+// what lets a cancelled ingest be finished later instead of forgotten.
+func (e *Engine) registerNode(ctx context.Context, fr *FileResult, srcInfo os.FileInfo, exif *ExifResult, containerPath string, w WriteResult) {
+	srcPath, archivePath, localPath := fr.SourcePath, fr.ArchivePath, fr.LocalPath
+	ext := extNoDot(srcPath)
 
 	// pHash is computed against the just-written LOCAL copy, not the
 	// source: content is guaranteed byte-identical to the source (that is
@@ -441,25 +515,19 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	nodeUUID, err := e.NewNodeUUID()
 	if err != nil {
 		fr.Err = fmt.Errorf("mint node uuid: %w", err)
-		return fr
+		return
 	}
 	fr.NodeUUID = nodeUUID
-
-	containerPath, err := ToContainerPath(e.Mappings, archivePath)
-	if err != nil {
-		fr.Err = err
-		return fr
-	}
 
 	payload := branchdam.NodeCreatedPayload{
 		NodeUUID:     nodeUUID,
 		FilePath:     containerPath,
 		FileName:     filepath.Base(archivePath),
 		FileExt:      ext,
-		SizeBytes:    writeRes.SizeBytes,
+		SizeBytes:    w.SizeBytes,
 		MtimeUnix:    srcInfo.ModTime().Unix(),
-		FastHash:     &writeRes.FastHash,
-		FullHash:     &writeRes.FullHash,
+		FastHash:     &w.FastHash,
+		FullHash:     &w.FullHash,
 		Phash:        fr.PHash,
 		FilenameStem: strPtr(naming.Stem(filepath.Base(archivePath))),
 		GPSLatitude:  gpsLat,
@@ -479,13 +547,186 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	}
 
 	eventUUID := e.mintEventUUID()
+	durable := context.WithoutCancel(ctx)
+	if e.Queue != nil {
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			fr.Err = fmt.Errorf("marshal node created payload: %w", err)
+			return
+		}
+		rec := queue.NewRecord{
+			NodeUUID:               nodeUUID,
+			Kind:                   queue.KindMedia,
+			Origin:                 queue.OriginOnline,
+			SourcePath:             srcPath,
+			LocalPath:              localPath,
+			ArchivePath:            archivePath,
+			ArchiveContainerPath:   containerPath,
+			Tier0ContainerPath:     containerPath,
+			FileName:               filepath.Base(archivePath),
+			FileExt:                ext,
+			SizeBytes:              w.SizeBytes,
+			MtimeUnix:              srcInfo.ModTime().Unix(),
+			FullHash:               w.FullHash,
+			FastHash:               w.FastHash,
+			NodeCreatedPayloadJSON: string(payloadJSON),
+			NodeCreatedEventUUID:   eventUUID,
+		}
+		if err := e.Queue.InsertPending(durable, rec); err != nil {
+			// Nothing was promised to the server yet. The copies stay;
+			// a re-run finds them and registers them (confirmRegistered).
+			fr.Err = fmt.Errorf("record ingest in queue.db before submitting: %w", err)
+			return
+		}
+	}
+
 	resp, err := e.Client.PostNodeCreatedWithUUID(ctx, e.AgentID, payload, eventUUID)
 	if err != nil {
-		fr.Err = fmt.Errorf("submit EVENT_NODE_CREATED: %w", err)
-		return fr
+		if e.Queue == nil {
+			fr.Err = fmt.Errorf("submit EVENT_NODE_CREATED: %w", err)
+			return
+		}
+		if markErr := e.Queue.MarkNodeCreatedAttempt(durable, nodeUUID, err.Error(), backoffFor(1, e.now())); markErr != nil {
+			slog.Warn("ingest: could not record the failed EVENT_NODE_CREATED attempt; the row stays pending and Drain retries it", "node", nodeUUID, "err", markErr)
+		}
+		slog.Warn("ingest: EVENT_NODE_CREATED not accepted; queued for Drain", "source", srcPath, "node", nodeUUID, "err", err)
+		fr.Queued = true
+		return
 	}
 	fr.EventID = resp.EventID
+	if e.Queue != nil {
+		if err := e.Queue.MarkNodeCreatedSubmitted(durable, nodeUUID, resp.EventID, e.now()); err != nil {
+			// The server has it. Drain re-sends the same nodeUuid and
+			// event UUID, which the server treats as a no-op.
+			slog.Warn("ingest: could not mark EVENT_NODE_CREATED submitted in queue.db; Drain will re-send it harmlessly", "node", nodeUUID, "err", err)
+		}
+	}
+}
+
+// confirmRegistered handles a file whose identical copies already sit at
+// both destinations (ResolveDestination's AlreadyIngested). Finding the
+// bytes there proves an earlier run copied them -- not that it registered
+// them: that run may have died, been cancelled, failed its POST, or
+// stopped at a buffered verify the config forbids. Skipping on the files
+// alone is how a copied-but-unregistered file used to be skipped on every
+// later run, so the skip needs evidence of registration, cheapest first:
+//
+//  1. A queue.db row for this exact destination (online ingest records one
+//     before its POST): the registration was accepted, or is queued and
+//     Drain is retrying it. Skip.
+//  2. Otherwise hash the local copy (a cache-defeating read of the SSD,
+//     not the card) and ask the server's check-content. A live node with
+//     this content: skip.
+//  3. Otherwise -- not found, or the server can't say -- register it now:
+//     verify the archive copy against that hash, apply RequireUnbuffered to
+//     both reads, then registerNode as for a fresh copy. Registering
+//     content the server already has is harmless: it drops an
+//     EVENT_NODE_CREATED whose full_hash a live node already carries.
+//
+// Nothing here deletes or rewrites the existing copies: they are not this
+// run's files. "Identical" is ResolveDestination's sampled FastHash match
+// against the card, the same evidence the old unconditional skip relied
+// on; the hash registered is that of the copies themselves.
+func (e *Engine) confirmRegistered(ctx context.Context, fr FileResult, srcInfo os.FileInfo, exif *ExifResult, dedupUnavailable *bool) FileResult {
+	archivePath, localPath := fr.ArchivePath, fr.LocalPath
+
+	if e.Queue != nil {
+		rec, found, err := e.Queue.ByLocalPath(ctx, localPath)
+		if err != nil {
+			// Fail closed: without the lookup a skip would be a guess.
+			fr.Err = fmt.Errorf("queue lookup for already-present copy %s: %w", localPath, err)
+			return fr
+		}
+		if found && rec.ArchivePath == archivePath && rec.SizeBytes == srcInfo.Size() && !rec.Failed() {
+			fr.Skipped = true
+			fr.NodeUUID = rec.NodeUUID
+			if rec.NodeCreatedStatus == queue.StatusPending {
+				fr.SkipReason = fmt.Sprintf("%s; registration of node %s is queued and retried by the queue drain", alreadyIngestedReason, rec.NodeUUID)
+			} else {
+				fr.SkipReason = fmt.Sprintf("%s; registered as node %s", alreadyIngestedReason, rec.NodeUUID)
+			}
+			return fr
+		}
+	}
+
+	size := srcInfo.Size()
+	localVerify, err := Verify(localPath, "", e.progressOpts(ctx, localPath, ProgressPhaseVerifying, size)...)
+	if err != nil {
+		fr.Err = fmt.Errorf("hash already-present local copy: %w", err)
+		return fr
+	}
+	// This read is the reference the archive copy is checked against.
+	localVerify.Verified = true
+	fullHash := localVerify.Hash
+	fastHash, err := fastHashFile(localPath, size)
+	if err != nil {
+		fr.Err = fmt.Errorf("fast hash already-present local copy: %w", err)
+		return fr
+	}
+
+	if found, nodeUUID := e.serverHasLiveContent(ctx, fastHash, fullHash, dedupUnavailable); found {
+		fr.Skipped = true
+		fr.ExistingNodeUUID = nodeUUID
+		fr.SkipReason = fmt.Sprintf("%s; server already has it as node %s", alreadyIngestedReason, nodeUUID)
+		return fr
+	}
+
+	archiveVerify, err := Verify(archivePath, fullHash, e.progressOpts(ctx, archivePath, ProgressPhaseVerifying, size)...)
+	if err != nil {
+		fr.Err = fmt.Errorf("verify already-present archive copy: %w", err)
+		return fr
+	}
+	fr.ArchiveVerify = archiveVerify
+	fr.LocalVerify = localVerify
+	if !archiveVerify.Verified {
+		fr.Err = fmt.Errorf("ingest: %s and %s are both present but differ (archive BLAKE3 %s, local %s) -- neither registered nor changed; resolve by hand, safe-eject withheld",
+			archivePath, localPath, archiveVerify.Hash, fullHash)
+		return fr
+	}
+	if e.Ingest.RequireUnbuffered && (archiveVerify.Method == VerifyMethodBufferedFloor || localVerify.Method == VerifyMethodBufferedFloor) {
+		fr.Err = fmt.Errorf("ingest: copies already at %s are not registered, and unbuffered verify is required by config but fell back to buffered floor (archive=%s, local=%s) -- not registering, safe-eject withheld", archivePath, archiveVerify.Method, localVerify.Method)
+		return fr
+	}
+
+	containerPath, err := ToContainerPath(e.Mappings, archivePath)
+	if err != nil {
+		fr.Err = err
+		return fr
+	}
+	fr.Write = WriteResult{ArchivePath: archivePath, LocalPath: localPath, SizeBytes: size, FullHash: fullHash, FastHash: fastHash}
+	slog.Info("ingest: copies already at destination are not known to be registered -- registering them", "source", fr.SourcePath, "archive", archivePath)
+	e.registerNode(ctx, &fr, srcInfo, exif, containerPath, fr.Write)
 	return fr
+}
+
+// serverHasLiveContent asks GET /api/v1/agent/check-content whether a
+// live node already has this content. found=false covers "not there" and
+// "couldn't ask" alike (no checker, pre-flight disabled, the endpoint
+// latched unavailable earlier in this pass, or an error) -- the caller
+// then registers, which the server dedups by full_hash if it does have it.
+func (e *Engine) serverHasLiveContent(ctx context.Context, fastHash, fullHash string, dedupUnavailable *bool) (found bool, nodeUUID string) {
+	if (dedupUnavailable != nil && *dedupUnavailable) || e.Ingest.PreflightTimeoutSecs < 0 || e.Client == nil {
+		return false, ""
+	}
+	checker, ok := e.Client.(contentChecker)
+	if !ok {
+		return false, ""
+	}
+	timeout := time.Duration(config.DefaultPreflightTimeoutSecs) * time.Second
+	if e.Ingest.PreflightTimeoutSecs > 0 {
+		timeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	res, err := checker.CheckContent(cctx, fastHash, fullHash)
+	cancel()
+	if err != nil {
+		slog.Warn("ingest: could not ask the server whether an already-present copy is registered -- registering it", "err", err)
+		return false, ""
+	}
+	if res.Found && isLiveLifecycleState(res.LifecycleState) {
+		return true, res.NodeUUID
+	}
+	return false, ""
 }
 
 func (e *Engine) now() time.Time {
@@ -558,7 +799,7 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 			localPath := filepath.Join(e.Ingest.LocalEditRoot, relPath)
 			fr.LocalPath = localPath
 
-			writeRes, err := WriteLocal(srcPath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
+			writeRes, err := WriteLocal(srcPath, localPath, e.progressOpts(ctx, localPath, ProgressPhaseCopying, srcInfo.Size())...)
 			if err != nil {
 				fr.Err = fmt.Errorf("write local copy: %w", err)
 				return fr
@@ -566,7 +807,7 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 			fr.Write = writeRes
 			preserveMtimeAt(srcPath, localPath, srcInfo.ModTime())
 
-			localVerify, err := Verify(localPath, writeRes.FullHash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+			localVerify, err := Verify(localPath, writeRes.FullHash, e.progressOpts(ctx, localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 			if err != nil {
 				_ = os.Remove(localPath)
 				fr.Err = fmt.Errorf("verify local copy: %w", err)
@@ -619,7 +860,7 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 	}
 
 	var body io.Reader = srcFile
-	if o := applyWriteOptions(e.progressOpts(srcPath, ProgressPhaseCopying, srcInfo.Size())); o.onBytes != nil {
+	if o := applyWriteOptions(e.progressOpts(ctx, srcPath, ProgressPhaseCopying, srcInfo.Size())); o.onBytes != nil {
 		body = &progressReader{r: srcFile, onBytes: o.onBytes}
 	}
 
@@ -634,7 +875,7 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 	localPath := filepath.Join(e.Ingest.LocalEditRoot, upResp.RelativePath)
 	fr.LocalPath = localPath
 
-	writeRes, err := WriteLocal(srcPath, localPath, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
+	writeRes, err := WriteLocal(srcPath, localPath, e.progressOpts(ctx, localPath, ProgressPhaseCopying, srcInfo.Size())...)
 	if err != nil {
 		fr.Err = fmt.Errorf("write local copy: %w", err)
 		return fr
@@ -645,7 +886,7 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 	// copy. Failure is logged, not fatal -- see preserveMtimeAt.
 	preserveMtimeAt(srcPath, localPath, srcInfo.ModTime())
 
-	localVerify, err := Verify(localPath, upResp.Blake3Hash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+	localVerify, err := Verify(localPath, upResp.Blake3Hash, e.progressOpts(ctx, localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 	if err != nil {
 		_ = os.Remove(localPath)
 		fr.Err = fmt.Errorf("verify local copy: %w", err)

@@ -96,11 +96,12 @@ func DualWrite(srcPath, archivePath, localPath string, opts ...WriteOption) (res
 	fastHasher := hashing.NewStreamingFastHasher(size)
 
 	writers := []io.Writer{archiveFile, localFile, fullHasher, fastHasher}
-	if o := applyWriteOptions(opts); o.onBytes != nil {
+	o := applyWriteOptions(opts)
+	if o.onBytes != nil {
 		writers = append(writers, &progressWriter{onBytes: o.onBytes})
 	}
 	mw := io.MultiWriter(writers...)
-	n, copyErr := io.Copy(mw, src)
+	n, copyErr := io.Copy(mw, o.wrapReader(src))
 	if copyErr != nil {
 		return WriteResult{}, fmt.Errorf("ingest: copy %s: %w", srcPath, copyErr)
 	}

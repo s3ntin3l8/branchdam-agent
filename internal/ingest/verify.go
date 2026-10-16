@@ -48,7 +48,7 @@ type VerifyResult struct {
 // buffered, not the bytes that landed on the far side of an NFS/SMB mount,
 // which is exactly the failure mode this function exists to rule out.
 func Verify(path string, wantHash string, opts ...WriteOption) (VerifyResult, error) {
-	r, method, err := openForVerify(path)
+	r, method, err := openForVerifyFn(path)
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("ingest: open %s for verify: %w", path, err)
 	}
@@ -56,10 +56,11 @@ func Verify(path string, wantHash string, opts ...WriteOption) (VerifyResult, er
 
 	h := blake3.New()
 	var dst io.Writer = h
-	if o := applyWriteOptions(opts); o.onBytes != nil {
+	o := applyWriteOptions(opts)
+	if o.onBytes != nil {
 		dst = io.MultiWriter(h, &progressWriter{onBytes: o.onBytes})
 	}
-	if _, err := copyAligned(dst, r); err != nil {
+	if _, err := copyAligned(dst, o.wrapReader(r)); err != nil {
 		return VerifyResult{}, fmt.Errorf("ingest: read %s for verify: %w", path, err)
 	}
 	got := fmt.Sprintf("%x", h.Sum(nil))
@@ -71,6 +72,11 @@ func Verify(path string, wantHash string, opts ...WriteOption) (VerifyResult, er
 		Verified: got == wantHash,
 	}, nil
 }
+
+// openForVerifyFn is the platform's openForVerify, indirected so tests can
+// force a particular VerifyMethod (whether O_DIRECT works depends on the
+// filesystem the test's temp dir happens to be on).
+var openForVerifyFn = openForVerify
 
 // directBufSize/directAlign size and align the read buffer used by both the
 // O_DIRECT (verify_linux.go) and buffered-floor (verify_other.go, and

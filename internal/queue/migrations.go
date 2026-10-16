@@ -79,6 +79,16 @@ ALTER TABLE queue_nodes ADD COLUMN node_created_event_uuid TEXT NOT NULL DEFAULT
 UPDATE queue_nodes SET node_created_event_uuid = node_uuid WHERE node_created_event_uuid = '';
 `,
 	},
+	{
+		// origin: which ingest path wrote the row (store.go's OriginOffline
+		// / OriginOnline). Every row before this version came from
+		// IngestCardOffline -- online ingest never wrote queue rows -- so
+		// the OFFLINE default is exact for them.
+		fromVersion: 2,
+		sql: `
+ALTER TABLE queue_nodes ADD COLUMN origin TEXT NOT NULL DEFAULT 'OFFLINE';
+`,
+	},
 }
 
 // migrate reads PRAGMA user_version and applies every pending migration to
