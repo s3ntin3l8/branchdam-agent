@@ -41,6 +41,13 @@ var errAgentBusy = errors.New("branchDAM is running but didn't answer in time --
 // agent is running then, so the wording claims neither way.
 var errAgentNoAnswer = errors.New("branchDAM didn't answer in time (no connection to the agent was made) -- check that the tray app is running and that nothing blocks its local port")
 
+// passHTTPTimeout bounds the window's "Drain now"/"Prune now" requests,
+// which (unlike every other call here) wait for a whole pass to finish.
+// The agent bounds the pass itself at 2 minutes (internal/tray's
+// drainPruneClickTimeout); this sits comfortably above it so the window
+// reports the pass's own result rather than its own timeout.
+const passHTTPTimeout = 3 * time.Minute
+
 // App is the Wails-bound backend for the status and settings views, kept
 // deliberately thin: every settings/status method below round-trips a raw
 // JSON string to and from the agent's loopback API rather than decoding
@@ -55,10 +62,16 @@ var errAgentNoAnswer = errors.New("branchDAM didn't answer in time (no connectio
 type App struct {
 	ctx    context.Context
 	client *http.Client
+	// passClient is client's counterpart for the two calls that wait on a
+	// whole drain or prune pass (passHTTPTimeout).
+	passClient *http.Client
 }
 
 func NewApp() *App {
-	return &App{client: &http.Client{Timeout: httpTimeout}}
+	return &App{
+		client:     &http.Client{Timeout: httpTimeout},
+		passClient: &http.Client{Timeout: passHTTPTimeout},
+	}
 }
 
 // Startup is passed to options.App.OnStartup -- Wails calls it once the
@@ -401,6 +414,177 @@ func (a *App) RevealHook(id string) error {
 	return nil
 }
 
+// StartIngest starts an ingest in the agent and returns at once --
+// POST /api/actions/ingest-start's counterpart. An empty cardPath is the
+// tray menu's "Ingest now" (every detected card volume); a folder path is
+// "Import from folder…" (pick it with PickDirectory first). The agent runs
+// the ingest through the same Runner.TriggerIngest the tray menu uses, so
+// it is serialized with every other ingest and self-update; the window
+// follows it through StatusJSON's busy/ingestProgress fields. Returns the
+// raw ingestStartResult JSON: started=false with err says why nothing
+// started (paused, already running, no card found).
+func (a *App) StartIngest(cardPath string) (string, error) {
+	reqBody, err := json.Marshal(struct {
+		CardPath string `json:"cardPath"`
+	}{CardPath: cardPath})
+	if err != nil {
+		return "", err
+	}
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/ingest-start", reqBody)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// CancelIngest asks the in-flight ingest to stop after the file it is
+// copying -- POST /api/actions/cancel-ingest's counterpart. The file in
+// progress always finishes (copy, verify and registration), so nothing is
+// left half-written; the card is not ejected and re-ingesting it later
+// picks up where this stopped. Returns the raw {"canceled": bool} JSON;
+// false means no ingest was running.
+func (a *App) CancelIngest() (string, error) {
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/cancel-ingest", nil)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// TriggerDrain runs one offline-queue drain pass now and waits for it --
+// POST /api/actions/drain's counterpart, the tray menu's "Drain queue
+// now". Returns the raw drainActionResult JSON; ran=false means the pass
+// was skipped (paused, metered connection, already running, or not
+// configured).
+func (a *App) TriggerDrain() (string, error) {
+	body, err := a.agentRequestWith(a.passClient, http.MethodPost, "/api/actions/drain", nil)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// TriggerPrune runs one prune pass now and waits for it --
+// POST /api/actions/prune's counterpart, the tray menu's "Prune now".
+// Returns the raw pruneActionResult JSON; ran=false means skipped
+// (paused, an ingest or update holds the gate, or prune is off).
+func (a *App) TriggerPrune() (string, error) {
+	body, err := a.agentRequestWith(a.passClient, http.MethodPost, "/api/actions/prune", nil)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// SetPaused turns the agent's session-only pause on or off --
+// POST /api/actions/pause's counterpart, the tray menu's "Pause ingest" /
+// "Resume ingest". Never the persisted pauseUploadOnMetered setting (that
+// is SetSetting("ingest.pauseUploadOnMetered", ...)). Returns the raw
+// {"paused": bool} JSON with the state now in effect.
+func (a *App) SetPaused(paused bool) (string, error) {
+	reqBody, err := json.Marshal(struct {
+		Paused bool `json:"paused"`
+	}{Paused: paused})
+	if err != nil {
+		return "", err
+	}
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/pause", reqBody)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// RollbackUpdate starts restoring the previously installed version --
+// POST /api/actions/rollback-update's counterpart, the tray menu's "Roll
+// back to …". Returns immediately with the raw {"started", "status"} JSON;
+// the swap and the tray's restart are followed through StatusJSON's
+// selfUpdate phase, like ApplyUpdate.
+func (a *App) RollbackUpdate() (string, error) {
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/rollback-update", nil)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// FailedQueueJSON lists the offline queue's FAILED rows --
+// GET /api/queue/failed's counterpart. Returns the raw
+// {"configured", "rows"} JSON.
+func (a *App) FailedQueueJSON() (string, error) {
+	body, err := a.agentRequest(http.MethodGet, "/api/queue/failed", nil)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// RetryFailedRow puts one FAILED queue row back to pending so the next
+// drain pass retries it -- POST /api/actions/queue-retry with nodeUuid.
+// Returns the raw {"archiveCopies", "rebases"} reset counts.
+func (a *App) RetryFailedRow(nodeUUID string) (string, error) {
+	if nodeUUID == "" {
+		return "", errors.New("no queue row given to retry")
+	}
+	return a.queueRetry(struct {
+		NodeUUID string `json:"nodeUuid"`
+	}{NodeUUID: nodeUUID})
+}
+
+// RetryAllFailed puts every FAILED queue row back to pending -- the same
+// reset `queue-drain -retry-failed` runs.
+func (a *App) RetryAllFailed() (string, error) {
+	return a.queueRetry(struct {
+		All bool `json:"all"`
+	}{All: true})
+}
+
+func (a *App) queueRetry(req any) (string, error) {
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+	body, err := a.agentRequest(http.MethodPost, "/api/actions/queue-retry", reqBody)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// ConfirmAction asks the operator to confirm a destructive window action
+// (drain, prune, roll back, cancel ingest) with a native question dialog
+// -- ConfirmApplyUpdate's generalization, for the same WKWebView reason
+// browser confirm() can't be used. The frontend only calls it when the
+// tray.confirmDestructive setting is on, mirroring the tray menu's own
+// gate. Windows' MessageBox ignores custom labels and returns "Yes"/"No";
+// macOS returns the label itself -- both are accepted.
+func (a *App) ConfirmAction(title, message, confirmLabel string) (bool, error) {
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if confirmLabel == "" {
+		confirmLabel = "OK"
+	}
+	selected, err := messageDialogFunc(ctx, runtime.MessageDialogOptions{
+		Type:          runtime.QuestionDialog,
+		Title:         title,
+		Message:       message,
+		Buttons:       []string{"Cancel", confirmLabel},
+		DefaultButton: confirmLabel,
+		CancelButton:  "Cancel",
+	})
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(selected)) {
+	case strings.ToLower(confirmLabel), "yes", "ok":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
 // idActionRequest mirrors internal/tray/statusapi.go's own request shape of
 // the same name -- {"id": "..."} -- for /api/actions/sync,
 // /api/actions/hook-install, and /api/actions/hook-reveal. Duplicated here
@@ -450,6 +634,15 @@ func (a *App) PickFile(title string, patterns []string) (string, error) {
 // not running"/"token changed" error wording, so every bound method fails
 // the same way for the same underlying reason.
 func (a *App) agentRequest(method, path string, body []byte) ([]byte, error) {
+	return a.agentRequestWith(a.client, method, path, body)
+}
+
+// agentRequestWith is agentRequest over a specific client -- passClient
+// for the drain/prune calls that wait on a whole pass, client otherwise.
+func (a *App) agentRequestWith(client *http.Client, method, path string, body []byte) ([]byte, error) {
+	if client == nil {
+		client = a.client
+	}
 	addr, err := statusServerAddrFunc()
 	if err != nil {
 		return nil, fmt.Errorf("could not read branchDAM's config: %w", err)
@@ -488,7 +681,7 @@ func (a *App) agentRequest(method, path string, body []byte) ([]byte, error) {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := a.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		// A timeout on an established connection means the agent
 		// accepted the request but didn't answer in time: it is running,

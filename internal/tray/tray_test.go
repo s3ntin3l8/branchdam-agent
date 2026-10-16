@@ -2306,8 +2306,15 @@ func TestWindowApplyRestartOutcome(t *testing.T) {
 	if !ok {
 		t.Fatal("ok = false, want true for a completed window apply")
 	}
-	if !got.RestartRequested || got.AppliedVersion != status.Applied {
-		t.Fatalf("outcome = %+v, want restart for %q", got, status.Applied)
+	if !got.RestartRequested || got.AppliedVersion != status.Applied || got.RolledBack {
+		t.Fatalf("outcome = %+v, want a forward-update restart for %q", got, status.Applied)
+	}
+
+	// A window-started rollback reports itself as one, so the restart is
+	// logged "rolled back to" rather than "updated to".
+	rb, ok := windowApplyRestartOutcome(UpdateStatus{Phase: UpdatePhaseRestarting, Applied: "1.14.0", RolledBack: true}, false, false)
+	if !ok || !rb.RolledBack || rb.AppliedVersion != "1.14.0" {
+		t.Fatalf("rollback outcome = %+v, %v; want RolledBack restart to 1.14.0", rb, ok)
 	}
 
 	for _, tc := range []struct {
@@ -2327,7 +2334,7 @@ func TestWindowApplyRestartOutcome(t *testing.T) {
 }
 
 func TestUpdatePhaseOwnsBinary(t *testing.T) {
-	for _, phase := range []string{UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting} {
+	for _, phase := range []string{UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting, UpdatePhaseRollingBack} {
 		if !updatePhaseOwnsBinary(phase) {
 			t.Errorf("updatePhaseOwnsBinary(%q) = false, want true", phase)
 		}

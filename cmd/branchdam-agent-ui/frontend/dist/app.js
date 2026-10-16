@@ -169,7 +169,7 @@ function renderServer(status) {
   }
   const lastHandshake = fmtTime(status.lastHandshakeAt);
   if (lastHandshake) rows.push(["Last successful handshake", lastHandshake]);
-  if (status.paused) rows.push(["Paused", raw(pill("yes — paused from the tray menu", "warn"))]);
+  if (status.paused) rows.push(["Paused", raw(pill("yes — resume from Storage & ingest or the tray menu", "warn"))]);
 
   const container = byId("server-body");
   // Preserve the pairing input's focus/caret across this rebuild --
@@ -332,10 +332,50 @@ function renderPairingRow(status) {
   return row;
 }
 
-function renderIngest(status) {
+// confirmDestructive asks the operator to confirm a destructive window
+// action through the native dialog (App.ConfirmAction) -- the same gate
+// the tray menu puts in front of drain, prune and roll back, honouring the
+// same tray.confirmDestructive setting. Settings not loaded (or the field
+// absent) keeps the confirmation: fail closed, as renderSelfUpdate's own
+// "Install and restart" does.
+async function confirmDestructive(settings, title, message, confirmLabel) {
+  if (settings && settings.ConfirmDestructive === false) return true;
+  const app = getApp();
+  if (!app) return false;
+  return await app.ConfirmAction(title, message, confirmLabel);
+}
+
+// runTracked wraps one bound-method call in the inFlightActions
+// bookkeeping every action button here uses (see that set's own doc
+// comment): the key is cleared as soon as the request resolves, before
+// the caller branches on the result, so a follow-up poll() never renders
+// the action as still in flight.
+async function runTracked(key, call) {
+  inFlightActions.add(key);
+  try {
+    return JSON.parse(await call());
+  } finally {
+    inFlightActions.delete(key);
+  }
+}
+
+// renderIngest shows the running or last ingest plus the window's ingest
+// controls -- "Ingest now", "Import from folder…", "Cancel ingest" and
+// Pause/Resume, the same actions as the tray menu. Every one goes through
+// the agent's Runner (TriggerIngest/CancelIngest/SetPaused), so a window
+// click and a tray click or detected card can never ingest concurrently.
+function renderIngest(status, settings) {
+  const container = byId("ingest-body");
+  let html = "";
+  if (status.paused) {
+    html += `<p>${pill("paused — cards are not ingested and the queue is not drained until you resume", "warn")}</p>`;
+  }
   if (status.busy) {
     const since = fmtTime(status.busySince);
-    let html = `<p>${pill("running", "ok")} ${escapeHtml(status.busyCard ?? "")}${since ? " since " + escapeHtml(since) : ""}</p>`;
+    html += `<p>${pill("running", "ok")} ${escapeHtml(status.busyCard ?? "")}${since ? " since " + escapeHtml(since) : ""}</p>`;
+    if (status.ingestCancelRequested) {
+      html += `<p>${pill("stopping after the current file", "warn")}</p>`;
+    }
     const p = status.ingestProgress;
     if (p) {
       html += table([
@@ -344,24 +384,184 @@ function renderIngest(status) {
         ["Progress", p.totalBytes ? `${fmtBytes(p.bytesDone)} / ${fmtBytes(p.totalBytes)}` : fmtBytes(p.bytesDone)],
       ]);
     }
-    byId("ingest-body").innerHTML = html;
-    return;
+  } else {
+    const last = status.lastIngest;
+    if (!last) {
+      html += `<p class="empty">No ingest has run this session.</p>`;
+    } else {
+      const rows = [
+        ["Card", last.cardPath],
+        ["Started", fmtTime(last.startedAt) ?? "—"],
+        ["Submitted / Skipped / Failed", `${last.submitted ?? 0} / ${last.skipped ?? 0} / ${last.failed ?? 0}`],
+      ];
+      if (last.resumed) rows.push(["Resumed from earlier run", `${last.resumed ?? 0}`]);
+      if (last.deferred) rows.push(["Waiting for unmetered connection", raw(pill(`${last.deferred} on card -- not ejected`, "warn"))]);
+      if (last.offline) rows.push(["Mode", raw(pill("offline queue", "neutral"))]);
+      if (last.canceled) {
+        rows.push(["Canceled", raw(pill("stopped before the end of the card -- not ejected; ingest it again to finish", "warn"))]);
+      } else if (last.err) {
+        rows.push(["Error", raw(pill(last.err, "bad"))]);
+      }
+      html += table(rows);
+    }
   }
-  const last = status.lastIngest;
-  if (!last) {
-    byId("ingest-body").innerHTML = `<p class="empty">No ingest has run this session.</p>`;
-    return;
+  container.innerHTML = html;
+
+  const blocked = !!status.busy || !!status.paused || !!status.configIncomplete;
+  const startIngest = async (statusEl, cardPath) => {
+    const app = getApp();
+    if (!app) return;
+    const result = await runTracked("ingestStart", () => app.StartIngest(cardPath));
+    if (!result.started) {
+      // Nothing changes in the status view for a refused start, so the
+      // reason stays standing rather than being erased by poll().
+      setFieldStatus(statusEl, result.err || "Ingest did not start", "error");
+      return;
+    }
+    const n = (result.cardPaths ?? []).length;
+    setFieldStatus(statusEl, n > 1 ? `Ingesting ${n} cards…` : "Ingest started", "saved");
+    await poll();
+  };
+  container.appendChild(
+    actionButtonRow("Ingest actions", "", [
+      {
+        label: "Ingest now",
+        busyText: "Starting…",
+        disabled: blocked,
+        busy: inFlightActions.has("ingestStart"),
+        run: (statusEl) => startIngest(statusEl, ""),
+      },
+      {
+        label: "Import from folder…",
+        busyText: "Starting…",
+        disabled: blocked,
+        run: async (statusEl) => {
+          const app = getApp();
+          if (!app) return;
+          const dir = await app.PickDirectory("Import from folder…");
+          if (!dir) {
+            setFieldStatus(statusEl, "");
+            return;
+          }
+          await startIngest(statusEl, dir);
+        },
+      },
+      {
+        label: "Cancel ingest",
+        busyText: "Stopping…",
+        disabled: !status.busy || !!status.ingestCancelRequested,
+        busy: inFlightActions.has("cancelIngest"),
+        run: async (statusEl) => {
+          const app = getApp();
+          if (!app) return;
+          const result = await runTracked("cancelIngest", () => app.CancelIngest());
+          if (!result.canceled) {
+            setFieldStatus(statusEl, "No ingest is running", "error");
+            return;
+          }
+          setFieldStatus(statusEl, "Stopping after the current file", "saved");
+          await poll();
+        },
+      },
+      {
+        label: status.paused ? "Resume" : "Pause",
+        busyText: status.paused ? "Resuming…" : "Pausing…",
+        busy: inFlightActions.has("pause"),
+        run: async (statusEl) => {
+          const app = getApp();
+          if (!app) return;
+          const result = await runTracked("pause", () => app.SetPaused(!status.paused));
+          setFieldStatus(statusEl, result.paused ? "Paused" : "Resumed", "saved");
+          await poll();
+        },
+      },
+    ], true),
+  );
+}
+
+// failedRows caches the last GET /api/queue/failed answer so the 5s
+// status poll (which rebuilds #queue-body from scratch) can render the
+// list synchronously instead of flashing it empty while a fresh copy
+// loads; refreshFailedRows replaces it in the background.
+let failedRows = [];
+let failedRowsLoading = false;
+
+async function refreshFailedRows() {
+  const app = getApp();
+  if (!app || failedRowsLoading) return;
+  failedRowsLoading = true;
+  try {
+    const res = JSON.parse(await app.FailedQueueJSON());
+    failedRows = res.rows ?? [];
+  } catch {
+    // Leave the previous list standing; the next poll retries.
+  } finally {
+    failedRowsLoading = false;
   }
-  const rows = [
-    ["Card", last.cardPath],
-    ["Started", fmtTime(last.startedAt) ?? "—"],
-    ["Submitted / Skipped / Failed", `${last.submitted ?? 0} / ${last.skipped ?? 0} / ${last.failed ?? 0}`],
-  ];
-  if (last.resumed) rows.push(["Resumed from earlier run", `${last.resumed ?? 0}`]);
-  if (last.deferred) rows.push(["Waiting for unmetered connection", raw(pill(`${last.deferred} on card -- not ejected`, "warn"))]);
-  if (last.offline) rows.push(["Mode", raw(pill("offline queue", "neutral"))]);
-  if (last.err) rows.push(["Error", raw(pill(last.err, "bad"))]);
-  byId("ingest-body").innerHTML = table(rows);
+  const holder = byId("queue-failed");
+  if (holder) renderFailedRows(holder);
+}
+
+const FAILED_STEP_LABELS = {
+  archive_copy: "archive copy",
+  rebase: "archive confirmation",
+};
+
+// renderFailedRows lists the queue's FAILED rows, each with its reason and
+// a "Retry" that re-queues just that row (the agent's queue reset, the
+// same one `queue-drain -retry-failed` runs), plus "Retry all". A retried
+// row goes back to waiting; the next drain pass -- the timer's, or "Drain
+// now" -- tries it again.
+function renderFailedRows(holder) {
+  holder.innerHTML = "";
+  if (!failedRows.length) return;
+  const heading = document.createElement("h3");
+  heading.textContent = "Failed files";
+  holder.appendChild(heading);
+  const intro = document.createElement("p");
+  intro.className = "section-intro";
+  intro.textContent = "These stopped retrying on their own. Fix the cause shown, then retry; the next drain picks them up.";
+  holder.appendChild(intro);
+
+  const retried = async (statusEl, result) => {
+    const n = (result.archiveCopies ?? 0) + (result.rebases ?? 0);
+    setFieldStatus(statusEl, n ? "Queued for retry" : "Already retried", "saved");
+    await refreshFailedRows();
+    await poll();
+  };
+  for (const row of failedRows) {
+    const step = FAILED_STEP_LABELS[row.step] ?? row.step;
+    const detail = `${pill(step, "bad")} ${escapeHtml(row.lastError || "no reason recorded")}`;
+    const key = `retry:${row.nodeUuid}`;
+    holder.appendChild(
+      actionButtonRow(row.fileName || row.sourcePath || row.nodeUuid, detail, [
+        {
+          label: "Retry",
+          busyText: "Retrying…",
+          busy: inFlightActions.has(key),
+          run: async (statusEl) => {
+            const app = getApp();
+            if (!app) return;
+            await retried(statusEl, await runTracked(key, () => app.RetryFailedRow(row.nodeUuid)));
+          },
+        },
+      ]),
+    );
+  }
+  holder.appendChild(
+    actionButtonRow("Failed file actions", "", [
+      {
+        label: "Retry all",
+        busyText: "Retrying…",
+        busy: inFlightActions.has("retryAll"),
+        run: async (statusEl) => {
+          const app = getApp();
+          if (!app) return;
+          await retried(statusEl, await runTracked("retryAll", () => app.RetryAllFailed()));
+        },
+      },
+    ], true),
+  );
 }
 
 // renderQueue shows the offline queue -- an operator-facing name for what
@@ -370,11 +570,15 @@ function renderIngest(status) {
 // SettingsView.OfflineQueueConfigured -- see storageRequiredNote below --
 // not editable: moving the queue DB file mid-run has real operational
 // consequences), so an unconfigured queue gets a pointer to the config key
-// rather than a dead end.
-function renderQueue(status) {
+// rather than a dead end. A configured queue gets "Drain now"/"Prune now"
+// (the tray menu's items, behind the same confirmation) and the failed-
+// rows list.
+function renderQueue(status, settings) {
   const q = status.queueStatus;
+  const container = byId("queue-body");
   if (!q || !q.Configured) {
-    byId("queue-body").innerHTML =
+    failedRows = [];
+    container.innerHTML =
       `<p class="empty">Offline queue is off. An ingest still runs normally when the server is reachable; ` +
       `set <code>offline.queueDbPath</code> in config.yaml to keep queuing ingests while it isn't.</p>`;
     return;
@@ -391,7 +595,76 @@ function renderQueue(status) {
   let html = table(rows);
   if (status.inFlightDrain) html += `<p>${pill("drain running", "neutral")}</p>`;
   if (status.inFlightPrune) html += `<p>${pill("prune running", "neutral")}</p>`;
-  byId("queue-body").innerHTML = html;
+  container.innerHTML = html;
+
+  const buttons = [
+    {
+      label: "Drain now",
+      busyText: "Draining…",
+      disabled: !!status.paused || !!status.inFlightDrain,
+      busy: inFlightActions.has("drain"),
+      run: async (statusEl) => {
+        const app = getApp();
+        if (!app) return;
+        if (!(await confirmDestructive(settings, "Confirm drain queue",
+          "Drain the offline queue now? This will POST all pending node_created events to branchDAM.", "Drain"))) {
+          setFieldStatus(statusEl, "");
+          return;
+        }
+        const result = await runTracked("drain", () => app.TriggerDrain());
+        if (!result.ran) {
+          setFieldStatus(statusEl, "Skipped — paused, on a metered connection, or a drain is already running", "error");
+          return;
+        }
+        if (result.err) {
+          setFieldStatus(statusEl, result.err, "error");
+        } else {
+          setFieldStatus(statusEl, `Drained — ${result.remaining ?? 0} left`, "saved");
+        }
+        await refreshFailedRows();
+        await poll();
+      },
+    },
+  ];
+  if (q.PruneEnabled) {
+    buttons.push({
+      label: "Prune now",
+      busyText: "Pruning…",
+      disabled: !!status.paused || !!status.inFlightPrune || !!status.busy,
+      busy: inFlightActions.has("prune"),
+      run: async (statusEl) => {
+        const app = getApp();
+        if (!app) return;
+        if (!(await confirmDestructive(settings, "Confirm prune",
+          "Delete verified local files from the local edit folder? This is destructive and cannot be undone.", "Prune"))) {
+          setFieldStatus(statusEl, "");
+          return;
+        }
+        const result = await runTracked("prune", () => app.TriggerPrune());
+        if (!result.ran) {
+          setFieldStatus(statusEl, "Skipped — paused, or an ingest or update is running", "error");
+          return;
+        }
+        if (result.err) {
+          setFieldStatus(statusEl, result.err, "error");
+        } else {
+          setFieldStatus(statusEl, `Pruned ${result.pruned ?? 0} (${fmtBytes(result.freedBytes ?? 0)} freed)`, "saved");
+        }
+        await poll();
+      },
+    });
+  }
+  container.appendChild(actionButtonRow("Queue actions", "", buttons, true));
+
+  const holder = document.createElement("div");
+  holder.id = "queue-failed";
+  container.appendChild(holder);
+  if ((c.Failed ?? 0) > 0) {
+    renderFailedRows(holder);
+    refreshFailedRows();
+  } else {
+    failedRows = [];
+  }
 }
 
 // inFlightActions holds "kind:id" keys (e.g. "sync:luminar") for every
@@ -664,6 +937,10 @@ function renderSelfUpdate(status, settings) {
   }
   if (!su.Enabled) {
     container.innerHTML = `<p>${pill("disabled", "neutral")}</p>`;
+    // Rolling back needs no update check (it restores the copy a past
+    // update left on disk), so it stays available with checks turned off,
+    // matching the tray menu's "Roll back" item.
+    appendRollbackRow(container, status, su, settings);
     return;
   }
   const rows = [["Current version", su.CurrentVersion]];
@@ -758,6 +1035,44 @@ function renderSelfUpdate(status, settings) {
             return;
           }
           setFieldStatus(statusEl, "Update started — watch status above", "saved");
+          await poll();
+        },
+      },
+    ], true),
+  );
+  appendRollbackRow(container, status, su, settings);
+}
+
+// appendRollbackRow adds "Roll back to <version>" when the agent reports a
+// previous version on disk (selfUpdate.RollbackVersion). Disabled while an
+// ingest runs or an update/rollback owns the binary -- the agent refuses
+// both anyway (it takes the same idle gate as the tray menu's rollback),
+// this only keeps the button honest. Confirmed like the tray menu item.
+function appendRollbackRow(container, status, su, settings) {
+  if (!su.RollbackVersion) return;
+  const ownsBinary = !!su.Phase && !["idle", "available", "failed", "checking"].includes(su.Phase);
+  container.appendChild(
+    actionButtonRow("Roll back", "", [
+      {
+        label: `Roll back to ${su.RollbackVersion}`,
+        busyText: "Rolling back…",
+        disabled: !!status.busy || ownsBinary,
+        busy: inFlightActions.has("rollbackUpdate"),
+        run: async (statusEl) => {
+          const app = getApp();
+          if (!app) return;
+          if (!(await confirmDestructive(settings, "Confirm roll back",
+            `Roll back to ${su.RollbackVersion}? Current version: ${su.CurrentVersion || "unknown"}. The tray restarts and is unavailable for ~5 seconds.`,
+            "Roll back"))) {
+            setFieldStatus(statusEl, "");
+            return;
+          }
+          const result = await runTracked("rollbackUpdate", () => app.RollbackUpdate());
+          if (!result.started) {
+            setFieldStatus(statusEl, result.status?.Err || "Rollback could not be started", "error");
+            return;
+          }
+          setFieldStatus(statusEl, "Rolling back — the tray restarts when done", "saved");
           await poll();
         },
       },
@@ -1075,7 +1390,7 @@ function renderOverview(status, settings) {
 
   if (status.paused) {
     const pausedTile = document.createElement("p");
-    pausedTile.innerHTML = pill("paused from the tray menu — nothing runs automatically", "warn");
+    pausedTile.innerHTML = pill("paused — nothing runs automatically until you resume", "warn");
     healthEl.insertBefore(pausedTile, grid);
   }
 }
@@ -1121,8 +1436,8 @@ function render(view) {
   renderSetupBanner(status);
   renderOverview(status, settings);
   renderServer(status);
-  renderIngest(status);
-  renderQueue(status);
+  renderIngest(status, view.settings);
+  renderQueue(status, view.settings);
   renderIntegrations(status);
   renderHooks(status);
   renderSelfUpdate(status, view.settings);

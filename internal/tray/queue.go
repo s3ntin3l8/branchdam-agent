@@ -3,6 +3,7 @@ package tray
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -148,4 +149,107 @@ func (s QueueStatus) MarshalJSON() ([]byte, error) {
 		alias
 		Err string `json:"Err,omitempty"`
 	}{alias: alias(s), Err: errString(s.Err)})
+}
+
+// FailedQueueRow is one queue.db row with a terminally FAILED archive copy
+// or rebase -- the tray-local mirror of the fields of internal/queue.Record
+// the window's failed-rows list shows, duplicated for the same reason
+// QueueCounts is. Step names which step failed ("archive_copy" or
+// "rebase"; an archive-copy failure ends the row before rebase ever runs)
+// and LastError is that step's recorded reason.
+type FailedQueueRow struct {
+	NodeUUID    string `json:"nodeUuid"`
+	FileName    string `json:"fileName"`
+	SourcePath  string `json:"sourcePath"`
+	LocalPath   string `json:"localPath"`
+	ArchivePath string `json:"archivePath"`
+	SizeBytes   int64  `json:"sizeBytes"`
+	Step        string `json:"step"`
+	LastError   string `json:"lastError"`
+	Attempts    int    `json:"attempts"`
+	CreatedAt   int64  `json:"createdAtUnix"`
+}
+
+// Failed-step names reported in FailedQueueRow.Step.
+const (
+	FailedStepArchiveCopy = "archive_copy"
+	FailedStepRebase      = "rebase"
+)
+
+// QueueRetryCounts is the tray-local mirror of internal/queue.ResetCounts:
+// how many FAILED steps a retry put back to PENDING.
+type QueueRetryCounts struct {
+	ArchiveCopies int64 `json:"archiveCopies"`
+	Rebases       int64 `json:"rebases"`
+}
+
+// QueueFailureManager is the optional half of a QueueReader that can list
+// FAILED rows and re-queue them (internal/queue.Store's FailedRows,
+// ResetFailedNode and ResetFailed, the same reset `queue-drain
+// -retry-failed` runs). A separate interface rather than more QueueReader
+// methods so every existing Counts-only fake keeps compiling; Runner
+// type-asserts for it and reports ErrQueueRetryUnsupported when absent.
+type QueueFailureManager interface {
+	FailedRows(ctx context.Context, limit int) ([]FailedQueueRow, error)
+	// RetryFailed resets nodeUUID's FAILED steps, or every row's when
+	// nodeUUID is "".
+	RetryFailed(ctx context.Context, nodeUUID string) (QueueRetryCounts, error)
+}
+
+// ErrQueueNotConfigured is returned by the failed-row methods when no
+// offline queue is wired (offline.queueDbPath unset).
+var ErrQueueNotConfigured = errors.New("tray: offline queue is not configured")
+
+// ErrQueueRetryUnsupported is returned when the wired QueueReader cannot
+// list or reset failed rows.
+var ErrQueueRetryUnsupported = errors.New("tray: offline queue does not support listing or retrying failed rows")
+
+// failedQueueReadTimeout bounds a failed-rows read the same way
+// statusQueueReadTimeout bounds Status()'s Counts call.
+const failedQueueReadTimeout = statusQueueReadTimeout
+
+// queueFailureManager returns the wired QueueReader's QueueFailureManager
+// half, or the error explaining why there is none.
+func (r *Runner) queueFailureManager() (QueueFailureManager, error) {
+	r.mu.Lock()
+	reader := r.queueReader
+	r.mu.Unlock()
+	if reader == nil {
+		return nil, ErrQueueNotConfigured
+	}
+	m, ok := reader.(QueueFailureManager)
+	if !ok {
+		return nil, ErrQueueRetryUnsupported
+	}
+	return m, nil
+}
+
+// FailedQueueRows lists up to limit FAILED queue rows (limit <= 0: all),
+// oldest first, for the window's failed-rows list.
+func (r *Runner) FailedQueueRows(ctx context.Context, limit int) ([]FailedQueueRow, error) {
+	m, err := r.queueFailureManager()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, failedQueueReadTimeout)
+	defer cancel()
+	return m.FailedRows(ctx, limit)
+}
+
+// RetryFailedQueueRows puts nodeUUID's FAILED steps (every row's when
+// nodeUUID is "") back to PENDING so the next drain pass retries them. It
+// needs no lock of its own: the reset only touches rows already FAILED,
+// which a drain pass never selects (they are terminal), and queue.db is a
+// single-connection store, so a concurrent drain can neither lose the
+// reset nor see half of it. Deliberately not gated on Paused(): re-queuing
+// does no network I/O, and the paused drain simply picks the rows up once
+// resumed.
+func (r *Runner) RetryFailedQueueRows(ctx context.Context, nodeUUID string) (QueueRetryCounts, error) {
+	m, err := r.queueFailureManager()
+	if err != nil {
+		return QueueRetryCounts{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, failedQueueReadTimeout)
+	defer cancel()
+	return m.RetryFailed(ctx, nodeUUID)
 }

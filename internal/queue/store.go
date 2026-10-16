@@ -615,6 +615,23 @@ type ResetCounts struct {
 // FAILED never reached rebase, so resetting it alone re-runs the row from
 // the copy onward.
 func (s *Store) ResetFailed(ctx context.Context) (ResetCounts, error) {
+	return s.resetFailed(ctx, "")
+}
+
+// ResetFailedNode is ResetFailed for the single row nodeUUID -- the
+// per-row "Retry" in the tray window's failed-rows list. Same reset, same
+// transaction shape; a row with no FAILED step is left alone and reported
+// as zero resets, never an error, so a retry racing a drain pass that
+// already re-queued it is harmless.
+func (s *Store) ResetFailedNode(ctx context.Context, nodeUUID string) (ResetCounts, error) {
+	if nodeUUID == "" {
+		return ResetCounts{}, fmt.Errorf("queue: reset failed: nodeUUID is required")
+	}
+	return s.resetFailed(ctx, nodeUUID)
+}
+
+// resetFailed implements ResetFailed (nodeUUID "") and ResetFailedNode.
+func (s *Store) resetFailed(ctx context.Context, nodeUUID string) (ResetCounts, error) {
 	var c ResetCounts
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -622,10 +639,14 @@ func (s *Store) ResetFailed(ctx context.Context) (ResetCounts, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// nodeFilter matches every row when nodeUUID is "" and exactly one row
+	// otherwise, so both entry points share one statement per step.
+	const nodeFilter = ` AND (? = '' OR node_uuid = ?)`
+
 	res, err := tx.ExecContext(ctx,
 		`UPDATE queue_nodes SET archive_copy_status = ?, archive_copy_attempts = 0, archive_copy_next_attempt_unix = 0
-WHERE archive_copy_status = ?`,
-		StatusPending, StatusFailed)
+WHERE archive_copy_status = ?`+nodeFilter,
+		StatusPending, StatusFailed, nodeUUID, nodeUUID)
 	if err != nil {
 		return c, fmt.Errorf("queue: reset failed archive copies: %w", err)
 	}
@@ -635,8 +656,8 @@ WHERE archive_copy_status = ?`,
 
 	res, err = tx.ExecContext(ctx,
 		`UPDATE queue_nodes SET rebase_status = ?, rebase_attempts = 0, rebase_next_attempt_unix = 0
-WHERE rebase_status = ?`,
-		StatusPending, StatusFailed)
+WHERE rebase_status = ?`+nodeFilter,
+		StatusPending, StatusFailed, nodeUUID, nodeUUID)
 	if err != nil {
 		return c, fmt.Errorf("queue: reset failed rebases: %w", err)
 	}
@@ -743,6 +764,36 @@ func (s *Store) CollectGarbage(ctx context.Context, now time.Time, retention tim
 		}
 	}
 	return deleted, nil
+}
+
+// FailedRows returns up to limit rows with a terminally FAILED archive copy
+// or rebase (Record.Failed), oldest first -- the tray window's failed-rows
+// list. limit <= 0 returns every failed row. Counts().Failed is the total
+// to show alongside a truncated list.
+func (s *Store) FailedRows(ctx context.Context, limit int) ([]Record, error) {
+	query := selectCols + `
+WHERE ` + failedSQL + `
+ORDER BY id ASC`
+	args := []any{}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("queue: list failed: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Record
+	for rows.Next() {
+		rec, err := scanRecordRows(rows)
+		if err != nil {
+			return nil, fmt.Errorf("queue: scan failed row: %w", err)
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 const selectCols = `SELECT

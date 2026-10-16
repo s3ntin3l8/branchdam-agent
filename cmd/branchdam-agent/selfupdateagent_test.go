@@ -252,3 +252,101 @@ func TestCheckNowSkipsWhileApplyRuns(t *testing.T) {
 		t.Error("ran = true, want false while an apply holds applyMu")
 	}
 }
+
+// waitForPhase polls updater until its phase is want and both locks
+// StartRollback reserved are free again.
+func waitForPhase(t *testing.T, runner *tray.Runner, updater *selfUpdateAgent, want string) tray.UpdateStatus {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := updater.Status(); got.Phase == want && updater.applyMu.TryLock() {
+			updater.applyMu.Unlock()
+			if release, ok := runner.TryLockIdle(); ok {
+				release()
+				return got
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("phase never reached %q with locks released: %+v", want, updater.Status())
+	return tray.UpdateStatus{}
+}
+
+func TestTrayUpdateApplierStartRollbackRestartsAsRollback(t *testing.T) {
+	runner := tray.NewRunner(nil, nil, "")
+	updater := &selfUpdateAgent{st: tray.UpdateStatus{Enabled: true, Phase: updatePhaseIdle}}
+	applier := &trayUpdateApplier{
+		runner:            runner,
+		updater:           updater,
+		rollbackAvailable: func() (string, bool) { return "v1.2.0", true },
+		rollback:          func(context.Context) (string, error) { return "v1.2.0", nil },
+	}
+	status, started := applier.StartRollback()
+	if !started {
+		t.Fatalf("started = false, status = %+v", status)
+	}
+	if status.Phase != tray.UpdatePhaseRollingBack || status.RollbackVersion != "v1.2.0" {
+		t.Errorf("started status = %+v, want phase %q for v1.2.0", status, tray.UpdatePhaseRollingBack)
+	}
+	got := waitForPhase(t, runner, updater, updatePhaseRestarting)
+	if !got.RolledBack || got.Applied != "v1.2.0" || got.Err != nil {
+		t.Errorf("final status = %+v, want a RolledBack restart to v1.2.0", got)
+	}
+}
+
+func TestTrayUpdateApplierStartRollbackRecordsFailure(t *testing.T) {
+	runner := tray.NewRunner(nil, nil, "")
+	updater := &selfUpdateAgent{st: tray.UpdateStatus{Phase: updatePhaseIdle}}
+	want := errors.New("backup missing")
+	applier := &trayUpdateApplier{
+		runner:            runner,
+		updater:           updater,
+		rollbackAvailable: func() (string, bool) { return "v1.2.0", true },
+		rollback:          func(context.Context) (string, error) { return "", want },
+	}
+	if _, started := applier.StartRollback(); !started {
+		t.Fatal("started = false")
+	}
+	got := waitForPhase(t, runner, updater, updatePhaseFailed)
+	if !errors.Is(got.Err, want) || got.RolledBack {
+		t.Errorf("final status = %+v, want failed with %v", got, want)
+	}
+}
+
+func TestTrayUpdateApplierStartRollbackRefusals(t *testing.T) {
+	called := false
+	rollback := func(context.Context) (string, error) { called = true; return "", nil }
+
+	none := &trayUpdateApplier{
+		runner: tray.NewRunner(nil, nil, ""), updater: &selfUpdateAgent{},
+		rollbackAvailable: func() (string, bool) { return "", false }, rollback: rollback,
+	}
+	if st, started := none.StartRollback(); started || st.Err == nil {
+		t.Errorf("no previous version: started=%v err=%v, want refused", started, st.Err)
+	}
+
+	busyRunner := tray.NewRunner(nil, nil, "")
+	release, ok := busyRunner.TryLockIdle()
+	if !ok {
+		t.Fatal("could not reserve runner gate")
+	}
+	defer release()
+	busy := &trayUpdateApplier{
+		runner: busyRunner, updater: &selfUpdateAgent{},
+		rollbackAvailable: func() (string, bool) { return "v1", true }, rollback: rollback,
+	}
+	if st, started := busy.StartRollback(); started || st.Err == nil {
+		t.Errorf("gate held (ingest running): started=%v err=%v, want refused", started, st.Err)
+	}
+
+	applying := &trayUpdateApplier{
+		runner: tray.NewRunner(nil, nil, ""), updater: &selfUpdateAgent{st: tray.UpdateStatus{Phase: updatePhaseDownloading}},
+		rollbackAvailable: func() (string, bool) { return "v1", true }, rollback: rollback,
+	}
+	if st, started := applying.StartRollback(); started || st.Err == nil {
+		t.Errorf("apply in progress: started=%v err=%v, want refused", started, st.Err)
+	}
+	if called {
+		t.Error("a refused rollback still ran")
+	}
+}

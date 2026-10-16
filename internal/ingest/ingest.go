@@ -251,7 +251,11 @@ func isLiveLifecycleState(state string) bool {
 // OK. Only an error on cardRoot itself returns (CardResult{}, err).
 // A cancelled ctx stops the walk before the next file (and
 // DualWrite/Verify within one buffer of the file in flight); IngestCard
-// then returns the files already processed together with ctx's error.
+// then returns the files already processed together with ctx's error. An
+// operator stop requested through WithFileBoundaryCancel also ends the walk
+// before the next entry, returning the partial result with an error
+// wrapping ErrCanceled, but the file in progress when it arrives finishes
+// first (see WithFileBoundaryCancel).
 // Re-running on the same card is always safe (the AlreadyIngested
 // fast-path here; queue.db's BySourcePath check in the offline twin).
 func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, error) {
@@ -263,6 +267,12 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 		upload = newUploadPass()
 	}
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
+		// Checked before every entry, so an operator stop
+		// (WithFileBoundaryCancel) or a shutdown ends the walk between
+		// files rather than failing every remaining one.
+		if stop := stopRequested(ctx); stop != nil {
+			return stop
+		}
 		if err != nil {
 			entryErr, fatal := walkEntryError(cardRoot, path, err)
 			if entryErr != nil {
@@ -312,8 +322,8 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 		return nil
 	})
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
-			return result, fmt.Errorf("ingest: card %s: stopped before the remaining files: %w", cardRoot, err)
+		if stopped := walkStopped(ctx, cardRoot, err); stopped != nil {
+			return result, stopped
 		}
 		return CardResult{}, fmt.Errorf("ingest: walk card root %s: %w", cardRoot, err)
 	}

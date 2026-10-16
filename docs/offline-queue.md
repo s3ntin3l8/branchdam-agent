@@ -172,7 +172,11 @@ What the operator does depends on which step failed:
   card). Then run `queue-drain -retry-failed`.
 
 `queue-drain -retry-failed` puts every failed archive copy and rebase back to `PENDING`
-(`queue.Store.ResetFailed`) and drains.
+(`queue.Store.ResetFailed`) and drains. With the tray running, the branchDAM window's
+Storage & ingest page does the same without a terminal: its Queue section lists every failed row
+with the step that failed and its last error, and offers "Retry" per row
+(`queue.Store.ResetFailedNode`) or "Retry all" (`ResetFailed`). A retried row is back to
+`PENDING` and goes out on the next drain pass (the timer's, or "Drain now").
 
 One `archive_copy` failure mode does NOT self-clear, and there's no terminal state to catch it: if
 the local edit copy is deleted (by the user, by disk cleanup, by anything) before `archive_copy`

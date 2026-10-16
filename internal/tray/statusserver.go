@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -72,6 +73,9 @@ type StatusServer struct {
 	// nil-tolerant like Updates so older/test-only StatusServers still serve
 	// the rest of the API unchanged.
 	UpdateApply UpdateApplier
+	// UpdateRollback starts a rollback to the previous version
+	// asynchronously -- UpdateApply's counterpart, equally nil-tolerant.
+	UpdateRollback UpdateRollbacker
 	// PairConfirm shows the operator confirmation dialog for deep-link
 	// pair requests (POST /api/actions/pair with source "deeplink"). Nil
 	// refuses such requests (fail closed).
@@ -85,6 +89,12 @@ type StatusServer struct {
 	Token string
 
 	srv *http.Server
+
+	// ingestBatch is set while a window-started ingest batch
+	// (POST /api/actions/ingest-start) is running, so a second click
+	// reports "already running" instead of queuing another batch behind
+	// Runner.gate.
+	ingestBatch atomic.Bool
 }
 
 // NewStatusServer builds a StatusServer bound to addr (or its loopback-only

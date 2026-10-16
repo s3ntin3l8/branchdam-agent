@@ -36,13 +36,6 @@ import (
 // ingested and a self-update note that changed since the tray started.
 const menuRefreshInterval = 5 * time.Second
 
-// drainPruneClickTimeout bounds a menu-triggered "Drain queue now"/"Prune
-// now" pass -- the tray's own background timer path
-// (cmd/branchdam-agent/queueagent.go's periodicPassTimeout) already bounds
-// every automatic pass to the same duration; a manual click went unbounded
-// until a Hermes review finding on this PR caught the inconsistency.
-const drainPruneClickTimeout = 2 * time.Minute
-
 // applyResult is what the install goroutine feeds back to the select loop.
 type applyResult struct {
 	version string
@@ -312,7 +305,8 @@ func Run(
 				// Left as "Installing..." by the click handler; don't
 				// stomp it with a stale UpdateFound-driven title.
 			case us.Phase == UpdatePhaseChecking || us.Phase == UpdatePhaseDownloading ||
-				us.Phase == UpdatePhaseVerifying || us.Phase == UpdatePhaseRestarting:
+				us.Phase == UpdatePhaseVerifying || us.Phase == UpdatePhaseRestarting ||
+				us.Phase == UpdatePhaseRollingBack:
 				installItem.Show()
 				if st.Busy {
 					installItem.SetTitle(fmt.Sprintf("Install and restart (waiting for ingest of %s to finish)", st.BusyCard))
@@ -404,7 +398,11 @@ func Run(
 					notify(ctx, "branchDAM Agent", ingestNowEmptyMessage(r.WatchDirs()))
 				}
 				for _, vol := range vols {
-					r.TriggerIngest(ctx, vol)
+					// A cancel (the window's "Cancel ingest") stops the
+					// whole batch, not just the volume it landed on.
+					if r.TriggerIngest(ctx, vol).Canceled {
+						break
+					}
 				}
 				ingestDoneCh <- struct{}{}
 			}

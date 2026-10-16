@@ -75,6 +75,12 @@ type IngestSummary struct {
 	Deferred int   `json:"deferred"`
 	Err      error `json:"-"`
 	Offline  bool  `json:"offline"`
+	// Canceled is true when the operator stopped this ingest
+	// (Runner.CancelIngest) before it walked the whole card. The counts
+	// above cover the files handled before the stop; Err wraps
+	// ingest.ErrCanceled, so OK() is false and the card is never
+	// auto-ejected. Re-running the ingest picks up where it stopped.
+	Canceled bool `json:"canceled,omitempty"`
 }
 
 // MarshalJSON renders Err as its message string rather than encoding the
@@ -181,6 +187,15 @@ type UpdateStatus struct {
 	// Applied is set to the version string once ApplyLatest has
 	// succeeded this session.
 	Applied string
+	// RolledBack is set together with Applied (and Phase restarting) when
+	// the swap that just completed was a rollback to the previous
+	// version rather than a forward update, so the restart is logged as
+	// "rolled back to" (Outcome.RolledBack).
+	RolledBack bool
+	// RollbackVersion is the version a rollback would restore, or "" when
+	// no previous version is on disk -- filled from
+	// SelfUpdater.RollbackAvailable for the window's "Roll back" button.
+	RollbackVersion string
 }
 
 // Update lifecycle phase values shared by the tray menu, status API, and the
@@ -195,6 +210,10 @@ const (
 	UpdatePhaseVerifying   = "verifying"
 	UpdatePhaseRestarting  = "restarting"
 	UpdatePhaseFailed      = "failed"
+	// UpdatePhaseRollingBack covers a window-started rollback restoring
+	// the previous version's files (the tray menu's own rollback tracks
+	// this in its select loop instead).
+	UpdatePhaseRollingBack = "rolling-back"
 )
 
 // MarshalJSON renders Err as a string -- see IngestSummary.MarshalJSON's
@@ -262,6 +281,9 @@ type Status struct {
 	// IngestProgress is the most recent progress sample from an in-flight
 	// ingest (DualWrite/WriteLocal/Verify), or nil when idle.
 	IngestProgress *ingest.ProgressEvent `json:"ingestProgress,omitempty"`
+	// IngestCancelRequested is true once Runner.CancelIngest has asked the
+	// in-flight ingest to stop; it is still finishing its current file.
+	IngestCancelRequested bool `json:"ingestCancelRequested,omitempty"`
 	// HandshakeOK surfaces the most recent DrainSummary.HandshakeOK to the
 	// status page -- the operator's most basic "is the server reachable?"
 	// signal, which DrainSummary already computes but never exposed. False
@@ -450,6 +472,12 @@ type Runner struct {
 	busyCard      string
 	busySince     time.Time
 	onPauseChange func(paused bool)
+	// ingestStop asks the in-flight ingest to stop at the next file
+	// boundary (ingest.WithFileBoundaryCancel); nil while no ingest holds
+	// gate. ingestStopRequested records that CancelIngest called it, for
+	// Status().IngestCancelRequested ("stopping after the current file").
+	ingestStop          context.CancelFunc
+	ingestStopRequested bool
 
 	// lastProgress records the most recent progress sample from an in-flight
 	// IngestCard call (DualWrite/WriteLocal/Verify). Cleared when idle.
@@ -955,51 +983,69 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		r.setBusy(false, "")
 	}()
 
+	// The ingest runs under a stop signal CancelIngest can fire. It only
+	// ever takes effect between files (ingest.WithFileBoundaryCancel), so
+	// a stop never tears down a DualWrite mid-stream or leaves a copy
+	// without its registration -- the same guarantee every action
+	// handler's context.WithoutCancel keeps for a disconnected client.
+	ingestCtx, stop := ingest.WithFileBoundaryCancel(ctx)
 	r.mu.Lock()
 	ingester := r.ingester
+	r.ingestStop = stop
+	r.ingestStopRequested = false
 	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.ingestStop = nil
+		r.ingestStopRequested = false
+		r.mu.Unlock()
+		stop()
+	}()
 	r.wireProgress(ingester)
 
+	// A stopped walk returns its partial result alongside the error, so
+	// the files are counted whether or not err is set (every other error
+	// comes back with an empty result).
 	if reachable {
-		result, err := ingester.IngestCard(ctx, cardPath)
+		result, err := ingester.IngestCard(ingestCtx, cardPath)
 		summary.Elapsed = time.Since(summary.StartedAt)
 		if err != nil {
 			summary.Err = err
-		} else {
-			for _, f := range result.Files {
-				switch {
-				case f.Err != nil:
-					summary.Failed++
-				case f.Deferred:
-					summary.Deferred++
-				case f.Skipped:
-					summary.Skipped++
-				default:
-					summary.Submitted++
-				}
+			summary.Canceled = errors.Is(err, ingest.ErrCanceled)
+		}
+		for _, f := range result.Files {
+			switch {
+			case f.Err != nil:
+				summary.Failed++
+			case f.Deferred:
+				summary.Deferred++
+			case f.Skipped:
+				summary.Skipped++
+			default:
+				summary.Submitted++
 			}
 		}
 	} else {
-		result, err := ingester.IngestCardOffline(ctx, cardPath)
+		result, err := ingester.IngestCardOffline(ingestCtx, cardPath)
 		summary.Elapsed = time.Since(summary.StartedAt)
 		if err != nil {
 			summary.Err = err
-		} else {
-			// No Deferred arm: offline ingest never uploads (the archive
-			// copy and registration wait in queue.db for the drain), so a
-			// metered connection cannot hold anything back here and
-			// OfflineFileResult has no Deferred flag.
-			for _, f := range result.Files {
-				switch f.Outcome() {
-				case ingest.OfflineOutcomeFailed:
-					summary.Failed++
-				case ingest.OfflineOutcomeResumed:
-					summary.Resumed++
-				case ingest.OfflineOutcomeSkipped:
-					summary.Skipped++
-				case ingest.OfflineOutcomeQueued:
-					summary.Submitted++
-				}
+			summary.Canceled = errors.Is(err, ingest.ErrCanceled)
+		}
+		// No Deferred arm: offline ingest never uploads (the archive copy
+		// and registration wait in queue.db for the drain), so a metered
+		// connection cannot hold anything back here and OfflineFileResult
+		// has no Deferred flag.
+		for _, f := range result.Files {
+			switch f.Outcome() {
+			case ingest.OfflineOutcomeFailed:
+				summary.Failed++
+			case ingest.OfflineOutcomeResumed:
+				summary.Resumed++
+			case ingest.OfflineOutcomeSkipped:
+				summary.Skipped++
+			case ingest.OfflineOutcomeQueued:
+				summary.Submitted++
 			}
 		}
 	}
@@ -1048,6 +1094,25 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 	}
 
 	return summary
+}
+
+// CancelIngest asks the in-flight ingest, if any, to stop before its next
+// file and reports whether there was one to stop. The file being copied
+// finishes -- copy, verify and registration or queue row -- so nothing is
+// left half-done; the summary then reports Canceled, the card is not
+// auto-ejected, and a later ingest of the same card resumes where this one
+// stopped (already-ingested files are skipped). Deliberately not a pause
+// gate: it never touches Paused(), and it does not take gate, so it can
+// never block behind (or deadlock with) the ingest it is stopping.
+func (r *Runner) CancelIngest() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ingestStop == nil {
+		return false
+	}
+	r.ingestStop()
+	r.ingestStopRequested = true
+	return true
 }
 
 func (r *Runner) setBusy(busy bool, cardPath string) {
@@ -2266,6 +2331,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	lastProbe := r.lastProbe
 	inFlightProbe := r.inFlightProbe
 	pauseUploadOnMetered := r.pauseUploadOnMetered
+	cancelRequested := r.ingestStopRequested
 
 	// Built entirely under r.mu, not after unlocking: r.syncers/r.lastSync
 	// are read map entries here, not copied whole-map references, so a
@@ -2355,6 +2421,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		ServerProbe:      lastProbe,
 		InFlightProbe:    inFlightProbe,
 
-		UploadPausedMetered: r.meteredUploadPaused(pauseUploadOnMetered),
+		UploadPausedMetered:   r.meteredUploadPaused(pauseUploadOnMetered),
+		IngestCancelRequested: busy && cancelRequested,
 	}
 }

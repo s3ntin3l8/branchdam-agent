@@ -1308,3 +1308,138 @@ func TestPairingDoesNotUseWindowPrompt(t *testing.T) {
 		t.Error("app.js no longer defines renderPairingRow -- the inline 'Pair with server' control this test guards seems to have been removed")
 	}
 }
+
+// TestWindowActionBindingsHitTheirRoutes pins every window action binding
+// added for ingest/drain/prune/pause/rollback/cancel and the failed-rows
+// list to its loopback route, method and body, and checks the raw agent
+// response comes back unchanged.
+func TestWindowActionBindingsHitTheirRoutes(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name       string
+		call       func(a *App) (string, error)
+		wantMethod string
+		wantPath   string
+		wantBody   string
+	}{
+		{"ingest now", func(a *App) (string, error) { return a.StartIngest("") }, http.MethodPost, "/api/actions/ingest-start", `{"cardPath":""}`},
+		{"import folder", func(a *App) (string, error) { return a.StartIngest("/Users/me/Shoot") }, http.MethodPost, "/api/actions/ingest-start", `{"cardPath":"/Users/me/Shoot"}`},
+		{"cancel ingest", (*App).CancelIngest, http.MethodPost, "/api/actions/cancel-ingest", ""},
+		{"drain", (*App).TriggerDrain, http.MethodPost, "/api/actions/drain", ""},
+		{"prune", (*App).TriggerPrune, http.MethodPost, "/api/actions/prune", ""},
+		{"pause", func(a *App) (string, error) { return a.SetPaused(true) }, http.MethodPost, "/api/actions/pause", `{"paused":true}`},
+		{"resume", func(a *App) (string, error) { return a.SetPaused(false) }, http.MethodPost, "/api/actions/pause", `{"paused":false}`},
+		{"rollback", (*App).RollbackUpdate, http.MethodPost, "/api/actions/rollback-update", ""},
+		{"failed rows", (*App).FailedQueueJSON, http.MethodGet, "/api/queue/failed", ""},
+		{"retry row", func(a *App) (string, error) { return a.RetryFailedRow("n1") }, http.MethodPost, "/api/actions/queue-retry", `{"nodeUuid":"n1"}`},
+		{"retry all", (*App).RetryAllFailed, http.MethodPost, "/api/actions/queue-retry", `{"all":true}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != tc.wantMethod || r.URL.Path != tc.wantPath {
+					t.Errorf("method/path = %s %s, want %s %s", r.Method, r.URL.Path, tc.wantMethod, tc.wantPath)
+				}
+				if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+					t.Error("request carried no session token")
+				}
+				body, _ := io.ReadAll(r.Body)
+				if string(body) != tc.wantBody {
+					t.Errorf("body = %q, want %q", body, tc.wantBody)
+				}
+				_, _ = w.Write([]byte(`{"marker":"agent-response"}`))
+			}))
+			defer srv.Close()
+			withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+			got, err := tc.call(newTestApp(t))
+			if err != nil {
+				t.Fatalf("call: %v", err)
+			}
+			if !strings.Contains(got, "agent-response") {
+				t.Errorf("returned %q, want the agent's raw body", got)
+			}
+		})
+	}
+}
+
+// TestDrainAndPruneOutliveTheShortTimeout: a whole drain/prune pass can
+// take far longer than httpTimeout, so those two bindings use passClient.
+func TestDrainAndPruneOutliveTheShortTimeout(t *testing.T) {
+	a := NewApp()
+	if a.passClient == nil || a.passClient.Timeout <= a.client.Timeout {
+		t.Fatalf("passClient timeout = %v, want longer than client's %v", a.passClient.Timeout, a.client.Timeout)
+	}
+	if a.passClient.Timeout <= 2*time.Minute {
+		t.Errorf("passClient timeout %v must exceed the agent's own 2m pass bound", a.passClient.Timeout)
+	}
+}
+
+func TestRetryFailedRowRequiresNodeUUID(t *testing.T) {
+	if _, err := NewApp().RetryFailedRow(""); err == nil {
+		t.Error("RetryFailedRow(\"\") succeeded; an empty id must never reach the agent (it would not mean \"all\")")
+	}
+}
+
+func TestConfirmActionResponses(t *testing.T) {
+	orig := messageDialogFunc
+	t.Cleanup(func() { messageDialogFunc = orig })
+
+	var got wailsruntime.MessageDialogOptions
+	for _, tc := range []struct {
+		ret  string
+		want bool
+	}{
+		{"Prune", true}, {"Yes", true}, {"Ok", true}, {"Cancel", false}, {"No", false}, {"", false},
+	} {
+		messageDialogFunc = func(_ context.Context, o wailsruntime.MessageDialogOptions) (string, error) {
+			got = o
+			return tc.ret, nil
+		}
+		ok, err := newTestApp(t).ConfirmAction("Confirm prune", "Delete verified local files?", "Prune")
+		if err != nil || ok != tc.want {
+			t.Errorf("dialog %q: ConfirmAction = %v, %v; want %v", tc.ret, ok, err, tc.want)
+		}
+	}
+	if got.Type != wailsruntime.QuestionDialog || got.Title != "Confirm prune" || got.CancelButton != "Cancel" {
+		t.Errorf("dialog options = %+v, want a question dialog with a Cancel button", got)
+	}
+}
+
+// TestWindowWiresTrayActions pins that app.js actually calls every window
+// action binding (a binding nothing calls is a button that silently went
+// missing), routes the destructive ones through the native confirmation
+// gate, and never re-implements the tray's pause or ingest logic itself.
+func TestWindowWiresTrayActions(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	for _, call := range []string{
+		"app.StartIngest(", "app.CancelIngest()", "app.TriggerDrain()", "app.TriggerPrune()",
+		"app.SetPaused(", "app.RollbackUpdate()", "app.FailedQueueJSON()", "app.RetryFailedRow(",
+		"app.RetryAllFailed()", "app.ConfirmAction(",
+	} {
+		if !strings.Contains(body, call) {
+			t.Errorf("app.js never calls %s", call)
+		}
+	}
+	for _, title := range []string{`"Confirm drain queue"`, `"Confirm prune"`, `"Confirm roll back"`} {
+		if !strings.Contains(body, "confirmDestructive(settings, "+title) {
+			t.Errorf("app.js does not gate %s behind confirmDestructive", title)
+		}
+	}
+	bareConfirm := regexp.MustCompile(`(^|[^.\w])confirm\(`)
+	for i, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		if bareConfirm.MatchString(line) {
+			t.Errorf("app.js:%d calls browser confirm() -- unreliable in Wails' macOS WKWebView; use app.ConfirmAction", i+1)
+		}
+	}
+}

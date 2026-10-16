@@ -559,12 +559,14 @@ func runTrayCmd(args []string) int {
 	updater := newSelfUpdateAgent(cfg, version)
 
 	statusSrv := tray.NewStatusServer(cfg.Tray.StatusAddrOrDefault(), func() tray.Status {
-		return runner.Status(updater.Status())
+		return runner.Status(updater.StatusWithRollback())
 	}, settings.Snapshot, version)
 	statusSrv.Actions = runner
 	statusSrv.Settings = settings
 	statusSrv.Updates = updater
-	statusSrv.UpdateApply = &trayUpdateApplier{runner: runner, updater: updater}
+	updateApplier := &trayUpdateApplier{runner: runner, updater: updater}
+	statusSrv.UpdateApply = updateApplier
+	statusSrv.UpdateRollback = updateApplier
 	statusSrv.PairConfirm = trayConfirm(dialog)
 	statusSrv.PairNotify = trayNotifyOS(dialog)
 
