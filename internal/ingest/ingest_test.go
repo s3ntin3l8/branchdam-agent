@@ -1429,6 +1429,9 @@ func TestIngestCardUploadStreamPauseOnMetered(t *testing.T) {
 	if !fr.Skipped {
 		t.Errorf("expected fr.Skipped=true, got false")
 	}
+	if !fr.Deferred {
+		t.Errorf("expected fr.Deferred=true: the file never left the card, so the card is not done")
+	}
 	if fr.SkipReason != "upload skipped on metered connection -- re-insert card to retry" {
 		t.Errorf("expected skipReason 'upload skipped on metered connection -- re-insert card to retry', got %q", fr.SkipReason)
 	}
@@ -1462,8 +1465,8 @@ func TestIngestCardUploadStreamPauseOnMetered(t *testing.T) {
 	if len(res2.Files) != 1 || res2.Files[0].Err != nil {
 		t.Fatalf("unexpected result: %+v", res2.Files)
 	}
-	if res2.Files[0].Skipped {
-		t.Errorf("expected fr.Skipped=false on unmetered network, got true")
+	if res2.Files[0].Skipped || res2.Files[0].Deferred {
+		t.Errorf("expected fr.Skipped=false and Deferred=false on unmetered network, got %+v", res2.Files[0])
 	}
 	if len(uploader2.uploadCalls) != 1 {
 		t.Errorf("expected 1 upload call on unmetered network, got %d", len(uploader2.uploadCalls))

@@ -1210,7 +1210,10 @@ appropriate:
     `PostNodeCreated` once connectivity is restored.
 15. **Safe eject after verified ingest (#87):** with `autoEject: true` set,
     insert a camera card -- confirm the volume unmounts/ejects after the
-    verified ingest completes and an OS notification appears. On Windows
+    verified ingest completes and an OS notification appears. Only a
+    detected card volume is ever ejected: "Ingest now", "Import from
+    folder…" and `POST /api/actions/ingest` never eject, and neither does
+    an ingest that deferred an upload on a metered connection. On Windows
     specifically, confirm the tray surfaces `IOCTL_STORAGE_EJECT_MEDIA` via
     `DeviceIoControl` cleanly (no "device in use" dialog from the OS -- the
     card must have been closed by `Verify`'s unbuffered re-open before the

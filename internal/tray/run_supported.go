@@ -412,8 +412,16 @@ func Run(
 		ingestRequestCh := make(chan struct{}, 1)
 		go func() {
 			for range ingestRequestCh {
-				for _, dir := range r.WatchDirs() {
-					r.TriggerIngest(ctx, dir)
+				// Detected card volumes only -- never the cardRoots
+				// parents WatchDirs returns (/Volumes, /media/$USER),
+				// which hold every mounted disk including the NAS and
+				// the edit SSD. See Runner.IngestNowVolumes.
+				vols := r.IngestNowVolumes()
+				if len(vols) == 0 && notify != nil {
+					notify(ctx, "branchDAM Agent", ingestNowEmptyMessage(r.WatchDirs()))
+				}
+				for _, vol := range vols {
+					r.TriggerIngest(ctx, vol)
 				}
 				ingestDoneCh <- struct{}{}
 			}

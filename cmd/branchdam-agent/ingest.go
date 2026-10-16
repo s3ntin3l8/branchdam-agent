@@ -14,6 +14,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/eject"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
+	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
 // runIngestCmd implements `branchdam-agent ingest --card <path> --config
@@ -121,12 +122,27 @@ func runIngestCmd(args []string) int {
 	if !ok {
 		return 1
 	}
-	if cfg.Ingest.AutoEject {
-		if err := eject.Eject(*cardPath); err != nil {
-			fmt.Fprintf(os.Stderr, "branchdam-agent ingest: auto-eject failed: %v\n", err)
-		}
-	}
+	maybeAutoEject(os.Stderr, "branchdam-agent ingest", cfg, *cardPath, eject.Eject)
 	return 0
+}
+
+// maybeAutoEject ejects cardPath after a clean headless ingest, but only
+// when ingest.autoEject is on and cardPath is exactly a card volume root:
+// an immediate child of an ingest.cardRoots entry that holds neither the
+// archive nor the local edit root -- the same structural check the tray
+// applies (tray.IsCardVolumeRoot). `ingest -card` takes any path, so
+// without it `-card /Volumes/NAS` would unmount the archive share.
+func maybeAutoEject(w io.Writer, prefix string, cfg config.Config, cardPath string, ejectFn func(string) error) {
+	if !cfg.Ingest.AutoEject {
+		return
+	}
+	if !tray.IsCardVolumeRoot(cardPath, cfg.Ingest.CardRoots, cfg.Ingest.ArchiveRoot, cfg.Ingest.LocalEditRoot) {
+		_, _ = fmt.Fprintf(w, "%s: auto-eject skipped: %s is not a card volume under ingest.cardRoots (or it holds the archive or local edit root)\n", prefix, cardPath)
+		return
+	}
+	if err := ejectFn(cardPath); err != nil {
+		_, _ = fmt.Fprintf(w, "%s: auto-eject failed: %v\n", prefix, err)
+	}
 }
 
 // runIngestOffline is `ingest -offline`'s body: open queue.db, wire it and
@@ -170,10 +186,8 @@ func runIngestOffline(ctx context.Context, engine *ingest.Engine, cfg config.Con
 	}
 
 	exitCode := printOfflineIngestReport(os.Stdout, cardPath, result, time.Since(start))
-	if exitCode == 0 && cfg.Ingest.AutoEject {
-		if err := eject.Eject(cardPath); err != nil {
-			fmt.Fprintf(os.Stderr, "branchdam-agent ingest -offline: auto-eject failed: %v\n", err)
-		}
+	if exitCode == 0 {
+		maybeAutoEject(os.Stderr, "branchdam-agent ingest -offline", cfg, cardPath, eject.Eject)
 	}
 	return exitCode
 }
@@ -240,13 +254,17 @@ func printIngestReport(w io.Writer, cardPath string, result ingest.CardResult, e
 	_, _ = fmt.Fprintf(w, "card: %s\n\n", cardPath)
 
 	ok := true
-	submitted, skipped, failed := 0, 0, 0
+	submitted, skipped, failed, deferred := 0, 0, 0, 0
 	for _, f := range result.Files {
 		switch {
 		case f.Err != nil:
 			failed++
 			ok = false
 			_, _ = fmt.Fprintf(w, "[FAIL] %s: %v\n", f.SourcePath, f.Err)
+		case f.Deferred:
+			deferred++
+			ok = false
+			_, _ = fmt.Fprintf(w, "[DEFERRED] %s: %s\n", f.SourcePath, f.SkipReason)
 		case f.Skipped:
 			skipped++
 			_, _ = fmt.Fprintf(w, "[SKIP] %s: %s\n", f.SourcePath, f.SkipReason)
@@ -262,11 +280,14 @@ func printIngestReport(w io.Writer, cardPath string, result ingest.CardResult, e
 	}
 
 	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintf(w, "%d submitted, %d skipped, %d failed (%s)\n", submitted, skipped, failed, elapsed.Round(time.Millisecond))
-	if ok {
+	_, _ = fmt.Fprintf(w, "%d submitted, %d skipped, %d deferred, %d failed (%s)\n", submitted, skipped, deferred, failed, elapsed.Round(time.Millisecond))
+	switch {
+	case ok:
 		_, _ = fmt.Fprintln(w, "safe to eject")
-	} else {
+	case failed > 0:
 		_, _ = fmt.Fprintln(w, "NOT safe to eject -- one or more files failed")
+	default:
+		_, _ = fmt.Fprintln(w, "NOT safe to eject -- uploads deferred on a metered connection; re-run on an unmetered connection")
 	}
 	return ok
 }

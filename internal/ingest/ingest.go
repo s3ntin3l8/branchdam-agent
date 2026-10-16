@@ -179,7 +179,14 @@ type FileResult struct {
 	Exif             *ExifResult
 	PHash            *int64
 	GPSSource        string // "exif", "srt", or "" (no GPS)
-	Err              error
+	// Deferred is set (alongside Skipped) when uploadStream mode held the
+	// upload back on a metered connection: the local edit copy landed and
+	// verified, but nothing reached branchDAM or the archive, so the card
+	// is still the only copy outside this workstation. Callers must treat
+	// a Deferred file as unfinished -- never "safe to eject" -- even though
+	// it carries no Err.
+	Deferred bool
+	Err      error
 }
 
 // CardResult is one IngestCard call's full outcome.
@@ -577,6 +584,7 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 			}
 
 			fr.Skipped = true
+			fr.Deferred = true
 			fr.SkipReason = "upload skipped on metered connection -- re-insert card to retry"
 			return fr
 		}

@@ -65,11 +65,16 @@ type IngestSummary struct {
 	// already copied and queued (same source path, size and mtime) -- kept
 	// apart from Submitted so a re-run over a half-ingested card doesn't
 	// read as fresh imports. Always 0 for an online ingest.
-	Resumed int   `json:"resumed"`
-	Skipped int   `json:"skipped"`
-	Failed  int   `json:"failed"`
-	Err     error `json:"-"`
-	Offline bool  `json:"offline"`
+	Resumed int `json:"resumed"`
+	Skipped int `json:"skipped"`
+	Failed  int `json:"failed"`
+	// Deferred counts files whose local copy landed but whose upload was
+	// held back on a metered connection (ingest.FileResult.Deferred) --
+	// they still exist only on the card and the local edit SSD, so the
+	// card is not done and must not be ejected.
+	Deferred int   `json:"deferred"`
+	Err      error `json:"-"`
+	Offline  bool  `json:"offline"`
 }
 
 // MarshalJSON renders Err as its message string rather than encoding the
@@ -94,12 +99,27 @@ func (s IngestSummary) MarshalJSON() ([]byte, error) {
 }
 
 // OK reports whether every file that should have been submitted succeeded
-// (a deliberate sidecar skip does not count as a failure) -- mirrors
+// (a deliberate sidecar skip does not count as a failure) and none is still
+// waiting on the card for an unmetered connection -- mirrors
 // cmd/branchdam-agent/ingest.go's printIngestReport logic exactly, since
 // the tray drives the same underlying Engine and should reach the same
 // verdict from the same CardResult shape.
 func (s IngestSummary) OK() bool {
-	return s.Err == nil && s.Failed == 0
+	return s.Err == nil && s.Failed == 0 && s.Deferred == 0
+}
+
+// shouldAutoEject is triggerIngest's whole eject decision, kept pure so it
+// can be table-tested. Ejecting is only ever right for a camera card the
+// detector found and the operator (or the autoImportPaths allow-list)
+// accepted: isDetection must be true and cardPath must be exactly a card
+// volume root (an immediate subdirectory of a cardRoots parent that holds
+// no ingest destination -- see isCardVolumeRoot). "Ingest now", "Import
+// from folder…" and POST /api/actions/ingest are manual (isDetection
+// false) and never eject, whatever path they were given -- a picked folder
+// on the edit SSD or the NAS must not take its whole disk offline. And the
+// ingest itself must be OK(): nothing failed and nothing deferred.
+func shouldAutoEject(autoEject, isDetection bool, cardPath string, cardRoots []string, destRoots []string, summary IngestSummary) bool {
+	return autoEject && isDetection && summary.OK() && isCardVolumeRoot(cardPath, cardRoots, destRoots...)
 }
 
 // Outcome is why Run returned -- specifically, whether the operator asked
@@ -641,6 +661,39 @@ func (r *Runner) SetErrorNotifier(fn func(title, message string)) {
 	r.notifyError = fn
 }
 
+// IngestNowVolumes returns the card volumes the "Ingest now" menu item
+// should ingest: every volume currently mounted under the configured
+// cardRoots that the detector would report (honouring requireDCIM), minus
+// any volume that holds the archive or local edit root. WatchDirs itself
+// is the list of PARENT directories (/Volumes, /media/$USER) and must never
+// be ingested directly -- that walks every mounted disk, the NAS included.
+func (r *Runner) IngestNowVolumes() []string {
+	r.mu.Lock()
+	cardRoots := append([]string(nil), r.watchDirs...)
+	destRoots := []string{r.archiveRoot, r.scratchDir}
+	r.mu.Unlock()
+	r.detectorMu.Lock()
+	requireDCIM := r.detectorRequireDCIM
+	r.detectorMu.Unlock()
+	kept, excluded := selectCardVolumes(cardRoots, requireDCIM, destRoots...)
+	for _, v := range excluded {
+		slog.Info("tray: Ingest now is skipping a volume that holds the archive or local edit root",
+			"volume", agentlog.Sanitize(v))
+	}
+	return kept
+}
+
+// ingestNowEmptyMessage is the notification "Ingest now" shows when
+// IngestNowVolumes found nothing to ingest. With no cardRoots configured
+// there is nowhere to look, so "no card found" would mislead -- point the
+// operator at the setting instead.
+func ingestNowEmptyMessage(cardRoots []string) string {
+	if len(cardRoots) == 0 {
+		return "No card folders are configured -- add one under Settings > Watch folders"
+	}
+	return "No camera card found to ingest"
+}
+
 // WatchDirs returns a defensive copy of the directories currently
 // described as watched -- run_supported.go's menu rendering and its
 // "Ingest now" worker both read this rather than a raw field, since
@@ -767,6 +820,8 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 				switch {
 				case f.Err != nil:
 					summary.Failed++
+				case f.Deferred:
+					summary.Deferred++
 				case f.Skipped:
 					summary.Skipped++
 				default:
@@ -780,6 +835,10 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		if err != nil {
 			summary.Err = err
 		} else {
+			// No Deferred arm: offline ingest never uploads (the archive
+			// copy and registration wait in queue.db for the drain), so a
+			// metered connection cannot hold anything back here and
+			// OfflineFileResult has no Deferred flag.
 			for _, f := range result.Files {
 				switch f.Outcome() {
 				case ingest.OfflineOutcomeFailed:
@@ -800,11 +859,17 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 	notifier := r.notifier
 	autoEject := r.autoEject
 	ejectFn := r.ejectFn
+	cardRoots := append([]string(nil), r.watchDirs...)
+	destRoots := []string{r.archiveRoot, r.scratchDir}
 	r.mu.Unlock()
 
 	volName := filepath.Base(cardPath)
 
-	if summary.OK() && autoEject {
+	if summary.Deferred > 0 && notifier != nil {
+		notifier("branchDAM Agent", fmt.Sprintf("%d file(s) from %s are waiting for an unmetered connection -- card not ejected; re-insert it to finish", summary.Deferred, volName))
+	}
+
+	if shouldAutoEject(autoEject, isDetection, cardPath, cardRoots, destRoots, summary) {
 		if ejectFn == nil {
 			ejectFn = eject.Eject
 		}
@@ -1621,7 +1686,20 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 	done := make(chan struct{})
 	r.detectorDone = done
 
-	detector := ingest.NewDetector(roots, interval, r.detectorRequireDCIM)
+	// Same volume selection as IngestNowVolumes: a disk holding the archive
+	// or local edit root is never offered as a card, whichever path asks.
+	requireDCIM := r.detectorRequireDCIM
+	detectorRoots := append([]string(nil), roots...)
+	detector := &ingest.Detector{
+		List: func() ([]string, error) {
+			r.mu.Lock()
+			destRoots := []string{r.archiveRoot, r.scratchDir}
+			r.mu.Unlock()
+			kept, _ := selectCardVolumes(detectorRoots, requireDCIM, destRoots...)
+			return kept, nil
+		},
+		Interval: interval,
+	}
 	go func() {
 		defer close(done)
 		err := detector.Watch(dctx, func(diff ingest.Diff) {
