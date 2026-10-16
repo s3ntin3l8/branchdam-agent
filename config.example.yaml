@@ -66,7 +66,9 @@ ingest:
   # or hotspot connection (e.g. cellular, tethered). Default false.
   # pauseUploadOnMetered: false
   # Automatically unmount and eject the camera card volume after a successful
-  # verified ingest. Default false (opt-in).
+  # verified ingest. Only a card volume directly under one of cardRoots that
+  # holds neither archiveRoot nor localEditRoot is ever ejected; manual tray
+  # ingests never eject. Default false (opt-in).
   autoEject: false
   # The desktop environment's PATH may not include Homebrew on macOS. Set an
   # absolute path there, commonly /opt/homebrew/bin/exiftool.

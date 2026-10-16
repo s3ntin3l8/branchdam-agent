@@ -14,6 +14,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/eject"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
+	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
 // runIngestCmd implements `branchdam-agent ingest --card <path> --config
@@ -121,12 +122,27 @@ func runIngestCmd(args []string) int {
 	if !ok {
 		return 1
 	}
-	if cfg.Ingest.AutoEject {
-		if err := eject.Eject(*cardPath); err != nil {
-			fmt.Fprintf(os.Stderr, "branchdam-agent ingest: auto-eject failed: %v\n", err)
-		}
-	}
+	maybeAutoEject(os.Stderr, "branchdam-agent ingest", cfg, *cardPath, eject.Eject)
 	return 0
+}
+
+// maybeAutoEject ejects cardPath after a clean headless ingest, but only
+// when ingest.autoEject is on and cardPath is exactly a card volume root:
+// an immediate child of an ingest.cardRoots entry that holds neither the
+// archive nor the local edit root -- the same structural check the tray
+// applies (tray.IsCardVolumeRoot). `ingest -card` takes any path, so
+// without it `-card /Volumes/NAS` would unmount the archive share.
+func maybeAutoEject(w io.Writer, prefix string, cfg config.Config, cardPath string, ejectFn func(string) error) {
+	if !cfg.Ingest.AutoEject {
+		return
+	}
+	if !tray.IsCardVolumeRoot(cardPath, cfg.Ingest.CardRoots, cfg.Ingest.ArchiveRoot, cfg.Ingest.LocalEditRoot) {
+		_, _ = fmt.Fprintf(w, "%s: auto-eject skipped: %s is not a card volume under ingest.cardRoots (or it holds the archive or local edit root)\n", prefix, cardPath)
+		return
+	}
+	if err := ejectFn(cardPath); err != nil {
+		_, _ = fmt.Fprintf(w, "%s: auto-eject failed: %v\n", prefix, err)
+	}
 }
 
 // runIngestOffline is `ingest -offline`'s body: open queue.db, wire it and
@@ -170,10 +186,8 @@ func runIngestOffline(ctx context.Context, engine *ingest.Engine, cfg config.Con
 	}
 
 	exitCode := printOfflineIngestReport(os.Stdout, cardPath, result, time.Since(start))
-	if exitCode == 0 && cfg.Ingest.AutoEject {
-		if err := eject.Eject(cardPath); err != nil {
-			fmt.Fprintf(os.Stderr, "branchdam-agent ingest -offline: auto-eject failed: %v\n", err)
-		}
+	if exitCode == 0 {
+		maybeAutoEject(os.Stderr, "branchdam-agent ingest -offline", cfg, cardPath, eject.Eject)
 	}
 	return exitCode
 }

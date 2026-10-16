@@ -505,3 +505,47 @@ func TestPrintIngestReportWithholdsEjectOnMeteredDeferral(t *testing.T) {
 		}
 	}
 }
+
+// TestMaybeAutoEjectOnlyEjectsCardVolumeRoots: the headless `ingest -card`
+// auto-eject applies the tray's structural check, so a path that is the
+// archive share, the edit SSD, a cardRoots parent or a folder inside a card
+// is never ejected, whatever ingest.autoEject says.
+func TestMaybeAutoEjectOnlyEjectsCardVolumeRoots(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Ingest.AutoEject = true
+	cfg.Ingest.CardRoots = []string{"/Volumes"}
+	cfg.Ingest.ArchiveRoot = "/Volumes/NAS/archive"
+	cfg.Ingest.LocalEditRoot = "/Volumes/EDIT/branchdam"
+
+	cases := []struct {
+		name      string
+		autoEject bool
+		cardRoots []string
+		path      string
+		want      bool
+	}{
+		{"card volume root", true, cfg.Ingest.CardRoots, "/Volumes/EOS_DIGITAL", true},
+		{"autoEject off", false, cfg.Ingest.CardRoots, "/Volumes/EOS_DIGITAL", false},
+		{"archive share", true, cfg.Ingest.CardRoots, "/Volumes/NAS", false},
+		{"edit SSD", true, cfg.Ingest.CardRoots, "/Volumes/EDIT", false},
+		{"cardRoots parent", true, cfg.Ingest.CardRoots, "/Volumes", false},
+		{"folder inside a card", true, cfg.Ingest.CardRoots, "/Volumes/EOS_DIGITAL/DCIM", false},
+		{"no cardRoots configured", true, nil, "/Volumes/EOS_DIGITAL", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := cfg
+			c.Ingest.AutoEject = tc.autoEject
+			c.Ingest.CardRoots = tc.cardRoots
+			ejected := false
+			var buf bytes.Buffer
+			maybeAutoEject(&buf, "ingest", c, tc.path, func(string) error { ejected = true; return nil })
+			if ejected != tc.want {
+				t.Errorf("ejected = %v, want %v (output %q)", ejected, tc.want, buf.String())
+			}
+			if tc.autoEject && !tc.want && !strings.Contains(buf.String(), "auto-eject skipped") {
+				t.Errorf("a refused eject should say why, got %q", buf.String())
+			}
+		})
+	}
+}

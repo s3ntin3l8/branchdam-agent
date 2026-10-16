@@ -73,6 +73,14 @@ func isCardVolumeRoot(path string, cardRoots []string, destRoots ...string) bool
 	return underRoot && !overlapsAny(clean, destRoots)
 }
 
+// IsCardVolumeRoot is isCardVolumeRoot for callers outside the tray -- the
+// headless `ingest` subcommand gates its own auto-eject on the same
+// structural check, so `ingest -card /Volumes/NAS` can never unmount the
+// archive share.
+func IsCardVolumeRoot(path string, cardRoots []string, destRoots ...string) bool {
+	return isCardVolumeRoot(path, cardRoots, destRoots...)
+}
+
 // overlapsAny reports whether path equals, contains, or is contained in any
 // non-empty entry of roots. Both sides are compared as written and with
 // symlinks resolved (when resolvable), so an archiveRoot configured through
@@ -94,7 +102,10 @@ func overlapsAny(path string, roots []string) bool {
 }
 
 // pathForms returns the cleaned path plus its symlink-resolved form when
-// that differs (and can be resolved -- an unmounted path can't be).
+// that differs (and can be resolved -- an unmounted path can't be). When a
+// destination root is configured through a symlink whose target is not
+// mounted, only its lexical form is compared; that volume is then not
+// mounted either, so there is nothing for the check to exclude.
 func pathForms(p string) []string {
 	clean := filepath.Clean(p)
 	forms := []string{clean}
