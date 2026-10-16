@@ -202,6 +202,17 @@ pattern for `/`) -- there is no HTML rendering path left in `internal/tray` at a
 unauthenticated and loopback-only, same as before, for anyone who wants to `curl` it; the tray's
 "Open status page" menu item is gone along with the page it opened.
 
+**Host-header check (DNS rebinding).** When bound to loopback (the default), every request --
+the plain JSON routes and `/api/*` alike -- must carry a `Host` of `localhost`, a loopback IP
+literal, or an empty host (a client given a bare `:port` statusAddr), on the listener's own port;
+anything else gets `403`. Without it, a page on `http://attacker.example:38080` whose DNS record
+is rebound to `127.0.0.1` is same-origin with itself in the browser and could read
+`/status.json` (watch directories, local paths, queue state) off the loopback listener; the
+rebound request still names the attacker's host, which is what the check rejects. An
+operator-widened bind (`tray.statusAddr` set to a non-loopback host) skips the check, since the
+server cannot know every name the machine is reachable by; `/api/*` is not registered there at
+all.
+
 **A separate, authenticated `/api/*` surface exists alongside the plain JSON routes above**
 (`internal/tray/statusapi.go`), built for the native app UI (Track 3 of the distribution/UX plan):
 `GET /api/status`, `GET`/`POST /api/settings`, `POST /api/settings/integration-path`,
@@ -1216,15 +1227,18 @@ appropriate:
     unaffected by issue #211's `confirmDestructive`-specific fix). "Pause ingest" is unrelated and
     unmoved -- it's a session-only, top-level tray item (never in the Advanced submenu, not
     persisted, no window equivalent by design): toggle it on, insert a card -- confirm no ingest
-    starts AND no dialog appears; toggle off, confirm a re-insert triggers the
-    dialog again).
+    starts AND no dialog appears; toggle off, confirm the card inserted while paused (still
+    mounted) is now offered through the same dialog / allow-list, without a re-insert, and that
+    a card already handled before the pause is not offered again).
 13. **Live ingest progress in tooltip + Wails window (#85):** insert a card,
     open the tray menu -- confirm the tooltip updates within one tick with
     the per-file line rendered by `FormatIngestProgress` (filename, bytes
     done / total, percentage, speed, ETA); the Wails window renders the same
     data plus the `phase` field under the busy-card header. Confirm the
     tooltip clears (reverts to the default "branchDAM agent" string) within
-    one tick of ingest completion.
+    one tick of ingest completion. With "Pause upload on metered connection" on and a metered
+    network, the tooltip carries an "upload paused (metered connection)" suffix rather than
+    replacing the live text; "Pause ingest" and an incomplete config show their own tooltips.
 14. **Content dedup (#88):** ingest a card. Then re-insert the same
     card. Confirm the second ingest reports every file as
     `duplicate: already in library as node X`, leaves no new file under

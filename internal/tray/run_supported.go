@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,7 +29,6 @@ import (
 	"fyne.io/systray"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/appbundle"
-	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
 )
 
 // menuRefreshInterval is how often the informational (disabled) menu items
@@ -214,17 +212,18 @@ func Run(
 			us := up.Status()
 			windowApplying := updatePhaseOwnsBinary(us.Phase)
 			st := r.Status(us)
-			systray.SetTooltip(FormatTooltip(st))
+			// The one and only tooltip write per refresh -- see TrayTooltip.
+			systray.SetTooltip(TrayTooltip(st))
 			statusItem.SetTitle("Status: " + summarize(st))
 			updateItem.SetTitle("Self-update: " + us.Note())
 
 			// pauseItem's title/check/tooltip track st.Paused unconditionally --
 			// independent of whether config is complete, since an operator can
 			// toggle pause (a session-only, in-memory gate) at any time,
-			// including mid-setup. Only the tray icon and its own tooltip are
-			// chosen three-way below: ConfigIncomplete takes priority over
-			// Paused for the icon because "not configured" is the more
-			// actionable state to surface at a glance.
+			// including mid-setup. Only the tray icon is chosen three-way
+			// below (TrayTooltip applies the same priority to the tooltip):
+			// ConfigIncomplete takes priority over Paused because "not
+			// configured" is the more actionable state to surface at a glance.
 			if st.Paused {
 				pauseItem.Check()
 				pauseItem.SetTitle("▶ Resume ingest")
@@ -242,17 +241,14 @@ func Run(
 				} else {
 					systray.SetIcon(buildUnconfiguredTrayIcon())
 				}
-				systray.SetTooltip("branchDAM agent — not configured")
 			case st.Paused:
 				systray.SetIcon(buildPausedTrayIcon())
-				systray.SetTooltip("branchDAM agent (ingest paused)")
 			default:
 				if runtime.GOOS == "darwin" {
 					systray.SetTemplateIcon(buildTemplateIcon(), buildTrayIcon())
 				} else {
 					systray.SetIcon(buildTrayIcon())
 				}
-				systray.SetTooltip(FormatTooltip(st))
 			}
 
 			// Watch dirs can change out from under this menu now that
@@ -309,19 +305,6 @@ func Run(
 				restartNowItem.Show()
 			} else {
 				restartNowItem.Hide()
-			}
-
-			if sv.PauseUploadOnMetered {
-				if metered, mErr := netgate.IsMetered(); metered || mErr != nil {
-					if mErr != nil {
-						slog.Debug("metered probe failed for tooltip", "err", mErr)
-					}
-					systray.SetTooltip("Upload paused (metered connection)")
-				} else {
-					systray.SetTooltip("branchDAM agent")
-				}
-			} else {
-				systray.SetTooltip("branchDAM agent")
 			}
 
 			switch {

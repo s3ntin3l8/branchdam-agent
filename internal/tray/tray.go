@@ -325,6 +325,12 @@ type Status struct {
 	// is what the status page renders as the Server card's reachability
 	// pill instead.
 	ServerProbe *ProbeResult `json:"serverProbe,omitempty"`
+	// UploadPausedMetered is true when ingest.pauseUploadOnMetered is on
+	// and the last metered probe reported a metered connection (or
+	// failed -- shown fail-closed, like the drain gate). Read from an
+	// asynchronously refreshed cache so Status() never blocks on the
+	// probe; see metered.go. Display only: TriggerDrain probes for itself.
+	UploadPausedMetered bool `json:"uploadPausedMetered"`
 }
 
 // Runner owns the state a tray-resident process needs: the ingest engine
@@ -410,6 +416,12 @@ type Runner struct {
 	// paused tracks whether manual ingest pause is active (shoot-mode, issue #83).
 	// Session-only, never persisted.
 	paused atomic.Bool
+	// pausedInserts holds card volumes the detector reported as inserted
+	// while paused (guarded by mu). The detector only reports a volume
+	// once per insertion, so without this a card inserted mid-pause was
+	// never offered at all; SetPaused(false) offers the ones still
+	// present (see offerCardsHeldDuringPause).
+	pausedInserts map[string]bool
 
 	// mu guards every field below, including ingester/watchDirs/
 	// scratchDir -- unlike before issue #31's settings menu, these are no
@@ -542,6 +554,9 @@ type Runner struct {
 	detectorErrHandler   func(err error)
 	pauseUploadOnMetered bool
 	isMeteredFn          func() (bool, error)
+	// meteredCache is the display-only, asynchronously refreshed copy of
+	// the metered probe -- see metered.go.
+	meteredCache meteredCache
 
 	// autoEject gates OS-level safe eject after verified ingest (issue #87).
 	autoEject bool
@@ -587,14 +602,98 @@ func (r *Runner) Paused() bool {
 }
 
 // SetPaused updates the manual ingest pause state and invokes onPauseChange if registered.
+// Resuming (true -> false) also offers every card volume that was inserted
+// while paused and is still mounted, through the same IngestGate path a
+// live detection takes -- see offerCardsHeldDuringPause.
 func (r *Runner) SetPaused(v bool) {
-	r.paused.Store(v)
+	was := r.paused.Swap(v)
 	r.mu.Lock()
 	cb := r.onPauseChange
 	r.mu.Unlock()
 	if cb != nil {
 		cb(v)
 	}
+	if was && !v {
+		r.offerCardsHeldDuringPause()
+	}
+}
+
+// holdPausedInserts records volumes the detector reported while paused,
+// and forgets removed ones so a card pulled mid-pause is never offered.
+// Reports whether diff.Inserted was held (the tray was paused). The pause
+// check and the record happen under one r.mu critical section, and
+// offerCardsHeldDuringPause takes the set under r.mu after flipping
+// paused, so an insertion racing a resume is offered exactly once: either
+// held here and offered by the resume, or not held and ingested by the
+// detector itself.
+func (r *Runner) holdPausedInserts(diff ingest.Diff) (held bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, v := range diff.Removed {
+		delete(r.pausedInserts, v)
+	}
+	if !r.paused.Load() {
+		return false
+	}
+	for _, v := range diff.Inserted {
+		if r.pausedInserts == nil {
+			r.pausedInserts = map[string]bool{}
+		}
+		r.pausedInserts[v] = true
+	}
+	return true
+}
+
+// offerCardsHeldDuringPause runs, in its own goroutine, a detection-style
+// ingest (TriggerDetectedIngest: skip set, IngestGate confirmation or
+// allow-list) for every volume held by holdPausedInserts that the current
+// card-volume selection still reports as present. Asynchronous because
+// SetPaused is called from the tray's menu loop and from the status API;
+// the volume listing and the gate's dialog must block neither. A volume
+// that was already present before the pause is not re-offered -- the
+// detector reported it (and it was handled) before pausing. If the tray is
+// paused again part-way through, the remaining volumes are held again.
+func (r *Runner) offerCardsHeldDuringPause() {
+	r.mu.Lock()
+	held := r.pausedInserts
+	r.pausedInserts = nil
+	r.mu.Unlock()
+	if len(held) == 0 {
+		return
+	}
+	go func() {
+		r.mu.Lock()
+		cardRoots := append([]string(nil), r.watchDirs...)
+		destRoots := []string{r.archiveRoot, r.scratchDir}
+		r.mu.Unlock()
+		r.detectorMu.Lock()
+		requireDCIM := r.detectorRequireDCIM
+		ctx := r.detectorBaseCtx
+		r.detectorMu.Unlock()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+
+		present, _ := selectCardVolumes(cardRoots, requireDCIM, destRoots...)
+		var offer []string
+		for _, v := range present {
+			if held[v] {
+				offer = append(offer, v)
+			}
+		}
+		for i, v := range offer {
+			if r.paused.Load() && r.holdPausedInserts(ingest.Diff{Inserted: offer[i:]}) {
+				return
+			}
+			r.TriggerDetectedIngest(ctx, v)
+			r.mu.Lock()
+			cb := r.onCardIngested
+			r.mu.Unlock()
+			if cb != nil {
+				cb()
+			}
+		}
+	}()
 }
 
 // SetOnPauseChange registers a callback invoked when the pause state changes.
@@ -1714,7 +1813,7 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 			for _, path := range diff.Removed {
 				r.ForgetSkipped(path)
 			}
-			if r.paused.Load() {
+			if r.holdPausedInserts(diff) {
 				return
 			}
 			for _, path := range diff.Inserted {
@@ -2068,6 +2167,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	configRevision := r.configRevision
 	lastProbe := r.lastProbe
 	inFlightProbe := r.inFlightProbe
+	pauseUploadOnMetered := r.pauseUploadOnMetered
 
 	// Built entirely under r.mu, not after unlocking: r.syncers/r.lastSync
 	// are read map entries here, not copied whole-map references, so a
@@ -2156,5 +2256,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		ConfigRevision:   configRevision,
 		ServerProbe:      lastProbe,
 		InFlightProbe:    inFlightProbe,
+
+		UploadPausedMetered: r.meteredUploadPaused(pauseUploadOnMetered),
 	}
 }

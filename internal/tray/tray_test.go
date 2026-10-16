@@ -2744,18 +2744,28 @@ func TestReconfigureDetectorDropsEventsWhenPaused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for i := 0; i < 50; i++ {
-		if atomic.LoadInt32(&hit) > 0 && len(fi.calls) > 0 {
+	// Resuming offers CARD1 (inserted while paused, still present) and the
+	// detector picks up CARD2 -- two ingests. Wait on the atomic counter
+	// alone: each onCardIngested call follows its ingest, so once both
+	// have fired fi.calls is safe to read.
+	for i := 0; i < 200; i++ {
+		if atomic.LoadInt32(&hit) >= 2 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if atomic.LoadInt32(&hit) == 0 || len(fi.calls) == 0 {
-		t.Errorf("expected ingest to resume after unpausing, got hit=%d, calls=%d", hit, len(fi.calls))
-	}
-
 	r.StopDetector()
+	if got := atomic.LoadInt32(&hit); got != 2 {
+		t.Fatalf("expected 2 ingests after unpausing (CARD1 held from the pause, CARD2 new), got hit=%d", got)
+	}
+	got := map[string]bool{}
+	for _, c := range fi.calls {
+		got[c] = true
+	}
+	if !got[cardDir1] || !got[cardDir2] || len(fi.calls) != 2 {
+		t.Errorf("ingested %v, want exactly %s and %s", fi.calls, cardDir1, cardDir2)
+	}
 }
 
 func TestTriggerDrainPauseOnMeteredCase3(t *testing.T) {
