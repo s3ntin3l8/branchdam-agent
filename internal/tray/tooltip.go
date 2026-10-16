@@ -9,6 +9,30 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
 )
 
+// TrayTooltip is the single tooltip the tray icon shows for st, computed
+// once per refresh. Not-configured and paused take priority (matching the
+// icon choice in run_supported.go's refresh); otherwise it is the live
+// ingest/queue text from FormatTooltip, with a metered-upload note
+// appended when the drain gate is holding uploads back.
+//
+// refresh used to set three tooltips in sequence on every tick and let a
+// trailing metered-only block overwrite the result with a static
+// "branchDAM agent", so ingest progress, the paused state and the
+// not-configured state never actually reached the tooltip.
+func TrayTooltip(st Status) string {
+	switch {
+	case st.ConfigIncomplete:
+		return "branchDAM agent \u2014 not configured"
+	case st.Paused:
+		return "branchDAM agent (ingest paused)"
+	}
+	tip := FormatTooltip(st)
+	if st.UploadPausedMetered {
+		tip += " \u2014 upload paused (metered connection)"
+	}
+	return tip
+}
+
 // FormatTooltip returns the tooltip text to display on the tray icon
 // depending on whether an ingest is currently in flight and what progress
 // has been reported.

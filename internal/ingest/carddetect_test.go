@@ -130,3 +130,31 @@ func mkdirs(base string, dirs ...string) error {
 	}
 	return nil
 }
+
+// TestDetectorKnownVolumesAreNotReinserted: a Detector that replaces an
+// earlier one starts from the volumes that one reported, so its first
+// poll reports only what changed.
+func TestDetectorKnownVolumesAreNotReinserted(t *testing.T) {
+	d := &Detector{
+		Interval: time.Hour,
+		Known:    []string{"/media/card1", "/media/gone"},
+		List: func() ([]string, error) {
+			return []string{"/media/card1", "/media/card2"}, nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var first Diff
+	err := d.Watch(ctx, func(diff Diff) {
+		first = diff
+		cancel()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Watch err = %v, want context.Canceled", err)
+	}
+	if !reflect.DeepEqual(first.Inserted, []string{"/media/card2"}) {
+		t.Errorf("Inserted = %v, want only [/media/card2]", first.Inserted)
+	}
+	if !reflect.DeepEqual(first.Removed, []string{"/media/gone"}) {
+		t.Errorf("Removed = %v, want [/media/gone]", first.Removed)
+	}
+}

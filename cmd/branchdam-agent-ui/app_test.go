@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -140,6 +141,35 @@ func TestAgentRequestTimeoutIsNotNotRunning(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "doesn't seem to be running") {
 		t.Errorf("busy agent reported as not running: %v", err)
+	}
+}
+
+// TestAgentRequestDialTimeoutIsNotBusy: a timeout before any connection
+// was made (a dial that never completes, e.g. a firewall dropping packets
+// to the loopback port) must not claim the agent is running.
+func TestAgentRequestDialTimeoutIsNotBusy(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	withStatusServerAddr(t, "127.0.0.1:1")
+
+	a := newTestApp(t)
+	a.client.Timeout = 50 * time.Millisecond
+	a.client.Transport = &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	_, err := a.SettingsJSON()
+	if !errors.Is(err, errAgentNoAnswer) {
+		t.Fatalf("err = %v, want errAgentNoAnswer", err)
+	}
+	// errAgentBusy's claim; the no-answer text may still tell the user to
+	// check that the tray app is running.
+	if strings.Contains(err.Error(), "branchDAM is running") {
+		t.Errorf("unreached agent reported as running: %v", err)
 	}
 }
 

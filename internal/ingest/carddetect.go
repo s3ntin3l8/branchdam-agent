@@ -26,6 +26,11 @@ type ListVolumesFunc func() ([]string, error)
 type Detector struct {
 	List     ListVolumesFunc
 	Interval time.Duration
+	// Known lists volumes already reported (by an earlier Detector this
+	// one replaces) before Watch starts: the first poll reports them as
+	// Inserted only if they weren't known, and as Removed if they are
+	// gone. Empty means every volume present at the first poll is new.
+	Known []string
 }
 
 // NewDetector builds a Detector over cardRoots (parent directories to scan
@@ -89,7 +94,10 @@ type Diff struct {
 // ListVolumesUnder itself never returns one -- but a custom List a caller
 // injects might).
 func (d *Detector) Watch(ctx context.Context, onDiff func(Diff)) error {
-	prev := map[string]bool{}
+	prev := make(map[string]bool, len(d.Known))
+	for _, v := range d.Known {
+		prev[v] = true
+	}
 	ticker := time.NewTicker(d.Interval)
 	defer ticker.Stop()
 

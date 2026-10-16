@@ -57,10 +57,11 @@ type SettingsView struct {
 	// been saved but not yet applied; RestartRequiredKeys names them
 	// (dotted config keys: tray.statusAddr, offline.queueDbPath,
 	// offline.drainIntervalSecs, prune.enabled when switched on,
-	// prune.intervalMinutes, ingest.pollIntervalSecs, selfUpdate.*). Each
-	// is read once at startup -- tray.statusAddr's listener, the queue.db
-	// handle, the drain/prune timers, the detector interval, the
-	// self-update agent -- so a reload can't apply it. The menu surfaces
+	// prune.intervalMinutes, selfUpdate.*). Each is read once at startup
+	// -- tray.statusAddr's listener, the queue.db handle, the drain/prune
+	// timers, the self-update agent -- so a reload can't apply it.
+	// (ingest.pollIntervalSecs is live: the reload's Reconfigure restarts
+	// the detector at the new interval.) The menu surfaces
 	// "Restart now" and the Settings window names the field rather than
 	// silently pretending the change already took effect.
 	RestartRequired     bool
@@ -247,8 +248,9 @@ type Settings interface {
 	// When a field graduates, remove the matching entry below in the
 	// same PR so this comment and the inventory doc never disagree.
 	//
-	//   * ingest.pollIntervalSecs: low-frequency, restart-only knob;
-	//     not worth a menu slot. Operators adjust via OpenConfigFile.
+	//   * ingest.pollIntervalSecs: low-frequency knob (applied on
+	//     reload, like the engine); not worth a menu slot. Operators
+	//     adjust via OpenConfigFile.
 	//   * prune.* (enabled, minAgeHours, intervalMinutes): destructive
 	//     subcommand gating; the hand-edit gate is the audit trail.
 	//     Toggles here would let a stray click disable a safety check.

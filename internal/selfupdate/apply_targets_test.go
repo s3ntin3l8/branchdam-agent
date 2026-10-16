@@ -309,3 +309,77 @@ func TestApplyAllTargetsWithdrawsLabelWhileSwapping(t *testing.T) {
 		t.Errorf("RollbackInfo() = (%q, %v), want (\"1.0.0\", true)", v, ok)
 	}
 }
+
+// TestApplyAllTargetsReinstateFailureLeavesRollbackWithdrawn: the first
+// target fails with nothing replaced, so the prior label would be written
+// back -- but its path is blocked after withdrawRollback removed it. The
+// write failure is joined into the target's error and no rollback is
+// advertised (the label stays withdrawn rather than half-written).
+func TestApplyAllTargetsReinstateFailureLeavesRollbackWithdrawn(t *testing.T) {
+	layout := threeTargetLayout(t)
+	withPriorRollback(t, layout)
+	sidecar := layout.Primary + rollbackVersionSuffix
+	boom := errors.New("simulated signature failure")
+
+	err := applyAllTargets(layout, "1.0.0", func(string) error {
+		// A non-empty directory where the label would be written back.
+		if err := os.MkdirAll(filepath.Join(sidecar, "blocker"), 0o755); err != nil {
+			return err
+		}
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want it to wrap the target failure", err)
+	}
+	if !strings.Contains(err.Error(), "restore rollback metadata") {
+		t.Errorf("err = %v, want the label write-back failure joined in", err)
+	}
+	assertAllAtV1(t, layout)
+	if v, ok := RollbackInfo(layout); ok {
+		t.Errorf("RollbackInfo() = (%q, true), want no rollback advertised", v)
+	}
+}
+
+// TestApplyAllTargetsFailedRepairNamesTarget: a failed swap left nothing
+// at the target and its ".previous" is gone too, so recoverFailedSwap
+// can't put it back. That failure is joined into the target's error and
+// names the target; on the primary, the siblings already swapped are
+// still restored.
+func TestApplyAllTargetsFailedRepairNamesTarget(t *testing.T) {
+	for _, failAt := range []int{0, 2} {
+		layout := threeTargetLayout(t)
+		targets := layout.orderedTargets()
+		boom := errors.New("simulated rename failure")
+
+		err := applyAllTargets(layout, "1.0.0", func(target string) error {
+			if target != targets[failAt] {
+				return fakeSwap(target, "v2")
+			}
+			if err := os.Remove(target); err != nil {
+				return err
+			}
+			if err := os.Remove(target + rollbackSuffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			return boom
+		})
+		if !errors.Is(err, boom) {
+			t.Fatalf("failAt=%d: err = %v, want it to wrap the target failure", failAt, err)
+		}
+		if !strings.Contains(err.Error(), "put "+targets[failAt]+" back") {
+			t.Errorf("failAt=%d: err = %v, want the failed repair of %s joined in", failAt, err, filepath.Base(targets[failAt]))
+		}
+		for i, target := range targets {
+			if i == failAt {
+				continue
+			}
+			want := "v1 " + filepath.Base(target)
+			if got, err := os.ReadFile(target); err != nil || string(got) != want {
+				t.Errorf("failAt=%d: %s = %q, %v; want %q", failAt, filepath.Base(target), got, err, want)
+			}
+		}
+		if v, ok := RollbackInfo(layout); ok {
+			t.Errorf("failAt=%d: RollbackInfo() = (%q, true), want no rollback advertised", failAt, v)
+		}
+	}
+}

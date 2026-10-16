@@ -1841,7 +1841,141 @@ func TestReconfigureDefersDuringInFlightIngest(t *testing.T) {
 	if newest.calls != 1 || superseded.calls != 0 {
 		t.Errorf("ingest went to newest=%d superseded=%d, want 1 and 0", newest.calls, superseded.calls)
 	}
+	// The superseded engine was never installed: it is closed when the
+	// newer call displaces it, not leaked; the installed one stays open.
+	if superseded.closeCount() != 1 || newest.closeCount() != 0 {
+		t.Errorf("closes: superseded=%d newest=%d, want 1 and 0", superseded.closeCount(), newest.closeCount())
+	}
 	r.StopDetector()
+}
+
+// TestReconfigureSupersededPendingKeepsSharedIngester: a pending call
+// displaced by a newer one carrying the same engine, or one displaced
+// while it is still the current engine, must not close it.
+func TestReconfigureSupersededPendingKeepsSharedIngester(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	r := NewRunner(&blockingIngester{started: started, release: release}, nil, "")
+	ingestDone := make(chan struct{})
+	go func() {
+		r.TriggerIngest(context.Background(), "/card")
+		close(ingestDone)
+	}()
+	<-started
+
+	shared := &closeCountingIngester{}
+	r.Reconfigure(shared, []string{"/a"}, "")
+	r.Reconfigure(shared, []string{"/b"}, "")
+	if shared.closeCount() != 0 {
+		t.Errorf("an engine re-sent by the newer pending call was closed %d times", shared.closeCount())
+	}
+
+	close(release)
+	<-ingestDone
+	deadline := time.Now().Add(2 * time.Second)
+	for r.ReconfigurePending() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := r.WatchDirs(); len(got) != 1 || got[0] != "/b" {
+		t.Errorf("WatchDirs() = %v, want [/b]", got)
+	}
+	if shared.closeCount() != 0 {
+		t.Errorf("the installed engine was closed %d times", shared.closeCount())
+	}
+	r.StopDetector()
+}
+
+// detectorRunningIntervalFor returns the running detector's interval and
+// its done channel (nil when no detector runs).
+func detectorRunningIntervalFor(r *Runner) (time.Duration, chan struct{}) {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+	return r.detectorRunningInterval, r.detectorDone
+}
+
+// TestReconfigureAppliesPollIntervalChange: a reload that changes only
+// ingest.pollIntervalSecs (SetDetectorInterval, then Reconfigure with the
+// same roots) restarts the detector at the new interval -- it used to be
+// reported as restart-only, though a simultaneous roots change applied it.
+func TestReconfigureAppliesPollIntervalChange(t *testing.T) {
+	fi := &fakeIngester{}
+	dir := t.TempDir()
+	r := NewRunner(fi, []string{dir}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.ReconfigureDetector(ctx, []string{dir})
+	defer r.StopDetector()
+
+	got, firstDone := detectorRunningIntervalFor(r)
+	if got != 10*time.Millisecond {
+		t.Fatalf("running interval = %v, want 10ms", got)
+	}
+
+	// Same interval: the running detector is kept.
+	r.SetDetectorInterval(10 * time.Millisecond)
+	r.Reconfigure(fi, []string{dir}, "")
+	if _, done := detectorRunningIntervalFor(r); done != firstDone {
+		t.Error("Reconfigure with an unchanged interval and roots restarted the detector")
+	}
+
+	r.SetDetectorInterval(20 * time.Millisecond)
+	if !r.Reconfigure(fi, []string{dir}, "") {
+		t.Fatal("Reconfigure on an idle runner did not apply")
+	}
+	got, done := detectorRunningIntervalFor(r)
+	if got != 20*time.Millisecond || done == firstDone || done == nil {
+		t.Errorf("after an interval change: running interval = %v, restarted = %v; want 20ms and a new detector", got, done != firstDone)
+	}
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("the detector polling at the old interval did not exit")
+	}
+}
+
+// TestReconfigurePollIntervalWaitsForIngest: the interval change rides
+// the deferred Reconfigure -- the detector is not restarted (which would
+// cancel a detection-triggered ingest's context) until the gate frees.
+func TestReconfigurePollIntervalWaitsForIngest(t *testing.T) {
+	dir := t.TempDir()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fi := &blockingIngester{started: started, release: release}
+	r := NewRunner(fi, []string{dir}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.ReconfigureDetector(ctx, []string{dir})
+	defer r.StopDetector()
+	_, firstDone := detectorRunningIntervalFor(r)
+
+	ingestDone := make(chan struct{})
+	go func() {
+		r.TriggerIngest(context.Background(), "/card")
+		close(ingestDone)
+	}()
+	<-started
+
+	r.SetDetectorInterval(30 * time.Millisecond)
+	if r.Reconfigure(fi, []string{dir}, "") {
+		t.Fatal("Reconfigure reported applied while an ingest held the gate")
+	}
+	if got, done := detectorRunningIntervalFor(r); got != 10*time.Millisecond || done != firstDone {
+		t.Errorf("detector restarted mid-ingest (interval %v)", got)
+	}
+
+	close(release)
+	<-ingestDone
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, _ := detectorRunningIntervalFor(r); got == 30*time.Millisecond {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	got, _ := detectorRunningIntervalFor(r)
+	t.Fatalf("running interval after the ingest = %v, want 30ms", got)
 }
 
 // closeCountingIngester counts IngestCard and Close calls.
@@ -2744,18 +2878,28 @@ func TestReconfigureDetectorDropsEventsWhenPaused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for i := 0; i < 50; i++ {
-		if atomic.LoadInt32(&hit) > 0 && len(fi.calls) > 0 {
+	// Resuming offers CARD1 (inserted while paused, still present) and the
+	// detector picks up CARD2 -- two ingests. Wait on the atomic counter
+	// alone: each onCardIngested call follows its ingest, so once both
+	// have fired fi.calls is safe to read.
+	for i := 0; i < 200; i++ {
+		if atomic.LoadInt32(&hit) >= 2 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if atomic.LoadInt32(&hit) == 0 || len(fi.calls) == 0 {
-		t.Errorf("expected ingest to resume after unpausing, got hit=%d, calls=%d", hit, len(fi.calls))
-	}
-
 	r.StopDetector()
+	if got := atomic.LoadInt32(&hit); got != 2 {
+		t.Fatalf("expected 2 ingests after unpausing (CARD1 held from the pause, CARD2 new), got hit=%d", got)
+	}
+	got := map[string]bool{}
+	for _, c := range fi.calls {
+		got[c] = true
+	}
+	if !got[cardDir1] || !got[cardDir2] || len(fi.calls) != 2 {
+		t.Errorf("ingested %v, want exactly %s and %s", fi.calls, cardDir1, cardDir2)
+	}
 }
 
 func TestTriggerDrainPauseOnMeteredCase3(t *testing.T) {

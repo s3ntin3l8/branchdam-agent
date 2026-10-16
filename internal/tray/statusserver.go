@@ -140,12 +140,66 @@ func (s *StatusServer) mux() *http.ServeMux {
 	return mux
 }
 
+// handler is the root handler Serve installs: mux() behind a Host-header
+// check when the server is bound to loopback. port is the port the
+// listener actually holds (not parsed from s.Addr, which may say ":0" in
+// tests).
+//
+// A browser enforces same-origin by hostname, not by IP, so without this
+// check a page on http://attacker.example:38080 whose DNS record is then
+// rebound to 127.0.0.1 is "same-origin" with itself and can read
+// /status.json (watch dirs, local paths, queue state) straight off the
+// loopback listener. The rebound request still carries the attacker's
+// hostname in Host, so rejecting any Host that isn't a loopback name or
+// IP on this listener's port closes it. Native clients (the Wails window,
+// curl) address the server by 127.0.0.1/localhost and pass unchanged.
+//
+// Not applied to an operator-widened bind (tray.statusAddr set to a
+// non-loopback host): the operator has deliberately made the read-only
+// page reachable by whatever name the machine has on the network, which
+// this server cannot enumerate; the mutating /api/* routes are already
+// absent there (see registerAPIRoutes).
+func (s *StatusServer) handler(port string) http.Handler {
+	mux := s.mux()
+	if !isLoopbackHost(s.Addr) {
+		return mux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !loopbackHostHeader(r.Host, port) {
+			http.Error(w, "host not allowed", http.StatusForbidden)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+// loopbackHostHeader reports whether a request's Host header names this
+// loopback listener: "localhost", a loopback IP literal, or an empty host
+// (a client given a bare ":port" statusAddr), and exactly port. A missing
+// port is rejected -- 38080 is never a scheme default, so every legitimate
+// client sends it.
+func loopbackHostHeader(hostHeader, port string) bool {
+	host, p, err := net.SplitHostPort(hostHeader)
+	if err != nil || p != port {
+		return false
+	}
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // Serve runs the status server on ln and blocks until ctx is cancelled,
 // then shuts down gracefully. Returns nil on a clean ctx-triggered
 // shutdown, matching net/http.Server.Shutdown's own contract.
 func (s *StatusServer) Serve(ctx context.Context, ln net.Listener) error {
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		return fmt.Errorf("tray: status server listener address %q: %w", ln.Addr(), err)
+	}
 	s.srv = &http.Server{
-		Handler:           s.mux(),
+		Handler:           s.handler(port),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
