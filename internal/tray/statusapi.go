@@ -40,6 +40,7 @@ import (
 // ResetFailedNode/ResetFailed. This file never reimplements any of them.
 type ActionRunner interface {
 	TriggerIngest(ctx context.Context, cardPath string) IngestSummary
+	TriggerIngestNoWait(ctx context.Context, cardPath string) IngestSummary
 	TriggerDrain(ctx context.Context) (DrainSummary, bool)
 	TriggerPrune(ctx context.Context) (PruneSummary, bool)
 	TriggerSync(ctx context.Context, id IntegrationID) (SyncSummary, bool)
@@ -1016,18 +1017,19 @@ func (s *StatusServer) handleActionIngestStart(w http.ResponseWriter, r *http.Re
 	go func() {
 		defer s.ingestBatch.Store(false)
 		for _, p := range paths {
-			// The acceptance check above and TriggerIngest's gate.Lock are
-			// not atomic, and the gate is released between volumes: a
-			// prune or update that takes it meanwhile would leave this
-			// goroutine blocked behind it, where CancelIngest can't reach
-			// it (and an update's restart drops it). Re-check before each
-			// volume and end the batch instead; the window shows the batch
-			// as finished and the operator can start it again.
-			if s.Actions.GateHeld() {
-				log.Printf("tray: ingest-start: batch stopped before %s: %v", p, errGateHeld)
+			// The gate is released between volumes, so a prune or update
+			// can take it mid-batch. TriggerIngestNoWait acquires it
+			// without waiting -- check and acquire in one step -- and the
+			// batch ends instead of blocking behind the holder, where
+			// CancelIngest can't reach it (and an update's restart would
+			// drop it). The window shows the batch as finished and the
+			// operator can start it again.
+			sum := s.Actions.TriggerIngestNoWait(ctx, p)
+			if errors.Is(sum.Err, ErrGateBusy) {
+				log.Printf("tray: ingest-start: batch stopped: %v", errGateHeld)
 				return
 			}
-			if s.Actions.TriggerIngest(ctx, p).Canceled {
+			if sum.Canceled {
 				return
 			}
 		}

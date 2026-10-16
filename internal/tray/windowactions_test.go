@@ -493,3 +493,38 @@ func TestDrainPruneHandlersAreBounded(t *testing.T) {
 		t.Errorf("deadline set: drain=%v prune=%v, want both bounded", a.drainDeadline, a.pruneDeadline)
 	}
 }
+
+// TestTriggerIngestNoWaitNeverBlocksOnTheGate: with the gate held (a prune
+// or self-update's TryLockIdle), TriggerIngestNoWait returns ErrGateBusy at
+// once and ingests nothing; once the gate is free it ingests as usual.
+func TestTriggerIngestNoWaitNeverBlocksOnTheGate(t *testing.T) {
+	ing := &fakeIngester{}
+	r := NewRunner(ing, nil, "")
+	release, ok := r.TryLockIdle()
+	if !ok {
+		t.Fatal("TryLockIdle on an idle runner failed")
+	}
+
+	done := make(chan IngestSummary, 1)
+	go func() { done <- r.TriggerIngestNoWait(context.Background(), "/media/CARD") }()
+	select {
+	case sum := <-done:
+		if !errors.Is(sum.Err, ErrGateBusy) {
+			t.Errorf("Err = %v, want ErrGateBusy", sum.Err)
+		}
+	case <-time.After(2 * time.Second):
+		release()
+		t.Fatal("TriggerIngestNoWait blocked on a held gate")
+	}
+	if len(ing.calls) != 0 {
+		t.Errorf("ingested %v while the gate was held", ing.calls)
+	}
+
+	release()
+	if sum := r.TriggerIngestNoWait(context.Background(), "/media/CARD"); sum.Err != nil {
+		t.Errorf("with the gate free: Err = %v", sum.Err)
+	}
+	if len(ing.calls) != 1 {
+		t.Errorf("calls = %v, want one ingest once the gate is free", ing.calls)
+	}
+}

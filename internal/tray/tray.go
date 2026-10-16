@@ -897,7 +897,20 @@ func (r *Runner) WatchDirs() []string {
 //   - If offline queueing is not configured, it records an error and invokes
 //     the registered error notification handler.
 func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSummary {
-	return r.triggerIngest(ctx, cardPath, false)
+	return r.triggerIngest(ctx, cardPath, false, false)
+}
+
+// ErrGateBusy is TriggerIngestNoWait's answer when something else (another
+// ingest, a prune pass, a self-update) holds Runner.gate.
+var ErrGateBusy = errors.New("tray: an ingest, prune or update holds the gate")
+
+// TriggerIngestNoWait is TriggerIngest that never waits for Runner.gate: if
+// the gate is held it returns at once with Err = ErrGateBusy and ingests
+// nothing. The window's ingest-start batch uses it so a prune or update
+// that takes the gate between two volumes ends the batch instead of
+// leaving it blocked behind the gate, where CancelIngest cannot reach it.
+func (r *Runner) TriggerIngestNoWait(ctx context.Context, cardPath string) IngestSummary {
+	return r.triggerIngest(ctx, cardPath, false, true)
 }
 
 // TriggerDetectedIngest runs one IngestCard pass for a newly detected card
@@ -905,10 +918,14 @@ func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSumma
 // confirmation (or checks the allow-list) before proceeding. Explicitly
 // skipped volumes are added to the session skip set and ignored until removed.
 func (r *Runner) TriggerDetectedIngest(ctx context.Context, cardPath string) IngestSummary {
-	return r.triggerIngest(ctx, cardPath, true)
+	return r.triggerIngest(ctx, cardPath, true, false)
 }
 
-func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection bool) IngestSummary {
+func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection, noWait bool) IngestSummary {
+	acquireGate := func() bool { r.lockGate(); return true }
+	if noWait {
+		acquireGate = r.tryLockGate
+	}
 	// A detection that finds the tray paused (including one that raced a
 	// re-pause after offerCardsHeldDuringPause checked) is held for the
 	// next resume rather than dropped: the detector won't report an
@@ -965,7 +982,9 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		if notifyErr != nil {
 			notifyErr("branchDAM Ingest", msg)
 		}
-		r.lockGate()
+		if !acquireGate() {
+			return IngestSummary{CardPath: cardPath, Err: ErrGateBusy}
+		}
 		r.mu.Lock()
 		r.last = &summary
 		r.mu.Unlock()
@@ -976,7 +995,9 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		summary.Offline = true
 	}
 
-	r.lockGate()
+	if !acquireGate() {
+		return IngestSummary{CardPath: cardPath, Err: ErrGateBusy}
+	}
 	defer r.unlockGate()
 	summary.StartedAt = time.Now()
 
@@ -1175,6 +1196,15 @@ func (r *Runner) GateHeld() bool { return r.gateHeld.Load() }
 func (r *Runner) lockGate() {
 	r.gate.Lock()
 	r.gateHeld.Store(true)
+}
+
+// tryLockGate is lockGate without waiting: false when the gate is held.
+func (r *Runner) tryLockGate() bool {
+	if !r.gate.TryLock() {
+		return false
+	}
+	r.gateHeld.Store(true)
+	return true
 }
 
 func (r *Runner) unlockGate() {

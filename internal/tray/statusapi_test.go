@@ -225,6 +225,12 @@ func (a *spyActions) TriggerIngest(_ context.Context, cardPath string) IngestSum
 	}
 	return a.ingestSummary
 }
+func (a *spyActions) TriggerIngestNoWait(ctx context.Context, cardPath string) IngestSummary {
+	if a.GateHeld() {
+		return IngestSummary{CardPath: cardPath, Err: ErrGateBusy}
+	}
+	return a.TriggerIngest(ctx, cardPath)
+}
 func (a *spyActions) CancelIngest() bool {
 	a.cancelCalls++
 	return a.cancelResult

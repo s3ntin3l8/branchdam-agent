@@ -1,6 +1,8 @@
 package ingest
 
 import (
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -128,6 +130,11 @@ func mergeVolumes(vols, drives []string, requireDCIM bool) []string {
 		}
 		if requireDCIM {
 			st, err := os.Stat(filepath.Join(d, "DCIM"))
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				// A permission or device error reads as "no DCIM" (the
+				// drive is skipped), as in ListVolumesUnder; say why.
+				slog.Debug("ingest: cannot check removable drive for DCIM; skipping it", "drive", d, "err", err)
+			}
 			if err != nil || !st.IsDir() {
 				continue
 			}
