@@ -544,11 +544,18 @@ type Runner struct {
 
 	// detectorMu guards detectorCancel, detectorDone, and detectorBaseCtx
 	// (issue #78) across ReconfigureDetector / Reconfigure / StopDetector calls.
-	detectorMu           sync.Mutex
-	detectorCancel       context.CancelFunc
-	detectorDone         chan struct{}
-	detectorBaseCtx      context.Context
-	detectorInterval     time.Duration
+	detectorMu       sync.Mutex
+	detectorCancel   context.CancelFunc
+	detectorDone     chan struct{}
+	detectorBaseCtx  context.Context
+	detectorInterval time.Duration
+	// detectorRunningInterval is the poll interval the running detector
+	// was built with (guarded by detectorMu; meaningful only while
+	// detectorCancel != nil). A reload that changes only
+	// ingest.pollIntervalSecs restarts the detector when its Reconfigure
+	// is applied -- see detectorIntervalStale.
+	detectorRunningInterval time.Duration
+
 	detectorRequireDCIM  bool
 	onCardIngested       func()
 	detectorErrHandler   func(err error)
@@ -1714,7 +1721,11 @@ func (r *Runner) BaseContext() context.Context {
 }
 
 // SetDetectorInterval sets the poll interval used when creating a new
-// ingest.Detector. If d <= 0, ingest.DefaultPollInterval is used.
+// ingest.Detector. If d <= 0, ingest.DefaultPollInterval is used. It does
+// not touch a running detector itself: the next Reconfigure that is
+// applied restarts the detector when its interval differs (a settings
+// reload sets the interval and then calls Reconfigure), so the change is
+// applied under the same never-under-a-card-mid-copy rule as the engine.
 func (r *Runner) SetDetectorInterval(d time.Duration) {
 	r.detectorMu.Lock()
 	defer r.detectorMu.Unlock()
@@ -1790,6 +1801,7 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 
 	dctx, cancel := context.WithCancel(baseCtx)
 	r.detectorCancel = cancel
+	r.detectorRunningInterval = interval
 	done := make(chan struct{})
 	r.detectorDone = done
 
@@ -1837,6 +1849,18 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 	}()
 }
 
+// detectorIntervalStale reports whether a detector is running with a poll
+// interval other than the one SetDetectorInterval last set.
+func (r *Runner) detectorIntervalStale() bool {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+	want := r.detectorInterval
+	if want <= 0 {
+		want = ingest.DefaultPollInterval
+	}
+	return r.detectorCancel != nil && r.detectorRunningInterval != want
+}
+
 // StopDetector cancels any running Detector.Watch goroutine and waits for it
 // to exit.
 func (r *Runner) StopDetector() {
@@ -1880,17 +1904,21 @@ type ingesterCloser interface{ Close() }
 // at once: a settings save during a long card copy must not hang the
 // caller -- the Settings window's request would time out and report the
 // agent as not running, though the change was saved. Only the newest
-// pending call is applied; an older one it superseded never is.
-// ReconfigurePending reports whether one is still waiting.
+// pending call is applied; an older one it superseded never is, and its
+// Ingester is Closed as soon as it is superseded (it was never installed,
+// so no ingest can be using it). ReconfigurePending reports whether one
+// is still waiting.
 //
 // The replaced Ingester is Closed (when it implements Close) right after
 // the swap, still under the gate, so the old engine's exiftool pool
 // doesn't outlive it -- no ingest can be using it at that point.
 //
-// When watchDirs differs from the current roots, the detector is
-// restarted (ReconfigureDetector, issue #78) AFTER releasing gate, so
-// waiting on the previous detector goroutine to exit cannot deadlock
-// against an in-flight TriggerIngest call.
+// When watchDirs differs from the current roots, or the running detector
+// polls at an interval other than SetDetectorInterval's latest (a reload
+// that changed ingest.pollIntervalSecs), the detector is restarted
+// (ReconfigureDetector, issue #78) AFTER releasing gate, so waiting on the
+// previous detector goroutine to exit cannot deadlock against an
+// in-flight TriggerIngest call.
 //
 // One field is deliberately NOT reconfigurable this way and is the
 // caller's responsibility to treat as restart-required instead:
@@ -1899,12 +1927,16 @@ type ingesterCloser interface{ Close() }
 // swap it into).
 func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir string) (applied bool) {
 	r.reconfigMu.Lock()
+	displaced := r.reconfigPending
 	r.reconfigPending = &pendingReconfig{
 		ingester:   ingester,
 		watchDirs:  append([]string(nil), watchDirs...),
 		scratchDir: scratchDir,
 	}
 	r.reconfigMu.Unlock()
+	if displaced != nil {
+		r.closeDisplacedIngester(displaced.ingester, ingester)
+	}
 
 	if r.gate.TryLock() {
 		r.gateHeld.Store(true)
@@ -1968,8 +2000,28 @@ func (r *Runner) applyPendingReconfigAndUnlock() {
 	}
 	r.unlockGate()
 
-	if rootsChanged {
+	if rootsChanged || r.detectorIntervalStale() {
 		r.ReconfigureDetector(r.BaseContext(), p.watchDirs)
+	}
+}
+
+// closeDisplacedIngester Closes the Ingester of a pending Reconfigure call
+// that a newer one superseded before it was applied. Never installed, so
+// nothing can be ingesting with it -- unless it is the one now current
+// or the one replacing it (the same engine passed twice), which are left
+// open.
+func (r *Runner) closeDisplacedIngester(displaced, replacement Ingester) {
+	if displaced == nil || displaced == replacement {
+		return
+	}
+	r.mu.Lock()
+	current := r.ingester
+	r.mu.Unlock()
+	if displaced == current {
+		return
+	}
+	if c, ok := displaced.(ingesterCloser); ok {
+		c.Close()
 	}
 }
 

@@ -12,7 +12,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -32,6 +34,12 @@ const httpTimeout = 10 * time.Second
 // errAgentBusy is agentRequest's error when the agent accepted the
 // connection but did not answer within httpTimeout.
 var errAgentBusy = errors.New("branchDAM is running but didn't answer in time -- it may be busy with an ingest or update; a settings change may already be saved, so reopen Settings to check")
+
+// errAgentNoAnswer is agentRequest's error when httpTimeout ran out before
+// a connection to the agent was even established (e.g. a firewall
+// silently dropping packets to the loopback port). Nothing proves the
+// agent is running then, so the wording claims neither way.
+var errAgentNoAnswer = errors.New("branchDAM didn't answer in time (no connection to the agent was made) -- check that the tray app is running and that nothing blocks its local port")
 
 // App is the Wails-bound backend for the status and settings views, kept
 // deliberately thin: every settings/status method below round-trips a raw
@@ -463,6 +471,14 @@ func (a *App) agentRequest(method, path string, body []byte) ([]byte, error) {
 	if body != nil {
 		reqBody = bytes.NewReader(body)
 	}
+	// connected records whether the transport got a connection to the
+	// agent, so a timeout can tell "running but slow" from "never
+	// reached". Atomic: the trace hook may run on the transport's dial
+	// goroutine.
+	var connected atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	})
 	req, err := http.NewRequestWithContext(ctx, method, "http://"+addr+path, reqBody)
 	if err != nil {
 		return nil, err
@@ -474,13 +490,18 @@ func (a *App) agentRequest(method, path string, body []byte) ([]byte, error) {
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		// A timeout means something answered the connection but not the
-		// request in time: the agent is running, just busy. Saying "not
-		// running" there sent operators restarting a tray that had in
-		// fact saved their change.
+		// A timeout on an established connection means the agent
+		// accepted the request but didn't answer in time: it is running,
+		// just busy. Saying "not running" there sent operators restarting
+		// a tray that had in fact saved their change. A timeout before
+		// any connection (a dial that never completed) proves nothing
+		// either way, so it gets neutral wording.
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
-			return nil, errAgentBusy
+			if connected.Load() {
+				return nil, errAgentBusy
+			}
+			return nil, errAgentNoAnswer
 		}
 		return nil, errors.New("branchDAM doesn't seem to be running (could not reach the agent) -- start the tray app first")
 	}

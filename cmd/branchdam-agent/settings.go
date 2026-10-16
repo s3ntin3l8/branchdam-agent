@@ -40,20 +40,18 @@ type configSettings struct {
 	// circuits on a nil installer so those tests don't need to wire one.
 	resolveInstaller *resolveHookInstaller
 
-	// appliedStatusAddr is what THIS PROCESS actually bound at launch
-	// -- fixed for the whole process lifetime, unlike s.cfg below
-	// (which reload() overwrites on every call). RestartRequired is
-	// derived by diffing the current config against this, not against
-	// the previous s.cfg snapshot: a Hermes review finding on this PR
-	// caught that diffing against the mutable snapshot made the flag
-	// latch permanently after the first reload, even if an operator
-	// reverted a hand-edit back to the original value on a second reload
-	// -- the "previous" snapshot by then was already the changed one,
-	// so the diff against it saw nothing.
-	appliedStatusAddr string
 	// applied is the whole config this process started with -- the
 	// baseline restartRequiredKeys diffs against for every key that,
-	// like tray.statusAddr, is only read at startup.
+	// like tray.statusAddr (the address this process actually bound), is
+	// only read at startup. Fixed for the whole process lifetime, unlike
+	// s.cfg below (which reload() overwrites on every call):
+	// RestartRequired is derived by diffing the current config against
+	// this, not against the previous s.cfg snapshot -- a Hermes review
+	// finding caught that diffing against the mutable snapshot made the
+	// flag latch permanently after the first reload, even if an operator
+	// reverted a hand-edit back to the original value on a second reload
+	// (the "previous" snapshot by then was already the changed one, so
+	// the diff against it saw nothing).
 	applied config.Config
 
 	// saveMu serialises every settings mutation end to end -- validate
@@ -98,21 +96,22 @@ var disableStartOnLoginFunc = autostart.Disable
 // before anything has changed).
 func newConfigSettings(path string, cfg config.Config, runner *tray.Runner) *configSettings {
 	return &configSettings{
-		path:              path,
-		cfg:               cfg,
-		runner:            runner,
-		appliedStatusAddr: cfg.Tray.StatusAddrOrDefault(),
-		applied:           cfg,
+		path:    path,
+		cfg:     cfg,
+		runner:  runner,
+		applied: cfg,
 	}
 }
 
 // restartRequiredKeys returns the config keys whose value in cfg differs
 // from applied (the config this process started with) and that nothing
 // re-applies until the process restarts: the status server's listen
-// address, the queue.db the tray opened, the drain/prune timers and the
-// detector's poll interval (all started once), and the self-update agent
-// (built once). Enabling prune counts; disabling it does not, since
-// reload drops the pruner and the timer then has nothing to run.
+// address, the queue.db the tray opened, the drain/prune timers (started
+// once), and the self-update agent (built once). Enabling prune counts;
+// disabling it does not, since reload drops the pruner and the timer then
+// has nothing to run. ingest.pollIntervalSecs is not here: reload sets
+// the detector interval and the Reconfigure it then calls restarts the
+// detector at the new interval (Runner.Reconfigure).
 func restartRequiredKeys(applied, cfg config.Config) []string {
 	var keys []string
 	add := func(key string, changed bool) {
@@ -125,7 +124,6 @@ func restartRequiredKeys(applied, cfg config.Config) []string {
 	add("offline.drainIntervalSecs", applied.Offline.DrainIntervalSecsOrDefault() != cfg.Offline.DrainIntervalSecsOrDefault())
 	add("prune.enabled", !applied.Prune.Enabled && cfg.Prune.Enabled)
 	add("prune.intervalMinutes", applied.Prune.IntervalMinutesOrDefault() != cfg.Prune.IntervalMinutesOrDefault())
-	add("ingest.pollIntervalSecs", max(applied.Ingest.PollIntervalSecs, 0) != max(cfg.Ingest.PollIntervalSecs, 0))
 	add("selfUpdate.enabled", applied.SelfUpdate.Enabled != cfg.SelfUpdate.Enabled)
 	add("selfUpdate.checkIntervalHours", applied.SelfUpdate.CheckIntervalHoursOrDefault() != cfg.SelfUpdate.CheckIntervalHoursOrDefault())
 	add("selfUpdate.repo", applied.SelfUpdate.RepoOrDefault() != cfg.SelfUpdate.RepoOrDefault())
@@ -762,7 +760,7 @@ func (s *configSettings) SetIntegrationRewrites(id tray.IntegrationID, value str
 // RestartRequired (and RestartRequiredKeys) is re-derived by diffing
 // against applied (fixed at construction -- what THIS PROCESS actually
 // started with), not against the mutable previous s.cfg snapshot -- see
-// appliedStatusAddr's doc comment for why that distinction matters.
+// applied's doc comment for why that distinction matters.
 //
 // Callers hold saveMu (every exported setter and Reload take it).
 func (s *configSettings) reload() error {

@@ -77,7 +77,7 @@ func TestConfigSettingsSnapshotNamesRestartRequiredKeys(t *testing.T) {
 		t.Fatalf("Reload: %v", err)
 	}
 	sv := s.Snapshot()
-	want := []string{"offline.drainIntervalSecs", "ingest.pollIntervalSecs", "selfUpdate.checkIntervalHours"}
+	want := []string{"offline.drainIntervalSecs", "selfUpdate.checkIntervalHours"}
 	if !sv.RestartRequired {
 		t.Error("RestartRequired = false after changing restart-only keys")
 	}
@@ -85,6 +85,11 @@ func TestConfigSettingsSnapshotNamesRestartRequiredKeys(t *testing.T) {
 		if !slices.Contains(sv.RestartRequiredKeys, k) {
 			t.Errorf("RestartRequiredKeys = %v, missing %q", sv.RestartRequiredKeys, k)
 		}
+	}
+	// The reload's Reconfigure restarts the detector at the new interval
+	// (tray.Runner.Reconfigure), so the poll interval is not restart-only.
+	if slices.Contains(sv.RestartRequiredKeys, "ingest.pollIntervalSecs") {
+		t.Errorf("RestartRequiredKeys = %v, want no ingest.pollIntervalSecs (applied live)", sv.RestartRequiredKeys)
 	}
 
 	// A hot-reloadable change alone is not flagged; reverting clears it.

@@ -929,7 +929,7 @@ func TestConfigSettingsReloadRefusesNonServerPlaceholder(t *testing.T) {
 
 // TestConfigSettingsRestartRequiredClearsWhenReverted is a regression test
 // for the second half of the restart-required diffing bug: RestartRequired
-// must be re-derived from the fixed appliedStatusAddr/appliedCardRoots
+// must be re-derived from the fixed applied (startup config)
 // baseline on every reload, not OR-accreted against the mutable previous
 // snapshot -- otherwise once true it can never go back to false, even after
 // an operator reverts a hand-edit back to the value this process actually
