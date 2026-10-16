@@ -66,8 +66,9 @@ The agent communicates with the branchDAM server via its `/api/v1/agent/*` REST 
   and the next tick sends a fresh snapshot. "Pause upload on metered connection" does not gate
   it (it gates uploads only, like the server probe): the snapshot is a few hundred bytes. The
   capacity comes from the cached reading the status page uses, so a hung `statfs` on an
-  unreachable share never stalls the pass; until the first reading lands, the pass sends zero
-  capacity, which the server treats as no verdict. The mirror/render-cache/proxy breakdown
+  unreachable share never stalls the pass. The startup pass waits up to 5 seconds for the first
+  reading, so it carries capacity whenever `statfs` answers promptly; if it doesn't, that pass
+  sends zero capacity, which the server treats as no verdict. The mirror/render-cache/proxy breakdown
   fields are sent as zero (the agent does not size them).
 - A `prune` subcommand -- not the same thing as real Tier-1 NLE scratch pruning, which stays
   architecturally blocked (see `internal/config.PruneConfig`'s doc comment and

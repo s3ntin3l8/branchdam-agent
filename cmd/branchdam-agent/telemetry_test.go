@@ -77,3 +77,38 @@ func TestRegisterTelemetryClearsWhenServerNotConfigured(t *testing.T) {
 		t.Error("the dummy client was dialed")
 	}
 }
+
+// TestStartupTelemetryPassCarriesCapacity: the disk-usage cache is cold
+// at startup and the server keeps only the latest snapshot, so the startup
+// pass waits (bounded) for the first statfs reading instead of reporting
+// zero capacity until the next tick.
+func TestStartupTelemetryPassCarriesCapacity(t *testing.T) {
+	var got atomic.Pointer[branchdam.AgentTelemetryInput]
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in branchdam.AgentTelemetryInput
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got.Store(&in)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"acknowledgedAtUnix":1}`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{AgentID: "ws-01"}
+	cfg.Server.BaseURL = srv.URL
+	cfg.Server.APIKey = "0123456789abcdef0123456789abcdef" // pragma: allowlist secret -- test fixture
+	runner := tray.NewRunner(nil, nil, t.TempDir())
+	registerTelemetry(runner, branchdam.New(srv.URL, cfg.Server.APIKey), cfg)
+
+	runStartupTelemetryPass(context.Background(), runner, startupUsageWait)
+
+	in := got.Load()
+	if in == nil {
+		t.Fatal("the startup pass sent nothing")
+	}
+	if in.ScratchStorage.TotalBytes <= 0 {
+		t.Errorf("startup snapshot TotalBytes = %d, want the scratch volume's capacity", in.ScratchStorage.TotalBytes)
+	}
+}

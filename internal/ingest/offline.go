@@ -654,7 +654,7 @@ func (e *Engine) resolveOfflineDestination(ctx context.Context, vars TemplateVar
 		return res, nil
 	}
 
-	for counter := 1; counter <= 10000; counter++ {
+	for counter := 1; counter <= maxCollisionSuffix; counter++ {
 		suffix := ""
 		if counter > 1 {
 			suffix = fmt.Sprintf("_%d", counter)
@@ -678,7 +678,7 @@ func (e *Engine) resolveOfflineDestination(ctx context.Context, vars TemplateVar
 			return cand, nil
 		}
 	}
-	return DestinationResolution{}, fmt.Errorf("no free destination name for %s after 10000 suffixes", srcPath)
+	return DestinationResolution{}, fmt.Errorf("no free destination name for %s after %d suffixes", srcPath, maxCollisionSuffix)
 }
 
 // offlineSlotUsable vets one ResolveDestination answer for the offline path:

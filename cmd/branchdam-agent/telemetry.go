@@ -17,9 +17,16 @@ import (
 // adding meaningful traffic.
 const telemetryInterval = 15 * time.Minute
 
-// telemetryTimeout bounds one telemetry pass (a statfs plus one small
-// POST).
+// telemetryTimeout bounds one telemetry pass, which is one small POST:
+// the pass reads the cached scratch-usage reading and never calls statfs
+// itself.
 const telemetryTimeout = 30 * time.Second
+
+// startupUsageWait bounds how long the startup telemetry pass waits for
+// the first scratch disk-usage reading. A few seconds covers any local or
+// healthy network volume; statfs on an unreachable share can hang
+// indefinitely, so the pass never waits longer than this.
+const startupUsageWait = 5 * time.Second
 
 // registerTelemetry wires (or clears) the Runner's telemetry sender,
 // mirroring registerServerProbe: never against the dummy client
@@ -32,6 +39,20 @@ func registerTelemetry(runner *tray.Runner, client *branchdam.Client, cfg config
 		return
 	}
 	runner.SetTelemetry(client, cfg.AgentID, version)
+}
+
+// runStartupTelemetryPass is the pass the tray sends right after startup.
+// The disk-usage cache is cold then, and the server keeps only the latest
+// snapshot, so a pass sent at once would report zero capacity until the
+// next tick 15 minutes later. It first waits up to usageWait for the
+// background statfs reading (Runner.WaitScratchUsage), then sends; a
+// statfs that doesn't answer in time leaves the old zero-capacity
+// behaviour, never a stalled pass.
+func runStartupTelemetryPass(ctx context.Context, runner *tray.Runner, usageWait time.Duration) {
+	runner.WaitScratchUsage(ctx, usageWait)
+	tctx, cancel := context.WithTimeout(ctx, telemetryTimeout)
+	defer cancel()
+	runTelemetryPass(tctx, runner)
 }
 
 // runTelemetryPass is one telemetry tick: TriggerTelemetry itself skips

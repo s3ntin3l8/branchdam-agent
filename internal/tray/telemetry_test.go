@@ -200,3 +200,41 @@ func TestPruneDurationReachesTelemetryAndJSON(t *testing.T) {
 		t.Errorf("PruneSummary JSON = %s, want durationMs and no raw Duration", b)
 	}
 }
+
+// TestWaitScratchUsage: the wait returns as soon as the first reading
+// lands, is bounded when statfs hangs (it must never stall the startup
+// telemetry pass), and returns at once with no localEditRoot.
+func TestWaitScratchUsage(t *testing.T) {
+	t.Run("reading lands", func(t *testing.T) {
+		withDiskUsage(t, func(string) (uint64, uint64, error) { return 300, 1000, nil })
+		r := NewRunner(&fakeIngester{}, nil, t.TempDir())
+		if !r.WaitScratchUsage(context.Background(), 5*time.Second) {
+			t.Fatal("WaitScratchUsage = false, want the reading")
+		}
+		if u := r.scratchUsageSnapshot(r.scratchDir); u.TotalBytes != 1000 {
+			t.Errorf("cached reading = %+v, want TotalBytes 1000", u)
+		}
+	})
+	t.Run("hung statfs is bounded", func(t *testing.T) {
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		withDiskUsage(t, func(string) (uint64, uint64, error) {
+			<-release
+			return 1, 2, nil
+		})
+		r := NewRunner(&fakeIngester{}, nil, t.TempDir())
+		start := time.Now()
+		if r.WaitScratchUsage(context.Background(), 100*time.Millisecond) {
+			t.Fatal("WaitScratchUsage = true while statfs hangs")
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Errorf("WaitScratchUsage took %v with a 100ms bound", elapsed)
+		}
+	})
+	t.Run("no localEditRoot", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+		if r.WaitScratchUsage(context.Background(), time.Hour) {
+			t.Error("WaitScratchUsage = true with no localEditRoot")
+		}
+	})
+}
