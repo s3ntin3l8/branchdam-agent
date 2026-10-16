@@ -408,6 +408,21 @@ func runTrayCmd(args []string) int {
 		runner.TriggerServerProbe(pctx)
 	})
 
+	// Scratch-storage/prune telemetry (POST /api/v1/agent/telemetry): its
+	// own timer goroutine, never the menu loop. One pass shortly after
+	// startup (startPeriodic has no leading tick) so the server's Storage
+	// Health card is populated without waiting a full interval; that first
+	// pass is skipped like any other while paused or not configured.
+	registerTelemetry(runner, client, cfg)
+	go func() {
+		tctx, cancel := context.WithTimeout(ctx, telemetryTimeout)
+		defer cancel()
+		runTelemetryPass(tctx, runner)
+	}()
+	go startPeriodic(ctx, telemetryInterval, telemetryTimeout, func(pctx context.Context) {
+		runTelemetryPass(pctx, runner)
+	})
+
 	runner.SetErrorNotifier(func(title, message string) {
 		go func() {
 			if dialog != nil {

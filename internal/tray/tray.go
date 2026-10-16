@@ -378,6 +378,10 @@ type Runner struct {
 	// TriggerPrune are.
 	probeMu sync.Mutex
 
+	// telemetry is the POST /api/v1/agent/telemetry wiring -- see
+	// telemetry.go.
+	telemetry telemetryDeps
+
 	// scratchUsageMu is its own dedicated mutex, same reasoning as
 	// drainMu/probeMu above -- but here the concern isn't lock ordering
 	// with an ingest/drain/update, it's that Status() must NEVER call the
@@ -427,7 +431,10 @@ type Runner struct {
 	// (inserted and not since removed), guarded by mu. A restarted
 	// detector (ReconfigureDetector) starts from it, so a reload while
 	// paused or not never reports an already-handled card as a new
-	// insertion.
+	// insertion. "Handled" means reported, whatever the ingest outcome
+	// (config incomplete, a failed IngestCard, a gate error): a reload is
+	// not an insertion. Re-inserting the card or "Ingest now" offers it
+	// again.
 	detectedVolumes map[string]bool
 
 	// mu guards every field below, including ingester/watchDirs/
@@ -848,8 +855,9 @@ func (r *Runner) WatchDirs() []string {
 // this single method, and it now also serializes them: a call blocks
 // until any other in-flight ingest (from either path) has finished, via
 // gate. Manual triggers bypass the confirmation dialog and session skip set.
-// When paused (issue #83), triggerIngest returns early without acquiring gate
-// so both manual and detection-driven calls drop the volume.
+// When paused (issue #83), triggerIngest returns early without acquiring
+// gate: a manual call drops the volume, a detection-driven one is held for
+// the next resume (holdPausedInserts).
 //
 // If the archive destination is probed and found unreachable:
 //   - If offline queueing is configured (queueReader != nil), it transparently
@@ -1419,8 +1427,10 @@ func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bo
 		r.mu.Unlock()
 	}()
 
+	pruneStart := time.Now()
 	summary, err := pruner.Prune(ctx)
 	summary.At = time.Now()
+	summary.Duration = summary.At.Sub(pruneStart)
 	if err != nil {
 		summary.Err = err
 	}

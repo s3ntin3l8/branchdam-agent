@@ -569,6 +569,7 @@ func (e *Engine) registerNode(ctx context.Context, fr *FileResult, srcInfo os.Fi
 		GPSLatitude:  gpsLat,
 		GPSLongitude: gpsLon,
 	}
+	payload.SourcePathHash = strPtr(sourcePathHash(srcPath))
 	if exif != nil {
 		payload.CameraModel = strPtr(exif.CameraModel)
 		payload.CameraSerial = strPtr(exif.CameraSerial)

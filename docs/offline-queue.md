@@ -348,8 +348,11 @@ probed itself), the deferred copy is moved there -- only if it still holds exact
 bytes (full BLAKE3) and nothing is at the server's path yet. A sidecar's copy is found under the
 card's name as well as under its master's new stem. When the server's path is already taken, the
 verified copy stays where it is, the fresh one is placed at the server's path, and a WARN names
-both. The lookup compares the local file against the hash already computed, so the card is not
-read again; a deferred copy that itself took a collision suffix is not looked for and stays.
+both (one WARN per verified copy found). Each candidate name is also swept through the collision
+suffixes a deferred copy takes when its name was taken (`_2`, `_3`, ...), stopping at the first
+suffix that is absent, so a suffixed deferred copy is found too. The lookup compares only a
+regular file of the uploaded size against the hash already computed, so the card is not read
+again.
 
 Deferred uploads are **not** written to `queue.db`, so nothing retries them until the card is
 re-inserted. Upload mode writes no queue rows at all: the server registers the node in the

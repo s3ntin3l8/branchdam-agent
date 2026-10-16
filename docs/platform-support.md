@@ -215,7 +215,7 @@ all. Loopback is decided case-insensitively (`LocalHost:38080` binds loopback an
 
 **Wire shape.** `/status.json` gains `uploadPausedMetered` (boolean, always present): true when
 `ingest.pauseUploadOnMetered` is on and the last metered probe said metered or failed. It is
-additive and display-only (the tooltip and the window read it); the drain gate never does.
+additive and display-only (the tooltip reads it); the drain gate never does.
 
 **A separate, authenticated `/api/*` surface exists alongside the plain JSON routes above**
 (`internal/tray/statusapi.go`), built for the native app UI (Track 3 of the distribution/UX plan):
