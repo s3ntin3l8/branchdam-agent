@@ -2,8 +2,6 @@ package ingest
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -260,6 +258,10 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 	stemSuffix := make(map[string]string)
 	var dedup dedupState
 	var result CardResult
+	var upload *uploadPass
+	if e.Ingest.UploadStream {
+		upload = newUploadPass()
+	}
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			entryErr, fatal := walkEntryError(cardRoot, path, err)
@@ -294,6 +296,18 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if upload != nil {
+			// uploadStream mode (upload.go): sidecars wait for every
+			// master so they can follow it. checkContentDedup does not
+			// run: the server dedups by the X-Blake3-Hash the upload
+			// carries, computed in flight from the single card read.
+			if isSidecarExt(extNoDot(path)) {
+				upload.sidecars = append(upload.sidecars, path)
+				return nil
+			}
+			result.Files = append(result.Files, e.ingestFileUpload(ctx, path, upload))
+			return nil
+		}
 		result.Files = append(result.Files, e.ingestFile(ctx, path, stemSuffix, &dedup))
 		return nil
 	})
@@ -302,6 +316,13 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 			return result, fmt.Errorf("ingest: card %s: stopped before the remaining files: %w", cardRoot, err)
 		}
 		return CardResult{}, fmt.Errorf("ingest: walk card root %s: %w", cardRoot, err)
+	}
+	if upload != nil {
+		sidecars, err := e.uploadSidecars(ctx, upload)
+		result.Files = append(result.Files, sidecars...)
+		if err != nil {
+			return result, fmt.Errorf("ingest: card %s: stopped before the remaining sidecars: %w", cardRoot, err)
+		}
 	}
 	return result, nil
 }
@@ -323,16 +344,10 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 // copies already in place does not take that as proof of registration
 // (confirmRegistered).
 func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string, dedup *dedupState) FileResult {
-	// UploadStream mode sends bytes directly to the server upload endpoint;
-	// server-side dedup is the backstop for that path.
-	if e.Ingest.UploadStream {
-		return e.ingestFileUpload(ctx, srcPath)
-	}
-
 	fr := FileResult{SourcePath: srcPath}
 
 	ext := extNoDot(srcPath)
-	fr.IsSidecar = ext == "xmp" || ext == "srt"
+	fr.IsSidecar = isSidecarExt(ext)
 
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {
@@ -806,169 +821,6 @@ func strPtr(s string) *string {
 	return &s
 }
 
-// ingestFileUpload streams media directly to POST /api/v1/agent/upload on the
-// branchDAM server, persists the local edit copy under LocalEditRoot with the
-// server-returned relativePath, and verifies cryptographic BLAKE3 parity.
-func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResult {
-	fr := FileResult{SourcePath: srcPath}
-
-	ext := extNoDot(srcPath)
-	fr.IsSidecar = ext == "xmp" || ext == "srt"
-
-	srcInfo, err := os.Stat(srcPath)
-	if err != nil {
-		fr.Err = fmt.Errorf("stat source: %w", err)
-		return fr
-	}
-
-	var exif *ExifResult
-	if e.Exiftool != nil && e.Exiftool.HasExiftool() && !fr.IsSidecar {
-		if res, err := e.Exiftool.Exif(ctx, srcPath); err == nil {
-			exif = res
-		}
-	}
-	fr.Exif = exif
-
-	var captureTimestamp int64
-	var cameraModel string
-	if exif != nil && exif.CapturedAt != nil {
-		captureTimestamp = exif.CapturedAt.Unix()
-	} else {
-		captureTimestamp = srcInfo.ModTime().Unix()
-	}
-	if exif != nil {
-		cameraModel = exif.CameraModel
-	}
-
-	if e.Ingest.PauseUploadOnMetered {
-		if metered, mErr := e.IsMetered(); metered || mErr != nil {
-			if mErr != nil {
-				slog.Debug("metered probe failed, treating as metered (fail-closed)", "err", mErr)
-			}
-			slog.Info("upload skipped on metered connection -- re-insert card to retry", "path", srcPath)
-
-			vars := buildTemplateVars(exif, srcPath, srcInfo.ModTime())
-
-			relPath := RenderPath(e.Ingest.PathTemplate, vars)
-			localPath := filepath.Join(e.Ingest.LocalEditRoot, relPath)
-			fr.LocalPath = localPath
-
-			writeRes, err := WriteLocal(srcPath, localPath, e.progressOpts(ctx, localPath, ProgressPhaseCopying, srcInfo.Size())...)
-			if err != nil {
-				fr.Err = fmt.Errorf("write local copy: %w", err)
-				return fr
-			}
-			fr.Write = writeRes
-			preserveMtimeAt(srcPath, localPath, srcInfo.ModTime())
-
-			localVerify, err := Verify(localPath, writeRes.FullHash, e.progressOpts(ctx, localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
-			if err != nil {
-				_ = os.Remove(localPath)
-				fr.Err = fmt.Errorf("verify local copy: %w", err)
-				return fr
-			}
-			fr.LocalVerify = localVerify
-
-			if !localVerify.Verified {
-				_ = os.Remove(localPath)
-				fr.Err = fmt.Errorf("ingest: verification failed for %s -- safe-eject withheld", srcPath)
-				return fr
-			}
-
-			if e.Ingest.RequireUnbuffered && localVerify.Method == VerifyMethodBufferedFloor {
-				fr.Err = fmt.Errorf("ingest: unbuffered verify required by config, but verify fell back to buffered floor (local=%s) -- safe-eject withheld", localVerify.Method)
-				return fr
-			}
-
-			if isImageExt(ext) && e.Exiftool != nil {
-				if ph, err := phash.Extract(ctx, e.Exiftool.Pool(), localPath); err == nil {
-					fr.PHash = ph
-				}
-			}
-
-			fr.Skipped = true
-			fr.Deferred = true
-			fr.SkipReason = "upload skipped on metered connection -- re-insert card to retry"
-			return fr
-		}
-	}
-
-	if e.Uploader == nil {
-		fr.Err = fmt.Errorf("ingest: uploadStream is true but client does not support upload")
-		return fr
-	}
-
-	srcFile, err := os.Open(srcPath)
-	if err != nil {
-		fr.Err = fmt.Errorf("open source %s: %w", srcPath, err)
-		return fr
-	}
-	defer func() { _ = srcFile.Close() }()
-
-	srcPathHash := sha256.Sum256([]byte(srcPath))
-	uploadOpts := branchdam.UploadOptions{
-		Filename:         filepath.Base(srcPath),
-		CameraModel:      cameraModel,
-		CaptureTimestamp: captureTimestamp,
-		SourcePathHash:   hex.EncodeToString(srcPathHash[:]),
-	}
-
-	var body io.Reader = srcFile
-	if o := applyWriteOptions(e.progressOpts(ctx, srcPath, ProgressPhaseCopying, srcInfo.Size())); o.onBytes != nil {
-		body = &progressReader{r: srcFile, onBytes: o.onBytes}
-	}
-
-	upResp, err := e.Uploader.Upload(ctx, body, uploadOpts)
-	if err != nil {
-		fr.Err = fmt.Errorf("upload %s: %w", srcPath, err)
-		return fr
-	}
-
-	fr.NodeUUID = upResp.NodeUUID
-	fr.ArchivePath = upResp.RelativePath
-	localPath := filepath.Join(e.Ingest.LocalEditRoot, upResp.RelativePath)
-	fr.LocalPath = localPath
-
-	writeRes, err := WriteLocal(srcPath, localPath, e.progressOpts(ctx, localPath, ProgressPhaseCopying, srcInfo.Size())...)
-	if err != nil {
-		fr.Err = fmt.Errorf("write local copy: %w", err)
-		return fr
-	}
-	fr.Write = writeRes
-	// Soft contract (issue #103): the archive landed server-side via
-	// Upload, so the only Chtimes call on this path is the local edit
-	// copy. Failure is logged, not fatal -- see preserveMtimeAt.
-	preserveMtimeAt(srcPath, localPath, srcInfo.ModTime())
-
-	localVerify, err := Verify(localPath, upResp.Blake3Hash, e.progressOpts(ctx, localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
-	if err != nil {
-		_ = os.Remove(localPath)
-		fr.Err = fmt.Errorf("verify local copy: %w", err)
-		return fr
-	}
-	fr.LocalVerify = localVerify
-
-	if !localVerify.Verified {
-		_ = os.Remove(localPath)
-		fr.Err = fmt.Errorf("ingest: verification failed for %s (local verified=%v, server blake3=%s, local blake3=%s) -- safe-eject withheld",
-			srcPath, localVerify.Verified, upResp.Blake3Hash, writeRes.FullHash)
-		return fr
-	}
-
-	if e.Ingest.RequireUnbuffered && localVerify.Method == VerifyMethodBufferedFloor {
-		fr.Err = fmt.Errorf("ingest: unbuffered verify required by config, but verify fell back to buffered floor (local=%s) -- safe-eject withheld", localVerify.Method)
-		return fr
-	}
-
-	if isImageExt(ext) && e.Exiftool != nil {
-		if ph, err := phash.Extract(ctx, e.Exiftool.Pool(), localPath); err == nil {
-			fr.PHash = ph
-		}
-	}
-
-	return fr
-}
-
 // dedupState is one ingest pass's memory of how the server answered the
 // content dedup check, so a pass does not keep asking a question the server
 // cannot answer. It lives for one IngestCard/IngestCardOffline call; the
@@ -1095,14 +947,13 @@ func (e *Engine) checkContentDedup(ctx context.Context, srcPath string, wr Write
 	if !ok {
 		return false, "", ""
 	}
-	logFailure := func(msg string, err error) {
-		if dedup.unavailable {
-			slog.Debug(msg, "source", srcPath, "err", err)
-		} else {
-			slog.Warn(msg, "source", srcPath, "err", err)
-		}
-	}
-
+	// Failures below are logged at Warn unconditionally. dedup.unavailable
+	// is never set by the time one is logged: the guard at the top of this
+	// function returns before any request once it is, and noteError (which
+	// latches it) runs only after the slog.Warn at both call sites. So the
+	// failure that latches is the one logged at Warn and the files after it
+	// never get this far. Keep that order -- guard first, noteError after the
+	// log -- rather than branching on dedup.unavailable here.
 	if !dedup.fullOnly {
 		res, err := call(branchdam.ContentCheckQuery{FastHash: wr.FastHash, SizeBytes: wr.SizeBytes})
 		switch {
@@ -1110,7 +961,7 @@ func (e *Engine) checkContentDedup(ctx context.Context, srcPath string, wr Write
 			dedup.fullOnly = true
 			slog.Info("ingest: server rejected the fast-hash pre-screen (older server) -- using the full-hash lookup for this pass", "source", srcPath, "err", err)
 		case err != nil:
-			logFailure("ingest: content check pre-flight failed (fail-open)", err)
+			slog.Warn("ingest: content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
 			dedup.noteError(err)
 			return false, "", ""
 		case !res.PossibleMatch && !res.Found:
@@ -1120,7 +971,7 @@ func (e *Engine) checkContentDedup(ctx context.Context, srcPath string, wr Write
 
 	res, err := call(branchdam.ContentCheckQuery{FastHash: wr.FastHash, FullHash: wr.FullHash})
 	if err != nil {
-		logFailure("ingest: content check pre-flight confirmation failed (fail-open)", err)
+		slog.Warn("ingest: content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
 		dedup.noteError(err)
 		return false, "", ""
 	}

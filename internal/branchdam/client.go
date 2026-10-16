@@ -20,7 +20,8 @@ import (
 )
 
 // DefaultTimeout is applied to a Client's underlying http.Client when none
-// is supplied via WithHTTPClient.
+// is supplied via WithHTTPClient. It bounds every JSON call; Upload uses a
+// separate client without a total timeout (see upload.go).
 const DefaultTimeout = 30 * time.Second
 
 // Client is the branchDAM agent-server REST client.
@@ -28,6 +29,12 @@ type Client struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+
+	// uploadClient carries Upload only. It has no total Timeout -- see
+	// upload.go's uploadTransport for the per-phase deadlines and idle
+	// watchdog that replace it.
+	uploadClient      *http.Client
+	uploadIdleTimeout time.Duration
 }
 
 // Option configures a Client.
@@ -86,6 +93,8 @@ func New(baseURL, apiKey string, opts ...Option) *Client {
 			Timeout:   DefaultTimeout,
 			Transport: secureTransport(),
 		},
+		uploadClient:      newUploadHTTPClient(),
+		uploadIdleTimeout: DefaultUploadIdleTimeout,
 	}
 	for _, opt := range opts {
 		opt(c)

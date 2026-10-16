@@ -251,8 +251,14 @@ type UploadOptions struct {
 	Filename         string
 	CameraModel      string
 	CaptureTimestamp int64
-	Blake3Hash       string
-	SourcePathHash   string // SHA-256 hex (64 chars) of original workstation file path
+	// Blake3Hash is the BLAKE3-256 (64 lowercase hex) of the body. The
+	// server rejects bytes that don't match it (400 CHECKSUM_MISMATCH)
+	// and answers 200 DEDUPLICATED without storing anything when a live
+	// node already has it.
+	Blake3Hash     string
+	SourcePathHash string // SHA-256 hex (64 chars) of original workstation file path
+	// SizeBytes is the body length, sent as Content-Length when > 0.
+	SizeBytes int64
 }
 
 // UploadResponse is the response body for POST /api/v1/agent/upload

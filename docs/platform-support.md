@@ -21,7 +21,7 @@ Linux workstation has the fully-tested headless `ingest` path instead.
 In addition to traditional dual-writing to local filesystem mounts (SMB/NFS shares), the agent supports direct streaming uploads across all platforms:
 - **`POST /api/v1/agent/upload`**: Ingest directly into the server's Master Archive over HTTP/HTTPS.
 - **Handshake Synchronization (`POST /api/v1/agent/handshake`)**: The server returns the active `namingTemplate`, which the workstation agent synchronizes at startup to ensure 100% path parity between local NVMe edit scratch (`LocalEditRoot`) and remote server archive storage.
-- **Cryptographic Verification**: The server computes and returns the Master Archive's BLAKE3 checksum, which the agent verifies against the local copy prior to granting safe card ejection.
+- **Cryptographic Verification**: The agent reads the card once into a verified local copy, uploads that copy with its BLAKE3 in `X-Blake3-Hash` (the server refuses mismatching bytes), and checks the BLAKE3 the server reports before granting safe card ejection. Uploads have no total timeout, only connect, response and body-idle deadlines. See [`offline-queue.md`](offline-queue.md#direct-http-streaming-ingest-vs-offline-queue).
 
 ## Soft-delete trash lifecycle
 

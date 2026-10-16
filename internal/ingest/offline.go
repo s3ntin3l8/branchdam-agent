@@ -256,7 +256,7 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 	fr := OfflineFileResult{SourcePath: srcPath}
 
 	ext := extNoDot(srcPath)
-	fr.IsSidecar = ext == "xmp" || ext == "srt"
+	fr.IsSidecar = isSidecarExt(ext)
 
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {

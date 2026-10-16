@@ -40,3 +40,11 @@ func isImageExt(ext string) bool {
 func extNoDot(path string) string {
 	return strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 }
+
+// isSidecarExt reports whether ext (lowercase, no dot -- extNoDot's form)
+// is a sidecar: an .xmp edit sidecar or a DJI .srt telemetry track. A
+// sidecar never gets its own EVENT_NODE_CREATED in dual-write mode, and
+// follows its master in uploadStream mode.
+func isSidecarExt(ext string) bool {
+	return ext == "xmp" || ext == "srt"
+}
