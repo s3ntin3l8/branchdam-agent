@@ -75,6 +75,10 @@ func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
 	a.updater.st.Phase = updatePhaseDownloading
 	a.updater.st.StartedAt = time.Now()
 	a.updater.st.Err = nil
+	// Snapshot before the worker starts: a worker that fails at once
+	// (e.g. no release found) must not let this call report "failed"
+	// for the apply it just started.
+	started := a.updater.st
 	a.updater.mu.Unlock()
 	go func() {
 		defer release()
@@ -83,7 +87,7 @@ func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
 		defer cancel()
 		_, _ = a.updater.applyLatestLocked(ctx)
 	}()
-	return a.updater.Status(), true
+	return started, true
 }
 
 const (
