@@ -375,7 +375,8 @@ func Run(
 				}
 			}
 		})
-		if len(r.WatchDirs()) > 0 {
+		// Windows detects removable drives with no cardRoots configured.
+		if len(r.WatchDirs()) > 0 || removableDriveDetection {
 			r.ReconfigureDetector(ctx, r.WatchDirs())
 		}
 

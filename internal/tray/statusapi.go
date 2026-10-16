@@ -23,23 +23,26 @@ import (
 // /api/actions/* routes drive. A structural interface, like Drainer/
 // Pruner/Settings elsewhere in this package, rather than a *Runner field
 // directly -- so a test can inject a fake without constructing a real
-// Runner's watch dirs, gates, and queue reader. *Runner already satisfies
-// this with no changes: TriggerIngest/TriggerDrain/TriggerPrune/
+// Runner's watch dirs, gates, and queue reader. *Runner satisfies it:
+// TriggerIngest/TriggerIngestNoWait/TriggerDrain/TriggerPrune/
 // TriggerSync/TriggerHookInstall/RevealHook/Paused/SetPaused are all
-// already safe to call concurrently from an HTTP handler goroutine (see
-// each method's own doc comment for its serialization mechanism).
+// safe to call concurrently from an HTTP handler goroutine (see each
+// method's own doc comment for its serialization mechanism).
 //
 // The window's ingest controls (POST /api/actions/ingest-start and
 // /api/actions/cancel-ingest) and its failed-rows list
 // (GET /api/queue/failed, POST /api/actions/queue-retry) go through the
 // same Runner: IngestNowVolumes/WatchDirs pick what "Ingest now" and
 // "Import from folder…" ingest exactly as the tray menu does, every
-// ingest still runs through TriggerIngest (and so behind Runner.gate,
-// AGENTS.md invariant 9), CancelIngest stops it at a file boundary, and
+// ingest runs behind Runner.gate (AGENTS.md invariant 9) -- the
+// ingest-start batch through TriggerIngestNoWait, which never waits for
+// the gate and ends the batch when something else holds it --
+// CancelIngest stops it at a file boundary, and
 // the failed-row methods wrap the queue store's own FailedRows/
 // ResetFailedNode/ResetFailed. This file never reimplements any of them.
 type ActionRunner interface {
 	TriggerIngest(ctx context.Context, cardPath string) IngestSummary
+	TriggerIngestNoWait(ctx context.Context, cardPath string) IngestSummary
 	TriggerDrain(ctx context.Context) (DrainSummary, bool)
 	TriggerPrune(ctx context.Context) (PruneSummary, bool)
 	TriggerSync(ctx context.Context, id IntegrationID) (SyncSummary, bool)
@@ -915,8 +918,9 @@ type ingestStartResult struct {
 var errIngestAlreadyRunning = errors.New("an ingest is already running -- wait for it to finish or cancel it")
 
 // errGateHeld is ingest-start's refusal while something other than an
-// ingest -- a self-update download, apply or roll back -- holds the gate.
-var errGateHeld = errors.New("an update is in progress -- try again when it finishes")
+// ingest holds the gate: a prune pass (TriggerPrune's TryLockIdle) or a
+// self-update download, apply or roll back. A drain does not take it.
+var errGateHeld = errors.New("a prune or update is in progress -- try again when it finishes")
 
 // errFolderPath is ingest-start's refusal for a folder path that is not
 // absolute or contains "..": the window's folder picker always returns a
@@ -978,7 +982,10 @@ func (s *StatusServer) handleActionIngestStart(w http.ResponseWriter, r *http.Re
 	} else {
 		// The path comes from the request: accept only what the window's
 		// native folder picker produces -- an absolute path with no ".."
-		// -- before it reaches the filesystem.
+		// -- before it reaches the filesystem. The substring test is the
+		// form CodeQL's go/path-injection recognises as a sanitizer; it
+		// also refuses a folder whose name holds "..", which the refusal
+		// message names.
 		if !filepath.IsAbs(req.CardPath) || strings.Contains(req.CardPath, "..") {
 			refuse(errFolderPath)
 			return
@@ -1011,8 +1018,21 @@ func (s *StatusServer) handleActionIngestStart(w http.ResponseWriter, r *http.Re
 	ctx := context.WithoutCancel(r.Context())
 	go func() {
 		defer s.ingestBatch.Store(false)
-		for _, p := range paths {
-			if s.Actions.TriggerIngest(ctx, p).Canceled {
+		for i, p := range paths {
+			// The gate is released between volumes, so a prune or update
+			// can take it mid-batch. TriggerIngestNoWait acquires it
+			// without waiting -- check and acquire in one step -- and the
+			// batch ends instead of blocking behind the holder, where
+			// CancelIngest can't reach it (and an update's restart would
+			// drop it). The window shows the batch as finished and the
+			// operator can start it again.
+			sum := s.Actions.TriggerIngestNoWait(ctx, p)
+			if errors.Is(sum.Err, ErrGateBusy) {
+				// TriggerIngestNoWait has already notified the operator.
+				log.Printf("tray: ingest-start: batch stopped, %d of %d volumes not ingested: %v", len(paths)-i, len(paths), ErrGateBusy)
+				return
+			}
+			if sum.Canceled {
 				return
 			}
 		}
@@ -1042,6 +1062,10 @@ func (s *StatusServer) handleActionCancelIngest(w http.ResponseWriter, _ *http.R
 // GET /api/status) still reports the true total.
 const failedRowsDefaultLimit = 200
 
+// failedRowsMaxLimit is the largest ?limit= GET /api/queue/failed accepts:
+// the store scan and the response body grow with it.
+const failedRowsMaxLimit = 1000
+
 type queueFailedResult struct {
 	// Configured is false when no offline queue is wired; Rows is then
 	// empty, which is not an error.
@@ -1052,7 +1076,7 @@ type queueFailedResult struct {
 // handleQueueFailed lists FAILED queue rows for the window's failed-rows
 // list -- read-only, but behind the same origin and token checks as
 // every other /api/* route, since a row carries local file paths.
-// ?limit=N overrides failedRowsDefaultLimit.
+// ?limit=N (1..failedRowsMaxLimit) overrides failedRowsDefaultLimit.
 func (s *StatusServer) handleQueueFailed(w http.ResponseWriter, r *http.Request) {
 	if s.Actions == nil {
 		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
@@ -1061,8 +1085,8 @@ func (s *StatusServer) handleQueueFailed(w http.ResponseWriter, r *http.Request)
 	limit := failedRowsDefaultLimit
 	if v := r.URL.Query().Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			http.Error(w, "limit must be a positive whole number", http.StatusBadRequest)
+		if err != nil || n < 1 || n > failedRowsMaxLimit {
+			http.Error(w, fmt.Sprintf("limit must be a whole number from 1 to %d", failedRowsMaxLimit), http.StatusBadRequest)
 			return
 		}
 		limit = n

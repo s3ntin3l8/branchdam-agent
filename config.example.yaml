@@ -49,7 +49,8 @@ ingest:
   pathTemplate: "{yyyy}/{yyyy}-{mm}-{dd}_{camera_model}/{original_name}"
   # Parent directories polled for newly mounted removable volumes (used by
   # the tray's card-detection loop, not by a direct `ingest --card <path>`
-  # invocation).
+  # invocation). On Windows every removable drive (SD/CF reader, USB stick)
+  # is detected by drive letter on its own, so this can stay empty there.
   cardRoots:
     - "/media/${USER}"
     - "/run/media/${USER}"

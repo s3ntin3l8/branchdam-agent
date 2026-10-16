@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -865,7 +864,7 @@ func (r *Runner) IngestNowVolumes() []string {
 // there is nowhere to look, so "no card found" would mislead -- point the
 // operator at the setting instead.
 func ingestNowEmptyMessage(cardRoots []string) string {
-	if len(cardRoots) == 0 {
+	if len(cardRoots) == 0 && !removableDriveDetection {
 		return "No card folders are configured -- add one under Settings > Watch folders"
 	}
 	return "No camera card found to ingest"
@@ -898,7 +897,20 @@ func (r *Runner) WatchDirs() []string {
 //   - If offline queueing is not configured, it records an error and invokes
 //     the registered error notification handler.
 func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSummary {
-	return r.triggerIngest(ctx, cardPath, false)
+	return r.triggerIngest(ctx, cardPath, false, false)
+}
+
+// ErrGateBusy is TriggerIngestNoWait's answer when something else (another
+// ingest, a prune pass, a self-update) holds Runner.gate.
+var ErrGateBusy = errors.New("tray: an ingest, prune or update holds the gate")
+
+// TriggerIngestNoWait is TriggerIngest that never waits for Runner.gate: if
+// the gate is held it returns at once with Err = ErrGateBusy and ingests
+// nothing. The window's ingest-start batch uses it so a prune or update
+// that takes the gate between two volumes ends the batch instead of
+// leaving it blocked behind the gate, where CancelIngest cannot reach it.
+func (r *Runner) TriggerIngestNoWait(ctx context.Context, cardPath string) IngestSummary {
+	return r.triggerIngest(ctx, cardPath, false, true)
 }
 
 // TriggerDetectedIngest runs one IngestCard pass for a newly detected card
@@ -906,10 +918,24 @@ func (r *Runner) TriggerIngest(ctx context.Context, cardPath string) IngestSumma
 // confirmation (or checks the allow-list) before proceeding. Explicitly
 // skipped volumes are added to the session skip set and ignored until removed.
 func (r *Runner) TriggerDetectedIngest(ctx context.Context, cardPath string) IngestSummary {
-	return r.triggerIngest(ctx, cardPath, true)
+	return r.triggerIngest(ctx, cardPath, true, false)
 }
 
-func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection bool) IngestSummary {
+// gateBusy is TriggerIngestNoWait's answer when the gate is held. The
+// window shows only the last completed ingest, so the operator is told
+// with a notification that the card was not ingested.
+func (*Runner) gateBusy(cardPath string, notifyErr func(title, msg string)) IngestSummary {
+	if notifyErr != nil {
+		notifyErr("branchDAM Ingest", fmt.Sprintf("%s was not ingested: another ingest, a prune or an update is running. Start it again once that finishes.", volumeName(cardPath)))
+	}
+	return IngestSummary{CardPath: cardPath, Err: ErrGateBusy}
+}
+
+func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection, noWait bool) IngestSummary {
+	acquireGate := func() bool { r.lockGate(); return true }
+	if noWait {
+		acquireGate = r.tryLockGate
+	}
 	// A detection that finds the tray paused (including one that raced a
 	// re-pause after offerCardsHeldDuringPause checked) is held for the
 	// next resume rather than dropped: the detector won't report an
@@ -933,7 +959,7 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		r.mu.Unlock()
 
 		if gate != nil {
-			proceed, err := gate.Confirm(ctx, cardPath, filepath.Base(cardPath))
+			proceed, err := gate.Confirm(ctx, cardPath, volumeName(cardPath))
 			if err != nil {
 				return IngestSummary{CardPath: cardPath, Err: err}
 			}
@@ -966,7 +992,12 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		if notifyErr != nil {
 			notifyErr("branchDAM Ingest", msg)
 		}
-		r.lockGate()
+		if !acquireGate() {
+			// The operator already has the NAS notice: return its
+			// reason, not a second, gate-busy one. (r.last is only
+			// written under the gate, so it is left as it was.)
+			return summary
+		}
 		r.mu.Lock()
 		r.last = &summary
 		r.mu.Unlock()
@@ -977,7 +1008,9 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		summary.Offline = true
 	}
 
-	r.lockGate()
+	if !acquireGate() {
+		return r.gateBusy(cardPath, notifyErr)
+	}
 	defer r.unlockGate()
 	summary.StartedAt = time.Now()
 
@@ -1064,7 +1097,7 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 	destRoots := []string{r.archiveRoot, r.scratchDir}
 	r.mu.Unlock()
 
-	volName := filepath.Base(cardPath)
+	volName := volumeName(cardPath)
 
 	if summary.Deferred > 0 && notifier != nil {
 		notifier("branchDAM Agent", fmt.Sprintf("%d file(s) from %s are waiting for an unmetered connection -- card not ejected; re-insert it to finish", summary.Deferred, volName))
@@ -1176,6 +1209,15 @@ func (r *Runner) GateHeld() bool { return r.gateHeld.Load() }
 func (r *Runner) lockGate() {
 	r.gate.Lock()
 	r.gateHeld.Store(true)
+}
+
+// tryLockGate is lockGate without waiting: false when the gate is held.
+func (r *Runner) tryLockGate() bool {
+	if !r.gate.TryLock() {
+		return false
+	}
+	r.gateHeld.Store(true)
+	return true
 }
 
 func (r *Runner) unlockGate() {
@@ -1899,7 +1941,9 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 	}
 	r.mu.Unlock()
 
-	if len(roots) == 0 {
+	// No roots stops the detector -- except where removable drives are
+	// detected on their own (Windows), which needs no cardRoots at all.
+	if len(roots) == 0 && !removableDriveDetection {
 		return
 	}
 

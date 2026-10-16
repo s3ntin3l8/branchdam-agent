@@ -49,11 +49,7 @@ func FormatTooltip(st Status) string {
 		return "branchDAM agent" + offlineSuffix
 	}
 	if st.IngestProgress == nil {
-		card := filepath.Base(st.BusyCard)
-		if card == "" || card == "." {
-			card = st.BusyCard
-		}
-		if card != "" {
+		if card := volumeName(st.BusyCard); card != "" {
 			return fmt.Sprintf("Ingesting %s...%s", card, offlineSuffix)
 		}
 		return "Ingesting..." + offlineSuffix
@@ -64,10 +60,7 @@ func FormatTooltip(st Status) string {
 // FormatIngestProgress formats a live ingest progress readout into:
 // "Ingesting <card>: <filename> — <bytesDone> / <totalBytes> (<pct>%, <speed>, ~<eta>)"
 func FormatIngestProgress(cardPath string, busySince time.Time, p *ingest.ProgressEvent) string {
-	card := filepath.Base(cardPath)
-	if card == "" || card == "." {
-		card = cardPath
-	}
+	card := volumeName(cardPath)
 
 	fileName := filepath.Base(p.Path)
 	if fileName == "" || fileName == "." {

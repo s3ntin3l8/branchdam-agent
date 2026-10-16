@@ -18,14 +18,27 @@ import (
 // every other mounted disk on the workstation, including -- quite commonly
 // -- the NAS share the archive lives on and the SSD the edit copies go to.
 
-// selectCardVolumes lists the volumes currently mounted under cardRoots
-// (ingest.ListVolumesUnder, honouring requireDCIM) and drops any volume that
-// contains, or is contained in, one of the destination roots. kept is what
-// "Ingest now" walks and what the card detector reports; excluded is
-// returned only so a one-shot caller can say why a disk was left out (the
-// detector polls every 2s and stays quiet).
+// Platform hooks for card volumes, indirected so tests can script a
+// Windows removable-drive layout on any OS. On Windows every card is its
+// own removable drive (`E:\`) rather than a subdirectory of a cardRoots
+// parent, so listCardVolumes adds those drives and isRemovableDriveRoot
+// lets their roots count as card volume roots; elsewhere both reduce to
+// the cardRoots behaviour (ingest.RemovableDriveDetection is false).
+var (
+	listCardVolumes         = ingest.ListCardVolumes
+	isRemovableDriveRoot    = ingest.IsRemovableDriveRoot
+	removableDriveDetection = ingest.RemovableDriveDetection
+)
+
+// selectCardVolumes lists the volumes currently mounted under cardRoots,
+// plus every removable drive with media on Windows (ingest.ListCardVolumes,
+// honouring requireDCIM), and drops any volume that contains, or is
+// contained in, one of the destination roots. kept is what "Ingest now"
+// walks and what the card detector reports; excluded is returned only so a
+// one-shot caller can say why a disk was left out (the detector polls
+// every 2s and stays quiet).
 func selectCardVolumes(cardRoots []string, requireDCIM bool, destRoots ...string) (kept, excluded []string) {
-	vols, err := ingest.ListVolumesUnder(cardRoots, requireDCIM)
+	vols, err := listCardVolumes(cardRoots, requireDCIM)
 	if err != nil {
 		slog.Warn("tray: list card volumes failed", "err", agentlog.Sanitize(err.Error()))
 		return nil, nil
@@ -49,14 +62,18 @@ func excludeDestinationVolumes(vols []string, destRoots ...string) (kept, exclud
 }
 
 // isCardVolumeRoot reports whether path is exactly a volume root the
-// detector can report: an immediate subdirectory of one of cardRoots that
-// does not overlap any of destRoots. It is the structural half of the
-// auto-eject decision -- a folder picked with "Import from folder…", a path
-// posted to /api/actions/ingest, or a cardRoots parent itself never
-// qualifies, however its ingest went.
+// detector can report: an immediate subdirectory of one of cardRoots, or
+// (Windows) the root of a removable drive, that does not overlap any of
+// destRoots. It is the structural half of the auto-eject decision -- a
+// folder picked with "Import from folder…", a path posted to
+// /api/actions/ingest, a folder on a card, or a cardRoots parent itself
+// never qualifies, however its ingest went.
 func isCardVolumeRoot(path string, cardRoots []string, destRoots ...string) bool {
 	if path == "" {
 		return false
+	}
+	if isRemovableDriveRoot(path) {
+		return !overlapsAny(filepath.Clean(path), destRoots)
 	}
 	clean := filepath.Clean(path)
 	parent := filepath.Dir(clean)
@@ -129,6 +146,18 @@ func isWithin(child, parent string) bool {
 		return len(child) > len(prefix) && strings.EqualFold(child[:len(prefix)], prefix)
 	}
 	return strings.HasPrefix(child, prefix)
+}
+
+// volumeName is the short name shown for a card volume in the ingest
+// confirmation dialog and notifications: its last path element
+// ("EOS_DIGITAL" for /Volumes/EOS_DIGITAL), or the path itself when it has
+// none -- a Windows drive root (`E:\`), whose filepath.Base is just `\`.
+func volumeName(path string) string {
+	base := filepath.Base(path)
+	if base == "" || base == "." || base == "/" || base == `\` {
+		return path
+	}
+	return base
 }
 
 // caseInsensitivePaths reports whether the default filesystems on this OS

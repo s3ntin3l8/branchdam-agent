@@ -224,6 +224,7 @@ func TestTriggerIngestEjectScope(t *testing.T) {
 // TestIngestNowEmptyMessage: with no cardRoots configured, "Ingest now"
 // points at the setting instead of claiming no card was found.
 func TestIngestNowEmptyMessage(t *testing.T) {
+	withoutRemovableDetection(t)
 	if got := ingestNowEmptyMessage(nil); !strings.Contains(got, "No card folders are configured") {
 		t.Errorf("ingestNowEmptyMessage(nil) = %q, want the not-configured message", got)
 	}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,10 +176,21 @@ func TestRunnerFailedQueueRows(t *testing.T) {
 }
 
 func newWindowActionServer(a *spyActions) *http.ServeMux {
+	return newWindowActionStatusServer(a).mux
+}
+
+type windowActionServer struct {
+	s   *StatusServer
+	mux *http.ServeMux
+}
+
+// newWindowActionStatusServer is newWindowActionServer that also returns
+// the StatusServer, for tests that watch its batch state.
+func newWindowActionStatusServer(a *spyActions) windowActionServer {
 	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Actions: a}
 	mux := http.NewServeMux()
 	s.registerAPIRoutes(mux)
-	return mux
+	return windowActionServer{s: s, mux: mux}
 }
 
 func postIngestStart(t *testing.T, mux *http.ServeMux, cardPath string) (int, ingestStartResult) {
@@ -250,6 +262,77 @@ func TestIngestStartImportsPickedFolder(t *testing.T) {
 	}
 	if p := receivePaths(t, a.ingested, 1); p[0] != dir {
 		t.Errorf("ingested %v, want [%s]", p, dir)
+	}
+}
+
+// TestIngestStartStopsWhenGateTakenAfterAcceptance: a prune or update that
+// takes the gate between ingest-start's acceptance and the batch reaching
+// TriggerIngest ends the batch instead of leaving it blocked on the gate.
+func TestIngestStartStopsWhenGateTakenAfterAcceptance(t *testing.T) {
+	var calls atomic.Int32
+	a := &spyActions{
+		nowVolumes: []string{"/Volumes/A", "/Volumes/B"},
+		ingested:   make(chan string, 2),
+		// Free at acceptance, held from then on.
+		gateHeldFn: func() bool { return calls.Add(1) > 1 },
+	}
+	srv := newWindowActionStatusServer(a)
+	if code, got := postIngestStart(t, srv.mux, ""); code != http.StatusAccepted || !got.Started {
+		t.Fatalf("ingest-start = %d %+v, want 202 started", code, got)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for srv.s.ingestBatch.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("batch still marked running after the gate was taken")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case p := <-a.ingested:
+		t.Errorf("batch ingested %s while another holder had the gate", p)
+	default:
+	}
+}
+
+// gateFreeAtAcceptance is a real *Runner whose GateHeld reports the gate
+// free, as it was when ingest-start accepted the request; the gate itself
+// is held, as by a prune or update that took it right after.
+type gateFreeAtAcceptance struct{ *Runner }
+
+func (gateFreeAtAcceptance) GateHeld() bool { return false }
+
+// TestIngestStartStopsOnRealRunnerGate is the pair of the two tests above
+// with no spy in between: ingest-start's batch on a real Runner whose gate
+// is held ends without ingesting, never blocks, and tells the operator.
+func TestIngestStartStopsOnRealRunnerGate(t *testing.T) {
+	ing := &fakeIngester{}
+	r := NewRunner(ing, nil, "")
+	var notes atomic.Int32
+	r.SetErrorNotifier(func(_, _ string) { notes.Add(1) })
+	release, ok := r.TryLockIdle()
+	if !ok {
+		t.Fatal("TryLockIdle on an idle runner failed")
+	}
+	defer release()
+
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Actions: gateFreeAtAcceptance{r}}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+	if code, got := postIngestStart(t, mux, t.TempDir()); code != http.StatusAccepted || !got.Started {
+		t.Fatalf("ingest-start = %d %+v, want 202 started", code, got)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for s.ingestBatch.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("batch blocked behind the held gate")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(ing.calls) != 0 || len(ing.offlineCalls) != 0 {
+		t.Errorf("ingested %v %v while the gate was held", ing.calls, ing.offlineCalls)
+	}
+	if notes.Load() != 1 {
+		t.Errorf("notifications = %d, want 1 telling the operator the card was not ingested", notes.Load())
 	}
 }
 
@@ -326,6 +409,11 @@ func TestHandleQueueFailed(t *testing.T) {
 	mux.ServeHTTP(rec, newAuthedRequest(http.MethodGet, "/api/queue/failed?limit=0", nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("?limit=0 = %d, want 400", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodGet, fmt.Sprintf("/api/queue/failed?limit=%d", failedRowsMaxLimit+1), nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("?limit=%d = %d, want 400", failedRowsMaxLimit+1, rec.Code)
 	}
 
 	a.failedErr = ErrQueueNotConfigured
@@ -445,5 +533,40 @@ func TestDrainPruneHandlersAreBounded(t *testing.T) {
 	}
 	if !a.drainDeadline || !a.pruneDeadline {
 		t.Errorf("deadline set: drain=%v prune=%v, want both bounded", a.drainDeadline, a.pruneDeadline)
+	}
+}
+
+// TestTriggerIngestNoWaitNeverBlocksOnTheGate: with the gate held (a prune
+// or self-update's TryLockIdle), TriggerIngestNoWait returns ErrGateBusy at
+// once and ingests nothing; once the gate is free it ingests as usual.
+func TestTriggerIngestNoWaitNeverBlocksOnTheGate(t *testing.T) {
+	ing := &fakeIngester{}
+	r := NewRunner(ing, nil, "")
+	release, ok := r.TryLockIdle()
+	if !ok {
+		t.Fatal("TryLockIdle on an idle runner failed")
+	}
+
+	done := make(chan IngestSummary, 1)
+	go func() { done <- r.TriggerIngestNoWait(context.Background(), "/media/CARD") }()
+	select {
+	case sum := <-done:
+		if !errors.Is(sum.Err, ErrGateBusy) {
+			t.Errorf("Err = %v, want ErrGateBusy", sum.Err)
+		}
+	case <-time.After(2 * time.Second):
+		release()
+		t.Fatal("TriggerIngestNoWait blocked on a held gate")
+	}
+	if len(ing.calls) != 0 {
+		t.Errorf("ingested %v while the gate was held", ing.calls)
+	}
+
+	release()
+	if sum := r.TriggerIngestNoWait(context.Background(), "/media/CARD"); sum.Err != nil {
+		t.Errorf("with the gate free: Err = %v", sum.Err)
+	}
+	if len(ing.calls) != 1 {
+		t.Errorf("calls = %v, want one ingest once the gate is free", ing.calls)
 	}
 }

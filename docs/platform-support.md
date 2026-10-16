@@ -16,6 +16,38 @@ Windows, macOS, and Linux. The tray shell (`tray`) is Windows/macOS only.
 than windows/darwin -- `tray` still builds and runs on Linux, it just errors immediately. A
 Linux workstation has the fully-tested headless `ingest` path instead.
 
+## Card detection, verify and eject per platform
+
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| Card detection (tray) | every removable drive with media (`GetLogicalDrives` + `GetDriveType == DRIVE_REMOVABLE`, from `C:`), plus any `cardRoots` subdirectories | subdirectories of `cardRoots` (`/Volumes`) | subdirectories of `cardRoots` (`/media/$USER`, `/run/media/$USER`) |
+| Verify re-read | `FILE_FLAG_NO_BUFFERING` (kernel-enforced cache bypass) | `F_NOCACHE` (advisory -- see below) | `O_DIRECT` (kernel-enforced cache bypass) |
+| Buffered-floor fallback only on | `ERROR_INVALID_PARAMETER`, `ERROR_NOT_SUPPORTED`, `ERROR_INVALID_FUNCTION` from `CreateFile` | `ENOTSUP` from `fcntl` | `EINVAL`, `EOPNOTSUPP` from `open` |
+| Eject | `FSCTL_LOCK_VOLUME` (retried 20 x 500 ms) -> `FSCTL_DISMOUNT_VOLUME` -> `IOCTL_STORAGE_MEDIA_REMOVAL` (allow) -> `IOCTL_STORAGE_EJECT_MEDIA` | `diskutil unmountDisk` | `udisksctl unmount` then `power-off` |
+
+**Windows card detection** (`internal/ingest/removable.go`, `removable_windows.go`): Windows gives
+each card its own drive letter instead of mounting it under a parent folder, so the detector
+polls the logical-drive bitmask and keeps the drives `GetDriveType` reports as `DRIVE_REMOVABLE`
+-- SD/CF card readers and USB sticks; fixed disks (including most USB SSDs, so the usual edit
+disk), network shares and optical drives never count. A: and B: are skipped, and an empty
+card-reader slot (which keeps its letter) is skipped until a card is in it. These drive roots go
+through the same detection path as a `/Volumes` subdirectory on macOS: the `IngestGate`
+confirmation and `autoImportPaths` allow-list, `requireDCIM`, the archive/local-edit-root
+exclusion, "Ingest now", and auto-eject, for which a removable drive root counts as a card
+volume root. No `cardRoots` are needed on Windows, so the detector runs with none configured.
+
+**macOS `F_NOCACHE` is advisory, not a guaranteed cache bypass.** It tells the kernel not to cache
+what this descriptor reads from now on, but pages already in the unified buffer cache -- usually
+the very pages `DualWrite` just wrote -- can still be served from memory, and a file system
+(SMB in particular) may ignore the hint. A verify reported `unbuffered` on macOS is therefore at
+least the fsync+close+reopen floor and often better, but it does not prove the bytes came back
+from the device the way `O_DIRECT` and `FILE_FLAG_NO_BUFFERING` do, and `requireUnbuffered`
+cannot close that gap on macOS.
+
+**Windows eject** reports which step failed (`eject.StepError`): a lock that never succeeds means
+a file on the card is still open (nothing is dismounted or ejected); a failure after the dismount
+means the card is already safe to pull, only the eject itself didn't happen.
+
 ## Direct HTTP streaming & server-governed naming
 
 In addition to traditional dual-writing to local filesystem mounts (SMB/NFS shares), the agent supports direct streaming uploads across all platforms:
@@ -1286,10 +1318,17 @@ appropriate:
     detected card volume is ever ejected: "Ingest now", "Import from
     folder…" and `POST /api/actions/ingest` never eject, and neither does
     an ingest that deferred an upload on a metered connection. On Windows
-    specifically, confirm the tray surfaces `IOCTL_STORAGE_EJECT_MEDIA` via
-    `DeviceIoControl` cleanly (no "device in use" dialog from the OS -- the
-    card must have been closed by `Verify`'s unbuffered re-open before the
-    eject call). On macOS, confirm `diskutil unmountDisk` reports `Volume X
+    specifically, with no `cardRoots` configured, insert an SD card --
+    confirm it is detected as its drive letter (`E:\`); confirm a USB SSD
+    or a mapped NAS drive is never detected; confirm the eject runs lock,
+    dismount, media-removal and eject (`DeviceIoControl`) cleanly and the
+    card disappears from Explorer with no "device in use" dialog; then open
+    a file on the card in another program before the ingest finishes and
+    confirm the eject fails after ~10s with a "file on the card is probably
+    still open" error and the card stays mounted. Also run a verify against
+    an SMB share and confirm it reports `unbuffered` or, where the
+    redirector refuses `FILE_FLAG_NO_BUFFERING`, `buffered_floor` -- never
+    a hard failure. On macOS, confirm `diskutil unmountDisk` reports `Volume X
     on diskY unmounted` and the card disappears from Finder. On Linux,
     confirm the udisks2 path runs (`udisksctl unmount -b <dev>` then
     `udisksctl power-off -b <dev>`, with the device resolved from
