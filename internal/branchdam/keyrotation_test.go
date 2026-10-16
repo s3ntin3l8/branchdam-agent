@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Fixture made by branchDAM's own pairing.SealForDevice (the S13 reference
@@ -493,15 +494,32 @@ func TestStaleKeyRequestRetriedWithCurrentKey(t *testing.T) {
 }
 
 // TestConcurrentHandshakesAdoptOnce: the tray can handshake from the
-// detector-ingest and drain goroutines at once. Both see the rotation; one
-// adopts it (adoptMu, then the stale check), the key is stored once, and
-// both end on the new key. Run under -race.
+// detector-ingest and drain goroutines at once. Every racer presents the
+// old key and sees the rotation; one adopts it, the key is stored once,
+// and every caller ends on the new key. The persister holds the first
+// adopter until all racers have had the chance to reach it, so a missing
+// adoptMu (not only a missing stale check) lets several through and
+// fails the test. Run under -race.
 func TestConcurrentHandshakesAdoptOnce(t *testing.T) {
+	const racers = 8
 	k1, k2 := randomKey(t), randomKey(t)
 	rs, srv := newRotationServer(t, k1, k2)
 	var mu sync.Mutex
 	var stored []string
+	arrived := make(chan struct{}, racers)
 	c := New(srv.URL, k1, WithKeyPersister(func(_ context.Context, apiKey string) error {
+		arrived <- struct{}{}
+		// Wait until every racer has arrived, or long enough that the
+		// ones adoptMu turned away have long since returned.
+		deadline := time.After(300 * time.Millisecond)
+		for len(arrived) < racers {
+			select {
+			case <-deadline:
+				goto store
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	store:
 		mu.Lock()
 		defer mu.Unlock()
 		stored = append(stored, apiKey)
@@ -510,7 +528,7 @@ func TestConcurrentHandshakesAdoptOnce(t *testing.T) {
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
-	for range 8 {
+	for range racers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -521,6 +539,10 @@ func TestConcurrentHandshakesAdoptOnce(t *testing.T) {
 	close(start)
 	wg.Wait()
 
+	// They really raced: every racer's first handshake went out on k1.
+	if n := countEntries(rs.entries(), handshakePath+" k1"); n < racers {
+		t.Fatalf("%d handshakes on k1, want %d (one per racer, before the switch)", n, racers)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if !slices.Equal(stored, []string{k2}) {
@@ -529,5 +551,14 @@ func TestConcurrentHandshakesAdoptOnce(t *testing.T) {
 	if c.currentKey() != k2 {
 		t.Fatal("client did not end on the rotated key")
 	}
-	_ = rs
+}
+
+func countEntries(entries []string, want string) int {
+	n := 0
+	for _, e := range entries {
+		if e == want {
+			n++
+		}
+	}
+	return n
 }

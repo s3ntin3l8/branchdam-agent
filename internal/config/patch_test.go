@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -284,5 +286,41 @@ func TestPatchCreatesMissingFile(t *testing.T) {
 		if !p.Advisory() {
 			t.Errorf("blocking Validate problem on created config: %s", p)
 		}
+	}
+}
+
+// TestPatchLockedCheckAbortsBeforeWrite: a failing check (SetRotatedAPIKey's
+// placeholder guard) leaves the file byte-for-byte as it was, and the check
+// sees the root the patch would have rewritten.
+func TestPatchLockedCheckAbortsBeforeWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	orig := []byte("# keep me\nserver:\n  apiKey: old-key # trailing\n")
+	if err := os.WriteFile(path, orig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	errCheck := errors.New("refused")
+	var sawKey string
+	patchMu.Lock()
+	err := patchLocked(path, map[string]any{"server.apiKey": "new-key"}, func(root *yaml.Node) error {
+		if i := findKey(root, "server"); i >= 0 {
+			if j := findKey(root.Content[i+1], "apiKey"); j >= 0 {
+				sawKey = root.Content[i+1].Content[j+1].Value
+			}
+		}
+		return errCheck
+	})
+	patchMu.Unlock()
+	if !errors.Is(err, errCheck) {
+		t.Fatalf("err = %v, want the check's error", err)
+	}
+	if sawKey != "old-key" {
+		t.Errorf("check saw apiKey %q, want the file's old-key", sawKey)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, orig) {
+		t.Errorf("file changed after a failed check:\n%s", got)
 	}
 }
