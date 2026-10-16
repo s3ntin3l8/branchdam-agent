@@ -345,8 +345,11 @@ is not OK and the card is not ejected. Re-inserting the card while still metered
 an unmetered link it then uploads, and the server's `relativePath` decides the final name: when
 that differs from the deferred copy's (a server collision suffix, or a camera model the server
 probed itself), the deferred copy is moved there -- only if it still holds exactly the uploaded
-bytes (full BLAKE3) and nothing is at the server's path yet. Otherwise it stays where it is, the
-fresh copy is placed at the server's path, and a WARN names both.
+bytes (full BLAKE3) and nothing is at the server's path yet. A sidecar's copy is found under the
+card's name as well as under its master's new stem. When the server's path is already taken, the
+verified copy stays where it is, the fresh one is placed at the server's path, and a WARN names
+both. The lookup compares the local file against the hash already computed, so the card is not
+read again; a deferred copy that itself took a collision suffix is not looked for and stays.
 
 Deferred uploads are **not** written to `queue.db`, so nothing retries them until the card is
 re-inserted. Upload mode writes no queue rows at all: the server registers the node in the

@@ -485,6 +485,58 @@ func TestUploadStreamReinsertMovesTheDeferredCopy(t *testing.T) {
 	}
 }
 
+// TestUploadStreamReinsertMovesADeferredSidecar: when the server suffixes
+// the master, its sidecar is uploaded under the master's new stem; the
+// sidecar's deferred copy (named after the card file) is still found and
+// moved, so no stale sidecar is left next to the master's new name.
+func TestUploadStreamReinsertMovesADeferredSidecar(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	localRoot := filepath.Join(dir, "local")
+	writeUploadCardFile(t, cardRoot, "IMG_0001.JPG", "jpeg bytes", time.Time{})
+	writeUploadCardFile(t, cardRoot, "IMG_0001.xmp", "<xmp/>", time.Time{})
+
+	u := &recordingUploader{relPath: func(o branchdam.UploadOptions) string {
+		if o.Filename == "IMG_0001.JPG" {
+			return "2026/IMG_0001_2.JPG"
+		}
+		return "2026/" + o.Filename
+	}}
+	e := newUploadEngine(u, localRoot)
+	e.Ingest.PauseUploadOnMetered = true
+	e.IsMetered = func() (bool, error) { return true, nil }
+	if _, err := e.IngestCard(context.Background(), cardRoot); err != nil {
+		t.Fatalf("metered IngestCard: %v", err)
+	}
+	for _, name := range []string{"IMG_0001.JPG", "IMG_0001.xmp"} {
+		if _, err := os.Stat(filepath.Join(localRoot, "2026", name)); err != nil {
+			t.Fatalf("deferred copy %s: %v", name, err)
+		}
+	}
+
+	e.IsMetered = func() (bool, error) { return false, nil }
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("unmetered IngestCard: %v", err)
+	}
+	for _, fr := range res.Files {
+		if fr.Err != nil {
+			t.Fatalf("%s: %v", fr.SourcePath, fr.Err)
+		}
+	}
+	for _, name := range []string{"IMG_0001_2.JPG", "IMG_0001_2.xmp"} {
+		if _, err := os.Stat(filepath.Join(localRoot, "2026", name)); err != nil {
+			t.Errorf("copy at the server's path %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"IMG_0001.JPG", "IMG_0001.xmp"} {
+		if _, err := os.Stat(filepath.Join(localRoot, "2026", name)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("deferred copy %s still at its own name (err %v); want it moved", name, err)
+		}
+	}
+	noAgentTemps(t, localRoot)
+}
+
 // TestUploadStreamFailureLeavesNoLocalFiles: a failed upload removes the
 // staged copy -- no temp and nothing at a final name.
 func TestUploadStreamFailureLeavesNoLocalFiles(t *testing.T) {
