@@ -593,3 +593,111 @@ PRAGMA user_version = 1;`
 		t.Errorf("NodeCreatedEventUUID = %q, want %q backfilled from node_uuid", rec.NodeCreatedEventUUID, "orig-uuid-1")
 	}
 }
+
+// TestArchiveCopyFailedIsTerminalAndCounted: a terminally failed archive
+// copy (a conflicting file at the archive path, or an edited local copy)
+// leaves Pending() so Drain stops cycling on it, is never reported as Done
+// in Counts, and is counted as Failed so the tray/window show it.
+func TestArchiveCopyFailedIsTerminalAndCounted(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	rec := sampleRecord("uuid-archive-failed", "f.jpg")
+	rec.SizeBytes = 500
+	if err := s.InsertPending(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkArchiveCopyFailed(ctx, "uuid-archive-failed", "archive destination exists with different content: /a/f.jpg"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := s.ByNodeUUID(ctx, "uuid-archive-failed")
+	if err != nil || !ok {
+		t.Fatalf("ByNodeUUID: ok=%v err=%v", ok, err)
+	}
+	if got.ArchiveCopyStatus != StatusFailed || got.ArchiveCopyLastError == "" {
+		t.Errorf("row = %+v, want archive_copy FAILED with its error recorded", got)
+	}
+	if !got.Done() || !got.Failed() {
+		t.Errorf("Done()=%v Failed()=%v, want both true for a terminally failed archive copy", got.Done(), got.Failed())
+	}
+
+	pending, err := s.Pending(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("Pending() = %d rows, want 0 -- a terminal failure must not be retried", len(pending))
+	}
+
+	counts, err := s.Counts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Counts{Failed: 1}); counts != want {
+		t.Errorf("Counts() = %+v, want %+v", counts, want)
+	}
+}
+
+// TestCountsBucketsWithArchiveCopyFailedMix: with archive_copy FAILED rows
+// mixed in among PENDING and DONE ones, every row lands in exactly one of
+// AwaitingUpload / AwaitingRebase / Failed / Done.
+func TestCountsBucketsWithArchiveCopyFailedMix(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	insert := func(id string) {
+		t.Helper()
+		if err := s.InsertPending(ctx, sampleRecord(id, id+".jpg")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 2 awaiting upload
+	insert("p1")
+	insert("p2")
+	// 3 archive_copy FAILED (one of them also attempted first)
+	for _, id := range []string{"af1", "af2", "af3"} {
+		insert(id)
+		if err := s.MarkArchiveCopyFailed(ctx, id, "conflict"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 1 awaiting rebase
+	insert("r1")
+	if err := s.MarkArchiveCopyDone(ctx, "r1"); err != nil {
+		t.Fatal(err)
+	}
+	// 2 done
+	for _, id := range []string{"d1", "d2"} {
+		insert(id)
+		if err := s.MarkArchiveCopyDone(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.MarkRebaseDone(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 1 rebase FAILED
+	insert("rf1")
+	if err := s.MarkArchiveCopyDone(ctx, "rf1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkRebaseFailed(ctx, "rf1", "archived"); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := s.Counts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Counts{AwaitingUpload: 2, AwaitingRebase: 1, Failed: 4, Done: 2, PendingBytes: c.PendingBytes}
+	if c != want {
+		t.Errorf("Counts() = %+v, want %+v", c, want)
+	}
+	all, err := s.All(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := c.AwaitingUpload + c.AwaitingRebase + c.Failed + c.Done; sum != len(all) {
+		t.Errorf("buckets sum to %d, want the row count %d", sum, len(all))
+	}
+}

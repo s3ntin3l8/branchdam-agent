@@ -34,7 +34,7 @@ One `queue_nodes` row per ingested file, three independent status columns:
 | Step | Values | What it means |
 |---|---|---|
 | `node_created` | `PENDING` → `SUBMITTED` | `EVENT_NODE_CREATED` was accepted (202) against the row's Tier-0 container path. `SUBMITTED` means *enqueued* server-side, not *applied* -- branchDAM's own drainer applies it asynchronously (contract gap 3: no feedback channel). |
-| `archive_copy` | `PENDING` → `DONE` | The row's local edit copy has been copied into the final Tier-3 archive path and cache-defeating-verified against the hash computed at ingest time. |
+| `archive_copy` | `PENDING` → `DONE` \| `FAILED` | The row's local edit copy has been copied into the final Tier-3 archive path and cache-defeating-verified against the hash computed at ingest time. `FAILED` is terminal: a different file already occupies the archive path (it is never overwritten), or the local copy no longer matches its queued hash. A row whose archive copy failed never reaches `rebase`. |
 | `rebase` | `PENDING` → `DONE` \| `FAILED` | `POST /api/v1/agent/rebase` moved the tracked node's `file_path` from the Tier-0 path to the real Tier-3 path. `FAILED` is terminal (a classified-fatal server error, e.g. the node was `ARCHIVED`) -- Drain never retries it. |
 
 A `SIDECAR`-kind row (`.xmp`/`.srt`) only ever needs `archive_copy`: `node_created` and `rebase`
@@ -50,12 +50,27 @@ opportunistic `PostNodeCreated` attempt. A crash between the POST succeeding and
 would leave a server-side node nothing local remembers, with no read endpoint to recover it; getting
 the order backwards was the first thing worth getting wrong here, so it isn't.
 
-**2. The archive copy never writes directly to the final path.** `CopyToArchive` writes to a
-deterministically-named temp file in the destination directory and renames into place only after a
-successful fsync+close. A crash mid-copy leaves an incomplete, never-renamed temp file that the
-next attempt removes unconditionally before redoing the copy -- `DualWrite`'s own `O_EXCL` contract
-(see `internal/ingest/writer.go`) would otherwise wedge a retry forever against a partial file
-sitting at the final name.
+**2. Nothing is ever written to, or deleted from, a final name except by renaming the agent's own
+complete copy into a free one.** Both offline copies -- the local edit copy at ingest and the archive
+copy at drain -- are written to a deterministically-named temp file next to their destination
+(`.<final-name>.branchdam-agent-tmp`, plus the extension again for the local copy) and renamed into
+place, refusing to replace anything already there, only once complete: the archive copy after a
+successful fsync+close *and* a BLAKE3 match against the queued hash, the local copy only after its
+queue row is committed. A crash mid-copy leaves only a temp file, which the next attempt removes before
+redoing the copy -- the agent's temp names are the only files it deletes on its own initiative. In
+particular:
+
+- Offline ingest never removes a file it finds at a destination name. An unclaimed file there (an
+  online ingest's edit copy, a user's file) keeps its name and the new file takes the next suffix; an
+  identical file there is trusted as "already ingested" only if a queue row claims it or the reachable
+  archive holds the same file. When the archive is reachable at ingest time, a name a different
+  archive file already holds is not handed out either.
+- `CopyToArchive` never removes a file at the archive path that it did not just place there. A
+  matching file means the copy is already done; a different one fails the row's `archive_copy` with
+  `FAILED` and an `archive_copy_last_error` naming the path -- move or rename one of the two files.
+- A resumed row whose local copy never reached its final name (a crash between the queue insert and
+  the rename) is completed on the next ingest of the same card: from the verified temp copy, or by
+  copying the file from the card again.
 
 **3. `POST /api/v1/agent/rebase` never fires until the archive copy is verified `DONE`.** This is
 issue #4's headline property. `resolveRebaseTarget` (branchDAM server-side) refuses a rebase to a
@@ -94,17 +109,32 @@ schedules the next attempt at `2s * 2^(attempts-1)`, capped at 5 minutes (`backo
 next-attempt timestamps that turn repeated calls (`queue-drain -watch`, a cron job, or the tray's
 own `offline.drainIntervalSecs` timer, issue #32) into backoff rather than a tight retry loop.
 
-`node_created` and `archive_copy` retry indefinitely -- every realistic failure mode on those two
-(network down, NAS unmounted) is expected to eventually clear. `rebase` is the one step with a
-terminal `FAILED` state: a classified-fatal server error (`internal/branchdam.HTTPError`'s
-`Classification()`, e.g. `ErrArchivedNode`) means retrying can never succeed, and an operator has
-to intervene -- check `rebase_last_error` in `queue.db`.
+`node_created` retries indefinitely, and so does `archive_copy` for every failure that can clear by
+itself (network down, NAS unmounted). `archive_copy` turns terminal `FAILED` only for the two cases
+retrying can never fix -- a different file at the archive path, or a local copy that no longer
+matches its queued hash -- and both show up in the queue's failed count with the reason in
+`archive_copy_last_error`. `rebase` also has a terminal `FAILED` state: a classified-fatal server
+error (`internal/branchdam.HTTPError`'s `Classification()`, e.g. `ErrArchivedNode`) means retrying
+can never succeed.
+
+What the operator does depends on which step failed:
+
+- **`rebase` FAILED** -- read `rebase_last_error`, fix the server-side cause (e.g. un-archive the
+  node, or correct the storage location), then run `queue-drain -retry-failed`.
+- **`archive_copy` FAILED** -- read `archive_copy_last_error`. For a conflict, move or rename the
+  file already at the archive path (it is never overwritten); for a local-copy mismatch, restore the
+  local edit copy to the bytes that were ingested (or re-ingest from the card). Then run
+  `queue-drain -retry-failed`.
+
+`queue-drain -retry-failed` (resetting both kinds of FAILED row to pending) arrives with the A5
+change; until it ships, the reset is a manual `UPDATE` of the row's status in `queue.db`.
 
 One `archive_copy` failure mode does NOT self-clear, and there's no terminal state to catch it: if
 the local edit copy is deleted (by the user, by disk cleanup, by anything) before `archive_copy`
 completes, `CopyToArchive`'s `open local copy` fails every single pass forever, backing off to the
 5-minute cap and staying there indefinitely. `local_path` in `queue.db` is the thing to check if a
-row's `archive_copy_attempts` climbs without bound.
+row's `archive_copy_attempts` climbs without bound. If the card still holds the file, ingesting it
+again restores the local copy (see ordering invariant #2's resume note).
 
 ## A note on the archive-copy temp file and concurrent scans
 

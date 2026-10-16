@@ -103,6 +103,10 @@ type Engine struct {
 	MintEventUUID func() string
 	// IsMetered is overridable for tests; default to netgate.IsMetered via NewEngine.
 	IsMetered func() (bool, error)
+	// ArchiveReachable is overridable for tests: IngestCardOffline's probe
+	// for whether Ingest.ArchiveRoot can be checked for name collisions.
+	// nil means a stat of archiveRoot bounded by archiveProbeTimeout.
+	ArchiveReachable func(ctx context.Context, archiveRoot string) bool
 
 	// Progress, if set, is called with byte-progress samples during a
 	// file's copy and verify phases (DualWrite/WriteLocal's copy, Verify's
