@@ -1000,8 +1000,16 @@ func isBadRequest(err error) bool {
 // not fatal: the content is safe in the library either way, and the
 // leftover is a redundant copy, not a lost one.
 func removeDuplicateCopy(srcPath, p string) {
-	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-		slog.Warn("ingest: failed to remove copy of a duplicate file", "source", srcPath, "path", p, "err", err)
+	if err := os.Remove(p); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("ingest: failed to remove copy of a duplicate file", "source", srcPath, "path", p, "err", err)
+		}
+		return
+	}
+	// Make the removal durable, as DualWrite does for the create: a crash
+	// right after must not bring back an unregistered copy.
+	if err := syncParentDir(filepath.Dir(p)); err != nil {
+		slog.Warn("ingest: fsync after removing a duplicate copy failed", "path", p, "err", err)
 	}
 }
 

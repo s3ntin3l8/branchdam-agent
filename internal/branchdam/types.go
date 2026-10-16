@@ -20,7 +20,7 @@ import "encoding/json"
 // branchdam's internal/agent/types.go or internal/httpapi/routes.go's agent
 // DTOs change; conformance_test.go asserts it matches the committed golden
 // fixture.
-const ContractVersion = "branchdam@11906bb"
+const ContractVersion = "branchdam@fcc7e2d"
 
 // Event type constants, matching the event_queue.event_type CHECK
 // constraint (internal/agent/types.go in branchdam).
@@ -324,6 +324,9 @@ type NodeStatusEntry struct {
 	LifecycleState string `json:"lifecycleState,omitempty"`
 	Tier           string `json:"tier,omitempty"`
 	Verified       bool   `json:"verified"`
+	// FullHash is the node's stored BLAKE3-256 full_hash (empty when it has
+	// none), so a caller can compare it with its own copy's hash.
+	FullHash string `json:"fullHash,omitempty"`
 }
 
 // NodeStatusResponse is the response body for POST /api/v1/agent/node-status
@@ -345,6 +348,7 @@ type ContentCheckResult struct {
 	NodeUUID       string `json:"nodeUuid,omitempty"`
 	FilePath       string `json:"filePath,omitempty"`
 	LifecycleState string `json:"lifecycleState,omitempty"`
+	IndexingStatus string `json:"indexingStatus,omitempty"`
 }
 
 // AgentScratchStorageDTO mirrors the scratchStorage sub-object of
