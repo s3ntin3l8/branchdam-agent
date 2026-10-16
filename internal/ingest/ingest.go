@@ -742,8 +742,9 @@ func (e *Engine) confirmRegistered(ctx context.Context, fr FileResult, srcInfo o
 // when known. The per-pass dedupState rules are checkContentDedup's: a
 // 400 means a server predating the pre-screen, so the lookup is retried
 // once in the form such servers accept (fastHash + fullHash) and
-// dedup.fullOnly makes the rest of the pass use that form; 404/501 or a
-// transport error latches dedup.unavailable for the rest of the pass.
+// dedup.fullOnly makes the rest of the pass use that form; a failure
+// noteError latches (transport error, 404/501, 401/403, 429) sets
+// dedup.unavailable for the rest of the pass.
 // found=false covers "not there" and "couldn't ask" alike (no checker,
 // pre-flight disabled, unavailable, or an error) -- the caller then
 // registers, which the server dedups by full_hash if it does have it.
@@ -974,8 +975,9 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 // next pass (the next card) starts fresh, since the server may have been
 // upgraded or come back in between.
 type dedupState struct {
-	// unavailable: the endpoint is missing (404/501) or the server is
-	// unreachable (transport error, timeout). The remaining files of the
+	// unavailable: the endpoint is missing (404/501), the server is
+	// unreachable (transport error, timeout), refuses the pass's API key
+	// (401/403) or asks the agent to back off (429). The remaining files of the
 	// pass skip the check entirely (fail-open).
 	unavailable bool
 	// fullOnly: the server rejected the fast-hash pre-screen with 400, so
@@ -986,11 +988,21 @@ type dedupState struct {
 }
 
 // noteError records what a failed check-content call says about the
-// server: 404/501 or a transport error latches unavailable; any other
-// status (400, 5xx, ...) is about this request only and latches nothing.
+// server: a transport error, 404/501 (no such endpoint), 401/403 (the
+// pass's API key is refused -- it is loaded once per pass, so every later
+// file would be refused too) or 429 (back off) latches unavailable; any
+// other status (400, other 5xx, ...) is about this request only and
+// latches nothing. Callers log the failure before calling this, so the
+// failure that latches is the one logged at Warn.
 func (d *dedupState) noteError(err error) {
 	var he *branchdam.HTTPError
-	if !errors.As(err, &he) || he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented {
+	if !errors.As(err, &he) {
+		d.unavailable = true
+		return
+	}
+	switch he.StatusCode {
+	case http.StatusNotFound, http.StatusNotImplemented,
+		http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
 		d.unavailable = true
 	}
 }
@@ -1098,8 +1110,8 @@ func (e *Engine) checkContentDedup(ctx context.Context, srcPath string, wr Write
 			dedup.fullOnly = true
 			slog.Info("ingest: server rejected the fast-hash pre-screen (older server) -- using the full-hash lookup for this pass", "source", srcPath, "err", err)
 		case err != nil:
-			dedup.noteError(err)
 			logFailure("ingest: content check pre-flight failed (fail-open)", err)
+			dedup.noteError(err)
 			return false, "", ""
 		case !res.PossibleMatch && !res.Found:
 			return false, "", ""
@@ -1108,8 +1120,8 @@ func (e *Engine) checkContentDedup(ctx context.Context, srcPath string, wr Write
 
 	res, err := call(branchdam.ContentCheckQuery{FastHash: wr.FastHash, FullHash: wr.FullHash})
 	if err != nil {
-		dedup.noteError(err)
 		logFailure("ingest: content check pre-flight confirmation failed (fail-open)", err)
+		dedup.noteError(err)
 		return false, "", ""
 	}
 	if !res.Found || !isLiveLifecycleState(res.LifecycleState) {

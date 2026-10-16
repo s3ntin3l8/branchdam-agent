@@ -1640,3 +1640,58 @@ func TestIngestCardUploadStreamPauseOnMetered(t *testing.T) {
 		t.Errorf("expected 1 upload call when PauseUploadOnMetered is false, got %d", len(uploader3.uploadCalls))
 	}
 }
+
+// TestDedupStateNoteErrorLatches pins which failures switch the content
+// check off for the rest of a pass: the ones every later file would hit too.
+func TestDedupStateNoteErrorLatches(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   error
+		latch bool
+	}{
+		{"transport error", errors.New("dial tcp: connection refused"), true},
+		{"404 route missing", &branchdam.HTTPError{StatusCode: 404}, true},
+		{"501 not implemented", &branchdam.HTTPError{StatusCode: 501}, true},
+		{"401 invalid key", &branchdam.HTTPError{StatusCode: 401}, true},
+		{"403 forbidden", &branchdam.HTTPError{StatusCode: 403}, true},
+		{"429 rate limited", &branchdam.HTTPError{StatusCode: 429}, true},
+		{"400 bad request", &branchdam.HTTPError{StatusCode: 400}, false},
+		{"500 server error", &branchdam.HTTPError{StatusCode: 500}, false},
+		{"503 unavailable", &branchdam.HTTPError{StatusCode: 503}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var d dedupState
+			d.noteError(tc.err)
+			if d.unavailable != tc.latch {
+				t.Errorf("unavailable = %v, want %v", d.unavailable, tc.latch)
+			}
+		})
+	}
+}
+
+// TestCheckContentDedupWarnsOnTheLatchingFailure: the failure that turns
+// dedup off for the pass is logged at Warn (visible at the default Info
+// level); only the files after it, which skip the check, go quiet.
+func TestCheckContentDedupWarnsOnTheLatchingFailure(t *testing.T) {
+	buf := captureSlog(t)
+	client := &fakeCheckContentClient{checkFunc: func(context.Context, branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+		return branchdam.ContentCheckResult{}, &branchdam.HTTPError{StatusCode: 404, Body: "404 page not found"}
+	}}
+	e := newTestEngine(t, client, t.TempDir(), t.TempDir())
+	dedup := &dedupState{}
+	wr := WriteResult{FastHash: "0123456789abcdef", FullHash: strings.Repeat("a", 64), SizeBytes: 10}
+
+	if skip, _, _ := e.checkContentDedup(context.Background(), "/card/A.JPG", wr, "", 5, dedup); skip {
+		t.Fatal("a failed check must fail open")
+	}
+	if !dedup.unavailable {
+		t.Fatal("a 404 must latch unavailable")
+	}
+	if !strings.Contains(buf.String(), `"level":"WARN"`) || !strings.Contains(buf.String(), "content check pre-flight failed") {
+		t.Errorf("the latching failure was not logged at WARN:\n%s", buf.String())
+	}
+	if skip, _, _ := e.checkContentDedup(context.Background(), "/card/B.JPG", wr, "", 5, dedup); skip || len(client.checkCalls) != 1 {
+		t.Errorf("after the latch: skip=%v, calls=%d, want no further request", skip, len(client.checkCalls))
+	}
+}

@@ -62,8 +62,8 @@ Two more online-ingest rules close the "copied but never registered" gap without
   of registration. It skips only when a queue row claims the copies or `check-content` finds a live
   (`ACTIVE` or `HIDDEN`) node with their BLAKE3 (hashed from the local copy, not the card, and looked
   up by full hash directly, with the fast hash and size alongside; the same per-pass rules as the
-  fresh-copy dedup apply -- a 400 retries as a plain full-hash lookup, a 404/501 or transport error
-  stops asking for the rest of the pass). A live node at the file's own archive path is its own
+  fresh-copy dedup apply -- a 400 retries as a plain full-hash lookup, a transport error, 404/501,
+  401/403 or 429 stops asking for the rest of the pass). A live node at the file's own archive path is its own
   registration, not a duplicate. Otherwise it verifies the archive copy against that hash --
   honouring `ingest.requireUnbuffered` -- and registers the copies (the server ignores an
   `EVENT_NODE_CREATED` whose `full_hash` a live node already has). A fresh copy that fails a
