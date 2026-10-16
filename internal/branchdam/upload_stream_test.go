@@ -167,6 +167,32 @@ func TestUploadSignReadIsBounded(t *testing.T) {
 	}
 }
 
+// TestUploadResponseReadIsBounded: a server that sends the response
+// headers and then stops sending the body fails with ErrUploadStalled
+// after the idle timeout instead of hanging the ingest.
+func TestUploadResponseReadIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"nodeUuid":`))
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+
+	c := New(srv.URL, "k", WithUploadIdleTimeout(200*time.Millisecond))
+	start := time.Now()
+	_, err := c.Upload(context.Background(), strings.NewReader("hello world"), UploadOptions{SizeBytes: 11})
+	if !errors.Is(err, ErrUploadStalled) {
+		t.Fatalf("err = %v, want ErrUploadStalled", err)
+	}
+	if el := time.Since(start); el > 5*time.Second {
+		t.Errorf("stalled response detected after %s", el)
+	}
+}
+
 // blockingReader blocks every Read until ch is closed, then reports EOF.
 type blockingReader chan struct{}
 

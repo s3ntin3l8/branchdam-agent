@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -81,7 +82,6 @@ func uploadTransport() *http.Transport {
 	tr.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	tr.TLSHandshakeTimeout = 30 * time.Second
 	tr.ResponseHeaderTimeout = DefaultUploadResponseTimeout
-	tr.ExpectContinueTimeout = time.Second
 	return tr
 }
 
@@ -153,6 +153,13 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions)
 		}
 	}
 
+	if signBody == nil {
+		// Deliberate: the server's default skipSignaturePaths exempts
+		// /upload. Logged so a 401 after a server narrows that exemption
+		// can be tied to "only the large files".
+		slog.Debug("branchdam: upload body above the signing cap; sent with the API key only",
+			"filename", opts.Filename, "signMaxBytes", UploadSignMaxBytes)
+	}
 	watched := newIdleReader(body, idle, onIdle)
 	defer watched.stop()
 
@@ -212,11 +219,19 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// The body is done (or the server answered early, e.g. a pre-write
-	// dedup): from here only the response read is outstanding.
+	// dedup): from here only the response read is outstanding. It gets
+	// its own idle watchdog -- ResponseHeaderTimeout covers only the
+	// header wait, and a server that sends headers and then stalls would
+	// otherwise hang the ingest. Cancelling upCtx aborts the body read.
 	watched.stop()
+	respWatched := newIdleReader(io.LimitReader(resp.Body, maxUploadResponseBytes), idle, onIdle)
+	defer respWatched.stop()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(respWatched)
 	if err != nil {
+		if cause := context.Cause(upCtx); cause != nil && errors.Is(cause, ErrUploadStalled) {
+			return nil, fmt.Errorf("branchdam: read upload response: %w", cause)
+		}
 		return nil, fmt.Errorf("branchdam: read upload response: %w", err)
 	}
 
@@ -229,17 +244,24 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions)
 		return nil, fmt.Errorf("branchdam: decode upload response: %w", err)
 	}
 	if opts.Blake3Hash != "" && out.Blake3Hash != "" && !strings.EqualFold(out.Blake3Hash, opts.Blake3Hash) {
-		return nil, fmt.Errorf("%w: sent %s, server reports %s", ErrUploadHashMismatch, opts.Blake3Hash, out.Blake3Hash)
+		return nil, fmt.Errorf("%w: sent %s, server reports %s for node %s at %s",
+			ErrUploadHashMismatch, opts.Blake3Hash, out.Blake3Hash, out.NodeUUID, out.RelativePath)
 	}
 	return &out, nil
 }
+
+// maxUploadResponseBytes bounds the upload response read: the JSON is a
+// few hundred bytes, and an error page is not worth more than this.
+const maxUploadResponseBytes = 1 << 20
 
 // readPrefix reads up to n bytes of r, returning early with ctx's cause
 // once ctx is done -- including when r stops producing bytes for idle,
 // which calls onIdle. The read runs on its own goroutine because a Read
 // blocked in the kernel (a hung network mount) ignores ctx; on an early
 // return that goroutine is abandoned until the Read returns, and r must
-// not be used again.
+// not be used again. Accepted cost: each upload cancelled that way holds
+// one goroutine and the caller's file handle until the mount answers or
+// the process exits -- nothing in user space can free a blocked read.
 func readPrefix(ctx context.Context, r io.Reader, n int64, idle time.Duration, onIdle func()) ([]byte, error) {
 	watched := newIdleReader(r, idle, onIdle)
 	defer watched.stop()

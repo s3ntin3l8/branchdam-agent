@@ -492,7 +492,8 @@ func (e *Engine) uploadLocalCopy(ctx context.Context, p string, w WriteResult, i
 		return nil, err
 	}
 	if resp.Blake3Hash != "" && !strings.EqualFold(resp.Blake3Hash, w.FullHash) {
-		return nil, fmt.Errorf("server stored BLAKE3 %s, local copy is %s -- safe-eject withheld", resp.Blake3Hash, w.FullHash)
+		return nil, fmt.Errorf("server stored BLAKE3 %s for node %s at %s, local copy is %s -- safe-eject withheld; the server copy differs and should be removed",
+			resp.Blake3Hash, resp.NodeUUID, resp.RelativePath, w.FullHash)
 	}
 	return resp, nil
 }
