@@ -2187,13 +2187,32 @@ const statusQueueReadTimeout = 5 * time.Second
 // Reconfigure, independent of this TTL).
 const scratchUsageTTL = 30 * time.Second
 
-// diskUsageFunc is a test seam for diskUsage (the real per-OS syscall,
-// see diskusage_{linux,darwin,windows}.go) -- mirrors
-// cmd/branchdam-agent/settings.go's enableStartOnLoginFunc pattern for the
-// same reason: a real statfs/GetDiskFreeSpaceEx call can't be made to hang
-// or fail on demand from a test, and TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir
-// needs exactly that to exercise refreshScratchUsage's abandoned-dir guard.
-var diskUsageFunc = diskUsage
+// diskUsageFn is a test seam for diskUsage (the real per-OS syscall, see
+// diskusage_{linux,darwin,windows}.go): a real statfs/GetDiskFreeSpaceEx
+// call can't be made to hang or fail on demand from a test, and
+// TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir needs exactly that
+// to exercise refreshScratchUsage's abandoned-dir guard. Atomic rather
+// than a plain var because refreshScratchUsage reads it on a goroutine of
+// its own, which can outlive the test that started it: a later test's
+// stub swap must not race that read. nil means diskUsage. Read it with
+// loadDiskUsageFunc and swap it only with setDiskUsageFunc.
+var diskUsageFn atomic.Pointer[func(dir string) (free, total uint64, err error)]
+
+// loadDiskUsageFunc returns the current disk-usage implementation.
+func loadDiskUsageFunc() func(dir string) (free, total uint64, err error) {
+	if fn := diskUsageFn.Load(); fn != nil {
+		return *fn
+	}
+	return diskUsage
+}
+
+// setDiskUsageFunc installs fn as the disk-usage implementation and
+// returns a func that restores the previous one -- for tests, as
+// t.Cleanup(setDiskUsageFunc(stub)).
+func setDiskUsageFunc(fn func(dir string) (free, total uint64, err error)) (restore func()) {
+	prev := diskUsageFn.Swap(&fn)
+	return func() { diskUsageFn.Store(prev) }
+}
 
 // ScratchUsage reports free/total disk space for the volume backing
 // ingest.localEditRoot (issue #274 -- replaces the old ScratchNote
@@ -2288,7 +2307,7 @@ func (r *Runner) scratchUsageSnapshot(dir string) ScratchUsage {
 // NEW dir's own refresh already wrote -- see the scratchUsageInFlightDir
 // check below.
 func (r *Runner) refreshScratchUsage(dir string) {
-	free, total, err := diskUsageFunc(dir)
+	free, total, err := loadDiskUsageFunc()(dir)
 	usage := ScratchUsage{Configured: true}
 	if err != nil {
 		usage.Err = err.Error()

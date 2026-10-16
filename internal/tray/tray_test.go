@@ -1401,34 +1401,27 @@ func TestScratchUsageSnapshotDoesNotLeakThePreviousPath(t *testing.T) {
 // guard on a single shared bool rather than the directory itself, which
 // let precisely this happen (review finding on this PR).
 func TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir(t *testing.T) {
-	orig := diskUsageFunc
+	orig := loadDiskUsageFunc()
 	hangRelease := make(chan struct{})
-	// hungCallStarted closes the instant the hung goroutine has actually
-	// dereferenced diskUsageFunc and entered this closure -- waiting on it
-	// below (before this test function can return into its own Cleanup,
-	// which reassigns diskUsageFunc) gives -race a real happens-before
-	// edge for that read. Without it, the read (in the still-blocked
-	// goroutine) and Cleanup's write race by Go's memory model even
-	// though the read always completes first in practice -- confirmed:
-	// an earlier version of this test without hungCallStarted reliably
-	// triggered `go test -race`.
+	// hungCallStarted closes the instant the hung goroutine has entered
+	// the stub below, so the refresh is known to be in flight (and
+	// blocked) before the healthy dir is asked for.
 	hungCallStarted := make(chan struct{})
-	t.Cleanup(func() { diskUsageFunc = orig })
 	t.Cleanup(func() { close(hangRelease) }) // let the hung goroutine finish (and get discarded) before the test exits
 
 	const hungDir = "/hung-dir-simulating-an-unmounted-network-share"
-	diskUsageFunc = func(dir string) (uint64, uint64, error) {
+	t.Cleanup(setDiskUsageFunc(func(dir string) (uint64, uint64, error) {
 		if dir == hungDir {
 			close(hungCallStarted)
 			<-hangRelease // blocks here until this test's cleanup releases it
 			return 0, 0, errors.New("late arrival after abandonment -- must never be written")
 		}
 		return orig(dir)
-	}
+	}))
 
 	r := NewRunner(&fakeIngester{}, nil, "")
 
-	// Kick a refresh for the "hung" dir -- it blocks inside diskUsageFunc
+	// Kick a refresh for the "hung" dir -- it blocks inside the stub
 	// until hangRelease closes.
 	first := r.scratchUsageSnapshot(hungDir)
 	if !first.Configured {
@@ -1457,23 +1450,22 @@ func TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir(t *testing.T) {
 // already had for a Reconfigure to a NEW path didn't extend to the
 // "Reconfigure to no path at all" case).
 func TestScratchUsageClearingScratchDirDoesNotResurrectStalePath(t *testing.T) {
-	orig := diskUsageFunc
+	orig := loadDiskUsageFunc()
 	hangRelease := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(hangRelease) }) }
 	hungCallStarted := make(chan struct{})
-	t.Cleanup(func() { diskUsageFunc = orig })
 	t.Cleanup(release) // let the hung goroutine finish (and get discarded) even if the test fails before its own explicit release() below
 
 	const hungDir = "/hung-dir-simulating-an-unmounted-network-share"
-	diskUsageFunc = func(dir string) (uint64, uint64, error) {
+	t.Cleanup(setDiskUsageFunc(func(dir string) (uint64, uint64, error) {
 		if dir == hungDir {
 			close(hungCallStarted)
 			<-hangRelease
 			return 123, 456, nil // a fabricated reading that must never be written
 		}
 		return orig(dir)
-	}
+	}))
 
 	r := NewRunner(&fakeIngester{}, nil, "")
 

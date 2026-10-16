@@ -22,11 +22,19 @@ func TestStatusServerRejectsNonLoopbackHost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(ctx, ln) }()
+	client := &http.Client{Timeout: 5 * time.Second}
 	t.Cleanup(func() {
+		// The transport can dial a spare keep-alive connection it never
+		// sends a request on; Shutdown treats such a StateNew connection
+		// as active for up to 5s. Closing the client's idle connections
+		// first lets Serve return at once, and the wait below is clearly
+		// longer than Serve's own shutdown bound, so the two timers never
+		// race.
+		client.CloseIdleConnections()
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(statusServerShutdownTimeout + 5*time.Second):
 			t.Error("Serve did not return after cancel")
 		}
 	})
@@ -48,7 +56,6 @@ func TestStatusServerRejectsNonLoopbackHost(t *testing.T) {
 		{"192.168.1.5:" + port, http.StatusForbidden},
 		{"localhost.attacker.example:" + port, http.StatusForbidden},
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
 	for _, tc := range cases {
 		req, err := http.NewRequest(http.MethodGet, "http://"+ln.Addr().String()+"/status.json", nil)
 		if err != nil {

@@ -25,11 +25,12 @@ func (f *fakeTelemetrySender) SendTelemetry(_ context.Context, in branchdam.Agen
 	return &branchdam.AgentTelemetryOutput{OK: true}, nil
 }
 
+// withDiskUsage stubs the disk-usage seam for the rest of t. The swap is
+// atomic (setDiskUsageFunc), so a background refresh still running from
+// this or an earlier test never races it.
 func withDiskUsage(t *testing.T, fn func(string) (uint64, uint64, error)) {
 	t.Helper()
-	orig := diskUsageFunc
-	diskUsageFunc = fn
-	t.Cleanup(func() { diskUsageFunc = orig })
+	t.Cleanup(setDiskUsageFunc(fn))
 }
 
 // warmScratchUsage waits for the cached disk-usage reading telemetry
@@ -115,8 +116,8 @@ func TestTriggerTelemetryRespectsGates(t *testing.T) {
 		r := NewRunner(&fakeIngester{}, nil, dir)
 		boom := errors.New("server down")
 		r.SetTelemetry(&fakeTelemetrySender{err: boom}, "a", "v")
-		// Let the background refresh finish before withDiskUsage's
-		// cleanup restores diskUsageFunc.
+		// Let the background refresh this Runner starts finish within
+		// the subtest.
 		warmScratchUsage(t, r, dir)
 		if ran, err := r.TriggerTelemetry(context.Background()); !ran || !errors.Is(err, boom) {
 			t.Errorf("TriggerTelemetry = (%v, %v), want (true, %v)", ran, err, boom)
@@ -130,9 +131,9 @@ func TestTriggerTelemetryRespectsGates(t *testing.T) {
 // pass sends zero capacity, which the server treats as no verdict.
 func TestTriggerTelemetryDoesNotBlockOnHungStatfs(t *testing.T) {
 	release := make(chan struct{})
-	// started closes once the background refresh has read diskUsageFunc
-	// and entered the stub; waiting on it before returning orders that
-	// read before withDiskUsage's cleanup reassigns the variable.
+	// started closes once the background refresh has entered the stub;
+	// waiting on it before returning confirms the hung call really was in
+	// flight while TriggerTelemetry returned.
 	started := make(chan struct{})
 	var once sync.Once
 	defer close(release)
