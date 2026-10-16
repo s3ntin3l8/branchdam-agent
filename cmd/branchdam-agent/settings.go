@@ -595,9 +595,11 @@ func serverConfigured(cfg config.Config) bool {
 //
 // hsTimeout bounds the handshake call; warnPrefix distinguishes the
 // startup vs. reload log lines without duplicating the surrounding code.
-func resolveServerConfig(ctx context.Context, cfg *config.Config, hsTimeout time.Duration, warnPrefix string) (client *branchdam.Client, missingFields []string) {
+// configPath is the file cfg was loaded from: a rotated API key delivered
+// on this or any later handshake is stored there (newServerClient).
+func resolveServerConfig(ctx context.Context, cfg *config.Config, configPath string, hsTimeout time.Duration, warnPrefix string) (client *branchdam.Client, missingFields []string) {
 	if serverConfigured(*cfg) {
-		client = branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
+		client = newServerClient(*cfg, configPath)
 
 		hsCtx, hsCancel := context.WithTimeout(ctx, hsTimeout)
 		if hs, err := client.Handshake(hsCtx, branchdam.HandshakeRequest{AgentID: cfg.AgentID}); err != nil {
@@ -781,7 +783,7 @@ func (s *configSettings) reload() error {
 	// handshake always runs, even with an incomplete config. Handshake
 	// failure must not block settings reload -- continue with
 	// config-file values.
-	client, missingFields := resolveServerConfig(context.Background(), &newCfg, 5*time.Second, " on reload")
+	client, missingFields := resolveServerConfig(context.Background(), &newCfg, s.path, 5*time.Second, " on reload")
 	configIncomplete := len(missingFields) > 0
 
 	engine := ingest.NewEngine(client, newCfg.AgentID, newCfg.Ingest, newCfg.PathMappings)

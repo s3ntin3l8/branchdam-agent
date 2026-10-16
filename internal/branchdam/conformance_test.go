@@ -218,10 +218,12 @@ func TestConformanceHandshakeRequestResponse(t *testing.T) {
 		ServerTimeUnix:        1752591200,
 		AcknowledgedEventUUID: "0190f1a2-9999-7000-8000-000000000000",
 		PendingEventsCount:    3,
-		// APIKey deliberately left "" here to pin the realistic case --
-		// see PendingRotationHint's doc comment on why it's usually blank.
+		CurrentKeyID:          6,
+		// APIKey is always "" on the wire (the new key is only ever sent
+		// sealed).
 		PendingRotation: &PendingRotationHint{
 			KeyID:                    7,
+			SealedAPIKey:             "v1:c2VhbGVk", // shape only; OpenRotatedKey is tested in keyrotation_test.go
 			PreviousKeyExpiresAtUnix: 1752677600,
 		},
 	}
@@ -229,11 +231,10 @@ func TestConformanceHandshakeRequestResponse(t *testing.T) {
 }
 
 // TestConformanceHandshakeRequestWithCurrentKeyID pins the wire shape of a
-// device-pairing-aware handshake request -- CurrentKeyID present -- as a
-// separate fixture from TestConformanceHandshakeRequestResponse's
-// CurrentKeyID-absent case above, since no caller in this codebase
-// populates it yet (see HandshakeRequest.CurrentKeyID's doc comment) but
-// the server-side field it targets already exists at ContractVersion.
+// handshake request with CurrentKeyID present, as a separate fixture from
+// TestConformanceHandshakeRequestResponse's CurrentKeyID-absent case
+// above. The server accepts and ignores the field (see
+// HandshakeRequest.CurrentKeyID's doc comment); no caller sets it.
 func TestConformanceHandshakeRequestWithCurrentKeyID(t *testing.T) {
 	req := HandshakeRequest{AgentID: "workstation-01", CurrentKeyID: int64Ptr(5)}
 	checkGolden(t, "handshake_request_with_key.golden.json", marshalIndent(t, req))
