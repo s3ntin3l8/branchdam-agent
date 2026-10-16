@@ -73,7 +73,13 @@ type Stats struct {
 // TIER3_MASTER_ARCHIVE and verified, AND the fullHash it returns equals
 // the BLAKE3 hash queue.db recorded for this file at ingest: "verified"
 // alone only says the server holds *a* 64-hex hash for the node, not that
-// it is this file's. A server that omits fullHash (older than branchDAM
+// it is this file's. The comparison proves only that the server's record
+// for the node still matches this agent's ledger (it catches a reused
+// UUID or a node whose hash diverged). It does not prove the archived
+// bytes: for an offline-ingested node the server's full_hash is the one
+// this agent sent in EVENT_NODE_CREATED. That half rests on "verified",
+// which on branchDAM with full_hash provenance (#505) requires the server
+// to have hashed the master itself. A server that omits fullHash (older than branchDAM
 // #538) gets nothing deleted; those files are counted
 // (SkippedNoServerHash) and reported. Two further local safety checks
 // then run before any deletion, neither of which trusts the server

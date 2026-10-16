@@ -246,12 +246,11 @@ separate, not-yet-implemented mechanism.
   path (a rebase of an *unknown* `NodeUUID`, since the Tier-0 create never actually landed, takes
   the `CREATED` branch -- see ordering invariant #4's failure mode, minus the "silent" part since
   in this case there was never a promoted-columns node to begin with). Net effect is worse than
-  "just missing metadata": the `CREATED` branch's `InsertMediaNode` call sets `FullHash: nil`
-  (the rebase request body carries `fastHash`, not `fullHash`), so `indexing_status` lands
-  `INDEXED_SHALLOW` rather than `INDEXED_FULL` -- and per branchDAM's own Tier-3 heuristic
-  resolver, a `INDEXED_SHALLOW` node with no `full_hash` is invisible to it, exactly the outcome
-  plan decision 3 exists to prevent. Symptom to look for: `queue.db` rows stuck `SUBMITTED` +
-  `DONE` + `DONE` whose `media_nodes` counterpart is `INDEXED_SHALLOW` with a `NULL full_hash`.
+  "just missing metadata": the `CREATED` branch's `InsertMediaNode` call stores only what the
+  rebase body carries (`fastHash` and `fullHash`, the latter as an agent-asserted hash), so the
+  node lacks every promoted column the Tier-0 create would have set. Symptom to look for:
+  `queue.db` rows stuck `SUBMITTED` + `DONE` + `DONE` whose `media_nodes` counterpart has a
+  `full_hash` but no camera/EXIF columns.
 - **Genuinely offline for a long time**: every step backs off up to 5 minutes between attempts.
   `queue-drain -watch` (or repeated manual invocation, or the tray's own timer) is expected to be
   running continuously or periodically for the queue to actually drain once connectivity returns.
