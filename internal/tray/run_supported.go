@@ -418,7 +418,7 @@ func Run(
 				// the edit SSD. See Runner.IngestNowVolumes.
 				vols := r.IngestNowVolumes()
 				if len(vols) == 0 && notify != nil {
-					notify(ctx, "branchDAM Agent", "No camera card found to ingest")
+					notify(ctx, "branchDAM Agent", ingestNowEmptyMessage(r.WatchDirs()))
 				}
 				for _, vol := range vols {
 					r.TriggerIngest(ctx, vol)

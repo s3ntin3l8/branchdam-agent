@@ -683,6 +683,17 @@ func (r *Runner) IngestNowVolumes() []string {
 	return kept
 }
 
+// ingestNowEmptyMessage is the notification "Ingest now" shows when
+// IngestNowVolumes found nothing to ingest. With no cardRoots configured
+// there is nowhere to look, so "no card found" would mislead -- point the
+// operator at the setting instead.
+func ingestNowEmptyMessage(cardRoots []string) string {
+	if len(cardRoots) == 0 {
+		return "No card folders are configured -- add one under Settings > Watch folders"
+	}
+	return "No camera card found to ingest"
+}
+
 // WatchDirs returns a defensive copy of the directories currently
 // described as watched -- run_supported.go's menu rendering and its
 // "Ingest now" worker both read this rather than a raw field, since
@@ -824,6 +835,10 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		if err != nil {
 			summary.Err = err
 		} else {
+			// No Deferred arm: offline ingest never uploads (the archive
+			// copy and registration wait in queue.db for the drain), so a
+			// metered connection cannot hold anything back here and
+			// OfflineFileResult has no Deferred flag.
 			for _, f := range result.Files {
 				switch f.Outcome() {
 				case ingest.OfflineOutcomeFailed:

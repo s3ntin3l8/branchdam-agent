@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
@@ -217,5 +218,16 @@ func TestTriggerIngestEjectScope(t *testing.T) {
 				t.Error("expected a notification that the card is waiting for an unmetered connection")
 			}
 		})
+	}
+}
+
+// TestIngestNowEmptyMessage: with no cardRoots configured, "Ingest now"
+// points at the setting instead of claiming no card was found.
+func TestIngestNowEmptyMessage(t *testing.T) {
+	if got := ingestNowEmptyMessage(nil); !strings.Contains(got, "No card folders are configured") {
+		t.Errorf("ingestNowEmptyMessage(nil) = %q, want the not-configured message", got)
+	}
+	if got := ingestNowEmptyMessage([]string{"/Volumes"}); got != "No camera card found to ingest" {
+		t.Errorf("ingestNowEmptyMessage([/Volumes]) = %q, want the no-card message", got)
 	}
 }
