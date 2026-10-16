@@ -197,10 +197,16 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 			})
 			return nil
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		result.Files = append(result.Files, e.ingestFileOffline(ctx, path, stemSuffix, &dedupUnavailable, archiveReachable))
 		return nil
 	})
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return result, fmt.Errorf("ingest: card %s: stopped before the remaining files: %w", cardRoot, err)
+		}
 		return OfflineCardResult{}, fmt.Errorf("ingest: walk card root %s: %w", cardRoot, err)
 	}
 	return result, nil
@@ -294,7 +300,7 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 			if fr.IsSidecar {
 				fr.SkipReason = "sidecar file (.xmp/.srt): copied to both destinations eventually, no EVENT_NODE_CREATED submitted"
 			}
-			if err := e.completeResumedLocalCopy(srcPath, srcInfo, existing); err != nil {
+			if err := e.completeResumedLocalCopy(ctx, srcPath, srcInfo, existing); err != nil {
 				fr.Err = fmt.Errorf("resume: restore local copy %s: %w", existing.LocalPath, err)
 			}
 			return fr
@@ -386,7 +392,7 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		return true
 	}
 
-	writeRes, err := WriteLocal(srcPath, tmpLocal, e.progressOpts(localPath, ProgressPhaseCopying, srcInfo.Size())...)
+	writeRes, err := WriteLocal(srcPath, tmpLocal, e.progressOpts(ctx, localPath, ProgressPhaseCopying, srcInfo.Size())...)
 	if err != nil {
 		fr.Err = fmt.Errorf("write local copy: %w", err)
 		return fr
@@ -398,7 +404,7 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 	// (The rename into place below keeps the mtime.)
 	preserveMtimeAt(srcPath, tmpLocal, srcInfo.ModTime())
 
-	localVerify, err := Verify(tmpLocal, writeRes.FullHash, e.progressOpts(localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+	localVerify, err := Verify(tmpLocal, writeRes.FullHash, e.progressOpts(ctx, localPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
 	if err != nil {
 		fr.Err = fmt.Errorf("verify local copy: %w", err)
 		return fr
@@ -744,8 +750,9 @@ func (e *Engine) offlineSlotUsable(ctx context.Context, res DestinationResolutio
 // place; otherwise (missing or bad) the file is copied again from the card
 // -- this re-run's single read of it -- and must hash to the queued value.
 // A row whose archive copy is no longer pending is left alone: prune may
-// legitimately have removed its local copy.
-func (e *Engine) completeResumedLocalCopy(srcPath string, srcInfo os.FileInfo, rec queue.Record) error {
+// legitimately have removed its local copy. RequireUnbuffered applies to
+// either verify exactly as it does to a fresh copy.
+func (e *Engine) completeResumedLocalCopy(ctx context.Context, srcPath string, srcInfo os.FileInfo, rec queue.Record) error {
 	if rec.ArchiveCopyStatus != queue.StatusPending {
 		return nil
 	}
@@ -757,13 +764,13 @@ func (e *Engine) completeResumedLocalCopy(srcPath string, srcInfo os.FileInfo, r
 
 	tmp := localTempName(rec.LocalPath)
 	if info, err := os.Stat(tmp); err == nil && info.Mode().IsRegular() && info.Size() == rec.SizeBytes {
-		if vr, verr := Verify(tmp, rec.FullHash); verr == nil && vr.Verified {
+		if vr, verr := Verify(tmp, rec.FullHash, WithContext(ctx)); verr == nil && vr.Verified && e.verifyMethodAllowed(vr.Method) {
 			return renameNoClobber(tmp, rec.LocalPath)
 		}
 	}
 	_ = os.Remove(tmp) // the agent's own temp name: missing, short or corrupt
 
-	writeRes, err := WriteLocal(srcPath, tmp, e.progressOpts(rec.LocalPath, ProgressPhaseCopying, srcInfo.Size())...)
+	writeRes, err := WriteLocal(srcPath, tmp, e.progressOpts(ctx, rec.LocalPath, ProgressPhaseCopying, srcInfo.Size())...)
 	if err != nil {
 		return err
 	}
@@ -772,7 +779,10 @@ func (e *Engine) completeResumedLocalCopy(srcPath string, srcInfo os.FileInfo, r
 		return fmt.Errorf("card file now hashes to %s, queued as %s", writeRes.FullHash, rec.FullHash)
 	}
 	preserveMtimeAt(srcPath, tmp, srcInfo.ModTime())
-	vr, err := Verify(tmp, writeRes.FullHash, e.progressOpts(rec.LocalPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+	vr, err := Verify(tmp, writeRes.FullHash, e.progressOpts(ctx, rec.LocalPath, ProgressPhaseVerifying, writeRes.SizeBytes)...)
+	if err == nil && vr.Verified && !e.verifyMethodAllowed(vr.Method) {
+		err = fmt.Errorf("unbuffered verify required by config, but local verify fell back to buffered floor (%s)", vr.Method)
+	}
 	if err != nil || !vr.Verified {
 		_ = os.Remove(tmp)
 		if err == nil {
@@ -781,4 +791,10 @@ func (e *Engine) completeResumedLocalCopy(srcPath string, srcInfo os.FileInfo, r
 		return err
 	}
 	return renameNoClobber(tmp, rec.LocalPath)
+}
+
+// verifyMethodAllowed reports whether a verify done with method satisfies
+// Ingest.RequireUnbuffered.
+func (e *Engine) verifyMethodAllowed(method VerifyMethod) bool {
+	return !e.Ingest.RequireUnbuffered || method != VerifyMethodBufferedFloor
 }

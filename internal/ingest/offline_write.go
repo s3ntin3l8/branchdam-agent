@@ -49,11 +49,12 @@ func WriteLocal(srcPath, localPath string, opts ...WriteOption) (result WriteRes
 	fastHasher := hashing.NewStreamingFastHasher(size)
 
 	writers := []io.Writer{localFile, fullHasher, fastHasher}
-	if o := applyWriteOptions(opts); o.onBytes != nil {
+	o := applyWriteOptions(opts)
+	if o.onBytes != nil {
 		writers = append(writers, &progressWriter{onBytes: o.onBytes})
 	}
 	mw := io.MultiWriter(writers...)
-	n, copyErr := io.Copy(mw, src)
+	n, copyErr := io.Copy(mw, o.wrapReader(src))
 	if copyErr != nil {
 		return WriteResult{}, fmt.Errorf("ingest: copy %s: %w", srcPath, copyErr)
 	}
@@ -211,10 +212,11 @@ func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOpt
 
 	hasher := blake3.New()
 	writers := []io.Writer{dst, hasher}
-	if o := applyWriteOptions(opts); o.onBytes != nil {
+	o := applyWriteOptions(opts)
+	if o.onBytes != nil {
 		writers = append(writers, &progressWriter{onBytes: o.onBytes})
 	}
-	if _, err := io.Copy(io.MultiWriter(writers...), src); err != nil {
+	if _, err := io.Copy(io.MultiWriter(writers...), o.wrapReader(src)); err != nil {
 		_ = dst.Close()
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("ingest: copy %s to archive: %w", localPath, err)

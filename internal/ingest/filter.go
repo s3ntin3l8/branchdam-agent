@@ -67,7 +67,7 @@ func shouldSkipDir(root, path string) (bool, string) {
 	case lower == "$recycle.bin":
 		return true, "OS metadata directory: $RECYCLE.BIN (Windows recycle bin)"
 	case strings.HasPrefix(base, "."):
-		return true, "OS metadata directory: " + base
+		return true, "hidden dot-directory: " + base
 	}
 	return false, ""
 }

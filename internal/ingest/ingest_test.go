@@ -217,6 +217,13 @@ func TestIngestCardMissingPathMappingFailsThatFile(t *testing.T) {
 	if len(client.calls) != 0 {
 		t.Error("must not submit an event when the container path can't be constructed")
 	}
+	// The mapping is checked before the copy: nothing may be left at
+	// either destination for a later run to mistake for an ingested file.
+	for _, root := range []string{filepath.Join(dir, "archive"), filepath.Join(dir, "local")} {
+		if _, err := os.Stat(filepath.Join(root, "photo.jpg")); !os.IsNotExist(err) {
+			t.Errorf("%s: a copy was written although the file could not be registered (stat err=%v)", root, err)
+		}
+	}
 }
 
 func TestIngestCardCollisionAutoSuffixing(t *testing.T) {
@@ -301,6 +308,7 @@ func TestIngestCardReingestSkipIdentical(t *testing.T) {
 	archiveRoot := filepath.Join(dir, "archive")
 	localRoot := filepath.Join(dir, "local")
 	e := newTestEngine(t, client, archiveRoot, localRoot)
+	e.Queue = openStoreT(t)
 
 	// First ingest: writes and submits
 	res1, err := e.IngestCard(context.Background(), cardRoot)
@@ -319,8 +327,13 @@ func TestIngestCardReingestSkipIdentical(t *testing.T) {
 	if !res2.Files[0].Skipped {
 		t.Error("second ingest of identical file should be skipped")
 	}
-	if res2.Files[0].SkipReason != "already ingested (identical file exists at destination)" {
-		t.Errorf("got skip reason %q", res2.Files[0].SkipReason)
+	// The skip rests on the queue.db row the first run wrote before its
+	// POST, not on the files alone.
+	if want := "already ingested (identical file exists at destination); registered as node 0000000-fake-uuid"; res2.Files[0].SkipReason != want {
+		t.Errorf("got skip reason %q, want %q", res2.Files[0].SkipReason, want)
+	}
+	if len(client.calls) != 1 {
+		t.Errorf("got %d EVENT_NODE_CREATED posts across both runs, want 1", len(client.calls))
 	}
 }
 
@@ -337,20 +350,30 @@ func TestIngestCardRequireUnbufferedFailsOnBufferedFloor(t *testing.T) {
 	client := &fakeClient{}
 	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
 	e.Ingest.RequireUnbuffered = true
+	forceBufferedVerify(t)
 
-	res, err := e.IngestCard(context.Background(), cardRoot)
-	if err != nil {
-		t.Fatalf("IngestCard: %v", err)
-	}
-	if len(res.Files) != 1 {
-		t.Fatalf("got %d files, want 1", len(res.Files))
-	}
-	fr := res.Files[0]
-	// On tmpfs / Linux tmp dir, O_DIRECT returns EINVAL, so method is buffered_floor.
-	if fr.ArchiveVerify.Method == VerifyMethodBufferedFloor || fr.LocalVerify.Method == VerifyMethodBufferedFloor {
-		if fr.Err == nil {
-			t.Error("expected error when RequireUnbuffered=true and method is buffered_floor")
+	// Twice: the first run must not leave copies behind that a second run
+	// would then pass as "already ingested" without the required verify.
+	for run := 1; run <= 2; run++ {
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("run %d: IngestCard: %v", run, err)
 		}
+		if len(res.Files) != 1 {
+			t.Fatalf("run %d: got %d files, want 1", run, len(res.Files))
+		}
+		fr := res.Files[0]
+		if fr.Err == nil {
+			t.Fatalf("run %d: expected an error when RequireUnbuffered=true and verify used the buffered floor (skipped=%v %q)", run, fr.Skipped, fr.SkipReason)
+		}
+		for _, p := range []string{fr.ArchivePath, fr.LocalPath} {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Errorf("run %d: %s left in place after the required unbuffered verify failed (stat err=%v)", run, p, err)
+			}
+		}
+	}
+	if len(client.calls) != 0 {
+		t.Errorf("got %d EVENT_NODE_CREATED posts, want 0", len(client.calls))
 	}
 }
 
@@ -1234,7 +1257,7 @@ func TestIngestFileDedupPreFlight(t *testing.T) {
 		}
 	})
 
-	t.Run("AlreadyIngested destination match skips pre-flight check", func(t *testing.T) {
+	t.Run("AlreadyIngested copies the server does not know are registered, not skipped", func(t *testing.T) {
 		dir := t.TempDir()
 		cardRoot := filepath.Join(dir, "card")
 		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
@@ -1285,15 +1308,21 @@ func TestIngestFileDedupPreFlight(t *testing.T) {
 		if len(res.Files) != 1 {
 			t.Fatalf("got %d files, want 1", len(res.Files))
 		}
+		// Copies at the destination prove nothing about registration:
+		// with no queue row and the server not knowing the content, the
+		// file is registered (from its existing copies), not skipped.
 		fr := res.Files[0]
-		if !fr.Skipped {
-			t.Errorf("expected Skipped=true, got false")
+		if fr.Err != nil {
+			t.Fatalf("unexpected file error: %v", fr.Err)
 		}
-		if fr.SkipReason != "already ingested (identical file exists at destination)" {
-			t.Errorf("SkipReason = %q, want 'already ingested (identical file exists at destination)'", fr.SkipReason)
+		if fr.Skipped {
+			t.Errorf("expected the unregistered copies to be registered, got Skipped (%q)", fr.SkipReason)
 		}
-		if len(client.checkCalls) != 0 {
-			t.Errorf("expected 0 CheckContent calls for AlreadyIngested file, got %d", len(client.checkCalls))
+		if len(client.checkCalls) != 1 || client.checkCalls[0].FullHash != blake3Hex(t, destLocal) {
+			t.Errorf("CheckContent calls = %+v, want one with the copies' full hash", client.checkCalls)
+		}
+		if len(client.calls) != 1 || client.calls[0].FilePath != "/storage/archive/DSC0006.JPG" {
+			t.Errorf("EVENT_NODE_CREATED posts = %+v, want one for /storage/archive/DSC0006.JPG", client.calls)
 		}
 	})
 
