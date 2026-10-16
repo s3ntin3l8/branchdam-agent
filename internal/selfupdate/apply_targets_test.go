@@ -112,10 +112,10 @@ func withPriorRollback(t *testing.T, layout InstallLayout) {
 	}
 }
 
-// TestApplyAllTargetsClearsStaleSidecarOnceASwapHappened covers a prior
+// TestApplyAllTargetsWithdrawsStaleSidecarOnceASwapHappened covers a prior
 // Apply's rollback: its sidecar must not survive a failed apply that has
 // already overwritten some of that rollback's backups.
-func TestApplyAllTargetsClearsStaleSidecarOnceASwapHappened(t *testing.T) {
+func TestApplyAllTargetsWithdrawsStaleSidecarOnceASwapHappened(t *testing.T) {
 	layout := threeTargetLayout(t)
 	withPriorRollback(t, layout)
 
@@ -256,5 +256,56 @@ func TestApplyAllTargetsRestoreFailureKeepsBackup(t *testing.T) {
 	}
 	if v, ok := RollbackInfo(layout); ok {
 		t.Errorf("RollbackInfo() = (%q, true), want no rollback advertised", v)
+	}
+}
+
+// TestApplyAllTargetsUndeletableLabelStopsBeforeAnySwap: a prior label
+// that can't be deleted would outlive the backups the swaps overwrite, so
+// the update stops before touching any target.
+func TestApplyAllTargetsUndeletableLabelStopsBeforeAnySwap(t *testing.T) {
+	layout := threeTargetLayout(t)
+	withPriorRollback(t, layout)
+	sidecar := layout.Primary + rollbackVersionSuffix
+	if err := os.Remove(sidecar); err != nil {
+		t.Fatal(err)
+	}
+	// A non-empty directory at the label's path can't be removed.
+	if err := os.MkdirAll(filepath.Join(sidecar, "blocker"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := applyAllTargets(layout, "1.0.0", func(target string) error {
+		t.Errorf("%s swapped although the prior label could not be withdrawn", filepath.Base(target))
+		return fakeSwap(target, "v2")
+	})
+	if err == nil {
+		t.Fatal("expected the label removal failure to be reported")
+	}
+	assertAllAtV1(t, layout)
+	for _, target := range layout.orderedTargets() {
+		if got, err := os.ReadFile(target + rollbackSuffix); err != nil || string(got) != "v0" {
+			t.Errorf("%s prior backup = %q, %v; want it untouched", filepath.Base(target), got, err)
+		}
+	}
+}
+
+// TestApplyAllTargetsWithdrawsLabelWhileSwapping: no prior label is on disk
+// while any target is being swapped.
+func TestApplyAllTargetsWithdrawsLabelWhileSwapping(t *testing.T) {
+	layout := threeTargetLayout(t)
+	withPriorRollback(t, layout)
+	sidecar := layout.Primary + rollbackVersionSuffix
+
+	err := applyAllTargets(layout, "1.0.0", func(target string) error {
+		if _, err := os.Stat(sidecar); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("prior label still on disk while %s is swapped", filepath.Base(target))
+		}
+		return fakeSwap(target, "v2")
+	})
+	if err != nil {
+		t.Fatalf("applyAllTargets: %v", err)
+	}
+	if v, ok := RollbackInfo(layout); !ok || v != "1.0.0" {
+		t.Errorf("RollbackInfo() = (%q, %v), want (\"1.0.0\", true)", v, ok)
 	}
 }

@@ -233,50 +233,54 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 // last) through applyOne, which must leave the replaced binary at
 // "<target>.previous" on success (Apply's per-target OldSavePath), and
 // makes the whole swap all-or-nothing for every failure the process
-// survives:
+// survives. The rollback label (the version sidecar) is never left
+// describing backups that don't match it: it either matches them or is
+// absent.
 //
-//   - A prior Apply's rollback sidecar is removed right after the first
-//     target swaps, before any other target is touched. That swap has
-//     overwritten the first ".previous", so the prior rollback no longer
-//     describes every backup; leaving its sidecar in place across a later
-//     failure is exactly what used to advertise "Roll back to vX" over
-//     backups that were really a mix of vX and currentVersion. A failure
-//     before any swap (download, checksum, signature) keeps it: nothing
-//     was replaced, so the prior rollback is still coherent.
-//   - If applyOne fails on any target, every target already swapped is
-//     restored from its own fresh ".previous" (most recent first) and that
-//     backup is removed, so the install ends back on currentVersion
+//   - A prior Apply's label is withdrawn before any target is touched.
+//     The first swap overwrites that target's ".previous", so the prior
+//     rollback can't stay coherent once swapping starts; withdrawing it
+//     first means a failure to delete it stops the update with nothing
+//     replaced. If the first target then fails with its ".previous"
+//     still in place (download, checksum, signature), nothing was
+//     replaced and the prior label is written back. go-selfupdate
+//     deletes that ".previous" just before moving the current binary
+//     aside, so a failure from there on leaves the label withdrawn.
+//   - If applyOne fails on any later target, every target already swapped
+//     is restored from its own fresh ".previous" (most recent first) and
+//     that backup is removed, so the install ends back on currentVersion
 //     everywhere with no rollback advertised.
-//   - Only once every target has swapped is the sidecar written. A
-//     sidecar-write failure is treated like a target failure (every
-//     target is restored): a new version without a matching rollback
-//     label would otherwise orphan the fresh backups.
+//   - Only once every target has swapped is the label written. A
+//     label-write failure is treated like a target failure (every target
+//     is restored): a new version without a matching rollback label would
+//     otherwise orphan the fresh backups.
 //
 // A restore failure during that unwind is joined into the returned error
 // and leaves that target's ".previous" in place for manual recovery.
 //
-// A crash (power loss, kill) between the first swap and the sidecar write
-// is not covered: it can leave some targets on the new version, with the
-// sidecar already removed, so no rollback is offered. Running update again
-// finishes the job: the Primary swaps last, so until it has swapped it
-// still reports currentVersion and the update is offered again, and once
-// it has, every target is already on the new version.
+// A crash (power loss, kill) part way through is not covered, though it
+// still never leaves a wrong label: the prior label is already withdrawn,
+// so no rollback is offered. A crash before the Primary swaps can leave
+// the siblings on the new version; running update again finishes the job,
+// since the Primary still reports currentVersion and the update is offered
+// again. A crash after the Primary swaps (for a single-target install, any
+// crash after its one swap) leaves every target on the new version with no
+// rollback until the next update.
 func applyAllTargets(layout InstallLayout, currentVersion string, applyOne func(target string) error) error {
 	sidecar := layout.Primary + rollbackVersionSuffix
+	prior, err := withdrawRollback(sidecar)
+	if err != nil {
+		return err
+	}
 
 	var swapped []string
 	for _, target := range layout.orderedTargets() {
 		if err := applyOne(target); err != nil {
 			err = recoverFailedSwap(target, err)
 			if len(swapped) == 0 {
-				return withdrawRollbackIfBroken(target, sidecar, err)
+				return reinstateRollback(target, sidecar, prior, err)
 			}
 			return restoreSwapped(swapped, err)
-		}
-		if len(swapped) == 0 {
-			if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return restoreSwapped([]string{target}, fmt.Errorf("selfupdate: clear stale rollback metadata: %w", err))
-			}
 		}
 		swapped = append(swapped, target)
 	}
@@ -285,6 +289,37 @@ func applyAllTargets(layout InstallLayout, currentVersion string, applyOne func(
 		return restoreSwapped(swapped, fmt.Errorf("selfupdate: record previous version for rollback: %w", err))
 	}
 	return nil
+}
+
+// withdrawRollback removes a prior Apply's rollback label and returns its
+// content (nil when there was none, or it couldn't be read) so
+// reinstateRollback can write it back.
+func withdrawRollback(sidecar string) ([]byte, error) {
+	prior, err := os.ReadFile(sidecar)
+	if err != nil {
+		prior = nil
+	}
+	if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("selfupdate: clear stale rollback metadata: %w", err)
+	}
+	return prior, nil
+}
+
+// reinstateRollback writes the prior rollback label back after the first
+// target failed, if that target's ".previous" is still there: nothing was
+// replaced, so the prior rollback still matches every backup. A failure to
+// write it back is joined into cause; the label then stays withdrawn.
+func reinstateRollback(target, sidecar string, prior []byte, cause error) error {
+	if prior == nil {
+		return cause
+	}
+	if _, err := os.Lstat(target + rollbackSuffix); err != nil {
+		return cause
+	}
+	if err := os.WriteFile(sidecar, prior, 0o600); err != nil {
+		return errors.Join(cause, fmt.Errorf("selfupdate: restore rollback metadata: %w", err))
+	}
+	return cause
 }
 
 // recoverFailedSwap puts target back when a failed swap left nothing at
@@ -300,22 +335,6 @@ func recoverFailedSwap(target string, cause error) error {
 	}
 	if err := os.Rename(target+rollbackSuffix, target); err != nil {
 		return errors.Join(cause, fmt.Errorf("selfupdate: put %s back after failed swap: %w", target, err))
-	}
-	return cause
-}
-
-// withdrawRollbackIfBroken handles a failure on the first target, before
-// anything was swapped. A prior Apply's rollback stays advertised only
-// while that target's ".previous" is still there: go-selfupdate removes
-// it just before moving the current binary aside, so a failure at or
-// after that point has consumed it (recoverFailedSwap may also have moved
-// it back into place).
-func withdrawRollbackIfBroken(target, sidecar string, cause error) error {
-	if _, err := os.Lstat(target + rollbackSuffix); err == nil {
-		return cause
-	}
-	if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return errors.Join(cause, fmt.Errorf("selfupdate: withdraw rollback metadata: %w", err))
 	}
 	return cause
 }

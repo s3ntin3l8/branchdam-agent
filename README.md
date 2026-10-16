@@ -390,9 +390,10 @@ config.yaml [-check] [-yes]`.
 **Rollback.** A successful apply keeps the version it replaced (a `.previous` backup next to each
 binary, plus a version sidecar written only once every binary has been swapped -- a failed apply
 restores the binaries already replaced, so it never leaves mixed versions behind). A crash part
-way through an apply can, with no rollback offered; running the update again finishes it. The
-tray menu shows "Roll back to vX.Y.Z" whenever one is
-available; the headless equivalent is `branchdam-agent update -rollback [-yes]`. Rollback makes no
+way through an apply can leave the install on a mix of both versions, with no rollback offered;
+running the update again finishes it. A crash after the last binary swapped (for a single-binary
+install, any crash after its one swap) leaves the new version with no rollback until the next
+update. The tray menu shows "Roll back to vX.Y.Z" whenever one is available; the headless equivalent is `branchdam-agent update -rollback [-yes]`. Rollback makes no
 network call at all, so it works even with `selfUpdate.enabled: false`. Once used, the backup is
 consumed and the affordance disappears until the next update. A later update replaces it with
 the version that update replaced, and withdraws it if that update fails after replacing any

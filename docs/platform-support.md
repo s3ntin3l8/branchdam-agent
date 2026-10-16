@@ -762,28 +762,33 @@ is a single fixed string per `Updater`, and this package's shared `Updater` is r
 target in a layout, so setting it there would make a Windows install's second target (the primary
 exe) silently overwrite the sibling exe's just-saved backup at the same path. A fresh per-target
 `Updater` is cheap (no network, just a struct) and sidesteps that. The multi-target swap is
-all-or-nothing for every failure the process survives (`applyAllTargets`): a prior rollback's
-sidecar is removed right after the first target swaps (that swap overwrote the first `.previous`,
-so the prior rollback no longer matches the backups); a failure before any swap (download,
-checksum, signature) keeps it, unless go-selfupdate had already removed that target's old
-`.previous` on its way to the swap; if a target's swap fails after moving the current binary
+all-or-nothing for every failure the process survives (`applyAllTargets`), and the rollback label
+(the version sidecar next to the primary's own backup, `<primary>.previous.version`) either
+matches the backups on disk or is absent. A prior rollback's label is withdrawn before any target
+is touched, since the first swap overwrites that target's `.previous`. If deleting it fails, the
+update stops with nothing replaced. If the first target then fails with its `.previous` still in
+place (download, checksum, signature), nothing was replaced and the prior label is written back.
+go-selfupdate deletes that `.previous` just before moving the current binary aside, so a failure
+from there on leaves the label withdrawn. If a target's swap fails after moving the current binary
 aside and go-selfupdate can't move it back, `applyAllTargets` moves it back from `.previous`
-itself; if any target fails, every target already swapped is restored from its fresh
+itself. If any later target fails, every target already swapped is restored from its fresh
 `.previous` backup and that backup removed, so the install ends back on the running version
-everywhere with no rollback advertised; and only once every target has swapped is the version
-being replaced recorded in the sidecar next to the primary's own backup
-(`<primary>.previous.version`). A sidecar-write failure at that point is treated like a target
+everywhere with no rollback advertised. Only once every target has swapped is the version being
+replaced recorded in the label. A label-write failure at that point is treated like a target
 failure (every target is restored), so a new version is never left live without a matching
-rollback label. Before this, the sidecar was written before the first swap, so a failure on the
+rollback label. Before this, the label was written before the first swap, so a failure on the
 primary after the siblings had swapped left mixed versions plus a rollback label that did not
 match the backups on disk.
 
-A crash (power loss, kill) between the first swap and the sidecar write is not covered: it can
-leave the siblings on the new version and the primary on the old one, with the prior sidecar
-already removed, so no rollback is offered. Running `update` again finishes the job: the primary
-swaps last, so until it has swapped it still reports the old version and the update is offered
-again; once it has, every target is already on the new version.
-`internal/selfupdate.RollbackInfo`/`PreviousVersion` read it to report whether a rollback is
+A crash (power loss, kill) part way through an apply is not covered, though it never leaves a
+wrong label: the prior label is already withdrawn, so no rollback is offered. A crash before the
+primary swaps can leave the siblings on the new version and the primary on the old one; running
+`update` again finishes the job, since the primary still reports the old version and the update
+is offered again. A crash after the primary swaps (for a single-target install, such as a headless
+Linux one, any crash after its one swap) leaves every target on the new version with no rollback
+until the next update.
+
+`internal/selfupdate.RollbackInfo`/`PreviousVersion` read the label to report whether a rollback is
 available and to which version, and `Rollback` uses it to restore every target from its own
 `.previous` file (via go-selfupdate's exported `update.Apply`, reused in the reverse direction --
 never re-validating the backup's checksum, since it was already checksum-validated once, by
