@@ -221,8 +221,8 @@ func TestPassKeepsFileWithNoRecordedHash(t *testing.T) {
 
 	stats, out := runPass(t, cfg, store, map[string]branchdam.NodeStatusEntry{uuid: verifiedEntry(uuid)})
 
-	if stats.Pruned != 0 || stats.SkippedHashMismatch != 1 {
-		t.Errorf("stats = %+v, want Pruned=0 SkippedHashMismatch=1", stats)
+	if stats.Pruned != 0 || stats.SkippedNoLocalHash != 1 || stats.SkippedHashMismatch != 0 {
+		t.Errorf("stats = %+v, want Pruned=0 SkippedNoLocalHash=1 SkippedHashMismatch=0", stats)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("local copy must be kept when no hash was recorded: %v", err)

@@ -51,9 +51,13 @@ type Stats struct {
 	// hash can't be compared and it is kept.
 	SkippedNoServerHash int
 	// SkippedHashMismatch: node-status's fullHash differs from the hash
-	// queue.db recorded for the file at ingest (or no hash was recorded).
-	// The archived master is not provably this file, so it is kept.
-	SkippedHashMismatch      int
+	// queue.db recorded for the file at ingest. The archived master is not
+	// provably this file, so it is kept.
+	SkippedHashMismatch int
+	// SkippedNoLocalHash: queue.db recorded no hash for the file at
+	// ingest, so there is nothing to compare the server's with and it is
+	// kept. A local ledger gap, not something a server upgrade fixes.
+	SkippedNoLocalHash       int
 	SkippedFileChanged       int
 	SkippedOutsideRoot       int
 	SkippedUnexpectedSymlink int
@@ -71,11 +75,10 @@ type Stats struct {
 // alone only says the server holds *a* 64-hex hash for the node, not that
 // it is this file's. A server that omits fullHash (older than branchDAM
 // #538) gets nothing deleted; those files are counted
-// (SkippedNoServerHash) and reported. Three independent local safety
-// gates then run before any deletion, none of which trusts the server
-// response alone:
+// (SkippedNoServerHash) and reported. Two further local safety checks
+// then run before any deletion, neither of which trusts the server
+// response:
 //
-//  0. The hash comparison above, against the agent's own record.
 //  1. A containment check (filepath.EvalSymlinks on both LocalEditRoot and
 //     the candidate path) refuses to touch anything that doesn't resolve
 //     under LocalEditRoot -- this agent has no storage.Guard equivalent, so
@@ -188,7 +191,12 @@ func Pass(ctx context.Context, w io.Writer, client *branchdam.Client, store *que
 			_, _ = fmt.Fprintf(w, "[SKIP] %s: server did not return the archived master's fullHash (branchDAM older than #538?), cannot compare hashes, keeping it\n", c.rec.LocalPath)
 			continue
 		}
-		if c.rec.FullHash == "" || !strings.EqualFold(s.FullHash, c.rec.FullHash) {
+		if c.rec.FullHash == "" {
+			stats.SkippedNoLocalHash++
+			_, _ = fmt.Fprintf(w, "[SKIP] %s: queue.db recorded no hash for this file at ingest, cannot compare it with the archived master's, keeping it\n", c.rec.LocalPath)
+			continue
+		}
+		if !strings.EqualFold(s.FullHash, c.rec.FullHash) {
 			stats.SkippedHashMismatch++
 			_, _ = fmt.Fprintf(w, "[SKIP] %s: archived master's fullHash %q does not match the hash recorded at ingest %q, keeping it\n", c.rec.LocalPath, s.FullHash, c.rec.FullHash)
 			continue
@@ -235,9 +243,10 @@ func Pass(ctx context.Context, w io.Writer, client *branchdam.Client, store *que
 		_, _ = fmt.Fprintf(w, "[PRUNED] %s (%d bytes)\n", c.rec.LocalPath, c.rec.SizeBytes)
 	}
 
-	// The tray discards w, so the two hash skips are also logged: a pass
-	// that silently frees nothing (old server) or finds a master that is
-	// not this file (mismatch) must be visible in agent.log too.
+	// The tray discards w, so the hash skips are also logged: a pass that
+	// silently frees nothing (old server), finds a master that is not this
+	// file (mismatch) or has no hash of its own to compare must be visible
+	// in agent.log too.
 	if stats.SkippedNoServerHash > 0 {
 		slog.Warn("prune: server returned no fullHash in node-status (branchDAM older than #538?); kept files whose hash could not be compared",
 			"count", stats.SkippedNoServerHash)
@@ -245,6 +254,10 @@ func Pass(ctx context.Context, w io.Writer, client *branchdam.Client, store *que
 	if stats.SkippedHashMismatch > 0 {
 		slog.Warn("prune: archived master's fullHash differs from the hash recorded at ingest; kept those files",
 			"count", stats.SkippedHashMismatch)
+	}
+	if stats.SkippedNoLocalHash > 0 {
+		slog.Warn("prune: queue.db recorded no hash at ingest for some files; kept them, nothing to compare",
+			"count", stats.SkippedNoLocalHash)
 	}
 
 	return stats, nil
@@ -285,10 +298,16 @@ func PrintReport(w io.Writer, s Stats, dryRun bool) {
 		_, _ = fmt.Fprintln(w, "branchdam-agent prune")
 	}
 	_, _ = fmt.Fprintf(w, "  evaluated: %d, pruned: %d, freed: %d bytes\n", s.Evaluated, s.Pruned, s.FreedBytes)
-	_, _ = fmt.Fprintf(w, "  skipped: sidecar=%d online-ingest=%d already-gone=%d too-young=%d not-verified=%d no-server-hash=%d hash-mismatch=%d file-changed=%d outside-root=%d unexpected-symlink=%d\n",
-		s.SkippedSidecar, s.SkippedOnlineIngest, s.SkippedAlreadyGone, s.SkippedTooYoung, s.SkippedNotVerified, s.SkippedNoServerHash, s.SkippedHashMismatch, s.SkippedFileChanged, s.SkippedOutsideRoot, s.SkippedUnexpectedSymlink)
+	_, _ = fmt.Fprintf(w, "  skipped: sidecar=%d online-ingest=%d already-gone=%d too-young=%d not-verified=%d no-server-hash=%d hash-mismatch=%d no-local-hash=%d file-changed=%d outside-root=%d unexpected-symlink=%d\n",
+		s.SkippedSidecar, s.SkippedOnlineIngest, s.SkippedAlreadyGone, s.SkippedTooYoung, s.SkippedNotVerified, s.SkippedNoServerHash, s.SkippedHashMismatch, s.SkippedNoLocalHash, s.SkippedFileChanged, s.SkippedOutsideRoot, s.SkippedUnexpectedSymlink)
 	if s.SkippedNoServerHash > 0 {
 		_, _ = fmt.Fprintln(w, "  note: the server did not return fullHash in node-status, so nothing it reported could be hash-checked; upgrade branchDAM to prune these files")
+	}
+	if s.SkippedHashMismatch > 0 {
+		_, _ = fmt.Fprintln(w, "  note: hash-mismatch files differ from the archived master their node points at; check that node in branchDAM before removing them by hand")
+	}
+	if s.SkippedNoLocalHash > 0 {
+		_, _ = fmt.Fprintln(w, "  note: no-local-hash files have no hash in queue.db from ingest, so prune cannot vouch for them; a server upgrade does not change that")
 	}
 	if s.Errors > 0 {
 		_, _ = fmt.Fprintf(w, "  errors: %d -- see [ERROR] lines above\n", s.Errors)
