@@ -325,7 +325,8 @@ type NodeStatusEntry struct {
 	Tier           string `json:"tier,omitempty"`
 	Verified       bool   `json:"verified"`
 	// FullHash is the node's stored BLAKE3-256 full_hash (empty when it has
-	// none), so a caller can compare it with its own copy's hash.
+	// none). Mirrored for parity with the pinned server revision and pinned
+	// by node_status_response.golden.json; nothing reads it yet.
 	FullHash string `json:"fullHash,omitempty"`
 }
 

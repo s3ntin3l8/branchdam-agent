@@ -711,3 +711,78 @@ func TestIngestCardDuplicateWritesNoQueueRow(t *testing.T) {
 		t.Errorf("queue rows = %d, posts = %d, want 0 and 0 for a duplicate", len(rows), len(client.calls))
 	}
 }
+
+// TestIngestCardDuplicateRemovalSyncsDirs: removing a duplicate's two
+// copies is made durable -- both parent directories are fsynced after the
+// removal, as DualWrite fsyncs them after the create.
+func TestIngestCardDuplicateRemovalSyncsDirs(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	writeCardFile(t, cardRoot, "DSC0001.JPG", []byte("duplicate-image-bytes"))
+
+	client := &fakeCheckContentClient{checkFunc: prescreenServer(true, liveDuplicate("ACTIVE"))}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+	synced := recordDirSyncs(t)
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := res.Files[0]
+	if !fr.Skipped || fr.ExistingNodeUUID == "" {
+		t.Fatalf("result = {Skipped:%v ExistingNodeUUID:%q}, want a duplicate skip", fr.Skipped, fr.ExistingNodeUUID)
+	}
+	// DualWrite syncs each directory once for the create; the removal
+	// must sync each one again.
+	count := map[string]int{}
+	for _, d := range synced() {
+		count[d]++
+	}
+	for _, p := range []string{fr.ArchivePath, fr.LocalPath} {
+		if got := count[filepath.Dir(p)]; got < 2 {
+			t.Errorf("%s synced %d times, want the create's sync plus one after the removal", filepath.Dir(p), got)
+		}
+	}
+}
+
+// TestIngestCardDuplicateRemovalFailureIsReported: a duplicate whose copy
+// cannot be removed is not reported as a clean skip -- the reason names
+// the leftover so the operator can delete it.
+func TestIngestCardDuplicateRemovalFailureIsReported(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	writeCardFile(t, cardRoot, "DSC0001.JPG", []byte("duplicate-image-bytes"))
+
+	client := &fakeCheckContentClient{checkFunc: prescreenServer(true, liveDuplicate("ACTIVE"))}
+	archiveRoot := filepath.Join(dir, "archive")
+	e := newTestEngine(t, client, archiveRoot, filepath.Join(dir, "local"))
+	orig := removeDuplicateFn
+	removeDuplicateFn = func(p string) error {
+		if strings.HasPrefix(p, archiveRoot) {
+			return &os.PathError{Op: "remove", Path: p, Err: errors.New("device busy")}
+		}
+		return orig(p)
+	}
+	t.Cleanup(func() { removeDuplicateFn = orig })
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := res.Files[0]
+	if !fr.Skipped || fr.Err != nil {
+		t.Fatalf("result = {Skipped:%v Err:%v}, want a duplicate skip", fr.Skipped, fr.Err)
+	}
+	if !strings.Contains(fr.SkipReason, "left behind") || !strings.Contains(fr.SkipReason, fr.ArchivePath) {
+		t.Errorf("SkipReason = %q, want it to name the leftover archive copy", fr.SkipReason)
+	}
+	if strings.Contains(fr.SkipReason, fr.LocalPath) {
+		t.Errorf("SkipReason = %q names the local copy, which was removed", fr.SkipReason)
+	}
+	if _, err := os.Stat(fr.ArchivePath); err != nil {
+		t.Errorf("archive copy: %v, want it still on disk (its removal failed)", err)
+	}
+	if _, err := os.Stat(fr.LocalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("local copy: err=%v, want it removed", err)
+	}
+}

@@ -1205,7 +1205,9 @@ appropriate:
     `duplicate: already in library as node X`, leaves no new file under
     `archiveRoot` or `localEditRoot` (each copy is written once, while
     hashing, and removed when the server confirms the duplicate), and
-    submits no `EVENT_NODE_CREATED`. The card is read once per file. Then
+    submits no `EVENT_NODE_CREATED`. A copy that could not be removed is
+    named in the skip reason ("... was left behind ... -- delete it by
+    hand"), never reported as a clean duplicate. The card is read once per file. Then
     disconnect from the server (simulate offline: pull the network cable /
     disable Wi-Fi), re-insert the card -- confirm the check times out
     within 5s (`PreflightTimeoutSecs`), the ingest proceeds normally, and

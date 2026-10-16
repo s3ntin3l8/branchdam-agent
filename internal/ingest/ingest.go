@@ -416,8 +416,15 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	// archive container path: a match there is the copy just written.
 	if !fr.IsSidecar {
 		if skip, existingUUID, skipReason := e.checkContentDedup(ctx, srcPath, writeRes, containerPath, config.DefaultPreflightTimeoutSecs, dedup); skip {
-			removeDuplicateCopy(srcPath, archivePath)
-			removeDuplicateCopy(srcPath, localPath)
+			// A copy that cannot be removed is a redundant, unregistered
+			// copy nothing will ever clean up (a later run skips it on the
+			// existing node), so say so in the result instead of reporting
+			// a clean skip.
+			for _, p := range []string{archivePath, localPath} {
+				if rmErr := removeDuplicateCopy(srcPath, p); rmErr != nil {
+					skipReason += fmt.Sprintf("; this run's copy at %s was left behind (%v) -- delete it by hand", p, rmErr)
+				}
+			}
 			fr.Skipped = true
 			fr.SkipReason = skipReason
 			fr.ExistingNodeUUID = existingUUID
@@ -994,23 +1001,30 @@ func isBadRequest(err error) bool {
 	return errors.As(err, &he) && he.StatusCode == http.StatusBadRequest
 }
 
+// removeDuplicateFn is os.Remove, indirected so tests can make the
+// removal of a duplicate's copy fail.
+var removeDuplicateFn = os.Remove
+
 // removeDuplicateCopy removes a copy this ingest pass itself just wrote
 // (DualWrite's O_EXCL create or the offline temp name) after the server
-// confirmed the content is already in the library. A failure is logged,
-// not fatal: the content is safe in the library either way, and the
-// leftover is a redundant copy, not a lost one.
-func removeDuplicateCopy(srcPath, p string) {
-	if err := os.Remove(p); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			slog.Warn("ingest: failed to remove copy of a duplicate file", "source", srcPath, "path", p, "err", err)
+// confirmed the content is already in the library. A failed removal is
+// not fatal -- the content is safe in the library either way, and the
+// leftover is a redundant copy, not a lost one -- but it is returned so the
+// caller can report the leftover.
+func removeDuplicateCopy(srcPath, p string) error {
+	if err := removeDuplicateFn(p); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
-		return
+		slog.Warn("ingest: failed to remove copy of a duplicate file", "source", srcPath, "path", p, "err", err)
+		return err
 	}
 	// Make the removal durable, as DualWrite does for the create: a crash
 	// right after must not bring back an unregistered copy.
-	if err := syncParentDir(filepath.Dir(p)); err != nil {
+	if err := syncParentDirFn(filepath.Dir(p)); err != nil {
 		slog.Warn("ingest: fsync after removing a duplicate copy failed", "path", p, "err", err)
 	}
+	return nil
 }
 
 // contentCheckCall returns a function that makes one check-content
@@ -1106,5 +1120,12 @@ func (e *Engine) checkContentDedup(ctx context.Context, srcPath string, wr Write
 		// watcher on the archive): that is this file, not a duplicate.
 		return false, "", ""
 	}
+	// Known window: check-content names one node per hash. If a server
+	// watcher indexed this run's archive copy in the moments between
+	// DualWrite and this answer, but the answer names an older node, the
+	// caller still removes the copy, and the watcher then marks the node
+	// it just created MISSING (rows are never deleted server-side). No
+	// content is lost -- the older node holds it -- and no endpoint lists
+	// every node with a hash, so a re-query could not close the window.
 	return true, res.NodeUUID, fmt.Sprintf("duplicate: already in library as node %s at %s", res.NodeUUID, res.FilePath)
 }

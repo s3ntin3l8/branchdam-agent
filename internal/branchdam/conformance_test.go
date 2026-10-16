@@ -284,6 +284,34 @@ func TestConformanceResolveSnapshotRequestResponse(t *testing.T) {
 	checkGolden(t, "resolve_snapshot_response.golden.json", marshalIndent(t, resp))
 }
 
+// TestConformanceContentCheckResult pins the check-content response field
+// names (branchdam's AgentCheckContentResult), including the pre-screen's
+// possibleMatch and the optional indexingStatus.
+func TestConformanceContentCheckResult(t *testing.T) {
+	res := ContentCheckResult{
+		Found: true, PossibleMatch: true,
+		NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60", FilePath: "/mnt/archive/2024/IMG_0001.CR3",
+		LifecycleState: "ACTIVE", IndexingStatus: "INDEXED_FULL",
+	}
+	checkGolden(t, "check_content_result.golden.json", marshalIndent(t, res))
+}
+
+// TestConformanceNodeStatusRequestResponse pins the node-status field
+// names (branchdam's AgentNodeStatusInput/Output), including fullHash.
+func TestConformanceNodeStatusRequestResponse(t *testing.T) {
+	req := NodeStatusRequest{NodeUUIDs: []string{"0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60"}}
+	checkGolden(t, "node_status_request.golden.json", marshalIndent(t, req))
+
+	resp := NodeStatusResponse{Statuses: []NodeStatusEntry{
+		{
+			NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60", Found: true, LifecycleState: "ACTIVE", Tier: "TIER3_MASTER_ARCHIVE",
+			Verified: true, FullHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		{NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f61"},
+	}}
+	checkGolden(t, "node_status_response.golden.json", marshalIndent(t, resp))
+}
+
 // TestHelloVsHandshakeFieldNamesDiffer is the regression test for the
 // single most likely copy-paste bug in this client: hello returns "version",
 // handshake returns "serverVersion" for the same concept. A shared struct
