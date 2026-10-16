@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "serverVersion": "1.2.3",
+  "serverTimeUnix": 1760000000,
+  "acknowledgedEventUuid": "33333333-3333-4333-8333-333333333333",
+  "pendingEventsCount": 2,
+  "namingTemplate": "{date:2006}/{date:2006-01-02}/{original}",
+  "currentKeyId": 7,
+  "pendingRotation": {
+    "keyId": 8,
+    "apiKey": "",
+    "sealedApiKey": "v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "previousKeyExpiresAtUnix": 1760086400
+  }
+}

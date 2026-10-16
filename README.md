@@ -37,7 +37,9 @@ The agent communicates with the branchDAM server via its `/api/v1/agent/*` REST 
 - `internal/branchdam/` -- the REST client for branchDAM's agent-server contract
   (`hello`/`handshake`/`events`/`rebase`), with DTOs hand-synced to branchDAM's own
   `internal/agent/types.go` and `internal/httpapi/routes.go`, plus a golden-file conformance test
-  (`internal/branchdam/conformance_test.go`).
+  (`internal/branchdam/conformance_test.go`) and a contract test against a pinned copy of the
+  server's own fixtures (`internal/branchdam/contract_conformance_test.go`,
+  `testdata/contract/`; refresh with `make contract-sync BRANCHDAM=<branchdam checkout>`).
 - `internal/hashing/`, `internal/naming/`, `internal/phash/` -- ports of the three pieces of
   branchDAM server logic an agent-ingested file must reproduce exactly to stay consistent with a
   normal server-side scan (`FastHash`'s sampled-window algorithm, `naming.Stem`'s filename

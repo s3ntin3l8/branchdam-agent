@@ -1,0 +1,23 @@
+{
+  "agentId": "workstation-01",
+  "clientVersion": "0.9.0",
+  "timestampUnix": 1760000000,
+  "scratchStorage": {
+    "mountPath": "/Volumes/EditSSD",
+    "totalBytes": 1000,
+    "freeBytes": 300,
+    "usedBytes": 700,
+    "mirrorsSizeBytes": 100,
+    "renderCacheSizeBytes": 50,
+    "proxiesSizeBytes": 25,
+    "prunableBytes": 10
+  },
+  "pruneStats": {
+    "lastPruneTimestampUnix": 1759999000,
+    "lastReclaimedBytes": 4096,
+    "lastPruneDurationMs": 250,
+    "prunedItemCounts": {
+      "mirrors": 3
+    }
+  }
+}
