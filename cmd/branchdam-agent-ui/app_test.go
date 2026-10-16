@@ -166,7 +166,9 @@ func TestAgentRequestDialTimeoutIsNotBusy(t *testing.T) {
 	if !errors.Is(err, errAgentNoAnswer) {
 		t.Fatalf("err = %v, want errAgentNoAnswer", err)
 	}
-	if strings.Contains(err.Error(), "is running") {
+	// errAgentBusy's claim; the no-answer text may still tell the user to
+	// check that the tray app is running.
+	if strings.Contains(err.Error(), "branchDAM is running") {
 		t.Errorf("unreached agent reported as running: %v", err)
 	}
 }
