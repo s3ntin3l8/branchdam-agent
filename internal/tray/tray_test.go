@@ -1978,6 +1978,143 @@ func TestReconfigurePollIntervalWaitsForIngest(t *testing.T) {
 	t.Fatalf("running interval after the ingest = %v, want 30ms", got)
 }
 
+// ctxBlockingIngester blocks its first IngestCard until release closes or
+// the ingest's ctx is cancelled, and reports which on canceled.
+type ctxBlockingIngester struct {
+	started  chan struct{}
+	release  chan struct{}
+	canceled chan error
+	once     sync.Once
+}
+
+func (b *ctxBlockingIngester) IngestCard(ctx context.Context, _ string) (ingest.CardResult, error) {
+	var err error
+	b.once.Do(func() {
+		close(b.started)
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			err = ctx.Err()
+			b.canceled <- err
+		}
+	})
+	return ingest.CardResult{}, err
+}
+
+func (b *ctxBlockingIngester) IngestCardOffline(_ context.Context, _ string) (ingest.OfflineCardResult, error) {
+	return ingest.OfflineCardResult{}, nil
+}
+
+// TestRequireDCIMChangeWaitsForDetectedIngest: a detection-triggered
+// ingest runs on the detector's own context, so restarting the detector
+// cancels it. A settings reload that toggles ingest.requireDCIM during
+// that ingest must leave it running and restart the detector only once
+// the gate frees -- the same deferred path a pollIntervalSecs change takes.
+func TestRequireDCIMChangeWaitsForDetectedIngest(t *testing.T) {
+	root := t.TempDir()
+	card := filepath.Join(root, "CARD1")
+	if err := os.MkdirAll(filepath.Join(card, "DCIM"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fi := &ctxBlockingIngester{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		canceled: make(chan error, 1),
+	}
+	r := NewRunner(fi, []string{root}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.ReconfigureDetector(ctx, []string{root})
+	defer r.StopDetector()
+	_, firstDone := detectorRunningIntervalFor(r)
+
+	select {
+	case <-fi.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the detector never started an ingest of the inserted card")
+	}
+
+	// What settings.go's reload does: set the detector options, then
+	// Reconfigure with the (unchanged) roots.
+	r.SetDetectorRequireDCIM(true)
+	select {
+	case err := <-fi.canceled:
+		t.Fatalf("toggling requireDCIM cancelled the detection-triggered ingest: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if r.Reconfigure(fi, []string{root}, "") {
+		t.Fatal("Reconfigure reported applied while an ingest held the gate")
+	}
+	if _, done := detectorRunningIntervalFor(r); done != firstDone {
+		t.Error("detector restarted while the detection-triggered ingest held the gate")
+	}
+
+	close(fi.release)
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the detector was not restarted once the ingest finished")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if dcim, done := detectorRunningRequireDCIMFor(r); dcim && done != nil && done != firstDone {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no detector requiring DCIM started after the deferred restart")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// detectorRunningRequireDCIMFor returns whether the running detector
+// requires DCIM/, and its done channel (nil when no detector runs).
+func detectorRunningRequireDCIMFor(r *Runner) (bool, chan struct{}) {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+	return r.detectorRunningRequireDCIM, r.detectorDone
+}
+
+// TestReconfigureAppliesRequireDCIMChange: with no ingest running, a
+// reload that changes only ingest.requireDCIM restarts the detector as
+// soon as its Reconfigure applies; one that leaves it alone keeps the
+// running detector.
+func TestReconfigureAppliesRequireDCIMChange(t *testing.T) {
+	fi := &fakeIngester{}
+	dir := t.TempDir()
+	r := NewRunner(fi, []string{dir}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.ReconfigureDetector(ctx, []string{dir})
+	defer r.StopDetector()
+	_, firstDone := detectorRunningRequireDCIMFor(r)
+
+	r.SetDetectorRequireDCIM(false)
+	r.Reconfigure(fi, []string{dir}, "")
+	if _, done := detectorRunningRequireDCIMFor(r); done != firstDone {
+		t.Error("Reconfigure with an unchanged requireDCIM and roots restarted the detector")
+	}
+
+	r.SetDetectorRequireDCIM(true)
+	if _, done := detectorRunningRequireDCIMFor(r); done != firstDone {
+		t.Error("SetDetectorRequireDCIM restarted the detector itself, outside Reconfigure")
+	}
+	if !r.Reconfigure(fi, []string{dir}, "") {
+		t.Fatal("Reconfigure on an idle runner did not apply")
+	}
+	dcim, done := detectorRunningRequireDCIMFor(r)
+	if !dcim || done == firstDone || done == nil {
+		t.Errorf("after a requireDCIM change: running requireDCIM = %v, restarted = %v; want true and a new detector", dcim, done != firstDone)
+	}
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("the detector built without requireDCIM did not exit")
+	}
+}
+
 // closeCountingIngester counts IngestCard and Close calls.
 type closeCountingIngester struct {
 	mu     sync.Mutex

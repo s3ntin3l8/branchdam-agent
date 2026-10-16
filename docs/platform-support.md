@@ -1242,7 +1242,8 @@ appropriate:
     bypasses the dialog.
 12. **Settings — M5 checkboxes (#81, #83, #84, #87), now in the Wails window:** open the native
     window and toggle "Require DCIM folder" (insert a USB stick with no DCIM folder -- confirm not
-    detected), "Auto-eject after successful ingest" (insert a card -- confirm a successful ingest
+    detected; toggle it while a detected card is still ingesting -- confirm that ingest runs to the
+    end and the field says it applies when the ingest finishes), "Auto-eject after successful ingest" (insert a card -- confirm a successful ingest
     unmounts/ejects the volume and surfaces an OS notification; induce an ingest error -- confirm
     the card is NOT ejected on partial ingest), and "Pause upload on metered connection" (toggle
     on, then on a real hotspot/iPhone-tethered network confirm queue drain is skipped and the local

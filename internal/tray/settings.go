@@ -60,8 +60,9 @@ type SettingsView struct {
 	// prune.intervalMinutes, selfUpdate.*). Each is read once at startup
 	// -- tray.statusAddr's listener, the queue.db handle, the drain/prune
 	// timers, the self-update agent -- so a reload can't apply it.
-	// (ingest.pollIntervalSecs is live: the reload's Reconfigure restarts
-	// the detector at the new interval.) The menu surfaces
+	// (ingest.pollIntervalSecs and ingest.requireDCIM are live: the
+	// reload's Reconfigure restarts the detector with them, after any
+	// in-flight ingest.) The menu surfaces
 	// "Restart now" and the Settings window names the field rather than
 	// silently pretending the change already took effect.
 	RestartRequired     bool

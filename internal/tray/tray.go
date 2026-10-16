@@ -591,13 +591,18 @@ type Runner struct {
 	detectorDone     chan struct{}
 	detectorBaseCtx  context.Context
 	detectorInterval time.Duration
-	// detectorRunningInterval is the poll interval the running detector
-	// was built with (guarded by detectorMu; meaningful only while
-	// detectorCancel != nil). A reload that changes only
-	// ingest.pollIntervalSecs restarts the detector when its Reconfigure
-	// is applied -- see detectorIntervalStale.
-	detectorRunningInterval time.Duration
+	// detectorRunningInterval and detectorRunningRequireDCIM are the poll
+	// interval and DCIM requirement the running detector was built with
+	// (guarded by detectorMu; meaningful only while detectorCancel !=
+	// nil). A reload that changes only ingest.pollIntervalSecs or
+	// ingest.requireDCIM restarts the detector when its Reconfigure is
+	// applied, never while an ingest holds the gate -- see detectorStale.
+	detectorRunningInterval    time.Duration
+	detectorRunningRequireDCIM bool
 
+	// detectorRequireDCIM is the latest SetDetectorRequireDCIM value
+	// (guarded by detectorMu). "Ingest now" and the resume offer read it
+	// at once; a running detector picks it up on its deferred restart.
 	detectorRequireDCIM  bool
 	onCardIngested       func()
 	detectorErrHandler   func(err error)
@@ -1838,21 +1843,17 @@ func (r *Runner) SetDetectorInterval(d time.Duration) {
 	r.detectorInterval = d
 }
 
-// SetDetectorRequireDCIM sets whether the card detector requires a DCIM/
-// subdirectory to detect a volume.
+// SetDetectorRequireDCIM sets whether a volume needs a DCIM/ subdirectory
+// to count as a card. IngestNowVolumes and the resume offer use the new
+// value at once. Like SetDetectorInterval, it does not touch a running
+// detector itself: the next Reconfigure that is applied restarts the
+// detector when its DCIM requirement differs (a settings reload sets it
+// and then calls Reconfigure). Restarting it here would cancel a
+// detection-triggered ingest, which runs on the detector's context.
 func (r *Runner) SetDetectorRequireDCIM(v bool) {
 	r.detectorMu.Lock()
-	changed := r.detectorRequireDCIM != v
+	defer r.detectorMu.Unlock()
 	r.detectorRequireDCIM = v
-	running := r.detectorCancel != nil
-	r.detectorMu.Unlock()
-
-	if changed && running {
-		r.mu.Lock()
-		roots := append([]string(nil), r.watchDirs...)
-		r.mu.Unlock()
-		r.ReconfigureDetector(r.BaseContext(), roots)
-	}
 }
 
 // SetDetectorErrorHandler registers a handler for non-cancellation errors
@@ -1902,15 +1903,16 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 		return
 	}
 
-	dctx, cancel := context.WithCancel(baseCtx)
-	r.detectorCancel = cancel
-	r.detectorRunningInterval = interval
-	done := make(chan struct{})
-	r.detectorDone = done
-
 	// Same volume selection as IngestNowVolumes: a disk holding the archive
 	// or local edit root is never offered as a card, whichever path asks.
 	requireDCIM := r.detectorRequireDCIM
+
+	dctx, cancel := context.WithCancel(baseCtx)
+	r.detectorCancel = cancel
+	r.detectorRunningInterval = interval
+	r.detectorRunningRequireDCIM = requireDCIM
+	done := make(chan struct{})
+	r.detectorDone = done
 	detectorRoots := append([]string(nil), roots...)
 	r.mu.Lock()
 	known := make([]string, 0, len(r.detectedVolumes))
@@ -1960,16 +1962,18 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 	}()
 }
 
-// detectorIntervalStale reports whether a detector is running with a poll
-// interval other than the one SetDetectorInterval last set.
-func (r *Runner) detectorIntervalStale() bool {
+// detectorStale reports whether a detector is running with a poll
+// interval or DCIM requirement other than the one SetDetectorInterval /
+// SetDetectorRequireDCIM last set.
+func (r *Runner) detectorStale() bool {
 	r.detectorMu.Lock()
 	defer r.detectorMu.Unlock()
 	want := r.detectorInterval
 	if want <= 0 {
 		want = ingest.DefaultPollInterval
 	}
-	return r.detectorCancel != nil && r.detectorRunningInterval != want
+	return r.detectorCancel != nil &&
+		(r.detectorRunningInterval != want || r.detectorRunningRequireDCIM != r.detectorRequireDCIM)
 }
 
 // StopDetector cancels any running Detector.Watch goroutine and waits for it
@@ -2025,11 +2029,15 @@ type ingesterCloser interface{ Close() }
 // doesn't outlive it -- no ingest can be using it at that point.
 //
 // When watchDirs differs from the current roots, or the running detector
-// polls at an interval other than SetDetectorInterval's latest (a reload
-// that changed ingest.pollIntervalSecs), the detector is restarted
-// (ReconfigureDetector, issue #78) AFTER releasing gate, so waiting on the
-// previous detector goroutine to exit cannot deadlock against an
-// in-flight TriggerIngest call.
+// polls at an interval or DCIM requirement other than SetDetectorInterval's
+// / SetDetectorRequireDCIM's latest (a reload that changed
+// ingest.pollIntervalSecs or ingest.requireDCIM), the detector is
+// restarted (ReconfigureDetector, issue #78) AFTER releasing gate, so
+// waiting on the previous detector goroutine to exit cannot deadlock
+// against an in-flight TriggerIngest call. Because the restart rides the
+// applied Reconfigure, it never happens while an ingest holds the gate:
+// restarting cancels the detector's context, which a detection-triggered
+// ingest runs on.
 //
 // One field is deliberately NOT reconfigurable this way and is the
 // caller's responsibility to treat as restart-required instead:
@@ -2111,7 +2119,7 @@ func (r *Runner) applyPendingReconfigAndUnlock() {
 	}
 	r.unlockGate()
 
-	if rootsChanged || r.detectorIntervalStale() {
+	if rootsChanged || r.detectorStale() {
 		r.ReconfigureDetector(r.BaseContext(), p.watchDirs)
 	}
 }

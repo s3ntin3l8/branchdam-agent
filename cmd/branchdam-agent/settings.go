@@ -109,9 +109,10 @@ func newConfigSettings(path string, cfg config.Config, runner *tray.Runner) *con
 // address, the queue.db the tray opened, the drain/prune timers (started
 // once), and the self-update agent (built once). Enabling prune counts;
 // disabling it does not, since reload drops the pruner and the timer then
-// has nothing to run. ingest.pollIntervalSecs is not here: reload sets
-// the detector interval and the Reconfigure it then calls restarts the
-// detector at the new interval (Runner.Reconfigure).
+// has nothing to run. ingest.pollIntervalSecs and ingest.requireDCIM are
+// not here: reload sets the detector interval and DCIM requirement, and
+// the Reconfigure it then calls restarts the detector with them once no
+// ingest holds the gate (Runner.Reconfigure).
 func restartRequiredKeys(applied, cfg config.Config) []string {
 	var keys []string
 	add := func(key string, changed bool) {
