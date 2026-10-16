@@ -921,6 +921,16 @@ func (r *Runner) TriggerDetectedIngest(ctx context.Context, cardPath string) Ing
 	return r.triggerIngest(ctx, cardPath, true, false)
 }
 
+// gateBusy is TriggerIngestNoWait's answer when the gate is held. The
+// window shows only the last completed ingest, so the operator is told
+// with a notification that the card was not ingested.
+func (*Runner) gateBusy(cardPath string, notifyErr func(title, msg string)) IngestSummary {
+	if notifyErr != nil {
+		notifyErr("branchDAM Ingest", fmt.Sprintf("%s was not ingested: another ingest, a prune or an update is running. Start it again once that finishes.", volumeName(cardPath)))
+	}
+	return IngestSummary{CardPath: cardPath, Err: ErrGateBusy}
+}
+
 func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection, noWait bool) IngestSummary {
 	acquireGate := func() bool { r.lockGate(); return true }
 	if noWait {
@@ -983,7 +993,7 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 			notifyErr("branchDAM Ingest", msg)
 		}
 		if !acquireGate() {
-			return IngestSummary{CardPath: cardPath, Err: ErrGateBusy}
+			return r.gateBusy(cardPath, notifyErr)
 		}
 		r.mu.Lock()
 		r.last = &summary
@@ -996,7 +1006,7 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 	}
 
 	if !acquireGate() {
-		return IngestSummary{CardPath: cardPath, Err: ErrGateBusy}
+		return r.gateBusy(cardPath, notifyErr)
 	}
 	defer r.unlockGate()
 	summary.StartedAt = time.Now()

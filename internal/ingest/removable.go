@@ -99,20 +99,45 @@ func IsRemovableDriveRoot(path string) bool {
 // ListCardVolumes is the full set of candidate card volumes: every volume
 // ListVolumesUnder finds under cardRoots plus, on Windows, the root of
 // every removable drive with media (honouring requireDCIM the same way),
-// without duplicates. It never returns an error: a failed drive listing is
-// logged and the cardRoots volumes are still returned, since an error from
-// a Detector's List ends its Watch loop for good.
+// without duplicates. A cardRoots entry that is itself one of those
+// removable drive roots is not walked as a parent: the drive is already a
+// volume, and its subdirectories would be the same card again. It never
+// returns an error: a failed drive listing is logged and the cardRoots
+// volumes are still returned, since an error from a Detector's List ends
+// its Watch loop for good.
 func ListCardVolumes(cardRoots []string, requireDCIM bool) ([]string, error) {
-	vols, err := ListVolumesUnder(cardRoots, requireDCIM)
-	if err != nil {
-		return nil, err
-	}
 	drives, err := listRemovableDrivesFn()
 	if err != nil {
 		slog.Debug("ingest: listing removable drives failed; using cardRoots only this poll", "err", err)
-		return vols, nil
+		return ListVolumesUnder(cardRoots, requireDCIM)
+	}
+	vols, err := ListVolumesUnder(withoutDriveRoots(cardRoots, drives), requireDCIM)
+	if err != nil {
+		return nil, err
 	}
 	return mergeVolumes(vols, drives, requireDCIM), nil
+}
+
+// withoutDriveRoots returns cardRoots minus any entry naming one of drives
+// (`E:`, `E:\` or `e:/`, compared as drive roots).
+func withoutDriveRoots(cardRoots, drives []string) []string {
+	if len(drives) == 0 {
+		return cardRoots
+	}
+	isDrive := make(map[string]bool, len(drives))
+	for _, d := range drives {
+		if r := driveRoot(d); r != "" {
+			isDrive[r] = true
+		}
+	}
+	out := make([]string, 0, len(cardRoots))
+	for _, root := range cardRoots {
+		if r := driveRoot(root); r != "" && isDrive[r] {
+			continue
+		}
+		out = append(out, root)
+	}
+	return out
 }
 
 // mergeVolumes appends each drive root not already in vols (compared

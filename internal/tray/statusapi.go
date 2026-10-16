@@ -23,19 +23,21 @@ import (
 // /api/actions/* routes drive. A structural interface, like Drainer/
 // Pruner/Settings elsewhere in this package, rather than a *Runner field
 // directly -- so a test can inject a fake without constructing a real
-// Runner's watch dirs, gates, and queue reader. *Runner already satisfies
-// this with no changes: TriggerIngest/TriggerDrain/TriggerPrune/
+// Runner's watch dirs, gates, and queue reader. *Runner satisfies it:
+// TriggerIngest/TriggerIngestNoWait/TriggerDrain/TriggerPrune/
 // TriggerSync/TriggerHookInstall/RevealHook/Paused/SetPaused are all
-// already safe to call concurrently from an HTTP handler goroutine (see
-// each method's own doc comment for its serialization mechanism).
+// safe to call concurrently from an HTTP handler goroutine (see each
+// method's own doc comment for its serialization mechanism).
 //
 // The window's ingest controls (POST /api/actions/ingest-start and
 // /api/actions/cancel-ingest) and its failed-rows list
 // (GET /api/queue/failed, POST /api/actions/queue-retry) go through the
 // same Runner: IngestNowVolumes/WatchDirs pick what "Ingest now" and
 // "Import from folder…" ingest exactly as the tray menu does, every
-// ingest still runs through TriggerIngest (and so behind Runner.gate,
-// AGENTS.md invariant 9), CancelIngest stops it at a file boundary, and
+// ingest runs behind Runner.gate (AGENTS.md invariant 9) -- the
+// ingest-start batch through TriggerIngestNoWait, which never waits for
+// the gate and ends the batch when something else holds it --
+// CancelIngest stops it at a file boundary, and
 // the failed-row methods wrap the queue store's own FailedRows/
 // ResetFailedNode/ResetFailed. This file never reimplements any of them.
 type ActionRunner interface {
@@ -1016,7 +1018,7 @@ func (s *StatusServer) handleActionIngestStart(w http.ResponseWriter, r *http.Re
 	ctx := context.WithoutCancel(r.Context())
 	go func() {
 		defer s.ingestBatch.Store(false)
-		for _, p := range paths {
+		for i, p := range paths {
 			// The gate is released between volumes, so a prune or update
 			// can take it mid-batch. TriggerIngestNoWait acquires it
 			// without waiting -- check and acquire in one step -- and the
@@ -1026,7 +1028,8 @@ func (s *StatusServer) handleActionIngestStart(w http.ResponseWriter, r *http.Re
 			// operator can start it again.
 			sum := s.Actions.TriggerIngestNoWait(ctx, p)
 			if errors.Is(sum.Err, ErrGateBusy) {
-				log.Printf("tray: ingest-start: batch stopped: %v", errGateHeld)
+				// TriggerIngestNoWait has already notified the operator.
+				log.Printf("tray: ingest-start: batch stopped, %d of %d volumes not ingested: %v", len(paths)-i, len(paths), sum.Err)
 				return
 			}
 			if sum.Canceled {

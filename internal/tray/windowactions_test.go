@@ -294,6 +294,48 @@ func TestIngestStartStopsWhenGateTakenAfterAcceptance(t *testing.T) {
 	}
 }
 
+// gateFreeAtAcceptance is a real *Runner whose GateHeld reports the gate
+// free, as it was when ingest-start accepted the request; the gate itself
+// is held, as by a prune or update that took it right after.
+type gateFreeAtAcceptance struct{ *Runner }
+
+func (gateFreeAtAcceptance) GateHeld() bool { return false }
+
+// TestIngestStartStopsOnRealRunnerGate is the pair of the two tests above
+// with no spy in between: ingest-start's batch on a real Runner whose gate
+// is held ends without ingesting, never blocks, and tells the operator.
+func TestIngestStartStopsOnRealRunnerGate(t *testing.T) {
+	ing := &fakeIngester{}
+	r := NewRunner(ing, nil, "")
+	var notes atomic.Int32
+	r.SetErrorNotifier(func(_, _ string) { notes.Add(1) })
+	release, ok := r.TryLockIdle()
+	if !ok {
+		t.Fatal("TryLockIdle on an idle runner failed")
+	}
+	defer release()
+
+	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Actions: gateFreeAtAcceptance{r}}
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+	if code, got := postIngestStart(t, mux, t.TempDir()); code != http.StatusAccepted || !got.Started {
+		t.Fatalf("ingest-start = %d %+v, want 202 started", code, got)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for s.ingestBatch.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("batch blocked behind the held gate")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(ing.calls) != 0 || len(ing.offlineCalls) != 0 {
+		t.Errorf("ingested %v %v while the gate was held", ing.calls, ing.offlineCalls)
+	}
+	if notes.Load() != 1 {
+		t.Errorf("notifications = %d, want 1 telling the operator the card was not ingested", notes.Load())
+	}
+}
+
 // TestIngestStartRefusals: every refusal is a 200 with started=false and a
 // reason, and none of them reaches TriggerIngest.
 func TestIngestStartRefusals(t *testing.T) {

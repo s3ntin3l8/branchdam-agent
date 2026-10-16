@@ -182,3 +182,18 @@ func TestDetectorDiffsRemovableDrives(t *testing.T) {
 		t.Errorf("diffs = %+v, want %+v", diffs, want)
 	}
 }
+
+// TestWithoutDriveRoots: a cardRoots entry that is a listed removable
+// drive root is dropped (the drive itself is the volume; walking it as a
+// parent would offer every folder on the card as another card), in any
+// spelling, and every other entry is kept.
+func TestWithoutDriveRoots(t *testing.T) {
+	cardRoots := []string{`E:`, `e:/`, `D:\`, `/media/user`, `E:\Cards`}
+	got := withoutDriveRoots(cardRoots, []string{`E:\`})
+	if want := []string{`D:\`, `/media/user`, `E:\Cards`}; !reflect.DeepEqual(got, want) {
+		t.Errorf("withoutDriveRoots = %v, want %v", got, want)
+	}
+	if got := withoutDriveRoots(cardRoots, nil); !reflect.DeepEqual(got, cardRoots) {
+		t.Errorf("no drives: withoutDriveRoots = %v, want cardRoots unchanged", got)
+	}
+}

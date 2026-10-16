@@ -25,7 +25,7 @@ import (
 func Eject(mountPath string) error {
 	volPath, err := volumeDevicePath(mountPath)
 	if err != nil {
-		return fmt.Errorf("eject %s: %w", mountPath, err)
+		return &StepError{Path: mountPath, Step: StepOpen, Err: err}
 	}
 	pathPtr, err := windows.UTF16PtrFromString(volPath)
 	if err != nil {
