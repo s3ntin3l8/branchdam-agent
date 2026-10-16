@@ -915,8 +915,9 @@ type ingestStartResult struct {
 var errIngestAlreadyRunning = errors.New("an ingest is already running -- wait for it to finish or cancel it")
 
 // errGateHeld is ingest-start's refusal while something other than an
-// ingest -- a self-update download, apply or roll back -- holds the gate.
-var errGateHeld = errors.New("an update is in progress -- try again when it finishes")
+// ingest holds the gate: a prune pass (TriggerPrune's TryLockIdle) or a
+// self-update download, apply or roll back. A drain does not take it.
+var errGateHeld = errors.New("a prune or update is in progress -- try again when it finishes")
 
 // errFolderPath is ingest-start's refusal for a folder path that is not
 // absolute or contains "..": the window's folder picker always returns a
@@ -978,7 +979,10 @@ func (s *StatusServer) handleActionIngestStart(w http.ResponseWriter, r *http.Re
 	} else {
 		// The path comes from the request: accept only what the window's
 		// native folder picker produces -- an absolute path with no ".."
-		// -- before it reaches the filesystem.
+		// -- before it reaches the filesystem. The substring test is the
+		// form CodeQL's go/path-injection recognises as a sanitizer; it
+		// also refuses a folder whose name holds "..", which the refusal
+		// message names.
 		if !filepath.IsAbs(req.CardPath) || strings.Contains(req.CardPath, "..") {
 			refuse(errFolderPath)
 			return
@@ -1012,6 +1016,17 @@ func (s *StatusServer) handleActionIngestStart(w http.ResponseWriter, r *http.Re
 	go func() {
 		defer s.ingestBatch.Store(false)
 		for _, p := range paths {
+			// The acceptance check above and TriggerIngest's gate.Lock are
+			// not atomic, and the gate is released between volumes: a
+			// prune or update that takes it meanwhile would leave this
+			// goroutine blocked behind it, where CancelIngest can't reach
+			// it (and an update's restart drops it). Re-check before each
+			// volume and end the batch instead; the window shows the batch
+			// as finished and the operator can start it again.
+			if s.Actions.GateHeld() {
+				log.Printf("tray: ingest-start: batch stopped before %s: %v", p, errGateHeld)
+				return
+			}
 			if s.Actions.TriggerIngest(ctx, p).Canceled {
 				return
 			}
@@ -1042,6 +1057,10 @@ func (s *StatusServer) handleActionCancelIngest(w http.ResponseWriter, _ *http.R
 // GET /api/status) still reports the true total.
 const failedRowsDefaultLimit = 200
 
+// failedRowsMaxLimit is the largest ?limit= GET /api/queue/failed accepts:
+// the store scan and the response body grow with it.
+const failedRowsMaxLimit = 1000
+
 type queueFailedResult struct {
 	// Configured is false when no offline queue is wired; Rows is then
 	// empty, which is not an error.
@@ -1052,7 +1071,7 @@ type queueFailedResult struct {
 // handleQueueFailed lists FAILED queue rows for the window's failed-rows
 // list -- read-only, but behind the same origin and token checks as
 // every other /api/* route, since a row carries local file paths.
-// ?limit=N overrides failedRowsDefaultLimit.
+// ?limit=N (1..failedRowsMaxLimit) overrides failedRowsDefaultLimit.
 func (s *StatusServer) handleQueueFailed(w http.ResponseWriter, r *http.Request) {
 	if s.Actions == nil {
 		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
@@ -1061,8 +1080,8 @@ func (s *StatusServer) handleQueueFailed(w http.ResponseWriter, r *http.Request)
 	limit := failedRowsDefaultLimit
 	if v := r.URL.Query().Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			http.Error(w, "limit must be a positive whole number", http.StatusBadRequest)
+		if err != nil || n < 1 || n > failedRowsMaxLimit {
+			http.Error(w, fmt.Sprintf("limit must be a whole number from 1 to %d", failedRowsMaxLimit), http.StatusBadRequest)
 			return
 		}
 		limit = n

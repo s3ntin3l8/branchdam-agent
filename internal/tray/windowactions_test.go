@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,10 +176,21 @@ func TestRunnerFailedQueueRows(t *testing.T) {
 }
 
 func newWindowActionServer(a *spyActions) *http.ServeMux {
+	return newWindowActionStatusServer(a).mux
+}
+
+type windowActionServer struct {
+	s   *StatusServer
+	mux *http.ServeMux
+}
+
+// newWindowActionStatusServer is newWindowActionServer that also returns
+// the StatusServer, for tests that watch its batch state.
+func newWindowActionStatusServer(a *spyActions) windowActionServer {
 	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Actions: a}
 	mux := http.NewServeMux()
 	s.registerAPIRoutes(mux)
-	return mux
+	return windowActionServer{s: s, mux: mux}
 }
 
 func postIngestStart(t *testing.T, mux *http.ServeMux, cardPath string) (int, ingestStartResult) {
@@ -250,6 +262,35 @@ func TestIngestStartImportsPickedFolder(t *testing.T) {
 	}
 	if p := receivePaths(t, a.ingested, 1); p[0] != dir {
 		t.Errorf("ingested %v, want [%s]", p, dir)
+	}
+}
+
+// TestIngestStartStopsWhenGateTakenAfterAcceptance: a prune or update that
+// takes the gate between ingest-start's acceptance and the batch reaching
+// TriggerIngest ends the batch instead of leaving it blocked on the gate.
+func TestIngestStartStopsWhenGateTakenAfterAcceptance(t *testing.T) {
+	var calls atomic.Int32
+	a := &spyActions{
+		nowVolumes: []string{"/Volumes/A", "/Volumes/B"},
+		ingested:   make(chan string, 2),
+		// Free at acceptance, held from then on.
+		gateHeldFn: func() bool { return calls.Add(1) > 1 },
+	}
+	srv := newWindowActionStatusServer(a)
+	if code, got := postIngestStart(t, srv.mux, ""); code != http.StatusAccepted || !got.Started {
+		t.Fatalf("ingest-start = %d %+v, want 202 started", code, got)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for srv.s.ingestBatch.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("batch still marked running after the gate was taken")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case p := <-a.ingested:
+		t.Errorf("batch ingested %s while another holder had the gate", p)
+	default:
 	}
 }
 
@@ -326,6 +367,11 @@ func TestHandleQueueFailed(t *testing.T) {
 	mux.ServeHTTP(rec, newAuthedRequest(http.MethodGet, "/api/queue/failed?limit=0", nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("?limit=0 = %d, want 400", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, newAuthedRequest(http.MethodGet, fmt.Sprintf("/api/queue/failed?limit=%d", failedRowsMaxLimit+1), nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("?limit=%d = %d, want 400", failedRowsMaxLimit+1, rec.Code)
 	}
 
 	a.failedErr = ErrQueueNotConfigured

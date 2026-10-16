@@ -198,6 +198,7 @@ type spyActions struct {
 	// ingest-start / cancel / failed-row state (window actions).
 	busy             bool
 	gateHeld         bool
+	gateHeldFn       func() bool // overrides gateHeld when set; may be called concurrently
 	configIncomplete bool
 	nowVolumes       []string
 	watchDirs        []string
@@ -229,10 +230,15 @@ func (a *spyActions) CancelIngest() bool {
 	return a.cancelResult
 }
 func (a *spyActions) Busy() (string, time.Time, bool) { return "", time.Time{}, a.busy }
-func (a *spyActions) GateHeld() bool                  { return a.gateHeld }
-func (a *spyActions) ConfigIncomplete() bool          { return a.configIncomplete }
-func (a *spyActions) IngestNowVolumes() []string      { return a.nowVolumes }
-func (a *spyActions) WatchDirs() []string             { return a.watchDirs }
+func (a *spyActions) GateHeld() bool {
+	if a.gateHeldFn != nil {
+		return a.gateHeldFn()
+	}
+	return a.gateHeld
+}
+func (a *spyActions) ConfigIncomplete() bool     { return a.configIncomplete }
+func (a *spyActions) IngestNowVolumes() []string { return a.nowVolumes }
+func (a *spyActions) WatchDirs() []string        { return a.watchDirs }
 func (a *spyActions) FailedQueueRows(_ context.Context, limit int) ([]FailedQueueRow, error) {
 	a.failedLimit = limit
 	return a.failedRows, a.failedErr
