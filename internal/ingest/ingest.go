@@ -347,7 +347,7 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 	fr := FileResult{SourcePath: srcPath}
 
 	ext := extNoDot(srcPath)
-	fr.IsSidecar = ext == "xmp" || ext == "srt"
+	fr.IsSidecar = isSidecarExt(ext)
 
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {

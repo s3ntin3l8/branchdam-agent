@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,7 @@ type recordingUploader struct {
 	bodies     [][]byte
 	beforeRead func(opts branchdam.UploadOptions)
 	relPath    func(opts branchdam.UploadOptions) string
+	status     string // default "UPLOADED"
 	err        error
 }
 
@@ -46,9 +48,13 @@ func (u *recordingUploader) Upload(_ context.Context, r io.Reader, opts branchda
 	if u.relPath != nil {
 		rel = u.relPath(opts)
 	}
+	status := "UPLOADED"
+	if u.status != "" {
+		status = u.status
+	}
 	return &branchdam.UploadResponse{
 		NodeUUID:     fmt.Sprintf("node-%d", len(u.calls)),
-		Status:       "UPLOADED",
+		Status:       status,
 		BytesWritten: int64(len(body)),
 		Blake3Hash:   blake3Bytes(body),
 		RelativePath: rel,
@@ -369,6 +375,20 @@ func TestUploadStreamSidecarDeferredWithMaster(t *testing.T) {
 	if len(u.calls) != 0 {
 		t.Errorf("upload calls = %d, want 0", len(u.calls))
 	}
+
+	// Re-inserting the card while still metered reuses both local copies:
+	// neither the master nor its sidecar is copied off the card again.
+	res, err = e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("second IngestCard: %v", err)
+	}
+	for _, fr := range res.Files {
+		if fr.Err != nil || !fr.Deferred || fr.Write.SizeBytes != 0 {
+			t.Errorf("%s on re-insert: Err=%v Deferred=%v copied=%d bytes; want deferred with no copy",
+				fr.SourcePath, fr.Err, fr.Deferred, fr.Write.SizeBytes)
+		}
+	}
+	noAgentTemps(t, localRoot)
 }
 
 // TestUploadStreamFailureLeavesNoLocalFiles: a failed upload removes the
@@ -416,6 +436,59 @@ func TestUploadStreamLocalConflictNeverOverwrites(t *testing.T) {
 		t.Errorf("existing local file changed to %q", b)
 	}
 	noAgentTemps(t, localRoot)
+}
+
+// TestUploadStreamDeduplicatedPlacesAtExistingPath: the server already
+// holds the content and answers DEDUPLICATED with the existing node's
+// relativePath. The verified local copy lands at that path (not the
+// template's), and when an identical file is already there it is kept as
+// is -- the upload is a success either way, and nothing is overwritten.
+func TestUploadStreamDeduplicatedPlacesAtExistingPath(t *testing.T) {
+	const content = "already archived bytes"
+	for _, tc := range []struct {
+		name        string
+		preexisting bool
+	}{
+		{"placed at the existing path", false},
+		{"identical file already there is kept", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cardRoot := filepath.Join(dir, "card")
+			localRoot := filepath.Join(dir, "local")
+			writeUploadCardFile(t, cardRoot, "IMG_0002.JPG", content, time.Time{})
+			want := filepath.Join(localRoot, "2025", "EARLIER.JPG")
+			if tc.preexisting {
+				writeUploadCardFile(t, localRoot, "2025/EARLIER.JPG", content, time.Time{})
+			}
+
+			u := &recordingUploader{
+				status:  "DEDUPLICATED",
+				relPath: func(branchdam.UploadOptions) string { return "2025/EARLIER.JPG" },
+			}
+			res, err := newUploadEngine(u, localRoot).IngestCard(context.Background(), cardRoot)
+			if err != nil {
+				t.Fatalf("IngestCard: %v", err)
+			}
+			fr := res.Files[0]
+			if fr.Err != nil {
+				t.Fatalf("file error: %v", fr.Err)
+			}
+			if fr.LocalPath != want {
+				t.Errorf("LocalPath = %q, want the existing node's path %q", fr.LocalPath, want)
+			}
+			if b, err := os.ReadFile(want); err != nil || string(b) != content {
+				t.Errorf("local copy = %q, %v; want %q", b, err, content)
+			}
+			if _, err := os.Stat(filepath.Join(localRoot, "2026", "IMG_0002.JPG")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("template path has a file (err %v); the copy belongs only at the server's path", err)
+			}
+			if len(u.calls) != 1 {
+				t.Errorf("upload calls = %d, want 1", len(u.calls))
+			}
+			noAgentTemps(t, localRoot)
+		})
+	}
 }
 
 // TestUploadStreamCancelStopsBeforeHeldSidecars: the sidecars held back

@@ -73,10 +73,11 @@ func WithUploadIdleTimeout(d time.Duration) Option {
 // uploadTransport is secureTransport plus the per-phase deadlines that
 // stand in for the total timeout the upload client deliberately lacks:
 // connect, TLS handshake and (after the body is sent) response headers.
-// The body phase itself is guarded by Upload's idle watchdog.
+// The body phase itself is guarded by Upload's idle watchdog. Like every
+// other agent call it ignores HTTP(S)_PROXY, so uploads reach the server
+// the same way the handshake does.
 func uploadTransport() *http.Transport {
 	tr := secureTransport()
-	tr.Proxy = http.ProxyFromEnvironment
 	tr.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	tr.TLSHandshakeTimeout = 30 * time.Second
 	tr.ResponseHeaderTimeout = DefaultUploadResponseTimeout
@@ -123,13 +124,24 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions)
 		body = http.NoBody
 	}
 
+	upCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	idle := c.uploadIdleTimeout
+	if idle <= 0 {
+		idle = DefaultUploadIdleTimeout
+	}
+	onIdle := func() {
+		cancel(fmt.Errorf("%w: no bytes sent for %s", ErrUploadStalled, idle))
+	}
+
 	// Small bodies are read into memory so they can be signed; see
 	// UploadSignMaxBytes. Reading one byte past the cap tells a small
 	// body of unknown size apart from a large one without consuming more
-	// than that of a large one.
+	// than that of a large one. The read is bound by ctx and the idle
+	// watchdog like the request itself.
 	var signBody []byte
 	if opts.SizeBytes <= UploadSignMaxBytes {
-		prefix, err := io.ReadAll(io.LimitReader(body, UploadSignMaxBytes+1))
+		prefix, err := readPrefix(upCtx, body, UploadSignMaxBytes+1, idle, onIdle)
 		if err != nil {
 			return nil, fmt.Errorf("branchdam: read upload body: %w", err)
 		}
@@ -141,15 +153,7 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions)
 		}
 	}
 
-	upCtx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	idle := c.uploadIdleTimeout
-	if idle <= 0 {
-		idle = DefaultUploadIdleTimeout
-	}
-	watched := newIdleReader(body, idle, func() {
-		cancel(fmt.Errorf("%w: no bytes sent for %s", ErrUploadStalled, idle))
-	})
+	watched := newIdleReader(body, idle, onIdle)
 	defer watched.stop()
 
 	req, err := http.NewRequestWithContext(upCtx, http.MethodPost, c.baseURL+uploadPath, watched)
@@ -230,6 +234,32 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions)
 	return &out, nil
 }
 
+// readPrefix reads up to n bytes of r, returning early with ctx's cause
+// once ctx is done -- including when r stops producing bytes for idle,
+// which calls onIdle. The read runs on its own goroutine because a Read
+// blocked in the kernel (a hung network mount) ignores ctx; on an early
+// return that goroutine is abandoned until the Read returns, and r must
+// not be used again.
+func readPrefix(ctx context.Context, r io.Reader, n int64, idle time.Duration, onIdle func()) ([]byte, error) {
+	watched := newIdleReader(r, idle, onIdle)
+	defer watched.stop()
+	type result struct {
+		b   []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		b, err := io.ReadAll(io.LimitReader(watched, n))
+		done <- result{b, err}
+	}()
+	select {
+	case res := <-done:
+		return res.b, res.err
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	}
+}
+
 // idleReader wraps an upload body and calls onIdle once if no Read
 // returns data for timeout. The http.Transport reads the body from its
 // own goroutine as fast as the socket accepts it, so a Read that blocks
@@ -238,18 +268,22 @@ type idleReader struct {
 	r       io.Reader
 	timeout time.Duration
 
-	mu      sync.Mutex
-	timer   *time.Timer
-	stopped bool
+	mu       sync.Mutex
+	timer    *time.Timer
+	lastData time.Time // last Read that returned bytes
+	stopped  bool
 }
 
 func newIdleReader(r io.Reader, timeout time.Duration, onIdle func()) *idleReader {
-	ir := &idleReader{r: r, timeout: timeout}
+	ir := &idleReader{r: r, timeout: timeout, lastData: time.Now()}
 	ir.timer = time.AfterFunc(timeout, func() {
 		ir.mu.Lock()
-		stopped := ir.stopped
+		// A Read that returned data after this firing was scheduled
+		// re-armed the timer; the stream is moving, so this firing is
+		// stale and the re-armed one decides.
+		idle := !ir.stopped && time.Since(ir.lastData) >= ir.timeout
 		ir.mu.Unlock()
-		if !stopped {
+		if idle {
 			onIdle()
 		}
 	})
@@ -261,6 +295,7 @@ func (ir *idleReader) Read(p []byte) (int, error) {
 	ir.mu.Lock()
 	if !ir.stopped {
 		if n > 0 {
+			ir.lastData = time.Now()
 			ir.timer.Reset(ir.timeout)
 		}
 		if err == io.EOF {

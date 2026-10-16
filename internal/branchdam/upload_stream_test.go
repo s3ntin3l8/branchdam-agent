@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -125,6 +126,55 @@ func TestUploadIdleTimeout(t *testing.T) {
 	})
 }
 
+// TestUploadSignReadIsBounded: a small body whose Read blocks (a hung
+// network mount under the local edit root) never hangs Upload: the read
+// that buffers it for signing ends with ctx, or with ErrUploadStalled once
+// the idle timeout passes, and the server is never contacted.
+func TestUploadSignReadIsBounded(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	t.Run("cancelled", func(t *testing.T) {
+		block := make(chan struct{})
+		t.Cleanup(func() { close(block) })
+		c := New(srv.URL, "k", WithUploadIdleTimeout(time.Hour))
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(100*time.Millisecond, cancel)
+		start := time.Now()
+		_, err := c.Upload(ctx, blockingReader(block), UploadOptions{SizeBytes: 11})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		if el := time.Since(start); el > 5*time.Second {
+			t.Errorf("Upload returned %s after cancel", el)
+		}
+	})
+	t.Run("stalled", func(t *testing.T) {
+		block := make(chan struct{})
+		t.Cleanup(func() { close(block) })
+		c := New(srv.URL, "k", WithUploadIdleTimeout(200*time.Millisecond))
+		_, err := c.Upload(context.Background(), blockingReader(block), UploadOptions{})
+		if !errors.Is(err, ErrUploadStalled) {
+			t.Fatalf("err = %v, want ErrUploadStalled", err)
+		}
+	})
+	if n := hits.Load(); n != 0 {
+		t.Errorf("server contacted %d times; a body that was never read must not be sent", n)
+	}
+}
+
+// blockingReader blocks every Read until ch is closed, then reports EOF.
+type blockingReader chan struct{}
+
+func (b blockingReader) Read([]byte) (int, error) {
+	<-b
+	return 0, io.EOF
+}
+
 type zeroReader struct{}
 
 func (zeroReader) Read(p []byte) (int, error) {
@@ -166,8 +216,10 @@ func TestUploadSignsSmallBodies(t *testing.T) {
 	}
 }
 
-// TestUploadLargeBodyStreamsUnsigned: above UploadSignMaxBytes the body is
-// streamed (never buffered) and sent with the API key only.
+// TestUploadLargeBodyStreamsUnsigned: a body whose known size is above
+// UploadSignMaxBytes is streamed without being buffered and sent with the
+// API key only. (A body of unknown size has up to UploadSignMaxBytes+1
+// bytes buffered first, to find out which side of the cap it is on.)
 func TestUploadLargeBodyStreamsUnsigned(t *testing.T) {
 	size := UploadSignMaxBytes + 1
 	var gotSig, gotLen string

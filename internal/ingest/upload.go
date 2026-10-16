@@ -362,7 +362,10 @@ func placeLocalCopy(ctx context.Context, tmpPath, finalPath, wantHash string) (p
 		_ = os.Remove(tmpPath)
 		return false, err
 	}
-	for _, dir := range uniqueDirs(filepath.Dir(tmpPath), filepath.Dir(finalPath)) {
+	// renameNoClobber already fsynced the destination directory. When the
+	// temp copy was staged elsewhere, its directory lost an entry too;
+	// sync that one so the move is durable on both sides.
+	if dir := filepath.Dir(tmpPath); dir != filepath.Dir(finalPath) {
 		if dirErr := syncParentDirFn(dir); dirErr != nil {
 			slog.Warn("upload: dir fsync failed; entry may not be durable on power loss", "dir", dir, "err", dirErr)
 		}
@@ -370,18 +373,21 @@ func placeLocalCopy(ctx context.Context, tmpPath, finalPath, wantHash string) (p
 	return true, nil
 }
 
-func uniqueDirs(a, b string) []string {
-	if a == b {
-		return []string{a}
-	}
-	return []string{a, b}
-}
-
 // deferUpload keeps a verified local edit copy and reports the file
 // Deferred: nothing reached the server, so the card stays the only copy
 // outside this workstation.
 func (e *Engine) deferUpload(ctx context.Context, fr FileResult, it uploadItem) FileResult {
 	localPath := it.deferredLocalPath
+	if localPath != "" && filesMatch(it.srcPath, localPath) {
+		// A sidecar deferred with its master: an earlier deferred pass
+		// already left these bytes beside it -- the master's own
+		// AlreadyIngested check, applied at the master's directory.
+		fr.LocalPath = localPath
+		fr.Skipped = true
+		fr.Deferred = true
+		fr.SkipReason = deferredUploadReason
+		return fr
+	}
 	if localPath == "" {
 		res := ResolveDestination([]string{e.Ingest.LocalEditRoot}, e.Ingest.PathTemplate, it.vars, it.srcPath, "")
 		localPath = filepath.Join(e.Ingest.LocalEditRoot, res.RelPath)
