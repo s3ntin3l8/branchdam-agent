@@ -142,7 +142,9 @@ func (o OfflineConfig) DrainIntervalSecsOrDefault() int {
 // PruneConfig configures the `prune` subcommand (branchdam#230-adjacent):
 // deleting this workstation's own LocalEditRoot mirror of a file once
 // POST /api/v1/agent/node-status confirms the Tier-3 archive copy is live
-// and hash-verified. Only applies to offline-ingested files tracked in
+// and hash-verified and returns a fullHash equal to the one recorded for
+// the file at ingest (a server that returns no fullHash prunes nothing).
+// Only applies to offline-ingested files tracked in
 // queue.db -- online `ingest` records rows too (origin ONLINE, for
 // registration retries), but its edit copies are kept and out of scope. This is NOT real Tier-1 LOCAL_SCRATCH pruning
 // (Resolve caches/proxies) -- that stays architecturally blocked; see
