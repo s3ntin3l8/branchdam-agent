@@ -1,7 +1,9 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -439,7 +441,7 @@ func TestUploadStreamReinsertMovesTheDeferredCopy(t *testing.T) {
 			cardRoot := filepath.Join(dir, "card")
 			localRoot := filepath.Join(dir, "local")
 			const content = "card bytes"
-			writeUploadCardFile(t, cardRoot, "IMG_0001.JPG", content, time.Time{})
+			src := writeUploadCardFile(t, cardRoot, "IMG_0001.JPG", content, time.Time{})
 
 			u := &recordingUploader{relPath: func(branchdam.UploadOptions) string { return "2026/IMG_0001_2.JPG" }}
 			e := newUploadEngine(u, localRoot)
@@ -460,6 +462,16 @@ func TestUploadStreamReinsertMovesTheDeferredCopy(t *testing.T) {
 				}
 			}
 
+			// The lookup must not read the card again: once the file is
+			// copied off it, the card is rewritten (same size, other bytes)
+			// before the upload body is read -- and so before the lookup. A
+			// lookup that sampled the card would no longer match the
+			// deferred copy and would leave it behind.
+			u.beforeRead = func(branchdam.UploadOptions) {
+				if err := os.WriteFile(src, []byte("CARD BYTES"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			e.IsMetered = func() (bool, error) { return false, nil }
 			res, err := e.IngestCard(context.Background(), cardRoot)
 			if err != nil {
@@ -533,6 +545,109 @@ func TestUploadStreamReinsertMovesADeferredSidecar(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(localRoot, "2026", name)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("deferred copy %s still at its own name (err %v); want it moved", name, err)
 		}
+	}
+	noAgentTemps(t, localRoot)
+}
+
+// TestUploadStreamReinsertMovesASuffixedDeferredCopy: when the metered
+// pass found its name taken by another file, its copy took a collision
+// suffix; the re-insert's sweep still finds that copy and moves it to the
+// server's path, and the file that held the name is left alone.
+func TestUploadStreamReinsertMovesASuffixedDeferredCopy(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	localRoot := filepath.Join(dir, "local")
+	const content = "card bytes"
+	writeUploadCardFile(t, cardRoot, "IMG_0001.JPG", content, time.Time{})
+	other := filepath.Join(localRoot, "2026", "IMG_0001.JPG")
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte("a user's own file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	u := &recordingUploader{relPath: func(branchdam.UploadOptions) string { return "2026/IMG_0001_7.JPG" }}
+	e := newUploadEngine(u, localRoot)
+	e.Ingest.PauseUploadOnMetered = true
+	e.IsMetered = func() (bool, error) { return true, nil }
+	if _, err := e.IngestCard(context.Background(), cardRoot); err != nil {
+		t.Fatalf("metered IngestCard: %v", err)
+	}
+	deferred := filepath.Join(localRoot, "2026", "IMG_0001_2.JPG")
+	if b, err := os.ReadFile(deferred); err != nil || string(b) != content {
+		t.Fatalf("suffixed deferred copy = %q, %v; want %q", b, err, content)
+	}
+
+	e.IsMetered = func() (bool, error) { return false, nil }
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("unmetered IngestCard: %v", err)
+	}
+	if fr := res.Files[0]; fr.Err != nil {
+		t.Fatalf("file error: %v", fr.Err)
+	}
+	server := filepath.Join(localRoot, "2026", "IMG_0001_7.JPG")
+	if b, err := os.ReadFile(server); err != nil || string(b) != content {
+		t.Errorf("copy at the server's path = %q, %v; want %q", b, err, content)
+	}
+	if _, err := os.Stat(deferred); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("suffixed deferred copy still in place (err %v); want it moved", err)
+	}
+	if b, err := os.ReadFile(other); err != nil || string(b) != "a user's own file" {
+		t.Errorf("the file holding the unsuffixed name = %q, %v; want it untouched", b, err)
+	}
+	noAgentTemps(t, localRoot)
+}
+
+// TestUploadStreamReinsertWarnsForEveryDeferredCopyLeftBehind: when the
+// server's path is already taken, no deferred copy can move there; each
+// verified copy found is named in its own WARN rather than the sweep
+// stopping at the first.
+func TestUploadStreamReinsertWarnsForEveryDeferredCopyLeftBehind(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	localRoot := filepath.Join(dir, "local")
+	const content = "card bytes"
+	writeUploadCardFile(t, cardRoot, "IMG_0001.JPG", content, time.Time{})
+	day := filepath.Join(localRoot, "2026")
+	if err := os.MkdirAll(day, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Two identical earlier copies, and one already at the server's path.
+	for _, name := range []string{"IMG_0001.JPG", "IMG_0001_2.JPG", "IMG_0001_9.JPG"} {
+		if err := os.WriteFile(filepath.Join(day, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logs := captureSlog(t)
+
+	u := &recordingUploader{relPath: func(branchdam.UploadOptions) string { return "2026/IMG_0001_9.JPG" }}
+	res, err := newUploadEngine(u, localRoot).IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	if fr := res.Files[0]; fr.Err != nil {
+		t.Fatalf("file error: %v", fr.Err)
+	}
+	for _, name := range []string{"IMG_0001.JPG", "IMG_0001_2.JPG", "IMG_0001_9.JPG"} {
+		if b, err := os.ReadFile(filepath.Join(day, name)); err != nil || string(b) != content {
+			t.Errorf("%s = %q, %v; want it kept", name, b, err)
+		}
+	}
+	warned := map[string]bool{}
+	dec := json.NewDecoder(bytes.NewReader(logs.Bytes()))
+	for {
+		var rec map[string]any
+		if err := dec.Decode(&rec); err != nil {
+			break
+		}
+		if rec["level"] == "WARN" && strings.Contains(fmt.Sprint(rec["msg"]), "earlier deferred copy stays") {
+			warned[filepath.Base(fmt.Sprint(rec["deferred"]))] = true
+		}
+	}
+	if !warned["IMG_0001.JPG"] || !warned["IMG_0001_2.JPG"] || len(warned) != 2 {
+		t.Errorf("WARNs named %v, want IMG_0001.JPG and IMG_0001_2.JPG", warned)
 	}
 	noAgentTemps(t, localRoot)
 }

@@ -459,7 +459,7 @@ func (e *Engine) streamUpload(ctx context.Context, fr FileResult, it uploadItem)
 	localPath := filepath.Join(e.Ingest.LocalEditRoot, rel)
 	fr.LocalPath = localPath
 
-	if moved := e.moveDeferredCopy(ctx, it, localPath, fr.Write.FullHash); moved {
+	if moved := e.moveDeferredCopy(ctx, it, localPath, fr.Write.FullHash, fr.Write.SizeBytes); moved {
 		_ = os.Remove(tmpPath)
 		e.localPHash(ctx, &fr, localPath)
 		return fr
@@ -492,53 +492,74 @@ func (e *Engine) streamUpload(ctx context.Context, fr FileResult, it uploadItem)
 //
 // The candidates are the names a deferred pass can have used: the card's
 // own base name (what deferUpload rendered) and, for a sidecar, the
-// master-derived upload name. Only the template's unsuffixed render is
-// probed, and it is compared against the hash already in hand, so the
-// card is not read again. A deferred copy that itself took a collision
-// suffix is not found and stays where it is.
-func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath, wantHash string) bool {
+// master-derived upload name -- each unsuffixed and with the collision
+// suffixes (_2, _3, ...) ResolveDestination gives a copy whose name was
+// taken. The sweep Lstats each render and stops at the first suffix that
+// is absent; only a regular file of the uploaded size is compared, against
+// the hash already in hand, so the card is not read again.
+func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath, wantHash string, wantSize int64) bool {
 	names := []string{it.vars.OriginalName}
 	if it.uploadName != "" && it.uploadName != it.vars.OriginalName {
 		names = append(names, it.uploadName)
 	}
 	for _, name := range names {
-		vars := it.vars
-		vars.OriginalName = name
-		prior := filepath.Join(e.Ingest.LocalEditRoot, RenderPath(e.Ingest.PathTemplate, vars))
-		if prior == localPath {
-			continue // placeLocalCopy keeps an identical file there
-		}
-		if info, err := os.Lstat(prior); err != nil || !info.Mode().IsRegular() {
-			continue
-		}
-		if vr, err := Verify(prior, wantHash, WithContext(ctx)); err != nil || !vr.Verified {
-			slog.Debug("upload: the file at the deferred name does not verify against the uploaded BLAKE3; leaving it in place",
-				"path", prior, "err", err)
-			continue
-		}
-		if _, err := os.Lstat(localPath); !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("upload: an earlier deferred copy stays at its own name; the server placed this file elsewhere",
-				"deferred", prior, "local", localPath)
-			return false
-		}
-		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
-			slog.Warn("upload: could not move the earlier deferred copy", "deferred", prior, "local", localPath, "err", err)
-			return false
-		}
-		if err := renameNoClobber(prior, localPath); err != nil {
-			slog.Warn("upload: could not move the earlier deferred copy", "deferred", prior, "local", localPath, "err", err)
-			return false
-		}
-		if dir := filepath.Dir(prior); dir != filepath.Dir(localPath) {
-			if dirErr := syncParentDirFn(dir); dirErr != nil {
-				slog.Warn("upload: dir fsync failed; entry may not be durable on power loss", "dir", dir, "err", dirErr)
+		for counter := 1; counter <= maxDeferredSuffix; counter++ {
+			if ctx.Err() != nil {
+				return false
 			}
+			suffix := ""
+			if counter > 1 {
+				suffix = fmt.Sprintf("_%d", counter)
+			}
+			vars := it.vars
+			vars.OriginalName = SuffixedFilename(name, suffix)
+			prior := filepath.Join(e.Ingest.LocalEditRoot, RenderPath(e.Ingest.PathTemplate, vars))
+			if prior == localPath {
+				continue // placeLocalCopy keeps an identical file there
+			}
+			info, err := os.Lstat(prior)
+			if err != nil {
+				if counter > 1 {
+					break // suffixes are taken in order; none further along
+				}
+				continue
+			}
+			if !info.Mode().IsRegular() || info.Size() != wantSize {
+				continue
+			}
+			if vr, err := Verify(prior, wantHash, WithContext(ctx)); err != nil || !vr.Verified {
+				slog.Debug("upload: the file at the deferred name does not verify against the uploaded BLAKE3; leaving it in place",
+					"path", prior, "err", err)
+				continue
+			}
+			if _, err := os.Lstat(localPath); !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("upload: an earlier deferred copy stays at its own name; the server placed this file elsewhere",
+					"deferred", prior, "local", localPath)
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+				slog.Warn("upload: could not move the earlier deferred copy", "deferred", prior, "local", localPath, "err", err)
+				return false
+			}
+			if err := renameNoClobber(prior, localPath); err != nil {
+				slog.Warn("upload: could not move the earlier deferred copy", "deferred", prior, "local", localPath, "err", err)
+				return false
+			}
+			if dir := filepath.Dir(prior); dir != filepath.Dir(localPath) {
+				if dirErr := syncParentDirFn(dir); dirErr != nil {
+					slog.Warn("upload: dir fsync failed; entry may not be durable on power loss", "dir", dir, "err", dirErr)
+				}
+			}
+			slog.Info("upload: moved the earlier deferred copy to the server's path", "from", prior, "to", localPath)
+			return true
 		}
-		slog.Info("upload: moved the earlier deferred copy to the server's path", "from", prior, "to", localPath)
-		return true
 	}
 	return false
 }
+
+// maxDeferredSuffix bounds moveDeferredCopy's suffix sweep at the same
+// counter ResolveDestination's own collision loop stops at.
+const maxDeferredSuffix = 10000
 
 // uploadLocalCopy streams the verified local copy at p to the server.
 func (e *Engine) uploadLocalCopy(ctx context.Context, p string, w WriteResult, it uploadItem) (*branchdam.UploadResponse, error) {
