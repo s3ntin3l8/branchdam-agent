@@ -134,6 +134,44 @@ func TestDrainFailsRowOnRepeatedArchiveReadBackMismatch(t *testing.T) {
 	}
 }
 
+// TestDrainResetRowGetsItsGraceRetryAgain: ResetFailed zeroes the attempt
+// counter but keeps archive_copy_last_error, so the stale mismatch text
+// alone must not fail the row on the first mismatch after a reset.
+func TestDrainResetRowGetsItsGraceRetryAgain(t *testing.T) {
+	dir := t.TempDir()
+	store := openStoreT(t)
+	seedMediaRow(t, store, dir, "uuid-reset", []byte("as-ingested"))
+
+	orig := archiveVerifyFn
+	archiveVerifyFn = func(path, _ string, _ ...WriteOption) (VerifyResult, error) {
+		return VerifyResult{Path: path, Method: VerifyMethodUnbuffered, Hash: "garbled", Verified: false}, nil
+	}
+	t.Cleanup(func() { archiveVerifyFn = orig })
+
+	ctx := context.Background()
+	t0 := time.Unix(1_800_000_000, 0)
+	for i, at := range []time.Time{t0, t0.Add(backoffCap)} {
+		if _, err := Drain(ctx, &fakeDrainClient{}, store, "agent-1", fixedNow(at)); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	if rec, _, _ := store.ByNodeUUID(ctx, "uuid-reset"); rec.ArchiveCopyStatus != queue.StatusFailed {
+		t.Fatalf("setup: status=%s after two mismatches, want FAILED", rec.ArchiveCopyStatus)
+	}
+
+	if _, err := store.ResetFailed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := Drain(ctx, &fakeDrainClient{}, store, "agent-1", fixedNow(t0.Add(2*backoffCap)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ := store.ByNodeUUID(ctx, "uuid-reset")
+	if stats.ArchiveCopiesFailed != 0 || rec.ArchiveCopyStatus != queue.StatusPending {
+		t.Fatalf("first mismatch after reset: failed=%d status=%s, want PENDING (one grace retry)", stats.ArchiveCopiesFailed, rec.ArchiveCopyStatus)
+	}
+}
+
 // TestDrainEditedLocalCopyStaysTerminal: once an edited local copy has
 // failed its row, later passes never pick the row up again -- even after
 // the backoff cap and even if the file is changed back.

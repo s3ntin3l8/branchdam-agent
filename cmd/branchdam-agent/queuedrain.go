@@ -123,8 +123,11 @@ func runDrainPass(w io.Writer, client *branchdam.Client, store *queue.Store, age
 	}
 	_, _ = fmt.Fprintf(w, "node_created submitted: %d, archive copies done: %d, archive copies permanently failed: %d, rebases done: %d, rebases permanently failed: %d, still pending: %d\n",
 		stats.NodeCreatedSent, stats.ArchiveCopiesDone, stats.ArchiveCopiesFailed, stats.RebasesDone, stats.RebasesFailed, stats.Remaining)
+	if stats.RowsCollected > 0 {
+		_, _ = fmt.Fprintf(w, "old finished rows collected: %d\n", stats.RowsCollected)
+	}
 	if stats.ArchiveCopiesFailed > 0 {
-		_, _ = fmt.Fprintln(w, "one or more archive copies hit a permanent failure (a different file already at the archive path, or a local copy edited since ingest) -- nothing was overwritten; see queue.db's archive_copy_last_error column; fix the cause, then run queue-drain -retry-failed")
+		_, _ = fmt.Fprintln(w, "one or more archive copies hit a permanent failure (a different file already at the archive path, a local copy edited since ingest, or an archive copy that read back wrong twice in a row) -- nothing was overwritten; see queue.db's archive_copy_last_error column; fix the cause, then run queue-drain -retry-failed")
 	}
 	if stats.RebasesFailed > 0 {
 		_, _ = fmt.Fprintln(w, "one or more rows hit a permanent (non-retryable) rebase failure -- see queue.db's rebase_last_error column; fix the cause, then run queue-drain -retry-failed")

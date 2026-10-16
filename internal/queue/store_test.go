@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -886,15 +887,20 @@ func TestMigrateV2ToV3AddsOriginDefaultingToOffline(t *testing.T) {
 
 // TestOpenEscapesAwkwardPaths: '?', '#', '%' and spaces in the queue.db
 // path must reach SQLite as part of the file name. Unescaped, SQLite reads
-// '?' as the start of URI parameters and opens a different (truncated)
-// path.
+// '?' as the start of URI parameters (and '#' as a fragment) and opens a
+// different (truncated) path. Windows forbids '?' in file names, so there
+// the path exercises '#', '%' and spaces only.
 func TestOpenEscapesAwkwardPaths(t *testing.T) {
 	parent := t.TempDir()
-	dir := filepath.Join(parent, "state dir?x=1#frag%41")
+	dirName, fileName := "state dir?x=1#frag%41", "queue 100%?.db"
+	if runtime.GOOS == "windows" {
+		dirName, fileName = "state dir #frag%41", "queue 100%#.db"
+	}
+	dir := filepath.Join(parent, dirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "queue 100%?.db")
+	path := filepath.Join(dir, fileName)
 	s, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open(%q): %v", path, err)
@@ -1054,5 +1060,22 @@ func TestCollectGarbageIfDueThrottles(t *testing.T) {
 	}
 	if n, err := s.CollectGarbageIfDue(ctx, now.Add(GCInterval)); err != nil || n != 1 {
 		t.Fatalf("sweep after GCInterval: n=%d err=%v, want 1", n, err)
+	}
+}
+
+// TestCollectGarbageIfDueRetriesAfterAFailedSweep: a sweep that errors
+// (here: ctx already cancelled) must not count as the day's sweep.
+func TestCollectGarbageIfDueRetriesAfterAFailedSweep(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	gcFixture(t, s, "gone", "done", GCRetention+24*time.Hour, false)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.CollectGarbageIfDue(cancelled, now); err == nil {
+		t.Fatal("sweep with a cancelled ctx returned no error")
+	}
+	if n, err := s.CollectGarbageIfDue(context.Background(), now.Add(time.Minute)); err != nil || n != 1 {
+		t.Fatalf("sweep after a failed one: n=%d err=%v, want it to run and collect 1", n, err)
 	}
 }

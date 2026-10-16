@@ -184,8 +184,11 @@ func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID 
 			// consecutive ErrArchiveVerifyMismatch (the previous attempt's
 			// recorded error says so) fails the row too, so a NAS that
 			// doesn't store the bytes it's given can't keep the row
-			// copying forever.
+			// copying forever. The attempt counter gates it as well:
+			// ResetFailed zeroes the counter but keeps last_error, and a
+			// row an operator just reset gets its grace retry again.
 			repeatMismatch := errors.Is(err, ErrArchiveVerifyMismatch) &&
+				r.ArchiveCopyAttempts > 0 &&
 				strings.Contains(r.ArchiveCopyLastError, ErrArchiveVerifyMismatch.Error())
 			if errors.Is(err, ErrArchiveConflict) || errors.Is(err, ErrLocalCopyMismatch) || repeatMismatch {
 				if markErr := store.MarkArchiveCopyFailed(ctx, r.NodeUUID, err.Error()); markErr == nil {

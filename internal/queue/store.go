@@ -177,8 +177,10 @@ type Store struct {
 	lastGC time.Time
 }
 
-// pragmas are applied by the driver to every new connection, in order --
-// busy_timeout first, so the others already wait on a locked database.
+// pragmas are applied by the driver to every new connection. The driver
+// (modernc.org/sqlite's applyQueryParams) decides the order: it runs
+// busy_timeout first, so the others already wait on a locked database,
+// then the rest sorted.
 // journal_mode=WAL + synchronous=FULL: every status-transition UPDATE in
 // this file (and the initial INSERT in InsertPending) fsyncs before its
 // call returns -- the durability floor the crash-safety AC depends on.
@@ -661,17 +663,28 @@ const GCRetention = 90 * 24 * time.Hour
 const GCInterval = 24 * time.Hour
 
 // CollectGarbageIfDue runs CollectGarbage(ctx, now, GCRetention) if no
-// sweep has run on this Store within GCInterval of now; otherwise it
-// returns (0, nil) without touching the database.
+// sweep has completed on this Store within GCInterval of now; otherwise it
+// returns (0, nil) without touching the database. A sweep that fails (a
+// locked database, ctx cancelled at shutdown) does not count, so the next
+// call tries again.
 func (s *Store) CollectGarbageIfDue(ctx context.Context, now time.Time) (int, error) {
 	s.gcMu.Lock()
-	if !s.lastGC.IsZero() && now.Sub(s.lastGC) < GCInterval {
+	prev := s.lastGC
+	if !prev.IsZero() && now.Sub(prev) < GCInterval {
 		s.gcMu.Unlock()
 		return 0, nil
 	}
-	s.lastGC = now
+	s.lastGC = now // claimed, so a concurrent caller doesn't sweep too
 	s.gcMu.Unlock()
-	return s.CollectGarbage(ctx, now, GCRetention)
+	n, err := s.CollectGarbage(ctx, now, GCRetention)
+	if err != nil {
+		s.gcMu.Lock()
+		if s.lastGC.Equal(now) {
+			s.lastGC = prev
+		}
+		s.gcMu.Unlock()
+	}
+	return n, err
 }
 
 // CollectGarbage deletes rows nothing will need again and returns how many.
