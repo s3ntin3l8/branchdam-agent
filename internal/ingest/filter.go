@@ -1,6 +1,8 @@
 package ingest
 
 import (
+	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 )
@@ -36,6 +38,54 @@ func shouldSkipByName(path string) (bool, string) {
 		return true, "OS metadata: dotfile " + base
 	}
 	return false, ""
+}
+
+// shouldSkipDir reports whether the card walk must not descend into the
+// directory at path: OS-maintained metadata directories whose files are
+// never camera media, and which IngestCard/IngestCardOffline used to walk
+// and ingest file by file (shouldSkipByName only ever saw the files inside,
+// e.g. ".Trashes/501/IMG_0001.JPG", whose basename passes):
+//
+//   - any directory whose name starts with ".", the directory form of
+//     shouldSkipByName's dotfile rule: ".Trashes" (macOS per-volume
+//     trash, which holds real-looking deleted photos), ".Spotlight-V100",
+//     ".fseventsd", ".TemporaryItems", ".DocumentRevisions-V100";
+//   - "System Volume Information" (Windows NTFS/exFAT metadata, e.g.
+//     WPSettings.dat, IndexerVolumeGuid);
+//   - "$RECYCLE.BIN" (Windows per-volume recycle bin).
+//
+// Names compare case-insensitively. root itself is never skipped, whatever
+// it is called -- the operator chose it.
+func shouldSkipDir(root, path string) (bool, string) {
+	if path == root {
+		return false, ""
+	}
+	base := filepath.Base(path)
+	switch lower := strings.ToLower(base); {
+	case lower == "system volume information":
+		return true, "OS metadata directory: System Volume Information (Windows volume metadata)"
+	case lower == "$recycle.bin":
+		return true, "OS metadata directory: $RECYCLE.BIN (Windows recycle bin)"
+	case strings.HasPrefix(base, "."):
+		return true, "OS metadata directory: " + base
+	}
+	return false, ""
+}
+
+// walkEntryError handles an error filepath.WalkDir reports for path while
+// walking a card rooted at root. An error on root itself (missing,
+// unreadable) is returned as fatal: there is no card to ingest. Any entry
+// below it -- typically a subdirectory that cannot be read -- is logged and
+// returned as entryErr for the caller to record as a failed entry, and the
+// walk continues: the files already ingested and the rest of the card are
+// still worth a result, and the failed entry keeps the summary from
+// reading OK (so auto-eject is withheld and the CLI exits non-zero).
+func walkEntryError(root, path string, err error) (entryErr, fatal error) {
+	if path == root {
+		return nil, err
+	}
+	slog.Warn("ingest: cannot read card entry, continuing with the rest of the card", "path", path, "err", err)
+	return fmt.Errorf("walk card: %w", err), nil
 }
 
 // shouldSkipByExtension reports whether ext should be skipped under the

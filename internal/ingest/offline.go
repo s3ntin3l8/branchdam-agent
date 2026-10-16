@@ -168,9 +168,17 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 	var result OfflineCardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return err
+			entryErr, fatal := walkEntryError(cardRoot, path, err)
+			if entryErr != nil {
+				result.Files = append(result.Files, OfflineFileResult{SourcePath: path, Err: entryErr})
+			}
+			return fatal
 		}
 		if d.IsDir() {
+			if skip, reason := shouldSkipDir(cardRoot, path); skip {
+				result.Files = append(result.Files, OfflineFileResult{SourcePath: path, Skipped: true, SkipReason: reason})
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if skip, reason := shouldSkipByName(path); skip {
