@@ -2,6 +2,8 @@ package ingest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -134,6 +136,10 @@ func TestIngestCardOfflineQueuesRowBeforeSubmission(t *testing.T) {
 	}
 	if payload.FilePath != rec.Tier0ContainerPath {
 		t.Errorf("stored payload FilePath = %q, want %q (Tier-0, not final archive path)", payload.FilePath, rec.Tier0ContainerPath)
+	}
+	wantSrcHash := sha256.Sum256([]byte(rec.SourcePath))
+	if payload.SourcePathHash == nil || *payload.SourcePathHash != hex.EncodeToString(wantSrcHash[:]) {
+		t.Errorf("stored payload SourcePathHash = %v, want sha256 of %q", payload.SourcePathHash, rec.SourcePath)
 	}
 }
 

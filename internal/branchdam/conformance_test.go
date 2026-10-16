@@ -78,6 +78,7 @@ func TestConformanceNodeCreatedFull(t *testing.T) {
 		MtimeUnix:          1752591000,
 		FastHash:           strPtr("a17463135ce85764"),
 		FullHash:           strPtr("d1b2c3a4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff"),
+		SourcePathHash:     strPtr("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"),
 		Phash:              int64Ptr(-4611686018427387903),
 		CameraModel:        strPtr("ILCE-7M4"),
 		CameraSerial:       strPtr("1234567"),
@@ -196,6 +197,7 @@ func TestConformancePathRebasedPayload(t *testing.T) {
 		TargetFileName: "DSC01234.ARW",
 		MtimeUnix:      1752591000,
 		FastHash:       strPtr("a17463135ce85764"),
+		FullHash:       strPtr("d1b2c3a4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff"),
 		SizeBytes:      52428800,
 	}
 	checkGolden(t, "path_rebased_payload.golden.json", marshalIndent(t, p))

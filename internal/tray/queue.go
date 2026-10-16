@@ -87,7 +87,10 @@ type Drainer interface {
 // tray-local mirror of internal/prune.Stats. At is set by
 // Runner.TriggerPrune, same reasoning as DrainSummary.At.
 type PruneSummary struct {
-	At         time.Time
+	At time.Time
+	// Duration is how long the pass took (stamped by TriggerPrune), what
+	// telemetry reports as lastPruneDurationMs.
+	Duration   time.Duration
 	Evaluated  int
 	Pruned     int
 	FreedBytes int64

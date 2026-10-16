@@ -493,6 +493,7 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 		GPSLatitude:  gpsLat,
 		GPSLongitude: gpsLon,
 	}
+	payload.SourcePathHash = strPtr(sourcePathHash(srcPath))
 	if exif != nil {
 		payload.CameraModel = strPtr(exif.CameraModel)
 		payload.CameraSerial = strPtr(exif.CameraSerial)

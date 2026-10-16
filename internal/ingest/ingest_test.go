@@ -139,6 +139,12 @@ func TestIngestCardBasicFlow(t *testing.T) {
 	if payload.FilenameStem == nil || *payload.FilenameStem != "img_0001" {
 		t.Errorf("FilenameStem = %v, want img_0001", payload.FilenameStem)
 	}
+	// sourcePathHash is SHA-256 of the card-side path, the same digest the
+	// streaming upload sends as X-Source-Path-Hash.
+	wantSrcHash := sha256.Sum256([]byte(filepath.Join(cardRoot, "IMG_0001.jpg")))
+	if payload.SourcePathHash == nil || *payload.SourcePathHash != hex.EncodeToString(wantSrcHash[:]) {
+		t.Errorf("SourcePathHash = %v, want sha256 of the source path %x", payload.SourcePathHash, wantSrcHash)
+	}
 
 	// Both destination copies exist with matching content.
 	archiveContent, err := os.ReadFile(fr.ArchivePath)

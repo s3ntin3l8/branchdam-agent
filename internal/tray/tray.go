@@ -378,6 +378,10 @@ type Runner struct {
 	// TriggerPrune are.
 	probeMu sync.Mutex
 
+	// telemetry is the POST /api/v1/agent/telemetry wiring -- see
+	// telemetry.go.
+	telemetry telemetryDeps
+
 	// scratchUsageMu is its own dedicated mutex, same reasoning as
 	// drainMu/probeMu above -- but here the concern isn't lock ordering
 	// with an ingest/drain/update, it's that Status() must NEVER call the
@@ -1419,8 +1423,10 @@ func (r *Runner) TriggerPrune(ctx context.Context) (summary PruneSummary, ran bo
 		r.mu.Unlock()
 	}()
 
+	pruneStart := time.Now()
 	summary, err := pruner.Prune(ctx)
 	summary.At = time.Now()
+	summary.Duration = summary.At.Sub(pruneStart)
 	if err != nil {
 		summary.Err = err
 	}

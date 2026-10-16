@@ -2,8 +2,6 @@ package ingest
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -550,13 +548,12 @@ func (e *Engine) uploadLocalCopy(ctx context.Context, p string, w WriteResult, i
 	}
 	defer func() { _ = f.Close() }()
 
-	srcPathHash := sha256.Sum256([]byte(it.srcPath))
 	opts := branchdam.UploadOptions{
 		Filename:         it.uploadName,
 		CameraModel:      it.cameraModel,
 		CaptureTimestamp: it.captureTimestamp,
 		Blake3Hash:       w.FullHash,
-		SourcePathHash:   hex.EncodeToString(srcPathHash[:]),
+		SourcePathHash:   sourcePathHash(it.srcPath),
 		SizeBytes:        w.SizeBytes,
 	}
 	body := &progressReader{r: f}

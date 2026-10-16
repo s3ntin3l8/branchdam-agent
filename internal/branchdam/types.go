@@ -59,14 +59,20 @@ type NodeCreatedPayload struct {
 	// is always re-derived from FilePath via storage.Guard.Resolve. Kept
 	// here only so an existing payload still round-trips; never send it
 	// expecting effect.
-	StorageLocationID  int64   `json:"storageLocationId,omitempty"`
-	FilePath           string  `json:"filePath"`
-	FileName           string  `json:"fileName,omitempty"`
-	FileExt            string  `json:"fileExt,omitempty"`
-	SizeBytes          int64   `json:"sizeBytes,omitempty"`
-	MtimeUnix          int64   `json:"mtimeUnix,omitempty"`
-	FastHash           *string `json:"fastHash,omitempty"`
-	FullHash           *string `json:"fullHash,omitempty"`
+	StorageLocationID int64   `json:"storageLocationId,omitempty"`
+	FilePath          string  `json:"filePath"`
+	FileName          string  `json:"fileName,omitempty"`
+	FileExt           string  `json:"fileExt,omitempty"`
+	SizeBytes         int64   `json:"sizeBytes,omitempty"`
+	MtimeUnix         int64   `json:"mtimeUnix,omitempty"`
+	FastHash          *string `json:"fastHash,omitempty"`
+	FullHash          *string `json:"fullHash,omitempty"`
+	// SourcePathHash is the lowercase SHA-256 hex (64 chars) of the file's
+	// original workstation/card path -- the same value the streaming
+	// upload sends as X-Source-Path-Hash (UploadOptions.SourcePathHash).
+	// The server stores it in media_nodes.source_path_hash; a value that
+	// isn't 64 hex characters is silently dropped there, not rejected.
+	SourcePathHash     *string `json:"sourcePathHash,omitempty"`
 	Phash              *int64  `json:"phash,omitempty"`
 	CameraModel        *string `json:"cameraModel,omitempty"`
 	CameraSerial       *string `json:"cameraSerial,omitempty"`
@@ -133,7 +139,12 @@ type PathRebasedPayload struct {
 	TargetStorageLocationID int64   `json:"targetStorageLocationId,omitempty"`
 	MtimeUnix               int64   `json:"mtimeUnix,omitempty"`
 	FastHash                *string `json:"fastHash,omitempty"`
-	SizeBytes               int64   `json:"sizeBytes,omitempty"`
+	// FullHash (BLAKE3-256, 64 hex) lets the server fill a known node's
+	// missing full_hash on rebase -- what POST /api/v1/agent/node-status
+	// keys "verified" on -- and is validated server-side the same way as
+	// NodeCreatedPayload.FullHash.
+	FullHash  *string `json:"fullHash,omitempty"`
+	SizeBytes int64   `json:"sizeBytes,omitempty"`
 }
 
 // VirtualNodeCreated is the payload for EVENT_VIRTUAL_NODE_CREATED.
@@ -314,7 +325,8 @@ type RebaseResponse struct {
 // (internal/httpapi.AgentNodeStatusInput in branchdam) -- the first
 // agent-reachable read endpoint; every other /api/v1/agent/* route is
 // write-oriented. NodeUUIDs is capped server-side per call
-// (400 on current branchDAM, 200 on older servers).
+// (400 on current branchDAM, 200 on older servers); internal/prune
+// batches at nodeStatusBatchSize, within both.
 type NodeStatusRequest struct {
 	NodeUUIDs []string `json:"nodeUuids"`
 }

@@ -53,7 +53,7 @@ func TestClientNodeStatusPostsPathAndReturnsStatuses(t *testing.T) {
 func TestClientNodeStatusOversizedBatchRefused400(t *testing.T) {
 	srv, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"title":"nodeUuids must not exceed 200 per request"}`))
+		_, _ = w.Write([]byte(`{"title":"nodeUuids must not exceed 400 per request"}`))
 	})
 	_ = srv
 

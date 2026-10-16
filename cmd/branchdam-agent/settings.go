@@ -808,6 +808,7 @@ func (s *configSettings) reload() error {
 	// server.apiKey or server.baseUrl from the Settings window must not
 	// leave "Test connection" probing a stale client indefinitely.
 	registerServerProbe(s.runner, client, serverConfigured(newCfg))
+	registerTelemetry(s.runner, client, newCfg)
 	s.runner.SetDetectorInterval(time.Duration(newCfg.Ingest.PollIntervalSecs) * time.Second)
 	s.runner.SetDetectorRequireDCIM(newCfg.Ingest.RequireDCIM)
 	s.runner.SetPauseUploadOnMetered(newCfg.Ingest.PauseUploadOnMetered)

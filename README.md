@@ -59,6 +59,12 @@ The agent communicates with the branchDAM server via its `/api/v1/agent/*` REST 
   still ingest a card, then finish the archive copy and `POST /api/v1/agent/rebase` once
   reconnected -- see [`docs/offline-queue.md`](docs/offline-queue.md) for the full state machine,
   the copy-before-rebase ordering guarantee, and the server-side prerequisite this depends on.
+- Scratch telemetry: the tray posts `POST /api/v1/agent/telemetry` shortly after startup and
+  every 15 minutes -- `ingest.localEditRoot`'s volume capacity (total/free/used) and the last
+  prune pass's reclaimed bytes, duration and pruned-mirror count -- for branchDAM's Storage
+  Health card. Skipped while the tray is paused or not fully configured; a failed send is logged
+  and the next tick sends a fresh snapshot. The mirror/render-cache/proxy breakdown fields are
+  sent as zero (the agent does not size them).
 - A `prune` subcommand -- not the same thing as real Tier-1 NLE scratch pruning, which stays
   architecturally blocked (see `internal/config.PruneConfig`'s doc comment and
   [`docs/platform-support.md`](docs/platform-support.md#known-gaps)): deletes an
