@@ -307,7 +307,8 @@ type RebaseResponse struct {
 // NodeStatusRequest is the request body for POST /api/v1/agent/node-status
 // (internal/httpapi.AgentNodeStatusInput in branchdam) -- the first
 // agent-reachable read endpoint; every other /api/v1/agent/* route is
-// write-oriented. NodeUUIDs is capped server-side at 200 per call.
+// write-oriented. NodeUUIDs is capped server-side per call
+// (400 on current branchDAM, 200 on older servers).
 type NodeStatusRequest struct {
 	NodeUUIDs []string `json:"nodeUuids"`
 }
@@ -317,7 +318,10 @@ type NodeStatusRequest struct {
 // synced, or a stale UUID). Verified mirrors branchDAM's own
 // ListPrunableNodes eligibility predicate: full_hash non-NULL and 64 hex
 // characters (BLAKE3-256) -- LifecycleState/Tier are only meaningful when
-// Found is true.
+// Found is true. FullHash is the node's stored BLAKE3-256 full_hash, so a
+// client deleting its own copy can compare it with the hash it computed;
+// empty when the node is not found, has no full hash, or the server
+// predates the field (branchDAM #538).
 type NodeStatusEntry struct {
 	NodeUUID       string `json:"nodeUuid"`
 	Found          bool   `json:"found"`
@@ -325,8 +329,7 @@ type NodeStatusEntry struct {
 	Tier           string `json:"tier,omitempty"`
 	Verified       bool   `json:"verified"`
 	// FullHash is the node's stored BLAKE3-256 full_hash (empty when it has
-	// none). Mirrored for parity with the pinned server revision and pinned
-	// by node_status_response.golden.json; nothing reads it yet.
+	// none). prune compares it with the hash queue.db recorded at ingest.
 	FullHash string `json:"fullHash,omitempty"`
 }
 

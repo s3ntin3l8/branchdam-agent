@@ -79,6 +79,13 @@ func pruneTestFixture(t *testing.T) (config.Config, *queue.Store, string) {
 // contract) unless overridden by ageHours.
 func insertDoneRow(t *testing.T, store *queue.Store, nodeUUID, localPath, content string, ageHours int, kind string) {
 	t.Helper()
+	insertDoneRowWithHash(t, store, nodeUUID, localPath, content, ageHours, kind, testFullHash)
+}
+
+// insertDoneRowWithHash is insertDoneRow with the full hash recorded at
+// ingest given explicitly ("" for a row that recorded none).
+func insertDoneRowWithHash(t *testing.T, store *queue.Store, nodeUUID, localPath, content string, ageHours int, kind, fullHash string) {
+	t.Helper()
 	if err := os.WriteFile(localPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +110,7 @@ func insertDoneRow(t *testing.T, store *queue.Store, nodeUUID, localPath, conten
 		FileExt:              filepath.Ext(localPath),
 		SizeBytes:            info.Size(),
 		MtimeUnix:            info.ModTime().Unix(),
-		FullHash:             strings.Repeat("ab", 32),
+		FullHash:             fullHash,
 		FastHash:             "abc",
 	}); err != nil {
 		t.Fatalf("InsertPending: %v", err)
@@ -121,9 +128,128 @@ func insertDoneRow(t *testing.T, store *queue.Store, nodeUUID, localPath, conten
 	}
 }
 
+// testFullHash is the BLAKE3 hash insertDoneRow records for every row.
+var testFullHash = strings.Repeat("ab", 32)
+
+// verifiedEntry is a node-status answer that authorises a prune: a live,
+// verified Tier-3 master whose fullHash equals the hash queue.db recorded.
 func verifiedEntry(uuid string) branchdam.NodeStatusEntry {
 	return branchdam.NodeStatusEntry{
 		NodeUUID: uuid, Found: true, LifecycleState: "ACTIVE", Tier: "TIER3_MASTER_ARCHIVE", Verified: true,
+		FullHash: testFullHash,
+	}
+}
+
+// runPass runs one non-dry-run Pass against a node-status server answering
+// from byUUID and returns its stats and the per-file output.
+func runPass(t *testing.T, cfg config.Config, store *queue.Store, byUUID map[string]branchdam.NodeStatusEntry) (Stats, string) {
+	t.Helper()
+	srv, _ := nodeStatusServer(t, byUUID)
+	client := branchdam.New(srv.URL, "test-key")
+	var buf bytes.Buffer
+	stats, err := Pass(context.Background(), &buf, client, store, cfg, time.Now(), false)
+	if err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	return stats, buf.String()
+}
+
+// TestPassKeepsFileWhenServerOmitsFullHash: a server older than branchDAM
+// #538 reports verified=true but no fullHash. The agent can't tell whether
+// the archived master is this file, so it keeps the local copy and reports
+// why, in the per-file output and the summary.
+func TestPassKeepsFileWhenServerOmitsFullHash(t *testing.T) {
+	cfg, store, root := pruneTestFixture(t)
+	cfg.Prune = config.PruneConfig{Enabled: true, MinAgeHours: 24}
+	uuid := "0190f1a2-0000-7000-8000-0000000000b1"
+	path := filepath.Join(root, "old-server.mov")
+	insertDoneRow(t, store, uuid, path, "old-server-content", 48, queue.KindMedia)
+
+	entry := verifiedEntry(uuid)
+	entry.FullHash = ""
+	stats, out := runPass(t, cfg, store, map[string]branchdam.NodeStatusEntry{uuid: entry})
+
+	if stats.Pruned != 0 || stats.SkippedNoServerHash != 1 {
+		t.Errorf("stats = %+v, want Pruned=0 SkippedNoServerHash=1", stats)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("local copy must be kept when the server sends no fullHash: %v", err)
+	}
+	if !strings.Contains(out, "[SKIP] "+path) || !strings.Contains(out, "fullHash") {
+		t.Errorf("output = %q, want a [SKIP] line naming the file and the missing fullHash", out)
+	}
+	var report bytes.Buffer
+	PrintReport(&report, stats, false)
+	if !strings.Contains(report.String(), "no-server-hash=1") || !strings.Contains(report.String(), "upgrade branchDAM") {
+		t.Errorf("report = %q, want the no-server-hash count and the upgrade note", report.String())
+	}
+}
+
+// TestPassKeepsFileOnHashMismatch: verified=true says the server holds some
+// 64-hex hash for the node, not that it is this file's. A fullHash that
+// differs from the one recorded at ingest keeps the local copy.
+func TestPassKeepsFileOnHashMismatch(t *testing.T) {
+	cfg, store, root := pruneTestFixture(t)
+	cfg.Prune = config.PruneConfig{Enabled: true, MinAgeHours: 24}
+	uuid := "0190f1a2-0000-7000-8000-0000000000b2"
+	path := filepath.Join(root, "mismatch.mov")
+	insertDoneRow(t, store, uuid, path, "mismatch-content", 48, queue.KindMedia)
+
+	entry := verifiedEntry(uuid)
+	entry.FullHash = strings.Repeat("cd", 32)
+	stats, out := runPass(t, cfg, store, map[string]branchdam.NodeStatusEntry{uuid: entry})
+
+	if stats.Pruned != 0 || stats.SkippedHashMismatch != 1 {
+		t.Errorf("stats = %+v, want Pruned=0 SkippedHashMismatch=1", stats)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("local copy must be kept on a hash mismatch: %v", err)
+	}
+	if !strings.Contains(out, "[SKIP] "+path) || !strings.Contains(out, "does not match") {
+		t.Errorf("output = %q, want a [SKIP] line for the mismatch", out)
+	}
+}
+
+// TestPassKeepsFileWithNoRecordedHash: a row that recorded no hash at
+// ingest has nothing to compare the server's hash with, so it is kept.
+func TestPassKeepsFileWithNoRecordedHash(t *testing.T) {
+	cfg, store, root := pruneTestFixture(t)
+	cfg.Prune = config.PruneConfig{Enabled: true, MinAgeHours: 24}
+	uuid := "0190f1a2-0000-7000-8000-0000000000b4"
+	path := filepath.Join(root, "nohash.mov")
+	insertDoneRowWithHash(t, store, uuid, path, "nohash-content", 48, queue.KindMedia, "")
+
+	stats, out := runPass(t, cfg, store, map[string]branchdam.NodeStatusEntry{uuid: verifiedEntry(uuid)})
+
+	if stats.Pruned != 0 || stats.SkippedNoLocalHash != 1 || stats.SkippedHashMismatch != 0 {
+		t.Errorf("stats = %+v, want Pruned=0 SkippedNoLocalHash=1 SkippedHashMismatch=0", stats)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("local copy must be kept when no hash was recorded: %v", err)
+	}
+	if !strings.Contains(out, "[SKIP] "+path) {
+		t.Errorf("output = %q, want a [SKIP] line", out)
+	}
+}
+
+// TestPassHashCompareIgnoresHexCase: hex case is not content; an
+// upper-case server hash equal to the recorded one still prunes.
+func TestPassHashCompareIgnoresHexCase(t *testing.T) {
+	cfg, store, root := pruneTestFixture(t)
+	cfg.Prune = config.PruneConfig{Enabled: true, MinAgeHours: 24}
+	uuid := "0190f1a2-0000-7000-8000-0000000000b3"
+	path := filepath.Join(root, "upper.mov")
+	insertDoneRow(t, store, uuid, path, "upper-content", 48, queue.KindMedia)
+
+	entry := verifiedEntry(uuid)
+	entry.FullHash = strings.ToUpper(testFullHash)
+	stats, _ := runPass(t, cfg, store, map[string]branchdam.NodeStatusEntry{uuid: entry})
+
+	if stats.Pruned != 1 {
+		t.Errorf("stats = %+v, want Pruned=1", stats)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected %s to be deleted, stat err = %v", path, err)
 	}
 }
 

@@ -8,8 +8,10 @@ import "context"
 // knows about each requested NodeUUID. Used by the prune subcommand to
 // decide whether it's safe to delete a local-edit mirror of a file already
 // durably archived: only once the server reports the node live
-// (ACTIVE/HIDDEN) and hash-verified. req.NodeUUIDs must not exceed 200 --
-// the server refuses a larger batch with a 400.
+// (ACTIVE/HIDDEN) and hash-verified, and the fullHash it returns equals the
+// hash the agent recorded for the file. req.NodeUUIDs must stay within the
+// server's per-request cap (400 on current branchDAM, 200 on older
+// servers) -- the server refuses a larger batch with a 400.
 func (c *Client) NodeStatus(ctx context.Context, req NodeStatusRequest) (*NodeStatusResponse, error) {
 	var out NodeStatusResponse
 	if err := c.post(ctx, "/api/v1/agent/node-status", req, &out); err != nil {

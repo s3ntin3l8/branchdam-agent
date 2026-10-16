@@ -64,10 +64,14 @@ The agent communicates with the branchDAM server via its `/api/v1/agent/*` REST 
   [`docs/platform-support.md`](docs/platform-support.md#known-gaps)): deletes an
   offline-ingested file's `ingest.localEditRoot` mirror once
   `POST /api/v1/agent/node-status` (branchDAM's first agent-reachable read endpoint) confirms the
-  Tier-3 archive copy is live and hash-verified. Only ever considers `queue.db` rows -- a plain
-  online `ingest` has no durable local-path ledger to prune against. Two independent safety
-  checks run before any deletion: a symlink-aware containment check against `LocalEditRoot`, and
-  a size/mtime re-stat against what was recorded at ingest time.
+  Tier-3 archive copy is live and hash-verified, and the `fullHash` it returns equals the hash the
+  agent recorded for the file at ingest (which proves the server's record still matches the
+  agent's; that the archived bytes do rests on the server's own verification). A server that doesn't return `fullHash` (older than
+  branchDAM #538) gets nothing pruned; the report counts those files as `no-server-hash`. Only
+  ever considers `queue.db` rows -- a plain online `ingest` has no durable local-path ledger to
+  prune against. Two further safety checks run before any deletion: a symlink-aware containment
+  check against `LocalEditRoot`, and a size/mtime re-stat against what was recorded at ingest
+  time.
 - `internal/luminar/`, `internal/nodeindex/` -- a `luminar-sync` subcommand: reads a Luminar Neo
   catalog read-only (`?mode=ro`, never `?immutable=1`; row extraction verified against a real
   catalog, `db_version 155`), infers edit->source pairs from filename convention -- the catalog

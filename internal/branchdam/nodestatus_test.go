@@ -16,7 +16,7 @@ func TestClientNodeStatusPostsPathAndReturnsStatuses(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"statuses":[
-			{"nodeUuid":"u1","found":true,"lifecycleState":"ACTIVE","tier":"TIER3_MASTER_ARCHIVE","verified":true},
+			{"nodeUuid":"u1","found":true,"lifecycleState":"ACTIVE","tier":"TIER3_MASTER_ARCHIVE","verified":true,"fullHash":"b3f1c4d9e2a7568013c9a4d2e8f7b1063c5a9d7e2f4b8016938ac1d4e7f2b09a"},
 			{"nodeUuid":"u2","found":false,"verified":false}
 		]}`))
 	})
@@ -42,8 +42,11 @@ func TestClientNodeStatusPostsPathAndReturnsStatuses(t *testing.T) {
 	if !resp.Statuses[0].Found || !resp.Statuses[0].Verified || resp.Statuses[0].Tier != "TIER3_MASTER_ARCHIVE" {
 		t.Errorf("statuses[0] = %+v, want found+verified on TIER3_MASTER_ARCHIVE", resp.Statuses[0])
 	}
-	if resp.Statuses[1].Found {
-		t.Errorf("statuses[1] = %+v, want Found=false", resp.Statuses[1])
+	if resp.Statuses[0].FullHash != "b3f1c4d9e2a7568013c9a4d2e8f7b1063c5a9d7e2f4b8016938ac1d4e7f2b09a" {
+		t.Errorf("statuses[0].FullHash = %q, want the server's fullHash", resp.Statuses[0].FullHash)
+	}
+	if resp.Statuses[1].Found || resp.Statuses[1].FullHash != "" {
+		t.Errorf("statuses[1] = %+v, want Found=false and no fullHash", resp.Statuses[1])
 	}
 }
 
