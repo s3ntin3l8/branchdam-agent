@@ -792,7 +792,10 @@ primary after the siblings had swapped left mixed versions plus a rollback label
 match the backups on disk.
 
 A crash (power loss, kill) part way through an apply is not covered, though it never leaves a
-wrong label: the prior label is already withdrawn, so no rollback is offered. A crash before the
+wrong label: the prior label is already withdrawn, so no rollback is offered. That holds from the
+moment the apply starts -- a kill during the first download, with every binary still unchanged,
+also loses the prior rollback, since the label is only written back for a failure the process
+reports. A crash before the
 primary swaps can leave the siblings on the new version and the primary on the old one; running
 `update` again finishes the job, since the primary still reports the old version and the update
 is offered again. A crash after the primary swaps (for a single-target install, such as a headless

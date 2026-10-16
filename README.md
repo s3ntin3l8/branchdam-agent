@@ -397,7 +397,10 @@ update. The tray menu shows "Roll back to vX.Y.Z" whenever one is available; the
 network call at all, so it works even with `selfUpdate.enabled: false`. Once used, the backup is
 consumed and the affordance disappears until the next update. A later update replaces it with
 the version that update replaced, and withdraws it if that update fails after replacing any
-binary; an update that fails before replacing anything (download, checksum or signature) keeps it.
+binary. An update that reports a failure before replacing anything (download, checksum or
+signature) keeps it, but the label is withdrawn as soon as the update starts, so a crash or kill
+at any point after that -- even during the download, with the install unchanged -- loses the prior
+rollback; see [`docs/platform-support.md`](docs/platform-support.md#rollback-issue-33).
 
 See [`docs/platform-support.md`](docs/platform-support.md) for the
 full per-platform breakdown (why Windows ships two `.exe`s, the `fyne.io/systray` cross-compile
