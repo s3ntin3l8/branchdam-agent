@@ -157,7 +157,9 @@ deterministic virtual project nodes and `PROJECT_SIDECAR` lineage edges from ind
 nodes. `file:`, `postgres://`, and `postgresql://` URLs are supported. Dry-run mode logs the
 virtual nodes and edges it would create without contacting the server.
 
-**Different mechanism from Settings.** Settings changes apply through `Runner.Reconfigure`;
+**Different mechanism from Settings.** Settings changes apply through `Runner.Reconfigure`
+(at once when idle; while a card is being ingested, the save returns immediately and the new
+engine is swapped in when that ingest finishes -- `SettingsView.ApplyPending`);
 integration changes apply through the separate `Runner.SetIntegrationSyncers` (rebuilt on every
 reload, same staleness class of fix as the offline-queue drainer/pruner rebuild). "Sync now" is a
 `Runner` action (like "Drain queue now"), not a Settings mutation -- it goes through

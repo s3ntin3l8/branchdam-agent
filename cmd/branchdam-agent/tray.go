@@ -378,15 +378,11 @@ func runTrayCmd(args []string) int {
 	}
 
 	engine := ingest.NewEngine(client, cfg.AgentID, cfg.Ingest, cfg.PathMappings)
-	// Closes whichever engine is current when the tray process exits. A
-	// config reload (configSettings.reload) swaps in a replacement engine
-	// via runner.Reconfigure without closing the one it replaces -- that
-	// stale pool relies on internal/exiftool's finalizer safety net
-	// instead, which is fine for a long-running process like this one
-	// (unlike the one-shot `ingest` command) since it'll see plenty of GC
-	// cycles before the process actually exits.
-	defer engine.Exiftool.Close()
 	runner := tray.NewRunner(engine, cfg.Ingest.CardRoots, cfg.Ingest.LocalEditRoot)
+	// A config reload (configSettings.reload) swaps in a replacement
+	// engine via runner.Reconfigure, which closes the engine it replaces;
+	// this closes whichever engine is current when the tray exits.
+	defer runner.CloseIngester()
 	runner.SetConfigIncomplete(configIncomplete, missingFields)
 	runner.SetArchiveRoot(cfg.Ingest.ArchiveRoot)
 	runner.SetArchiveProber(func(pctx context.Context, root string) bool {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -27,6 +28,10 @@ import (
 // agent side), so this just needs to be comfortably above that, not a
 // generous outer bound for something long-running like ingest.
 const httpTimeout = 10 * time.Second
+
+// errAgentBusy is agentRequest's error when the agent accepted the
+// connection but did not answer within httpTimeout.
+var errAgentBusy = errors.New("branchDAM is running but didn't answer in time -- it may be busy with an ingest or update; a settings change may already be saved, so reopen Settings to check")
 
 // App is the Wails-bound backend for the status and settings views, kept
 // deliberately thin: every settings/status method below round-trips a raw
@@ -469,6 +474,14 @@ func (a *App) agentRequest(method, path string, body []byte) ([]byte, error) {
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		// A timeout means something answered the connection but not the
+		// request in time: the agent is running, just busy. Saying "not
+		// running" there sent operators restarting a tray that had in
+		// fact saved their change.
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return nil, errAgentBusy
+		}
 		return nil, errors.New("branchDAM doesn't seem to be running (could not reach the agent) -- start the tray app first")
 	}
 	defer func() { _ = resp.Body.Close() }()

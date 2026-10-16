@@ -347,6 +347,7 @@ ul { margin: 4px 0; padding-left: 18px; }
   overflow-wrap: anywhere;
 }
 .field-row > .field-status.saved { color: var(--ok); }
+.field-row > .field-status.pending { color: var(--warn); }
 .field-row > .field-status.error { color: var(--bad); }
 
 /* Focus rings for keyboard navigation and accessibility. */

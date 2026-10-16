@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/sessiontoken"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -113,6 +114,32 @@ func TestStatusJSONUnreachableAgent(t *testing.T) {
 	_, err := a.StatusJSON()
 	if err == nil {
 		t.Fatal("StatusJSON succeeded against an unreachable address, want an error")
+	}
+}
+
+// TestAgentRequestTimeoutIsNotNotRunning: an agent that accepts the
+// request but answers late (busy) must not be reported as not running.
+func TestAgentRequestTimeoutIsNotNotRunning(t *testing.T) {
+	withTempAgentDir(t)
+	if _, err := sessiontoken.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	withStatusServerAddr(t, strings.TrimPrefix(srv.URL, "http://"))
+
+	a := newTestApp(t)
+	a.client.Timeout = 50 * time.Millisecond
+	_, err := a.SettingsJSON()
+	if !errors.Is(err, errAgentBusy) {
+		t.Fatalf("err = %v, want errAgentBusy", err)
+	}
+	if strings.Contains(err.Error(), "doesn't seem to be running") {
+		t.Errorf("busy agent reported as not running: %v", err)
 	}
 }
 
