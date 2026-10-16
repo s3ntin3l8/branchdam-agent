@@ -130,7 +130,7 @@ func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
 		return status, false
 	}
 	switch status.Phase {
-	case updatePhaseChecking, updatePhaseDownloading, updatePhaseVerifying, updatePhaseRestarting:
+	case updatePhaseChecking, updatePhaseDownloading, updatePhaseVerifying, updatePhaseRestarting, tray.UpdatePhaseRollingBack:
 		status.Err = fmt.Errorf("self-update: check/apply is already %s", status.Phase)
 		return status, false
 	}

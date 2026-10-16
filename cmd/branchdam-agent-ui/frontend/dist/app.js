@@ -364,7 +364,7 @@ async function runTracked(key, call) {
 // Pause/Resume, the same actions as the tray menu. Every one goes through
 // the agent's Runner (TriggerIngest/CancelIngest/SetPaused), so a window
 // click and a tray click or detected card can never ingest concurrently.
-function renderIngest(status, settings) {
+function renderIngest(status) {
   const container = byId("ingest-body");
   let html = "";
   if (status.paused) {
@@ -1436,7 +1436,7 @@ function render(view) {
   renderSetupBanner(status);
   renderOverview(status, settings);
   renderServer(status);
-  renderIngest(status, view.settings);
+  renderIngest(status);
   renderQueue(status, view.settings);
   renderIntegrations(status);
   renderHooks(status);

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +50,7 @@ type ActionRunner interface {
 	SetPaused(v bool)
 	CancelIngest() bool
 	Busy() (cardPath string, since time.Time, busy bool)
+	GateHeld() bool
 	ConfigIncomplete() bool
 	IngestNowVolumes() []string
 	WatchDirs() []string
@@ -912,6 +914,15 @@ type ingestStartResult struct {
 // any path: detector, menu, or an earlier window click) is in flight.
 var errIngestAlreadyRunning = errors.New("an ingest is already running -- wait for it to finish or cancel it")
 
+// errGateHeld is ingest-start's refusal while something other than an
+// ingest -- a self-update download, apply or roll back -- holds the gate.
+var errGateHeld = errors.New("an update is in progress -- try again when it finishes")
+
+// errFolderPath is ingest-start's refusal for a folder path that is not
+// absolute or contains "..": the window's folder picker always returns a
+// clean absolute path, so anything else did not come from it.
+var errFolderPath = errors.New("pick the folder with Import from folder... (the path must be absolute, without \"..\")")
+
 // handleActionIngestStart starts an ingest batch and returns at once
 // (202): unlike POST /api/actions/ingest (synchronous, kept for scripted
 // callers), a card ingest runs for minutes and the window must stay
@@ -948,6 +959,14 @@ func (s *StatusServer) handleActionIngestStart(w http.ResponseWriter, r *http.Re
 		refuse(errIngestAlreadyRunning)
 		return
 	}
+	// Busy covers only an ingest; a self-update holds the same gate
+	// (TryLockIdle) for its whole download-and-apply window. Accepting a
+	// batch then would block it on the gate behind the update, whose
+	// restart drops it -- so refuse up front, like the update path does.
+	if s.Actions.GateHeld() {
+		refuse(errGateHeld)
+		return
+	}
 
 	var paths []string
 	if req.CardPath == "" {
@@ -957,21 +976,29 @@ func (s *StatusServer) handleActionIngestStart(w http.ResponseWriter, r *http.Re
 			return
 		}
 	} else {
+		// The path comes from the request: accept only what the window's
+		// native folder picker produces -- an absolute path with no ".."
+		// -- before it reaches the filesystem.
+		if !filepath.IsAbs(req.CardPath) || strings.Contains(req.CardPath, "..") {
+			refuse(errFolderPath)
+			return
+		}
+		cardPath := filepath.Clean(req.CardPath)
 		// Same refusal as the tray menu's "Import from folder…"
 		// (handleImportFolder): a watched cardRoots parent holds every
 		// mounted disk, the NAS and the edit SSD included.
 		for _, dir := range s.Actions.WatchDirs() {
-			if samePath(dir, req.CardPath) {
+			if samePath(dir, cardPath) {
 				refuse(errors.New("already ingesting this path -- pick a card or folder inside it"))
 				return
 			}
 		}
-		info, err := os.Stat(req.CardPath)
+		info, err := os.Stat(cardPath)
 		if err != nil || !info.IsDir() {
-			refuse(fmt.Errorf("%s is not a folder that can be read", req.CardPath))
+			refuse(fmt.Errorf("%s is not a folder that can be read", cardPath))
 			return
 		}
-		paths = []string{req.CardPath}
+		paths = []string{cardPath}
 	}
 
 	if !s.ingestBatch.CompareAndSwap(false, true) {

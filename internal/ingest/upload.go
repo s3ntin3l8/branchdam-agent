@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
@@ -542,9 +543,9 @@ func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath,
 			if !info.Mode().IsRegular() || info.Size() != wantSize {
 				continue
 			}
-			if hashed > 0 && hashed+wantSize > deferredSweepHashBudget {
+			if budget := deferredSweepHashBudget.Load(); hashed > 0 && hashed+wantSize > budget {
 				slog.Warn("upload: stopped looking for an earlier deferred copy: hash budget spent; any copy not yet checked stays at its own name",
-					"local", localPath, "hashedBytes", hashed, "budgetBytes", deferredSweepHashBudget, "next", prior)
+					"local", localPath, "hashedBytes", hashed, "budgetBytes", budget, "next", prior)
 				return false
 			}
 			hashed += wantSize
@@ -580,9 +581,19 @@ func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath,
 
 // deferredSweepHashBudget caps the bytes moveDeferredCopy hashes (full
 // BLAKE3 of each same-size candidate) for one file -- the same 2 GiB
-// ResolveDestination allows its own collision sweep (hashBudget). A var
-// so tests can shrink it.
-var deferredSweepHashBudget = hashBudget
+// ResolveDestination allows its own collision sweep (hashBudget). Atomic,
+// like the tray's diskUsageFunc seam, so a test's swap can never race a
+// read on another goroutine; tests shrink it with setDeferredSweepHashBudget.
+var deferredSweepHashBudget atomic.Int64
+
+func init() { deferredSweepHashBudget.Store(hashBudget) }
+
+// setDeferredSweepHashBudget swaps the budget and returns a func that
+// restores the previous one, for t.Cleanup.
+func setDeferredSweepHashBudget(n int64) (restore func()) {
+	prev := deferredSweepHashBudget.Swap(n)
+	return func() { deferredSweepHashBudget.Store(prev) }
+}
 
 // maxDeferredSuffixGap is how many consecutive absent suffixes end
 // moveDeferredCopy's sweep of one name.

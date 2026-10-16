@@ -552,7 +552,7 @@ func (a *App) queueRetry(req any) (string, error) {
 }
 
 // ConfirmAction asks the operator to confirm a destructive window action
-// (drain, prune, roll back, cancel ingest) with a native question dialog
+// (drain, prune, roll back) with a native question dialog
 // -- ConfirmApplyUpdate's generalization, for the same WKWebView reason
 // browser confirm() can't be used. The frontend only calls it when the
 // tray.confirmDestructive setting is on, mirroring the tray menu's own

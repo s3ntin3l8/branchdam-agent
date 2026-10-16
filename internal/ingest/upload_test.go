@@ -695,9 +695,7 @@ func TestUploadStreamDeferredSweepStopsWhenHashBudgetSpent(t *testing.T) {
 	}
 
 	t.Run("budget spent", func(t *testing.T) {
-		orig := deferredSweepHashBudget
-		deferredSweepHashBudget = 2 * int64(len(content)) // two candidates' worth
-		t.Cleanup(func() { deferredSweepHashBudget = orig })
+		t.Cleanup(setDeferredSweepHashBudget(2 * int64(len(content)))) // two candidates' worth
 
 		deferred, _, logs := run(t)
 		if b, err := os.ReadFile(deferred); err != nil || string(b) != content {
