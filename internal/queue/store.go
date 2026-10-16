@@ -58,6 +58,11 @@ const (
 	// FAILED state; it retries indefinitely with backoff, as do every other
 	// archive_copy failure (network down, NAS unmounted), since those are
 	// expected to eventually clear.
+	//
+	// FAILED rows (archive_copy or rebase) are reset to PENDING by
+	// `queue-drain -retry-failed`, arriving in the A5 PR. Until it ships,
+	// resetting one requires a manual UPDATE of queue.db after the
+	// operator has fixed the cause.
 	StatusFailed = "FAILED"
 )
 
@@ -458,6 +463,8 @@ func (s *Store) MarkArchiveCopyAttempt(ctx context.Context, nodeUUID, errMsg str
 // MarkArchiveCopyFailed records a terminal archive-copy failure -- one
 // that retrying cannot fix (see StatusFailed). Drain never reattempts it;
 // errMsg (archive_copy_last_error) says what an operator has to resolve.
+// Once resolved, `queue-drain -retry-failed` (A5 PR) resets the row to
+// PENDING; until that ships, the reset is a manual queue.db UPDATE.
 func (s *Store) MarkArchiveCopyFailed(ctx context.Context, nodeUUID, errMsg string) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE queue_nodes SET archive_copy_status = ?, archive_copy_last_error = ? WHERE node_uuid = ?`,

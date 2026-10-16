@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1440,5 +1441,250 @@ func TestOfflineFileResultOutcome(t *testing.T) {
 				t.Errorf("Outcome() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCopyToArchiveKeepsPlacedCopyOnVerifyReadError: when the post-rename
+// re-read fails (transport/read error, not a hash mismatch), the copy that
+// was just placed must stay -- its bytes were hash-checked on the way in --
+// and the error must be transient (not a conflict), so the next attempt
+// re-verifies the file in place and succeeds.
+func TestCopyToArchiveKeepsPlacedCopyOnVerifyReadError(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "local.bin")
+	if err := os.WriteFile(localPath, []byte("payload-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(dir, "archive", "final.bin")
+	wantHash := blake3Hex(t, localPath)
+
+	orig := archiveVerifyFn
+	t.Cleanup(func() { archiveVerifyFn = orig })
+	archiveVerifyFn = func(path, want string, opts ...WriteOption) (VerifyResult, error) {
+		return VerifyResult{}, errors.New("simulated NAS read failure")
+	}
+
+	err := CopyToArchive(localPath, archivePath, wantHash)
+	if err == nil {
+		t.Fatal("expected an error when the post-rename verify cannot read the file")
+	}
+	if errors.Is(err, ErrArchiveConflict) || errors.Is(err, ErrLocalCopyMismatch) {
+		t.Fatalf("a read error must be transient, got terminal %v", err)
+	}
+	if got, rerr := os.ReadFile(archivePath); rerr != nil || string(got) != "payload-bytes" {
+		t.Fatalf("placed archive copy was removed on a verify read error: %q, %v", got, rerr)
+	}
+
+	// Next attempt, mount healthy again: the file in place verifies.
+	archiveVerifyFn = orig
+	if err := CopyToArchive(localPath, archivePath, wantHash); err != nil {
+		t.Fatalf("retry after a verify read error: %v", err)
+	}
+}
+
+// TestCopyToArchiveRemovesOwnCopyOnGenuineMismatch pins the other half: a
+// file this call just placed that reads back with the wrong hash is the
+// agent's own bad copy and is removed.
+func TestCopyToArchiveRemovesOwnCopyOnGenuineMismatch(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "local.bin")
+	if err := os.WriteFile(localPath, []byte("payload-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(dir, "archive", "final.bin")
+	orig := archiveVerifyFn
+	t.Cleanup(func() { archiveVerifyFn = orig })
+	archiveVerifyFn = func(path, want string, opts ...WriteOption) (VerifyResult, error) {
+		return VerifyResult{Path: path, Hash: "bitrot", Verified: false}, nil
+	}
+	if err := CopyToArchive(localPath, archivePath, blake3Hex(t, localPath)); err == nil {
+		t.Fatal("expected an error on a mismatching read-back")
+	}
+	if _, err := os.Stat(archivePath); !os.IsNotExist(err) {
+		t.Errorf("own mismatching copy should have been removed: %v", err)
+	}
+}
+
+// TestCopyToArchiveSymlinkAtArchivePathIsConflict: a symlink at the final
+// archive name is never followed, even when its target is byte-identical.
+// Following symlinks there is a deliberate future opt-in.
+func TestCopyToArchiveSymlinkAtArchivePathIsConflict(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "local.bin")
+	if err := os.WriteFile(localPath, []byte("payload-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "elsewhere.bin")
+	if err := os.WriteFile(target, []byte("payload-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(dir, "archive", "final.bin")
+	if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, archivePath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	err := CopyToArchive(localPath, archivePath, blake3Hex(t, localPath))
+	if !errors.Is(err, ErrArchiveConflict) {
+		t.Fatalf("err = %v, want ErrArchiveConflict for a symlink at the archive path", err)
+	}
+	if info, lerr := os.Lstat(archivePath); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("symlink at the archive path was replaced: %v", lerr)
+	}
+}
+
+// TestIngestCardOfflineSkipsDirectoryAtSuffixedName: a directory occupying
+// a candidate name is never used as a destination; the file lands on the
+// next free suffix.
+func TestIngestCardOfflineSkipsDirectoryAtSuffixedName(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "a.jpg"), []byte("real-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	localRoot := filepath.Join(dir, "local")
+	if err := os.MkdirAll(filepath.Join(localRoot, "a_2.jpg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Unsuffixed name holds an identical but unclaimed file: ResolveDestination
+	// reports AlreadyIngested, offlineSlotUsable rejects it (unclaimed), and
+	// resolveOfflineDestination's own suffix walk has to step over a_2.jpg.
+	if err := os.WriteFile(filepath.Join(localRoot, "a.jpg"), []byte("real-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openStoreT(t)
+	e := newOfflineTestEngine(t, failingClient{}, filepath.Join(dir, "archive"), localRoot, "/storage/staging/agent-1", store)
+	res, err := e.IngestCardOffline(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := res.Files[0]
+	if fr.Err != nil {
+		t.Fatalf("unexpected error: %v", fr.Err)
+	}
+	if want := filepath.Join(localRoot, "a_3.jpg"); fr.LocalPath != want {
+		t.Fatalf("LocalPath = %s, want %s (a_2.jpg is a directory)", fr.LocalPath, want)
+	}
+	if info, err := os.Stat(filepath.Join(localRoot, "a_2.jpg")); err != nil || !info.IsDir() {
+		t.Errorf("directory at a_2.jpg disturbed: %v", err)
+	}
+}
+
+// TestOfflineSlotUsableUnknownArchiveStatIsUsable: an archive Lstat error
+// other than "not there" means "unknown" -- the slot is usable for the
+// local write (CopyToArchive guards the archive at drain time) and no
+// content comparison is attempted.
+func TestOfflineSlotUsableUnknownArchiveStatIsUsable(t *testing.T) {
+	t.Run("ENOTDIR: archive root is a file", func(t *testing.T) {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "a.jpg")
+		if err := os.WriteFile(src, []byte("real-data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		archiveRoot := filepath.Join(dir, "archive-is-a-file")
+		if err := os.WriteFile(archiveRoot, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		e := newOfflineTestEngine(t, failingClient{}, archiveRoot, filepath.Join(dir, "local"), "/storage/staging/agent-1", openStoreT(t))
+		ok, err := e.offlineSlotUsable(context.Background(), DestinationResolution{RelPath: "a.jpg"}, src, true)
+		if err != nil || !ok {
+			t.Fatalf("offlineSlotUsable = %v, %v; want usable for an unknown archive state", ok, err)
+		}
+	})
+	t.Run("EACCES: unreadable archive dir", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("permission bits are not enforced on Windows or for root")
+		}
+		dir := t.TempDir()
+		src := filepath.Join(dir, "a.jpg")
+		if err := os.WriteFile(src, []byte("real-data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		archiveRoot := filepath.Join(dir, "archive")
+		locked := filepath.Join(archiveRoot, "locked")
+		if err := os.MkdirAll(locked, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(locked, "a.jpg"), []byte("different"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		e := newOfflineTestEngine(t, failingClient{}, archiveRoot, filepath.Join(dir, "local"), "/storage/staging/agent-1", openStoreT(t))
+		ok, err := e.offlineSlotUsable(context.Background(), DestinationResolution{RelPath: filepath.Join("locked", "a.jpg")}, src, true)
+		if err != nil || !ok {
+			t.Fatalf("offlineSlotUsable = %v, %v; want usable for an unreadable archive dir", ok, err)
+		}
+	})
+	t.Run("non-regular entry at the archive name is not usable", func(t *testing.T) {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "a.jpg")
+		if err := os.WriteFile(src, []byte("real-data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		archiveRoot := filepath.Join(dir, "archive")
+		if err := os.MkdirAll(filepath.Join(archiveRoot, "a.jpg"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		e := newOfflineTestEngine(t, failingClient{}, archiveRoot, filepath.Join(dir, "local"), "/storage/staging/agent-1", openStoreT(t))
+		ok, err := e.offlineSlotUsable(context.Background(), DestinationResolution{RelPath: "a.jpg"}, src, true)
+		if err != nil || ok {
+			t.Fatalf("offlineSlotUsable = %v, %v; want not usable for a directory at the archive name", ok, err)
+		}
+	})
+}
+
+// TestIngestCardOfflineDefaultArchiveProbeAvoidsCollision runs the real
+// archiveReachable probe (Engine.ArchiveReachable left nil) against a
+// mounted archive root holding a different file at the rendered name: the
+// new file must take the _2 suffix in both roots.
+func TestIngestCardOfflineDefaultArchiveProbeAvoidsCollision(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardRoot, "a.jpg"), []byte("real-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	archiveRoot := filepath.Join(dir, "archive")
+	if err := os.MkdirAll(archiveRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	master := filepath.Join(archiveRoot, "a.jpg")
+	if err := os.WriteFile(master, []byte("another-cards-master"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openStoreT(t)
+	e := newOfflineTestEngine(t, failingClient{}, archiveRoot, filepath.Join(dir, "local"), "/storage/staging/agent-1", store)
+	if e.ArchiveReachable != nil {
+		t.Fatal("test precondition: ArchiveReachable must be nil so the default probe runs")
+	}
+	res, err := e.IngestCardOffline(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := res.Files[0]
+	if fr.Err != nil || !fr.Queued {
+		t.Fatalf("got %+v, want a queued file", fr)
+	}
+	if want := filepath.Join(dir, "local", "a_2.jpg"); fr.LocalPath != want {
+		t.Errorf("LocalPath = %s, want %s", fr.LocalPath, want)
+	}
+	rec, _, _ := store.ByNodeUUID(context.Background(), fr.NodeUUID)
+	if want := filepath.Join(archiveRoot, "a_2.jpg"); rec.ArchivePath != want {
+		t.Errorf("ArchivePath = %s, want %s", rec.ArchivePath, want)
+	}
+	if got, _ := os.ReadFile(master); string(got) != "another-cards-master" {
+		t.Errorf("existing archive file changed: %q", got)
 	}
 }

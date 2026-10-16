@@ -92,6 +92,11 @@ var ErrArchiveConflict = errors.New("archive destination exists with different c
 // ErrArchiveConflict this cannot heal by retrying, so Drain fails the row.
 var ErrLocalCopyMismatch = errors.New("local copy no longer matches the queued hash")
 
+// archiveVerifyFn is the Verify CopyToArchive runs against the archive
+// path (both the "already there?" check and the post-rename check). A
+// package var so tests can inject a read failure; production is Verify.
+var archiveVerifyFn = Verify
+
 // errDestinationExists is renameNoClobber's refusal.
 var errDestinationExists = errors.New("destination already exists")
 
@@ -169,8 +174,12 @@ func renameNoClobber(tmpPath, finalPath string) error {
 // destination should call Verify directly.
 func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOption) error {
 	if existing, err := os.Lstat(archivePath); err == nil {
+		// Only a regular file can be "already done". Anything else at the
+		// final name -- a directory, a device, or a symlink, even one that
+		// points at an identical file -- is a conflict: following symlinks
+		// at the archive path is a deliberate future opt-in, not a default.
 		if existing.Mode().IsRegular() {
-			vr, verr := Verify(archivePath, wantFullHash)
+			vr, verr := archiveVerifyFn(archivePath, wantFullHash)
 			if verr != nil {
 				// Couldn't read it (flaky mount?): neither "done" nor a
 				// proven conflict -- let the caller retry later.
@@ -230,9 +239,14 @@ func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOpt
 		return err // transient: the next attempt re-examines whatever is there now
 	}
 
-	vr, err := Verify(archivePath, wantFullHash)
+	vr, err := archiveVerifyFn(archivePath, wantFullHash)
 	if err != nil {
-		return fmt.Errorf("ingest: verify archive copy %s: %w", archivePath, err)
+		// Couldn't re-read it (flaky mount, transport error): that says
+		// nothing about the bytes, which were hash-checked on the way in.
+		// Leave the placed file alone and report a transient error -- the
+		// next attempt's existing-file check re-verifies it and either
+		// finds it done or reports a conflict, never deletes it.
+		return fmt.Errorf("ingest: verify archive copy %s (left in place, will re-check): %w", archivePath, err)
 	}
 	if !vr.Verified {
 		// The file at archivePath is the one this call just renamed into

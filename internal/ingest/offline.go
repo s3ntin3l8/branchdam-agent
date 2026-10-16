@@ -365,6 +365,8 @@ func (e *Engine) ingestFileOffline(ctx context.Context, srcPath string, stemSuff
 			_ = os.Remove(tmpLocal)
 		}
 	}()
+	// Once rowInserted is true the temp is deliberately kept on a failed
+	// rename: the row claims it, and a re-run completes the move.
 	placeLocal := func() bool {
 		if err := renameNoClobber(tmpLocal, localPath); err != nil {
 			// The row is in; keep the temp copy. A re-run over this card
@@ -647,6 +649,9 @@ func (e *Engine) resolveOfflineDestination(ctx context.Context, vars TemplateVar
 		cv := vars
 		cv.OriginalName = SuffixedFilename(vars.OriginalName, suffix)
 		cand := DestinationResolution{RelPath: RenderPath(tpl, cv), Suffix: suffix}
+		// Anything already at the local name -- a regular file, a
+		// directory, a symlink -- makes it unusable; only "nothing there"
+		// is a candidate.
 		if _, err := os.Lstat(filepath.Join(e.Ingest.LocalEditRoot, cand.RelPath)); err == nil {
 			continue
 		} else if !errors.Is(err, fs.ErrNotExist) {
@@ -699,8 +704,20 @@ func (e *Engine) offlineSlotUsable(ctx context.Context, res DestinationResolutio
 		return false, nil
 	}
 	if archiveReachable && e.Ingest.ArchiveRoot != "" {
-		if _, err := os.Lstat(archivePath); err == nil {
+		info, err := os.Lstat(archivePath)
+		switch {
+		case err == nil && !info.Mode().IsRegular():
+			// A directory/symlink/device at the archive name: CopyToArchive
+			// would refuse it, so don't hand the name out.
+			return false, nil
+		case err == nil:
 			return filesMatch(srcPath, archivePath), nil
+		case errors.Is(err, fs.ErrNotExist):
+			return true, nil
+		default:
+			// Unknown (permission, ENOTDIR, I/O): usable for the local
+			// write; CopyToArchive refuses a real conflict at drain time.
+			return true, nil
 		}
 	}
 	return true, nil

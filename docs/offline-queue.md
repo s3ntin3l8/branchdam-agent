@@ -113,9 +113,21 @@ own `offline.drainIntervalSecs` timer, issue #32) into backoff rather than a tig
 itself (network down, NAS unmounted). `archive_copy` turns terminal `FAILED` only for the two cases
 retrying can never fix -- a different file at the archive path, or a local copy that no longer
 matches its queued hash -- and both show up in the queue's failed count with the reason in
-`archive_copy_last_error`. `rebase` also has a terminal `FAILED` state: a classified-fatal server error (`internal/branchdam.HTTPError`'s
-`Classification()`, e.g. `ErrArchivedNode`) means retrying can never succeed, and an operator has
-to intervene -- check `rebase_last_error` in `queue.db`.
+`archive_copy_last_error`. `rebase` also has a terminal `FAILED` state: a classified-fatal server
+error (`internal/branchdam.HTTPError`'s `Classification()`, e.g. `ErrArchivedNode`) means retrying
+can never succeed.
+
+What the operator does depends on which step failed:
+
+- **`rebase` FAILED** -- read `rebase_last_error`, fix the server-side cause (e.g. un-archive the
+  node, or correct the storage location), then run `queue-drain -retry-failed`.
+- **`archive_copy` FAILED** -- read `archive_copy_last_error`. For a conflict, move or rename the
+  file already at the archive path (it is never overwritten); for a local-copy mismatch, restore the
+  local edit copy to the bytes that were ingested (or re-ingest from the card). Then run
+  `queue-drain -retry-failed`.
+
+`queue-drain -retry-failed` (resetting both kinds of FAILED row to pending) arrives with the A5
+change; until it ships, the reset is a manual `UPDATE` of the row's status in `queue.db`.
 
 One `archive_copy` failure mode does NOT self-clear, and there's no terminal state to catch it: if
 the local edit copy is deleted (by the user, by disk cleanup, by anything) before `archive_copy`
