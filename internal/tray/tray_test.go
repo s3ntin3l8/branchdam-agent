@@ -2162,6 +2162,7 @@ func TestReconfigureClosesReplacedIngester(t *testing.T) {
 }
 
 func TestReconfigureDetectorStartsAndStops(t *testing.T) {
+	withoutRemovableDetection(t) // on Windows, empty roots keeps watching drives
 	fi := &fakeIngester{}
 	r := NewRunner(fi, nil, "")
 	r.SetDetectorInterval(10 * time.Millisecond)

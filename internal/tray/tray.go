@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -865,7 +864,7 @@ func (r *Runner) IngestNowVolumes() []string {
 // there is nowhere to look, so "no card found" would mislead -- point the
 // operator at the setting instead.
 func ingestNowEmptyMessage(cardRoots []string) string {
-	if len(cardRoots) == 0 {
+	if len(cardRoots) == 0 && !removableDriveDetection {
 		return "No card folders are configured -- add one under Settings > Watch folders"
 	}
 	return "No camera card found to ingest"
@@ -933,7 +932,7 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		r.mu.Unlock()
 
 		if gate != nil {
-			proceed, err := gate.Confirm(ctx, cardPath, filepath.Base(cardPath))
+			proceed, err := gate.Confirm(ctx, cardPath, volumeName(cardPath))
 			if err != nil {
 				return IngestSummary{CardPath: cardPath, Err: err}
 			}
@@ -1064,7 +1063,7 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 	destRoots := []string{r.archiveRoot, r.scratchDir}
 	r.mu.Unlock()
 
-	volName := filepath.Base(cardPath)
+	volName := volumeName(cardPath)
 
 	if summary.Deferred > 0 && notifier != nil {
 		notifier("branchDAM Agent", fmt.Sprintf("%d file(s) from %s are waiting for an unmetered connection -- card not ejected; re-insert it to finish", summary.Deferred, volName))
@@ -1899,7 +1898,9 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 	}
 	r.mu.Unlock()
 
-	if len(roots) == 0 {
+	// No roots stops the detector -- except where removable drives are
+	// detected on their own (Windows), which needs no cardRoots at all.
+	if len(roots) == 0 && !removableDriveDetection {
 		return
 	}
 

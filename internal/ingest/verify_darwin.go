@@ -22,12 +22,25 @@ var fcntlFncacheFn = func(fd uintptr) error {
 	return err
 }
 
-// openForVerify on macOS attempts to bypass the OS page cache via F_NOCACHE
-// (fcntl). If fcntl succeeds, unbuffered direct I/O is achieved. If fcntl
-// fails with ENOTSUP (unsupported filesystem), it falls back to the
-// fsync+close+reopen floor (VerifyMethodBufferedFloor).  Any other fcntl
-// error is returned to the caller so Verify can surface it instead of
-// silently degrading.
+// openForVerify on macOS asks the kernel not to cache the re-read via
+// fcntl(F_NOCACHE). If fcntl fails with ENOTSUP (unsupported filesystem),
+// it falls back to the fsync+close+reopen floor (VerifyMethodBufferedFloor).
+// Any other fcntl error is returned to the caller so Verify can surface it
+// instead of silently degrading.
+//
+// F_NOCACHE is weaker than Linux's O_DIRECT or Windows'
+// FILE_FLAG_NO_BUFFERING, and VerifyMethodUnbuffered overstates it on
+// macOS: it is advisory, not a guaranteed cache bypass. It turns off
+// caching for data this descriptor reads from now on, but pages that are
+// ALREADY resident in the unified buffer cache -- typically every page
+// DualWrite just wrote through its own descriptor -- may still be served
+// from memory, and the file system is free to ignore the hint (SMB and
+// other network file systems decide for themselves). A successful
+// F_NOCACHE verify on macOS is therefore at least the documented buffered
+// floor (fsync, close, reopen) and often better, but cannot prove the
+// bytes came back from the device. requireUnbuffered treats it as
+// unbuffered, so it does not close that gap on macOS. See
+// docs/platform-support.md ("Verify cache bypass per platform").
 func openForVerify(path string) (io.ReadCloser, VerifyMethod, error) {
 	f, err := os.Open(path) //nolint:gosec // path is our own just-written destination, not attacker input
 	if err != nil {

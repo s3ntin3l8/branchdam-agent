@@ -35,16 +35,17 @@ type Detector struct {
 
 // NewDetector builds a Detector over cardRoots (parent directories to scan
 // for currently-mounted subdirectories, e.g. "/media/$USER" on Linux,
-// "/Volumes" on macOS) using ListVolumesUnder, polling every interval
-// (DefaultPollInterval if <= 0). Optional requireDCIM (default false)
-// filters candidate roots to those containing a DCIM/ directory.
+// "/Volumes" on macOS) plus, on Windows, every removable drive
+// (ListCardVolumes), polling every interval (DefaultPollInterval if <= 0).
+// Optional requireDCIM (default false) filters candidate roots to those
+// containing a DCIM/ directory.
 func NewDetector(cardRoots []string, interval time.Duration, requireDCIM ...bool) *Detector {
 	if interval <= 0 {
 		interval = DefaultPollInterval
 	}
 	dcim := len(requireDCIM) > 0 && requireDCIM[0]
 	return &Detector{
-		List:     func() ([]string, error) { return ListVolumesUnder(cardRoots, dcim) },
+		List:     func() ([]string, error) { return ListCardVolumes(cardRoots, dcim) },
 		Interval: interval,
 	}
 }

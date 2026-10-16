@@ -18,9 +18,12 @@ import (
 type VerifyMethod string
 
 const (
-	// VerifyMethodUnbuffered means the re-read bypassed the OS page cache
-	// (O_DIRECT on Linux; not yet implemented for other platforms -- see
-	// verify_other.go).
+	// VerifyMethodUnbuffered means the re-read was opened to bypass the OS
+	// page cache: O_DIRECT on Linux and FILE_FLAG_NO_BUFFERING on Windows
+	// (both enforced by the kernel), F_NOCACHE on macOS -- which is only
+	// advisory and can still be served from pages already cached (see
+	// verify_darwin.go's openForVerify). Other platforms never report it
+	// (verify_other.go).
 	VerifyMethodUnbuffered VerifyMethod = "unbuffered"
 	// VerifyMethodBufferedFloor means fsync+close+reopen was used without an
 	// unbuffered/direct-I/O path -- the documented acceptable floor (issue
