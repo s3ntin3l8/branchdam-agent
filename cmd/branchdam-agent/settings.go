@@ -51,10 +51,26 @@ type configSettings struct {
 	// -- the "previous" snapshot by then was already the changed one,
 	// so the diff against it saw nothing.
 	appliedStatusAddr string
+	// applied is the whole config this process started with -- the
+	// baseline restartRequiredKeys diffs against for every key that,
+	// like tray.statusAddr, is only read at startup.
+	applied config.Config
+
+	// saveMu serialises every settings mutation end to end -- validate
+	// against the current config, config.Patch, reload -- so two saves
+	// arriving together (the Settings window and the tray menu, or two
+	// window fields) can't validate against the same stale snapshot or
+	// interleave their reloads. config.Patch serialises its own
+	// read-modify-write too; this covers the steps around it. Never
+	// taken by Snapshot, which stays readable while a save runs.
+	saveMu sync.Mutex
 
 	mu              sync.Mutex
 	cfg             config.Config
 	restartRequired bool
+	// restartKeys lists the restart-only keys whose saved value differs
+	// from the one this process applied at startup (restartRequiredKeys).
+	restartKeys []string
 	// queueStore is set once via SetQueueStore, right after runTrayCmd
 	// opens queue.db (nil when offline.queueDbPath isn't configured).
 	// reload() uses it to rebuild queueDrainer/queuePruner against the
@@ -86,7 +102,34 @@ func newConfigSettings(path string, cfg config.Config, runner *tray.Runner) *con
 		cfg:               cfg,
 		runner:            runner,
 		appliedStatusAddr: cfg.Tray.StatusAddrOrDefault(),
+		applied:           cfg,
 	}
+}
+
+// restartRequiredKeys returns the config keys whose value in cfg differs
+// from applied (the config this process started with) and that nothing
+// re-applies until the process restarts: the status server's listen
+// address, the queue.db the tray opened, the drain/prune timers and the
+// detector's poll interval (all started once), and the self-update agent
+// (built once). Enabling prune counts; disabling it does not, since
+// reload drops the pruner and the timer then has nothing to run.
+func restartRequiredKeys(applied, cfg config.Config) []string {
+	var keys []string
+	add := func(key string, changed bool) {
+		if changed {
+			keys = append(keys, key)
+		}
+	}
+	add("tray.statusAddr", applied.Tray.StatusAddrOrDefault() != cfg.Tray.StatusAddrOrDefault())
+	add("offline.queueDbPath", strings.TrimSpace(applied.Offline.QueueDBPath) != strings.TrimSpace(cfg.Offline.QueueDBPath))
+	add("offline.drainIntervalSecs", applied.Offline.DrainIntervalSecsOrDefault() != cfg.Offline.DrainIntervalSecsOrDefault())
+	add("prune.enabled", !applied.Prune.Enabled && cfg.Prune.Enabled)
+	add("prune.intervalMinutes", applied.Prune.IntervalMinutesOrDefault() != cfg.Prune.IntervalMinutesOrDefault())
+	add("ingest.pollIntervalSecs", max(applied.Ingest.PollIntervalSecs, 0) != max(cfg.Ingest.PollIntervalSecs, 0))
+	add("selfUpdate.enabled", applied.SelfUpdate.Enabled != cfg.SelfUpdate.Enabled)
+	add("selfUpdate.checkIntervalHours", applied.SelfUpdate.CheckIntervalHoursOrDefault() != cfg.SelfUpdate.CheckIntervalHoursOrDefault())
+	add("selfUpdate.repo", applied.SelfUpdate.RepoOrDefault() != cfg.SelfUpdate.RepoOrDefault())
+	return keys
 }
 
 // SetResolveInstaller wires the DaVinci Resolve render-hook installer
@@ -183,6 +226,8 @@ func (s *configSettings) Snapshot() tray.SettingsView {
 		AllowedExtensions:          cfg.Ingest.AllowedExtensions,
 		CardRoots:                  cfg.Ingest.CardRoots,
 		RestartRequired:            s.restartRequired,
+		RestartRequiredKeys:        append([]string(nil), s.restartKeys...),
+		ApplyPending:               s.runner != nil && s.runner.ReconfigurePending(),
 		NodeIndexPath:              cfg.Integrations.NodeIndexPath,
 		NodeIndexPathSet:           cfg.Integrations.NodeIndexPath != "",
 		UploadStream:               cfg.Ingest.UploadStream,
@@ -204,6 +249,9 @@ func databaseURLDisplay(raw string) string {
 }
 
 func (s *configSettings) SetBool(key string, v bool) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	if err := s.validateBoolChange(key, v); err != nil {
 		return err
 	}
@@ -232,6 +280,9 @@ func (s *configSettings) SetBool(key string, v bool) error {
 }
 
 func (s *configSettings) SetInt(key string, v int) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	if err := s.validateIntChange(key, v); err != nil {
 		return err
 	}
@@ -242,6 +293,9 @@ func (s *configSettings) SetInt(key string, v int) error {
 }
 
 func (s *configSettings) SetStringSlice(key string, v []string) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	if err := s.validateStringSliceChange(key, v); err != nil {
 		return err
 	}
@@ -414,6 +468,9 @@ func toPathMappingEntries(mappings []config.PathMapping) []tray.PathMappingEntry
 // containing a comma. Trims each field and rejects an entry with either
 // side empty.
 func (s *configSettings) SetPathMappings(entries []tray.PathMappingEntry) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	mappings := make([]config.PathMapping, 0, len(entries))
 	for _, e := range entries {
 		ws := strings.TrimSpace(e.WorkstationPath)
@@ -603,6 +660,13 @@ func (s *configSettings) validateAndPatchString(key, value string) error {
 // SetString persists one dotted config key -- see tray.Settings.SetString's
 // own doc comment.
 func (s *configSettings) SetString(key, value string) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	return s.setStringLocked(key, value)
+}
+
+// setStringLocked is SetString for a caller already holding saveMu.
+func (s *configSettings) setStringLocked(key, value string) error {
 	if err := s.validateAndPatchString(key, value); err != nil {
 		return err
 	}
@@ -620,7 +684,9 @@ func (s *configSettings) SetIntegrationPath(id tray.IntegrationID, value string)
 	if b.ID == tray.IntegrationResolveDB {
 		pathKey = "databaseUrl"
 	}
-	return s.SetString(b.ConfigKey(pathKey), value)
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	return s.setStringLocked(b.ConfigKey(pathKey), value)
 }
 
 // parseAndValidateRewrites parses value into path rewrite rules and
@@ -647,6 +713,9 @@ func parseAndValidateRewrites(cfg config.Config, value string) ([]config.Resolve
 // handles catalogPath/databaseUrl), so this uses parseAndValidateRewrites
 // directly instead.
 func (s *configSettings) SetIntegrationRewrites(id tray.IntegrationID, value string) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	b, ok := builderFor(id)
 	if !ok || b.ApplyRewrites == nil {
 		return fmt.Errorf("settings: integration %q does not support path rewrites", id)
@@ -690,10 +759,12 @@ func (s *configSettings) SetIntegrationRewrites(id tray.IntegrationID, value str
 // specific change before ever calling config.Patch, so a menu-driven
 // change should never reach this rejection in practice.
 //
-// RestartRequired is re-derived by diffing against appliedStatusAddr
-// (fixed at construction -- what THIS PROCESS actually bound), not against
-// the mutable previous s.cfg snapshot -- see that field's own doc comment
-// for why that distinction matters.
+// RestartRequired (and RestartRequiredKeys) is re-derived by diffing
+// against applied (fixed at construction -- what THIS PROCESS actually
+// started with), not against the mutable previous s.cfg snapshot -- see
+// appliedStatusAddr's doc comment for why that distinction matters.
+//
+// Callers hold saveMu (every exported setter and Reload take it).
 func (s *configSettings) reload() error {
 	newCfg, err := config.Load(s.path)
 	if err != nil {
@@ -719,7 +790,8 @@ func (s *configSettings) reload() error {
 	s.mu.Lock()
 	oldResolveScriptsDir := s.cfg.Integrations.Resolve.ScriptsDir
 	s.cfg = newCfg
-	s.restartRequired = s.appliedStatusAddr != newCfg.Tray.StatusAddrOrDefault()
+	s.restartKeys = restartRequiredKeys(s.applied, newCfg)
+	s.restartRequired = len(s.restartKeys) > 0
 	queueStore := s.queueStore
 	resolveInstaller := s.resolveInstaller
 	s.mu.Unlock()
@@ -753,7 +825,13 @@ func (s *configSettings) reload() error {
 	// it the same way every other live-tunable already does.
 	s.runner.SetConfirmDestructive(newCfg.Tray.ConfirmDestructive)
 	s.runner.SetConfigIncomplete(configIncomplete, missingFields)
-	s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot)
+	// Never blocks: during an ingest the new engine/roots are applied
+	// when the card finishes (Runner.Reconfigure), so the save returns
+	// at once and Snapshot reports ApplyPending until then. The engine
+	// this replaces is closed once it is swapped out.
+	if !s.runner.Reconfigure(engine, newCfg.Ingest.CardRoots, newCfg.Ingest.LocalEditRoot) {
+		slog.Info("settings saved; ingest settings apply when the current ingest finishes")
+	}
 
 	// Rebuild every integration syncer against the freshly reloaded
 	// client/config, for the exact reason the queueDrainer/queuePruner
@@ -813,6 +891,8 @@ func (s *configSettings) reload() error {
 }
 
 func (s *configSettings) Reload() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	return s.reload()
 }
 
@@ -829,6 +909,9 @@ func (s *configSettings) RevealConfigFolder() error {
 // pre-validates against an in-memory snapshot, patches server.baseUrl,
 // server.apiKey, and agentId, and triggers a reload.
 func (s *configSettings) Pair(server, key, agent string) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.Lock()
 	cfg := s.cfg
 	s.mu.Unlock()

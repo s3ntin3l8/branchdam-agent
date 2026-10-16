@@ -53,12 +53,24 @@ type SettingsView struct {
 	// nothing here to mask.
 	CardRoots []string
 
-	// RestartRequired is true once a change to a restart-only field
-	// (tray.statusAddr) has been saved but not yet
-	// applied -- see Runner.Reconfigure's doc comment for why that
-	// can't be hot-reloaded. The menu surfaces "Restart now" rather than
+	// RestartRequired is true once a change to a restart-only field has
+	// been saved but not yet applied; RestartRequiredKeys names them
+	// (dotted config keys: tray.statusAddr, offline.queueDbPath,
+	// offline.drainIntervalSecs, prune.enabled when switched on,
+	// prune.intervalMinutes, ingest.pollIntervalSecs, selfUpdate.*). Each
+	// is read once at startup -- tray.statusAddr's listener, the queue.db
+	// handle, the drain/prune timers, the detector interval, the
+	// self-update agent -- so a reload can't apply it. The menu surfaces
+	// "Restart now" and the Settings window names the field rather than
 	// silently pretending the change already took effect.
-	RestartRequired bool
+	RestartRequired     bool
+	RestartRequiredKeys []string
+
+	// ApplyPending is true while a saved change to the ingest engine
+	// (server, roots, template, ...) waits for an in-flight ingest to
+	// finish before it takes effect -- Runner.Reconfigure never swaps the
+	// engine under a card mid-copy, and never makes the save wait for it.
+	ApplyPending bool
 
 	// NodeIndexPath/NodeIndexPathSet mirror ServerBaseURL/ServerAPIKeySet's
 	// own pattern -- the path itself is not a secret (unlike the API key),

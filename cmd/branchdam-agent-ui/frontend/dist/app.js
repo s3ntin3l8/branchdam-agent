@@ -1416,6 +1416,21 @@ function setFieldStatus(el, text, kind) {
   }
 }
 
+// savedStatusText says when a just-saved key takes effect, from the
+// SettingsView the save returned: after a restart (the key is in
+// RestartRequiredKeys -- read once at startup), when the card being
+// ingested right now is done (ApplyPending -- the engine is never swapped
+// mid-copy), or at once.
+function savedStatusText(key, sv) {
+  if ((sv.RestartRequiredKeys ?? []).includes(key)) {
+    return "Saved -- takes effect after the agent restarts";
+  }
+  if (sv.ApplyPending) {
+    return "Saved -- applies when the current ingest finishes";
+  }
+  return "Saved";
+}
+
 // saveSetting drives the common "save one key, re-render nothing but this
 // field's own status" path every plain (non-integration) field uses.
 // saveSetting returns whether the save actually succeeded -- callers that
@@ -1436,12 +1451,16 @@ async function saveSetting(key, value, statusEl) {
     // plumbing; a body that doesn't parse as JSON is defensive-only
     // (SetSetting's own contract guarantees valid JSON on success) and
     // silently skipped rather than surfaced as a save failure.
+    let saved = "Saved";
     try {
-      refreshEnabledByID(JSON.parse(body));
+      const sv = JSON.parse(body);
+      refreshEnabledByID(sv);
+      saved = savedStatusText(key, sv);
     } catch {
       /* see comment above */
     }
-    setFieldStatus(statusEl, "Saved", "saved");
+    // A plain "Saved" fades; a "takes effect later" note stays put.
+    setFieldStatus(statusEl, saved, saved === "Saved" ? "saved" : "pending");
     return true;
   } catch (err) {
     setFieldStatus(statusEl, String(err), "error");

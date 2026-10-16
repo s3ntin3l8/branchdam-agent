@@ -211,6 +211,16 @@ func (e *Exiftool) Close() {
 	}
 }
 
+// Close releases the Engine's pooled exiftool processes. The tray calls
+// it (through Runner.Reconfigure) on an Engine a settings reload has
+// replaced; without it every reload leaked a pool. Safe on an Engine
+// without exiftool, and safe to call more than once.
+func (e *Engine) Close() {
+	if e != nil && e.Exiftool != nil {
+		e.Exiftool.Close()
+	}
+}
+
 // execute runs exiftool with args through the pool when one is set,
 // falling back to a plain one-shot fork otherwise -- the latter keeps a
 // bare &Exiftool{path: ...} literal (as this package's own tests build)

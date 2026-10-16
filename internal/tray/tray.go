@@ -351,6 +351,14 @@ type Runner struct {
 	// small but real gap.
 	gateHeld atomic.Bool
 
+	// reconfigMu guards reconfigPending/reconfigWaiting: the newest
+	// Reconfigure call not yet applied (it waits for gate while an ingest
+	// or a self-update holds it), and whether a goroutine is already
+	// waiting to apply it. Never held across gate.
+	reconfigMu      sync.Mutex
+	reconfigPending *pendingReconfig
+	reconfigWaiting bool
+
 	// drainMu is a SEPARATE mutex from gate, deliberately -- see
 	// TriggerDrain's doc comment for why a drain pass must never be
 	// blocked by (or block) an ingest or a self-update apply.
@@ -1746,45 +1754,137 @@ func (r *Runner) StopDetector() {
 	}
 }
 
+// pendingReconfig is one Reconfigure call's arguments.
+type pendingReconfig struct {
+	ingester   Ingester
+	watchDirs  []string
+	scratchDir string
+}
+
+// ingesterCloser is implemented by an Ingester that owns resources -- the
+// *ingest.Engine's pooled exiftool processes -- to release once it has
+// been replaced.
+type ingesterCloser interface{ Close() }
+
 // Reconfigure swaps in a freshly built Ingester plus the watch/scratch
 // description it should report going forward -- the guarded-rebuild
 // mechanism issue #31's settings menu applies every hot-reloadable config
 // change through, rather than giving each individual field (server URL,
 // API key, archive/local roots, naming template, requireUnbuffered) its
-// own bespoke hot-patch path. Blocks until no ingest is in flight (reuses
-// TriggerIngest's own gate), so a config reload can never race a card
-// mid-copy the way swapping these fields without synchronization would.
+// own bespoke hot-patch path. The swap happens under TriggerIngest's own
+// gate, so a config reload can never race a card mid-copy.
 //
-// When watchDirs differs from the current roots, Reconfigure invokes
-// ReconfigureDetector (issue #78) AFTER releasing gate, so waiting on the
-// previous detector goroutine to exit cannot deadlock against an in-flight
-// TriggerIngest call.
+// Reconfigure never waits for that gate. When it is free the swap happens
+// before Reconfigure returns (applied == true). When an ingest (or a
+// self-update) holds it, the call is recorded and applied by a background
+// goroutine the moment the gate frees up, and Reconfigure returns false
+// at once: a settings save during a long card copy must not hang the
+// caller -- the Settings window's request would time out and report the
+// agent as not running, though the change was saved. Only the newest
+// pending call is applied; an older one it superseded never is.
+// ReconfigurePending reports whether one is still waiting.
+//
+// The replaced Ingester is Closed (when it implements Close) right after
+// the swap, still under the gate, so the old engine's exiftool pool
+// doesn't outlive it -- no ingest can be using it at that point.
+//
+// When watchDirs differs from the current roots, the detector is
+// restarted (ReconfigureDetector, issue #78) AFTER releasing gate, so
+// waiting on the previous detector goroutine to exit cannot deadlock
+// against an in-flight TriggerIngest call.
 //
 // One field is deliberately NOT reconfigurable this way and is the
 // caller's responsibility to treat as restart-required instead:
 // tray.statusAddr (the embedded HTTP server's Listen() call already
 // happened and is this tray's single-instance guard -- there's nothing to
 // swap it into).
-func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir string) {
-	var rootsChanged bool
-	var newRoots []string
+func (r *Runner) Reconfigure(ingester Ingester, watchDirs []string, scratchDir string) (applied bool) {
+	r.reconfigMu.Lock()
+	r.reconfigPending = &pendingReconfig{
+		ingester:   ingester,
+		watchDirs:  append([]string(nil), watchDirs...),
+		scratchDir: scratchDir,
+	}
+	r.reconfigMu.Unlock()
 
-	r.lockGate()
+	if r.gate.TryLock() {
+		r.gateHeld.Store(true)
+		r.applyPendingReconfigAndUnlock()
+		return true
+	}
+
+	r.reconfigMu.Lock()
+	startWaiter := !r.reconfigWaiting
+	r.reconfigWaiting = true
+	r.reconfigMu.Unlock()
+	if startWaiter {
+		go func() {
+			r.lockGate()
+			// Cleared before taking the pending call: a Reconfigure that
+			// lands after this point either is taken below or, seeing no
+			// waiter, starts its own.
+			r.reconfigMu.Lock()
+			r.reconfigWaiting = false
+			r.reconfigMu.Unlock()
+			r.applyPendingReconfigAndUnlock()
+		}()
+	}
+	return false
+}
+
+// ReconfigurePending reports whether a Reconfigure call is still waiting
+// for an in-flight ingest (or self-update) to release the gate.
+func (r *Runner) ReconfigurePending() bool {
+	r.reconfigMu.Lock()
+	defer r.reconfigMu.Unlock()
+	return r.reconfigPending != nil
+}
+
+// applyPendingReconfigAndUnlock applies the newest pending Reconfigure
+// call, if any. Called with gate held; releases it before restarting the
+// detector.
+func (r *Runner) applyPendingReconfigAndUnlock() {
+	r.reconfigMu.Lock()
+	p := r.reconfigPending
+	r.reconfigPending = nil
+	r.reconfigMu.Unlock()
+	if p == nil {
+		r.unlockGate()
+		return
+	}
+
 	r.mu.Lock()
-	oldRoots := append([]string(nil), r.watchDirs...)
-	r.ingester = ingester
-	r.wireProgress(ingester)
-	r.scratchDir = scratchDir
-	if !slices.Equal(oldRoots, watchDirs) {
-		rootsChanged = true
-		newRoots = append([]string(nil), watchDirs...)
-		r.watchDirs = newRoots
+	old := r.ingester
+	rootsChanged := !slices.Equal(r.watchDirs, p.watchDirs)
+	r.ingester = p.ingester
+	r.wireProgress(p.ingester)
+	r.scratchDir = p.scratchDir
+	if rootsChanged {
+		r.watchDirs = p.watchDirs
 	}
 	r.mu.Unlock()
+
+	if c, ok := old.(ingesterCloser); ok && old != p.ingester {
+		c.Close()
+	}
 	r.unlockGate()
 
 	if rootsChanged {
-		r.ReconfigureDetector(r.BaseContext(), newRoots)
+		r.ReconfigureDetector(r.BaseContext(), p.watchDirs)
+	}
+}
+
+// CloseIngester releases the current Ingester's resources (see
+// ingesterCloser) -- for process shutdown. It does not wait for the gate:
+// shutdown must not hang behind a card copy, and an ingest still running
+// when its engine's exiftool pool closes falls back to one-shot exiftool
+// forks (internal/exiftool.Pool.Execute) rather than failing.
+func (r *Runner) CloseIngester() {
+	r.mu.Lock()
+	ing := r.ingester
+	r.mu.Unlock()
+	if c, ok := ing.(ingesterCloser); ok {
+		c.Close()
 	}
 }
 

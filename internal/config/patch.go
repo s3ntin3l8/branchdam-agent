@@ -3,13 +3,29 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
+
+// patchMu serialises every Patch in this process. Patch is a
+// read-modify-write of the whole file: two unserialised calls (two
+// settings saves arriving together from the window and the tray menu)
+// would both read the old file and the second rename would silently drop
+// the first call's change. Another process editing the file at the same
+// moment is not covered -- nothing but an operator's own editor ever does.
+var patchMu sync.Mutex
+
+// syncDirFn fsyncs a directory after the rename that replaced the config
+// file in it. A package var so tests can observe or fail it.
+var syncDirFn = syncDir
 
 // Patch applies dotted-key updates (e.g. "tray.startOnLogin", "server.baseUrl")
 // to the YAML file at path and writes it back. Unlike a yaml.Marshal(cfg)
@@ -32,9 +48,16 @@ import (
 // A missing file is created (with its parent directory) from an empty
 // document, so callers never need to bootstrap config.yaml first.
 //
+// Calls are serialised process-wide (patchMu), so concurrent Patches each
+// see the previous one's result. A path that is a symlink (an operator
+// keeping config.yaml in a dotfiles repo, say) is resolved first: the
+// link's target is the file read and replaced, and the link itself is
+// left alone.
+//
 // The file is written atomically (temp file in the same directory, mode
-// 0600, then rename) so a crash mid-write can never leave config.yaml
-// truncated or half-written. Mode 0600 matters here specifically because
+// 0600, fsync, then rename, then an fsync of the directory) so a crash
+// mid-write can never leave config.yaml truncated or half-written, and a
+// power loss right after Patch returns cannot roll the change back. Mode 0600 matters here specifically because
 // setting server.apiKey from a dialog writes that secret to disk in
 // plaintext -- callers offering that must say so.
 //
@@ -46,6 +69,14 @@ import (
 // splicer that still has to create nested keys correctly) is meaningfully
 // riskier for a purely cosmetic gap.
 func Patch(path string, changes map[string]any) error {
+	patchMu.Lock()
+	defer patchMu.Unlock()
+
+	path, err := resolveSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("config: patch: %w", err)
+	}
+
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		// A missing file is patched from an empty document: Load applies
@@ -223,6 +254,12 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
 		_ = tmp.Close()
 		return fmt.Errorf("chmod temp file: %w", cerr)
 	}
+	// Without this, the rename below can reach disk before the data does:
+	// a power loss then leaves a zero-length config.yaml.
+	if serr := tmp.Sync(); serr != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("fsync temp file: %w", serr)
+	}
 	// tmp is writable and holds the whole new file's data, unflushed until
 	// Close -- unlike a read-only handle's Close, this one is load-bearing
 	// and must not be silently discarded.
@@ -233,5 +270,64 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
 	if rerr := os.Rename(tmpPath, path); rerr != nil {
 		return fmt.Errorf("rename temp file into place: %w", rerr)
 	}
+	// The rename is only durable once the directory entry is. The new
+	// file is already in place, so a failure here is logged, not
+	// returned -- the change took; only its crash-durability is unproven.
+	if derr := syncDirFn(dir); derr != nil {
+		slog.Warn("config: fsync of config directory failed; the saved change may not survive a power loss", "dir", dir, "err", derr)
+	}
 	return nil
+}
+
+// maxSymlinkHops bounds resolveSymlinks against a link cycle.
+const maxSymlinkHops = 40
+
+// resolveSymlinks follows path through any chain of symlinks to the file
+// a write should replace. Unlike filepath.EvalSymlinks it also resolves a
+// link whose final target does not exist yet (Patch then creates that
+// target), and it only follows the last path element at each hop --
+// symlinked parent directories need no resolving, since the rename
+// happens inside whatever directory the kernel resolves them to.
+func resolveSymlinks(path string) (string, error) {
+	for hop := 0; hop < maxSymlinkHops; hop++ {
+		info, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return path, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("stat %s: %w", path, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return path, nil
+		}
+		target, err := os.Readlink(path)
+		if err != nil {
+			return "", fmt.Errorf("read symlink %s: %w", path, err)
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(path), target)
+		}
+		path = target
+	}
+	return "", fmt.Errorf("resolve %s: too many levels of symbolic links", path)
+}
+
+// syncDir fsyncs dir so a rename inside it is durable. Go's File.Sync is
+// fcntl(F_FULLFSYNC) on macOS and fsync elsewhere; Windows has no
+// directory fsync (NTFS commits the entry with the rename), so it is a
+// no-op there.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir) //nolint:gosec // dir is the config file's own directory
+	if err != nil {
+		return err
+	}
+	serr := d.Sync()
+	cerr := d.Close()
+	if serr != nil {
+		return serr
+	}
+	return cerr
 }

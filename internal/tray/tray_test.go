@@ -1782,32 +1782,119 @@ func TestReconfigureSwapsIngesterWatchDirsAndScratch(t *testing.T) {
 	}
 }
 
-func TestReconfigureWaitsForInFlightIngest(t *testing.T) {
+// TestReconfigureDefersDuringInFlightIngest: Reconfigure never waits for
+// an in-flight ingest (a Settings save would hang behind a card copy and
+// the window would report the agent as not running), but it never swaps
+// the engine under that ingest either -- the newest call is applied the
+// moment the gate frees up, and an older one it superseded never is.
+func TestReconfigureDefersDuringInFlightIngest(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	fi := &blockingIngester{started: started, release: release}
 	r := NewRunner(fi, []string{"/old"}, "")
 
-	go r.TriggerIngest(context.Background(), "/old")
+	ingestDone := make(chan struct{})
+	go func() {
+		r.TriggerIngest(context.Background(), "/old")
+		close(ingestDone)
+	}()
 	<-started
 
-	done := make(chan struct{})
-	go func() {
-		r.Reconfigure(&fakeIngester{}, []string{"/new"}, "")
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Fatal("Reconfigure returned while an ingest was still in flight -- it must block on the same gate TriggerIngest holds")
-	case <-time.After(20 * time.Millisecond):
+	superseded := &closeCountingIngester{}
+	newest := &closeCountingIngester{}
+	for _, ing := range []*closeCountingIngester{superseded, newest} {
+		done := make(chan bool)
+		dirs := []string{"/superseded"}
+		if ing == newest {
+			dirs = []string{"/new"}
+		}
+		go func() { done <- r.Reconfigure(ing, dirs, "") }()
+		select {
+		case applied := <-done:
+			if applied {
+				t.Fatal("Reconfigure reported applied while an ingest held the gate")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Reconfigure blocked behind an in-flight ingest")
+		}
+	}
+	if !r.ReconfigurePending() {
+		t.Error("ReconfigurePending = false while the ingest still runs")
+	}
+	if got := r.WatchDirs(); len(got) != 1 || got[0] != "/old" {
+		t.Errorf("WatchDirs() mid-ingest = %v, want [/old] (nothing swapped under the card)", got)
 	}
 
 	close(release)
-	<-done
-
+	<-ingestDone
+	deadline := time.Now().Add(2 * time.Second)
+	for r.ReconfigurePending() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if r.ReconfigurePending() {
+		t.Fatal("pending Reconfigure never applied after the ingest finished")
+	}
 	if got := r.WatchDirs(); len(got) != 1 || got[0] != "/new" {
-		t.Errorf("WatchDirs() after Reconfigure = %v, want [/new]", got)
+		t.Errorf("WatchDirs() after the ingest = %v, want [/new]", got)
+	}
+	r.TriggerIngest(context.Background(), "/new")
+	if newest.calls != 1 || superseded.calls != 0 {
+		t.Errorf("ingest went to newest=%d superseded=%d, want 1 and 0", newest.calls, superseded.calls)
+	}
+	r.StopDetector()
+}
+
+// closeCountingIngester counts IngestCard and Close calls.
+type closeCountingIngester struct {
+	mu     sync.Mutex
+	calls  int
+	closes int
+}
+
+func (c *closeCountingIngester) IngestCard(_ context.Context, _ string) (ingest.CardResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return ingest.CardResult{}, nil
+}
+
+func (c *closeCountingIngester) IngestCardOffline(_ context.Context, _ string) (ingest.OfflineCardResult, error) {
+	return ingest.OfflineCardResult{}, nil
+}
+
+func (c *closeCountingIngester) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closes++
+}
+
+func (c *closeCountingIngester) closeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closes
+}
+
+// TestReconfigureClosesReplacedIngester pins the exiftool pool leak: each
+// reload built a new engine (and pool) and nothing closed the old one.
+func TestReconfigureClosesReplacedIngester(t *testing.T) {
+	first := &closeCountingIngester{}
+	r := NewRunner(first, nil, "")
+	second := &closeCountingIngester{}
+
+	if !r.Reconfigure(second, nil, "") {
+		t.Fatal("Reconfigure on an idle runner did not apply")
+	}
+	if first.closeCount() != 1 || second.closeCount() != 0 {
+		t.Errorf("closes: replaced=%d current=%d, want 1 and 0", first.closeCount(), second.closeCount())
+	}
+	// Re-applying the same ingester must not close it.
+	r.Reconfigure(second, nil, "")
+	if second.closeCount() != 0 {
+		t.Errorf("current ingester closed by a Reconfigure that kept it")
+	}
+	r.CloseIngester()
+	if second.closeCount() != 1 {
+		t.Errorf("CloseIngester closed the current ingester %d times, want 1", second.closeCount())
 	}
 }
 
