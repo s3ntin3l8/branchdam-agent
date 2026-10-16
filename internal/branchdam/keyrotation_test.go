@@ -513,15 +513,27 @@ func TestConcurrentHandshakesAdoptOnce(t *testing.T) {
 		case arrived <- struct{}{}:
 		default: // more persists than racers: the assertions below fail
 		}
-		// Wait until every racer has handshaken on k1 and arrived here,
-		// or long enough that the ones adoptMu turned away have long since
-		// returned.
-		deadline := time.After(300 * time.Millisecond)
-		for len(arrived) < racers || countEntries(rs.entries(), handshakePath+" k1") < racers {
+		// First wait (a state, generously bounded) until every racer has
+		// sent its handshake on k1. Then hold briefly so that, were adoptMu
+		// missing, the other racers would get past the stale check and
+		// arrive here too; with adoptMu they never come, so this is a fixed
+		// grace, not a rendezvous.
+		k1Deadline := time.After(5 * time.Second)
+		for countEntries(rs.entries(), handshakePath+" k1") < racers {
 			select {
-			case <-deadline:
+			case <-k1Deadline:
 				goto store
 			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		{
+			grace := time.After(200 * time.Millisecond)
+			for len(arrived) < racers {
+				select {
+				case <-grace:
+					goto store
+				case <-time.After(5 * time.Millisecond):
+				}
 			}
 		}
 	store:
