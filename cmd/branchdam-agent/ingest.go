@@ -89,7 +89,7 @@ func runIngestCmd(args []string) int {
 		return 1
 	}
 
-	client := branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
+	client := newServerClient(cfg, resolvedPath)
 	engine := ingest.NewEngine(client, cfg.AgentID, cfg.Ingest, cfg.PathMappings)
 	// This process exits right after this command returns -- a pooled
 	// exiftool subprocess left running would just be orphaned, not reaped

@@ -179,7 +179,12 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions)
 		req.ContentLength = opts.SizeBytes
 	}
 
-	req.Header.Set("X-API-Key", c.apiKey)
+	// A large body is streamed and cannot be replayed, so a refused rotated
+	// key is not retried here (for any body size, to keep one path);
+	// observeAuth still reverts the client's key, so the caller's own retry
+	// goes out with the previous key.
+	apiKey := c.currentKey()
+	req.Header.Set("X-API-Key", apiKey)
 	req.Header.Set("Content-Type", "application/octet-stream")
 	if opts.Filename != "" {
 		req.Header.Set("X-Filename", opts.Filename)
@@ -203,7 +208,7 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions)
 		}
 		req.Header.Set("X-Timestamp", timestamp)
 		req.Header.Set("X-Nonce", nonce)
-		req.Header.Set("X-Signature", c.signRequest(http.MethodPost, uploadPath, nonce, timestamp, signBody))
+		req.Header.Set("X-Signature", signRequest(apiKey, http.MethodPost, uploadPath, nonce, timestamp, signBody))
 	}
 
 	hc := c.uploadClient
@@ -218,6 +223,7 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, opts UploadOptions)
 		return nil, fmt.Errorf("branchdam: upload: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	c.observeAuth(ctx, apiKey, resp.StatusCode)
 	// The body is done (or the server answered early, e.g. a pre-write
 	// dedup): from here only the response read is outstanding. It gets
 	// its own idle watchdog -- ResponseHeaderTimeout covers only the

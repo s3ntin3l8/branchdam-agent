@@ -389,10 +389,10 @@ func TestClientHandshake(t *testing.T) {
 
 // TestClientHandshakeLogsPendingRotation is the regression test for issue
 // #235: the server's pendingRotation hint used to have no field to decode
-// into at all, so encoding/json silently dropped it every time. Now that
-// HandshakeResponse.PendingRotation exists, Handshake must also make its
-// arrival visible (Warn-level, per handshake.go's doc comment) rather than
-// leaving it as a struct field nothing ever reads.
+// into at all, so encoding/json silently dropped it every time. A hint
+// without a sealedApiKey cannot be acted on (keyrotation.go), so Handshake
+// must make its arrival visible at Warn rather than leave it as a struct
+// field nothing ever reads.
 func TestClientHandshakeLogsPendingRotation(t *testing.T) {
 	srv, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -427,8 +427,16 @@ func TestClientHandshakeLogsPendingRotation(t *testing.T) {
 	if !strings.Contains(out, "level=WARN") {
 		t.Errorf("expected a WARN-level log line for the rotation hint, got: %s", out)
 	}
-	if !strings.Contains(out, "newKeyId=7") {
+	if !strings.Contains(out, "keyId=7") {
 		t.Errorf("expected the log line to name the new key id, got: %s", out)
+	}
+	// A cleartext apiKey is not part of the S13 contract: it is never
+	// adopted (only sealedApiKey is) and never logged.
+	if strings.Contains(out, "new-plaintext-key") { // pragma: allowlist secret
+		t.Errorf("rotation log line leaked the cleartext key: %s", out)
+	}
+	if c.currentKey() != "test-api-key-0123456789012345678901" { // pragma: allowlist secret
+		t.Error("client switched to a cleartext rotation key")
 	}
 }
 

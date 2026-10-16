@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,9 +26,13 @@ import (
 const DefaultTimeout = 30 * time.Second
 
 // Client is the branchDAM agent-server REST client.
+//
+// The API key can change during the client's life: Handshake adopts a
+// rotated key the server delivers (keyrotation.go), so every request reads
+// the current key once, under keyMu, and signs and authenticates with that
+// one value.
 type Client struct {
 	baseURL    string
-	apiKey     string
 	httpClient *http.Client
 
 	// uploadClient carries Upload only. It has no total Timeout -- see
@@ -35,6 +40,24 @@ type Client struct {
 	// watchdog that replace it.
 	uploadClient      *http.Client
 	uploadIdleTimeout time.Duration
+
+	persistKey KeyPersister
+
+	// adoptMu serializes rotated-key adoption (adoptRotation).
+	adoptMu sync.Mutex
+
+	// keyMu guards every field below.
+	keyMu  sync.Mutex
+	apiKey string
+	// adopting is non-nil from the switch to a rotated key until the
+	// server first answers a request made with it.
+	adopting *keyAdoption
+	// restoreKey is the previous key after the server refused the rotated
+	// one; it is written back to the key store once the server accepts it.
+	restoreKey string
+	// refusedKeyIDs are rotated key ids the server refused on first use;
+	// they are not adopted again in this process.
+	refusedKeyIDs map[int64]struct{}
 }
 
 // Option configures a Client.
@@ -178,8 +201,11 @@ func isLoopbackHost(h string) bool {
 // Body bytes are appended after the trailing "\n" so a request with an
 // empty body is a well-defined canonical string (no body bytes), not a
 // malformed one -- a Hello() call signs over the empty byte slice.
-func (c *Client) signRequest(method, path, nonce, timestamp string, body []byte) string {
-	mac := hmac.New(sha256.New, []byte(c.apiKey))
+//
+// apiKey is the key the request is sent with, read once per request (see
+// Client), so the signature and X-API-Key always agree.
+func signRequest(apiKey, method, path, nonce, timestamp string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(apiKey))
 	mac.Write([]byte(method + "\n" + path + "\n" + nonce + "\n" + timestamp + "\n"))
 	mac.Write(body)
 	return hex.EncodeToString(mac.Sum(nil))
@@ -222,58 +248,8 @@ func newReplayProtectionFields() (timestamp, nonce string, err error) {
 // an X-API-Key or other secret back to the client cannot re-leak it via
 // a slog/crash-dump path.
 func (c *Client) post(ctx context.Context, path string, body, out any) error {
-	var (
-		reqBody   io.Reader
-		bodyBytes []byte
-	)
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("branchdam: marshal request: %w", err)
-		}
-		bodyBytes = b
-		reqBody = bytes.NewReader(b)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, reqBody)
-	if err != nil {
-		return fmt.Errorf("branchdam: build request: %w", err)
-	}
-	req.Header.Set("X-API-Key", c.apiKey)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	timestamp, nonce, rerr := newReplayProtectionFields()
-	if rerr != nil {
-		return fmt.Errorf("branchdam: build replay protection fields: %w", rerr)
-	}
-	req.Header.Set("X-Timestamp", timestamp)
-	req.Header.Set("X-Nonce", nonce)
-	req.Header.Set("X-Signature", c.signRequest(req.Method, path, nonce, timestamp, bodyBytes))
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("branchdam: request %s: %w", path, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("branchdam: read response %s: %w", path, err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &HTTPError{StatusCode: resp.StatusCode, Body: string(bytes.TrimSpace(respBody))}
-	}
-
-	if out == nil || len(respBody) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(respBody, out); err != nil {
-		return fmt.Errorf("branchdam: decode response %s: %w", path, err)
-	}
-	return nil
+	_, err := c.do(ctx, http.MethodPost, path, body, out)
+	return err
 }
 
 // get issues a GET to c.baseURL+path, JSON-unmarshalling a 2xx response into out
@@ -281,42 +257,82 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 // (e.g. constructed via url.Values.Encode) as transmitted to the server, matching
 // the URI string signed in X-Signature. A non-2xx response is returned as *HTTPError.
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
-	if err != nil {
-		return fmt.Errorf("branchdam: build request: %w", err)
+	_, err := c.do(ctx, http.MethodGet, path, nil, out)
+	return err
+}
+
+// do sends one replayable request (see post and get) and returns the API
+// key the final attempt used. After each response observeAuth may ask for
+// one retry with a different key: when a freshly rotated key is refused,
+// or when the key changed while the request was in flight.
+func (c *Client) do(ctx context.Context, method, path string, body, out any) (string, error) {
+	var bodyBytes []byte
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return "", fmt.Errorf("branchdam: marshal request: %w", err)
+		}
+		bodyBytes = b
 	}
-	req.Header.Set("X-API-Key", c.apiKey)
+
+	key := c.currentKey()
+	for attempt := 0; ; attempt++ {
+		status, respBody, err := c.send(ctx, method, path, key, body != nil, bodyBytes)
+		if err != nil {
+			return key, err
+		}
+		if retry := c.observeAuth(ctx, key, status); retry != "" && retry != key && attempt == 0 {
+			key = retry
+			continue
+		}
+		if status < 200 || status >= 300 {
+			return key, &HTTPError{StatusCode: status, Body: string(bytes.TrimSpace(respBody))}
+		}
+		if out == nil || len(respBody) == 0 {
+			return key, nil
+		}
+		if err := json.Unmarshal(respBody, out); err != nil {
+			return key, fmt.Errorf("branchdam: decode response %s: %w", path, err)
+		}
+		return key, nil
+	}
+}
+
+// send performs one HTTP round trip authenticated and signed with apiKey
+// and returns the status code and the full response body.
+func (c *Client) send(ctx context.Context, method, path, apiKey string, hasBody bool, bodyBytes []byte) (int, []byte, error) {
+	var reqBody io.Reader
+	if hasBody {
+		reqBody = bytes.NewReader(bodyBytes)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+	if err != nil {
+		return 0, nil, fmt.Errorf("branchdam: build request: %w", err)
+	}
+	req.Header.Set("X-API-Key", apiKey)
+	if hasBody {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	timestamp, nonce, rerr := newReplayProtectionFields()
 	if rerr != nil {
-		return fmt.Errorf("branchdam: build replay protection fields: %w", rerr)
+		return 0, nil, fmt.Errorf("branchdam: build replay protection fields: %w", rerr)
 	}
 	req.Header.Set("X-Timestamp", timestamp)
 	req.Header.Set("X-Nonce", nonce)
-	req.Header.Set("X-Signature", c.signRequest(req.Method, path, nonce, timestamp, nil))
+	req.Header.Set("X-Signature", signRequest(apiKey, req.Method, path, nonce, timestamp, bodyBytes))
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("branchdam: request %s: %w", path, err)
+		return 0, nil, fmt.Errorf("branchdam: request %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("branchdam: read response %s: %w", path, err)
+		return 0, nil, fmt.Errorf("branchdam: read response %s: %w", path, err)
 	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &HTTPError{StatusCode: resp.StatusCode, Body: string(bytes.TrimSpace(respBody))}
-	}
-
-	if out == nil || len(respBody) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(respBody, out); err != nil {
-		return fmt.Errorf("branchdam: decode response %s: %w", path, err)
-	}
-	return nil
+	return resp.StatusCode, respBody, nil
 }
 
 // ContentCheckQuery is the query of one GET /api/v1/agent/check-content

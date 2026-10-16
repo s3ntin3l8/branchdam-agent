@@ -1375,7 +1375,7 @@ func TestResolveServerConfigDoesNotHandshakeWithoutAgentID(t *testing.T) {
 		},
 		Ingest: config.IngestConfig{LocalEditRoot: "/edit", UploadStream: true},
 	}
-	_, missing := resolveServerConfig(context.Background(), &cfg, time.Second, "")
+	_, missing := resolveServerConfig(context.Background(), &cfg, filepath.Join(t.TempDir(), "config.yaml"), time.Second, "")
 	if calls.Load() != 0 {
 		t.Fatalf("handshake calls = %d, want 0", calls.Load())
 	}

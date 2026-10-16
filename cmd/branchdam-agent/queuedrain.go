@@ -72,7 +72,7 @@ func runQueueDrainCmd(args []string) int {
 		}
 	}
 
-	client := branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
+	client := newServerClient(cfg, resolvedPath)
 
 	if !*watch {
 		return runDrainPass(os.Stdout, client, store, cfg.AgentID, *timeout)

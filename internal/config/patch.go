@@ -71,7 +71,14 @@ var syncDirFn = syncDir
 func Patch(path string, changes map[string]any) error {
 	patchMu.Lock()
 	defer patchMu.Unlock()
+	return patchLocked(path, changes)
+}
 
+// patchLocked is Patch's body; the caller holds patchMu. SetRotatedAPIKey
+// (rotate.go) calls it under the same lock, so a rotated API key arriving
+// on a background handshake and a Settings save cannot drop one another's
+// change.
+func patchLocked(path string, changes map[string]any) error {
 	path, err := resolveSymlinks(path)
 	if err != nil {
 		return fmt.Errorf("config: patch: %w", err)
@@ -229,7 +236,10 @@ func marshalNode(doc *yaml.Node) ([]byte, error) {
 
 // writeFileAtomic writes data to a temp file in path's directory and
 // renames it into place, so a crash mid-write never leaves path
-// truncated. The temp file's Close error is surfaced (not discarded) since
+// truncated. The temp file is fsynced before the rename and the directory
+// after it (best effort), so a successful return means the new content is
+// on disk -- a rotated API key is only used once it is (SetRotatedAPIKey).
+// The temp file's Close error is surfaced (not discarded) since
 // data can still be buffered and unflushed at Close time -- same
 // discipline as internal/appbundle.copyExecutable and
 // internal/selfupdate.checkWritable.

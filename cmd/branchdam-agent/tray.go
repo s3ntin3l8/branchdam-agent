@@ -371,7 +371,7 @@ func runTrayCmd(args []string) int {
 	// (issue #86); see resolveServerConfig's doc comment for why the
 	// handshake always runs, even on a fresh install with an incomplete
 	// config.
-	client, missingFields := resolveServerConfig(ctx, &cfg, 5*time.Second, "")
+	client, missingFields := resolveServerConfig(ctx, &cfg, resolvedPath, 5*time.Second, "")
 	configIncomplete := len(missingFields) > 0
 	if configIncomplete {
 		slog.Info("config incomplete, tray will start in setup mode", "missing", missingFields)

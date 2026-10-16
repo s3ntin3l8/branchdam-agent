@@ -235,11 +235,42 @@ never read server-side, `pendingEventsCount` is server-global (not scoped to thi
 handshake failure never aborts the rest of the pass -- `queue.db` is the only source of truth for
 what's outstanding.
 
-If the response carries a `pendingRotation` hint (the server telling this device about a newer
-API key), `internal/branchdam.Client.Handshake` logs it at `Warn` -- see issue #235. Nothing acts
-on it yet: this agent has no device-pairing flow, so it never sends `currentKeyId` on the request,
-and the server never sends the hint back without one. Rotating the stored key in response is a
-separate, not-yet-implemented mechanism.
+The handshake is also how a rotated API key arrives -- see "Rotated API keys" below.
+
+## Rotated API keys
+
+When an operator rotates this device's key in branchDAM (`POST
+/api/v1/companion/pairings/{id}/rotate`), the old key keeps working for a grace window and the
+server hands the new key out on the device's next handshake: `currentKeyId` names the key the
+request used, and `pendingRotation.sealedApiKey` carries the new key sealed for it (branchDAM's
+`docs/agent-api.md`, "Key rotation delivery"). The first request made with the new key adopts it,
+which revokes every older key at once. `internal/branchdam` (`keyrotation.go`) handles it inside
+`Client.Handshake`, for every client built by `newServerClient` (`cmd/branchdam-agent/serverclient.go`:
+the tray at startup and on settings reload, `ingest`, `queue-drain`):
+
+1. **Open.** `OpenRotatedKey` opens the sealed value with the key the handshake authenticated with
+   (AES-256-GCM, key = HMAC-SHA256(current key, `"branchdam-key-rotation-v1"`), `"v1:"` +
+   base64(nonce || ciphertext || tag)). A value that does not open is ignored and logged; there is
+   no other fallback. A plaintext `pendingRotation.apiKey` is never used.
+2. **Store first.** `config.SetRotatedAPIKey` writes the new key as `server.apiKey` through the
+   same surgical `yaml.Node` patch as the Settings menu (comments and other `${VAR}` placeholders
+   survive; temp file + rename at 0600, now fsynced before the rename). If `server.apiKey` is a
+   `${VAR}` placeholder, nothing is written: the agent logs a `Warn` telling the operator to set
+   that environment variable to the new key (shown on branchDAM's Companion Pairing page) and
+   restart before the old key expires, and stays on its current key.
+3. **Then switch.** Only after the write succeeds does the client swap its in-memory key, and it
+   adopts the new key at once with a second handshake (whose response `Handshake` returns).
+4. **Fall back once.** If the server refuses the new key on its first use (`401`), the client goes
+   back to the old key and retries that request with it; once the server accepts the old key it is
+   written back to `config.yaml`, and the refused key id is not tried again in this process. An
+   upload refused this way is not replayed (its body is a stream) but the next request goes out on
+   the old key. If both keys are refused, `config.yaml` keeps the new key and memory the old one,
+   and the device has to be re-paired.
+
+Commands that never handshake (`prune`, `luminar-sync`, `preflight`) build plain clients and pick
+the new key up from `config.yaml` on their next run. A rotation the server cannot deliver (no
+`BRANCHDAM_SECRET_KEY` on the server, so `sealedApiKey` is empty) is logged at `Warn` with the old
+key's expiry: re-pair with `branchdam-agent pair` before then.
 
 ## Failure modes worth knowing about
 

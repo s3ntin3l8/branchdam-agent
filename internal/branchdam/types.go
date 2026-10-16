@@ -206,14 +206,10 @@ type HandshakeRequest struct {
 	AgentID                string `json:"agentId"`
 	ClientVersion          string `json:"clientVersion,omitempty"`
 	LastProcessedEventUUID string `json:"lastProcessedEventUuid,omitempty"`
-	// CurrentKeyID is the key_id the device is currently using, so the
-	// server can decide whether to send back a PendingRotation hint.
-	// Nil means "no rotation hint, even if a newer key exists" server-side
-	// -- which is exactly what every caller in this codebase gets today,
-	// since this agent has no device-pairing flow yet (it authenticates
-	// with a single long-lived config.yaml server.apiKey, not a rotatable,
-	// numbered key). Wiring a real value through requires that pairing
-	// flow; out of scope for issue #235 (see HandshakeResponse.PendingRotation).
+	// CurrentKeyID is accepted by the server for backward compatibility
+	// and ignored: the server identifies the key from the request's
+	// X-API-Key and reports it back as HandshakeResponse.CurrentKeyID.
+	// Nothing in this codebase sets it.
 	CurrentKeyID *int64 `json:"currentKeyId,omitempty"`
 }
 
@@ -229,33 +225,31 @@ type HandshakeResponse struct {
 	AcknowledgedEventUUID string `json:"acknowledgedEventUuid,omitempty"`
 	PendingEventsCount    int64  `json:"pendingEventsCount"`
 	NamingTemplate        string `json:"namingTemplate,omitempty"`
-	// PendingRotation, when non-nil, tells the device about a newer key it
-	// should switch to -- only ever set when the request carried a
-	// CurrentKeyID that isn't the newest active key for this agent_id. See
-	// Client.Handshake, which logs this at Warn since no caller in this
-	// codebase acts on it yet (issue #235; the rotation mechanism itself --
-	// persisting a new key -- is a separate, not-yet-implemented piece of
-	// work).
+	// CurrentKeyID is the id of the paired-device key this request
+	// authenticated with; 0 (omitted) for any other caller.
+	CurrentKeyID int64 `json:"currentKeyId,omitempty"`
+	// PendingRotation is set when the pairing has a newer active key than
+	// the one this request used. Client.Handshake acts on it (see
+	// keyrotation.go).
 	PendingRotation *PendingRotationHint `json:"pendingRotation,omitempty"`
 }
 
 // PendingRotationHint mirrors branchdam's own (unexported)
-// pendingRotationDTO in internal/httpapi/routes.go. APIKey is frequently
-// blank in practice -- the server's pairing.Service does not expose a
-// minted key's plaintext outside CreatePairing/RotateKey, so as of
-// ContractVersion the server ships KeyID (and PreviousKeyExpiresAtUnix) alone
-// and leaves APIKey empty, expecting the device to re-pair via QR code
-// instead. Treat a blank APIKey as "no usable key was included," not as an
-// error.
+// pendingRotationDTO in internal/httpapi/routes.go.
 type PendingRotationHint struct {
-	// KeyID is the row id of the new key -- for logging/audit only; the
-	// device is expected to store the apiKey value itself, not this id.
+	// KeyID is the row id of the new key -- for logging and audit only.
 	KeyID int64 `json:"keyId"`
-	// APIKey is the new key's plaintext. May be blank -- see the type doc
-	// comment above.
+	// APIKey is always "" from current servers: the new key is never sent
+	// in the clear. Kept so the wire shape still parses.
 	APIKey string `json:"apiKey"`
+	// SealedAPIKey is the new key sealed for this device (OpenRotatedKey
+	// opens it with the key the handshake used). Empty when the server
+	// cannot deliver it -- it has no BRANCHDAM_SECRET_KEY, or the rotation
+	// predates delivery; the device must then be re-paired by QR before
+	// PreviousKeyExpiresAtUnix.
+	SealedAPIKey string `json:"sealedApiKey,omitempty"`
 	// PreviousKeyExpiresAtUnix is a Unix timestamp: when the caller's current
-	// key stops working.
+	// key stops working (0 = no expiry set).
 	PreviousKeyExpiresAtUnix int64 `json:"previousKeyExpiresAtUnix"`
 }
 

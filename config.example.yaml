@@ -11,6 +11,11 @@ server:
   baseUrl: "http://localhost:8080"
   # Sent as the raw X-API-Key header. The server rejects a key under 32
   # characters with a 503 ("agent authentication is not configured").
+  # When branchDAM rotates this device's key, the agent picks the new key up
+  # from its next handshake and writes it here itself -- unless this is a
+  # ${VAR} placeholder: the agent then leaves it alone and logs a warning, and
+  # you update the environment variable (new key: branchDAM's Companion
+  # Pairing page) before the old key's grace window ends.
   apiKey: "${BRANCHDAM_AGENT_API_KEY}"
 
 # Self-asserted identity for this workstation. There is no per-agent
