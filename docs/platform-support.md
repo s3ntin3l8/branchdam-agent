@@ -211,7 +211,11 @@ is rebound to `127.0.0.1` is same-origin with itself in the browser and could re
 rebound request still names the attacker's host, which is what the check rejects. An
 operator-widened bind (`tray.statusAddr` set to a non-loopback host) skips the check, since the
 server cannot know every name the machine is reachable by; `/api/*` is not registered there at
-all.
+all. Loopback is decided case-insensitively (`LocalHost:38080` binds loopback and keeps the check).
+
+**Wire shape.** `/status.json` gains `uploadPausedMetered` (boolean, always present): true when
+`ingest.pauseUploadOnMetered` is on and the last metered probe said metered or failed. It is
+additive and display-only (the tooltip and the window read it); the drain gate never does.
 
 **A separate, authenticated `/api/*` surface exists alongside the plain JSON routes above**
 (`internal/tray/statusapi.go`), built for the native app UI (Track 3 of the distribution/UX plan):

@@ -423,6 +423,13 @@ type Runner struct {
 	// present (see offerCardsHeldDuringPause).
 	pausedInserts map[string]bool
 
+	// detectedVolumes is the volume set the detector last reported
+	// (inserted and not since removed), guarded by mu. A restarted
+	// detector (ReconfigureDetector) starts from it, so a reload while
+	// paused or not never reports an already-handled card as a new
+	// insertion.
+	detectedVolumes map[string]bool
+
 	// mu guards every field below, including ingester/watchDirs/
 	// scratchDir -- unlike before issue #31's settings menu, these are no
 	// longer set once at construction and left alone; Reconfigure can
@@ -651,6 +658,22 @@ func (r *Runner) holdPausedInserts(diff ingest.Diff) (held bool) {
 	return true
 }
 
+// recordDetected keeps detectedVolumes in step with the detector's
+// reports; see that field.
+func (r *Runner) recordDetected(diff ingest.Diff) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, v := range diff.Removed {
+		delete(r.detectedVolumes, v)
+	}
+	for _, v := range diff.Inserted {
+		if r.detectedVolumes == nil {
+			r.detectedVolumes = map[string]bool{}
+		}
+		r.detectedVolumes[v] = true
+	}
+}
+
 // offerCardsHeldDuringPause runs, in its own goroutine, a detection-style
 // ingest (TriggerDetectedIngest: skip set, IngestGate confirmation or
 // allow-list) for every volume held by holdPausedInserts that the current
@@ -846,7 +869,12 @@ func (r *Runner) TriggerDetectedIngest(ctx context.Context, cardPath string) Ing
 }
 
 func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection bool) IngestSummary {
-	if r.paused.Load() {
+	// A detection that finds the tray paused (including one that raced a
+	// re-pause after offerCardsHeldDuringPause checked) is held for the
+	// next resume rather than dropped: the detector won't report an
+	// unchanged volume again. If the tray resumed in between, nothing is
+	// held and the ingest goes ahead.
+	if r.paused.Load() && (!isDetection || r.holdPausedInserts(ingest.Diff{Inserted: []string{cardPath}})) {
 		slog.Info("tray: ingest paused, skipping", "path", agentlog.Sanitize(cardPath))
 		return IngestSummary{CardPath: cardPath}
 	}
@@ -1809,7 +1837,14 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 	// or local edit root is never offered as a card, whichever path asks.
 	requireDCIM := r.detectorRequireDCIM
 	detectorRoots := append([]string(nil), roots...)
+	r.mu.Lock()
+	known := make([]string, 0, len(r.detectedVolumes))
+	for v := range r.detectedVolumes {
+		known = append(known, v)
+	}
+	r.mu.Unlock()
 	detector := &ingest.Detector{
+		Known: known,
 		List: func() ([]string, error) {
 			r.mu.Lock()
 			destRoots := []string{r.archiveRoot, r.scratchDir}
@@ -1822,6 +1857,7 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 	go func() {
 		defer close(done)
 		err := detector.Watch(dctx, func(diff ingest.Diff) {
+			r.recordDetected(diff)
 			for _, path := range diff.Removed {
 				r.ForgetSkipped(path)
 			}

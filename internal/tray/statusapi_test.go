@@ -22,6 +22,10 @@ func TestIsLoopbackHost(t *testing.T) {
 		{"127.0.0.1:38080", true},
 		{"127.5.6.7:38080", true},
 		{"localhost:38080", true},
+		// Host names are case-insensitive: a hand-edited LocalHost binds
+		// loopback too and must keep the Host check.
+		{"LocalHost:38080", true},
+		{"LOCALHOST:38080", true},
 		{"[::1]:38080", true},
 		{"0.0.0.0:38080", false},
 		{"192.168.1.5:38080", false},

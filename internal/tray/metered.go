@@ -14,6 +14,12 @@ import (
 // TriggerDrain), so the TTL only affects how quickly the tooltip notices.
 const meteredProbeTTL = 30 * time.Second
 
+// meteredProbeStall is how long a probe may stay in flight before the
+// display stops waiting for it: the cache then reads as metered (shown
+// fail-closed, like a probe error) and a fresh probe starts. The stalled
+// probe's late answer is discarded.
+const meteredProbeStall = 4 * meteredProbeTTL
+
 // meteredCache is the display-side copy of netgate.IsMetered's answer.
 // The probe can shell out (nmcli on Linux) or call into the OS network
 // stack, either of which can stall; Status() runs on the tray's menu loop
@@ -32,6 +38,10 @@ type meteredCache struct {
 	err      error
 	at       time.Time
 	inFlight bool
+	// started is when the in-flight probe began; gen numbers probes so a
+	// stalled one that finally returns can't overwrite a newer answer.
+	started time.Time
+	gen     uint64
 }
 
 // meteredUploadPaused reports whether the tray should show uploads as
@@ -45,22 +55,32 @@ func (r *Runner) meteredUploadPaused(pauseOnMetered bool) bool {
 	}
 	c := &r.meteredCache
 	c.mu.Lock()
-	fresh := c.probed && time.Since(c.at) < meteredProbeTTL
+	now := time.Now()
+	fresh := c.probed && now.Sub(c.at) < meteredProbeTTL
 	paused := c.probed && (c.metered || c.err != nil)
-	start := !fresh && !c.inFlight
+	stalled := c.inFlight && now.Sub(c.started) >= meteredProbeStall
+	if stalled {
+		paused = true
+	}
+	start := (!fresh && !c.inFlight) || stalled
+	var gen uint64
 	if start {
 		c.inFlight = true
+		c.started = now
+		c.gen++
+		gen = c.gen
 	}
 	c.mu.Unlock()
 	if start {
-		go r.refreshMetered()
+		go r.refreshMetered(gen)
 	}
 	return paused
 }
 
 // refreshMetered runs the probe off the caller's goroutine and stores the
-// result. meteredUploadPaused is the only caller.
-func (r *Runner) refreshMetered() {
+// result, unless a newer probe (gen) has since started. meteredUploadPaused
+// is the only caller.
+func (r *Runner) refreshMetered(gen uint64) {
 	r.mu.Lock()
 	probe := r.isMeteredFn
 	r.mu.Unlock()
@@ -73,6 +93,10 @@ func (r *Runner) refreshMetered() {
 	}
 	c := &r.meteredCache
 	c.mu.Lock()
+	if gen != c.gen {
+		c.mu.Unlock()
+		return
+	}
 	c.probed = true
 	c.metered = metered
 	c.err = err

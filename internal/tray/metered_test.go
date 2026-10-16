@@ -116,3 +116,52 @@ func TestTrayTooltipReflectsLiveState(t *testing.T) {
 		t.Errorf("metered note missing while ingesting: %q", got)
 	}
 }
+
+// TestStalledMeteredProbeIsAbandoned: a probe that never returns must not
+// freeze the display at its last answer. Past meteredProbeStall the cache
+// reads as metered (fail-closed), a new probe starts, and the stalled
+// probe's late answer is discarded.
+func TestStalledMeteredProbeIsAbandoned(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetPauseUploadOnMetered(true)
+	stuck := make(chan struct{})
+	var calls int32
+	r.SetIsMeteredFunc(func() (bool, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			<-stuck
+			return false, nil
+		}
+		return true, nil
+	})
+
+	_ = r.Status(UpdateStatus{})
+	if !waitFor(t, func() bool { return atomic.LoadInt32(&calls) == 1 }) {
+		t.Fatal("first probe never started")
+	}
+	// Age the in-flight probe past the stall bound.
+	r.meteredCache.mu.Lock()
+	r.meteredCache.started = time.Now().Add(-meteredProbeStall)
+	r.meteredCache.mu.Unlock()
+
+	if !r.Status(UpdateStatus{}).UploadPausedMetered {
+		t.Error("stalled probe: UploadPausedMetered = false, want true (fail-closed)")
+	}
+	if !waitFor(t, func() bool { return atomic.LoadInt32(&calls) == 2 }) {
+		t.Fatal("no fresh probe started after the stall")
+	}
+	if !waitFor(t, func() bool {
+		r.meteredCache.mu.Lock()
+		defer r.meteredCache.mu.Unlock()
+		return r.meteredCache.probed && r.meteredCache.metered
+	}) {
+		t.Fatal("fresh probe's answer was never stored")
+	}
+
+	// The stalled probe finally answers "not metered": it must not
+	// overwrite the newer answer.
+	close(stuck)
+	time.Sleep(50 * time.Millisecond)
+	if !r.Status(UpdateStatus{}).UploadPausedMetered {
+		t.Error("stalled probe's late answer overwrote the newer one")
+	}
+}

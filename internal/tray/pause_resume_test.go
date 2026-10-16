@@ -115,3 +115,65 @@ func TestResumeOffersCardsInsertedWhilePaused(t *testing.T) {
 		t.Errorf("card inserted while paused offered %d times, want exactly 1", n)
 	}
 }
+
+// TestDetectorRestartWhilePausedDoesNotReofferHandledCards: a reload that
+// restarts the detector while paused (new roots or poll interval) must not
+// report a card it already handled as a new insertion, so resuming offers
+// nothing.
+func TestDetectorRestartWhilePausedDoesNotReofferHandledCards(t *testing.T) {
+	dir := t.TempDir()
+	gate := &recordingGate{}
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+	r.SetIngestGate(gate)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	card := filepath.Join(dir, "CARD")
+	if err := os.Mkdir(card, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.ReconfigureDetector(ctx, []string{dir})
+	defer r.StopDetector()
+	if !waitFor(t, func() bool { return gate.count(card) == 1 }) {
+		t.Fatal("card present at start was never offered")
+	}
+
+	r.SetPaused(true)
+	r.ReconfigureDetector(ctx, []string{dir})
+	time.Sleep(50 * time.Millisecond)
+	r.mu.Lock()
+	held := len(r.pausedInserts)
+	r.mu.Unlock()
+	if held != 0 {
+		t.Errorf("restarted detector held %d already-handled cards, want 0", held)
+	}
+
+	r.SetPaused(false)
+	time.Sleep(50 * time.Millisecond)
+	if n := gate.count(card); n != 1 {
+		t.Errorf("handled card offered %d times after a paused restart and resume, want 1", n)
+	}
+}
+
+// TestPausedDetectionIsHeldNotDropped: a detection that reaches
+// triggerIngest while paused (for example after a re-pause raced the
+// resume offer) is held for the next resume instead of being dropped.
+// A manual ingest is not held.
+func TestPausedDetectionIsHeldNotDropped(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, nil, "")
+	r.SetPaused(true)
+	ctx := context.Background()
+
+	r.TriggerDetectedIngest(ctx, "/media/CARD")
+	r.TriggerIngest(ctx, "/media/MANUAL")
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.pausedInserts["/media/CARD"] {
+		t.Error("detection while paused was dropped, want it held for resume")
+	}
+	if r.pausedInserts["/media/MANUAL"] {
+		t.Error("manual ingest while paused was held, want it skipped")
+	}
+}
