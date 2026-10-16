@@ -912,48 +912,96 @@ func TestIngestCardUploadStreamChtimesFailureIsLogged(t *testing.T) {
 
 type fakeCheckContentClient struct {
 	fakeClient
-	checkCalls []struct{ FastHash, FullHash string }
-	checkFunc  func(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error)
+	checkCalls []branchdam.ContentCheckQuery
+	checkFunc  func(ctx context.Context, q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error)
 }
 
-func (f *fakeCheckContentClient) CheckContent(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-	f.checkCalls = append(f.checkCalls, struct{ FastHash, FullHash string }{fastHash, fullHash})
+func (f *fakeCheckContentClient) CheckContent(ctx context.Context, q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+	f.checkCalls = append(f.checkCalls, q)
 	if f.checkFunc != nil {
-		return f.checkFunc(ctx, fastHash, fullHash)
+		return f.checkFunc(ctx, q)
 	}
-	return branchdam.ContentCheckResult{Found: false}, nil
+	return branchdam.ContentCheckResult{}, nil
+}
+
+// prescreenServer answers check-content the way branchDAM (#538) does: a
+// fast-only request gets {found:false, possibleMatch}, never node details;
+// a full-hash request gets the definitive answer, with possibleMatch
+// mirroring found.
+func prescreenServer(possible bool, full branchdam.ContentCheckResult) func(context.Context, branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+	return func(_ context.Context, q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+		if q.FullHash == "" {
+			return branchdam.ContentCheckResult{Found: false, PossibleMatch: possible}, nil
+		}
+		full.PossibleMatch = full.Found
+		return full, nil
+	}
+}
+
+// oldServer answers check-content the way a server predating the fast-hash
+// pre-screen does: a request without fullHash is 400, a full-hash request
+// is answered (found + details).
+func oldServer(full branchdam.ContentCheckResult) func(context.Context, branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+	return func(_ context.Context, q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+		if q.FullHash == "" {
+			return branchdam.ContentCheckResult{}, &branchdam.HTTPError{StatusCode: http.StatusBadRequest, Body: `{"title":"Bad Request","status":400,"detail":"fullHash must be 64 hexadecimal characters"}`}
+		}
+		return full, nil
+	}
+}
+
+func liveDuplicate(state string) branchdam.ContentCheckResult {
+	return branchdam.ContentCheckResult{
+		Found:          true,
+		NodeUUID:       "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
+		FilePath:       "/storage/archive/2026/2026-07-15_ILCE-7M4/DSC0001.JPG",
+		LifecycleState: state,
+	}
+}
+
+// writeCard creates cardRoot with the given name -> content files.
+func writeCard(t *testing.T, cardRoot string, files map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(cardRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(cardRoot, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// wantHashes returns the FastHash and BLAKE3 full hash of p, computed the
+// way the server's columns are.
+func wantHashes(t *testing.T, p string) (fast, full string) {
+	t.Helper()
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fast, err = hashing.FastHash(f, fi.Size())
+	if err != nil {
+		t.Fatalf("FastHash: %v", err)
+	}
+	return fast, blake3Hex(t, p)
 }
 
 func TestIngestFileDedupPreFlight(t *testing.T) {
-	t.Run("confirmed duplicate skips DualWrite and sets ExistingNodeUUID", func(t *testing.T) {
+	t.Run("possibleMatch then live full-hash match skips and removes both copies", func(t *testing.T) {
 		dir := t.TempDir()
 		cardRoot := filepath.Join(dir, "card")
-		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0001.JPG"), []byte("duplicate-image-bytes"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeCard(t, cardRoot, map[string]string{"DSC0001.JPG": "duplicate-image-bytes"})
+		srcPath := filepath.Join(cardRoot, "DSC0001.JPG")
+		wantFast, wantFull := wantHashes(t, srcPath)
 
-		client := &fakeCheckContentClient{
-			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-				if fullHash == "" {
-					// Fast-hash pre-screen hit
-					return branchdam.ContentCheckResult{Found: true}, nil
-				}
-				// Full-hash confirmation hit
-				return branchdam.ContentCheckResult{
-					Found:          true,
-					NodeUUID:       "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
-					FilePath:       "/storage/archive/2026/2026-07-15_ILCE-7M4/DSC0001.JPG",
-					LifecycleState: "ACTIVE",
-				}, nil
-			},
-		}
-
-		archiveRoot := filepath.Join(dir, "archive")
-		localRoot := filepath.Join(dir, "local")
-		e := newTestEngine(t, client, archiveRoot, localRoot)
+		client := &fakeCheckContentClient{checkFunc: prescreenServer(true, liveDuplicate("ACTIVE"))}
+		e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
 
 		res, err := e.IngestCard(context.Background(), cardRoot)
 		if err != nil {
@@ -970,121 +1018,293 @@ func TestIngestFileDedupPreFlight(t *testing.T) {
 			t.Errorf("expected Skipped=true, got false")
 		}
 		if fr.ExistingNodeUUID != "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60" {
-			t.Errorf("ExistingNodeUUID = %q, want 0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60", fr.ExistingNodeUUID)
+			t.Errorf("ExistingNodeUUID = %q", fr.ExistingNodeUUID)
 		}
 		wantReason := "duplicate: already in library as node 0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60 at /storage/archive/2026/2026-07-15_ILCE-7M4/DSC0001.JPG"
 		if fr.SkipReason != wantReason {
 			t.Errorf("SkipReason = %q, want %q", fr.SkipReason, wantReason)
 		}
-
-		// Zero bytes written to archiveRoot or localRoot
 		if _, err := os.Stat(fr.ArchivePath); !os.IsNotExist(err) {
-			t.Errorf("archive file should not exist, err=%v", err)
+			t.Errorf("archive copy of a duplicate must be removed, err=%v", err)
 		}
 		if _, err := os.Stat(fr.LocalPath); !os.IsNotExist(err) {
-			t.Errorf("local file should not exist, err=%v", err)
+			t.Errorf("local copy of a duplicate must be removed, err=%v", err)
 		}
 		if len(client.calls) != 0 {
 			t.Errorf("expected 0 PostNodeCreated calls, got %d", len(client.calls))
 		}
 		if len(client.checkCalls) != 2 {
-			t.Fatalf("expected 2 CheckContent calls (fast then full), got %d", len(client.checkCalls))
+			t.Fatalf("expected 2 CheckContent calls (pre-screen then confirm), got %d", len(client.checkCalls))
 		}
-		srcPath := filepath.Join(cardRoot, "DSC0001.JPG")
-		wantFullHash := blake3Hex(t, srcPath)
-		f, err := os.Open(srcPath)
-		if err != nil {
-			t.Fatal(err)
+		pre, confirm := client.checkCalls[0], client.checkCalls[1]
+		if pre.FastHash != wantFast || pre.SizeBytes != int64(len("duplicate-image-bytes")) || pre.FullHash != "" {
+			t.Errorf("pre-screen query = %+v, want fastHash=%s sizeBytes=%d and no fullHash", pre, wantFast, len("duplicate-image-bytes"))
 		}
-		fi, err := f.Stat()
-		if err != nil {
-			t.Fatal(err)
-		}
-		wantFastHash, err := hashing.FastHash(f, fi.Size())
-		_ = f.Close()
-		if err != nil {
-			t.Fatalf("FastHash: %v", err)
-		}
-		if client.checkCalls[0].FastHash != wantFastHash {
-			t.Errorf("first check fastHash = %q, want %q", client.checkCalls[0].FastHash, wantFastHash)
-		}
-		if client.checkCalls[0].FullHash != "" {
-			t.Errorf("first check should have empty fullHash, got %q", client.checkCalls[0].FullHash)
-		}
-		if client.checkCalls[1].FastHash != wantFastHash {
-			t.Errorf("second check fastHash = %q, want %q", client.checkCalls[1].FastHash, wantFastHash)
-		}
-		if client.checkCalls[1].FullHash != wantFullHash {
-			t.Errorf("second check fullHash = %q, want %q", client.checkCalls[1].FullHash, wantFullHash)
+		if confirm.FullHash != wantFull {
+			t.Errorf("confirm fullHash = %q, want %q", confirm.FullHash, wantFull)
 		}
 	})
 
-	t.Run("duplicate found but lifecycle state non-live proceeds with DualWrite", func(t *testing.T) {
+	t.Run("dedup uses the in-flight hashes and never re-reads the card", func(t *testing.T) {
 		dir := t.TempDir()
 		cardRoot := filepath.Join(dir, "card")
-		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0004.JPG"), []byte("archived-node-content"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		client := &fakeCheckContentClient{
-			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-				return branchdam.ContentCheckResult{
-					Found:          true,
-					NodeUUID:       "0190f1a2-archived-node",
-					FilePath:       "/storage/archive/archived.jpg",
-					LifecycleState: "ARCHIVED",
-				}, nil
-			},
-		}
+		writeCard(t, cardRoot, map[string]string{"DSC0001.JPG": "read-once-bytes"})
+		srcPath := filepath.Join(cardRoot, "DSC0001.JPG")
+		_, wantFull := wantHashes(t, srcPath)
 
 		archiveRoot := filepath.Join(dir, "archive")
 		localRoot := filepath.Join(dir, "local")
+		var copiesExistedAtCheck bool
+		client := &fakeCheckContentClient{}
+		client.checkFunc = func(ctx context.Context, q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+			if q.FullHash == "" {
+				// The check runs after the single copy: both copies exist.
+				// Pull the card file away; any later read of it for
+				// hashing would fail.
+				_, aErr := os.Stat(filepath.Join(archiveRoot, "DSC0001.JPG"))
+				_, lErr := os.Stat(filepath.Join(localRoot, "DSC0001.JPG"))
+				copiesExistedAtCheck = aErr == nil && lErr == nil
+				if err := os.Remove(srcPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return prescreenServer(true, liveDuplicate("ACTIVE"))(ctx, q)
+		}
 		e := newTestEngine(t, client, archiveRoot, localRoot)
 
 		res, err := e.IngestCard(context.Background(), cardRoot)
 		if err != nil {
 			t.Fatalf("IngestCard: %v", err)
 		}
-		if len(res.Files) != 1 {
-			t.Fatalf("got %d files, want 1", len(res.Files))
+		if !copiesExistedAtCheck {
+			t.Error("content check ran before the copy: the card would be read more than once")
+		}
+		if len(client.checkCalls) != 2 || client.checkCalls[1].FullHash != wantFull {
+			t.Fatalf("check calls = %+v, want a confirm carrying fullHash %s", client.checkCalls, wantFull)
+		}
+		if fr := res.Files[0]; !fr.Skipped || fr.Err != nil {
+			t.Errorf("Skipped=%v Err=%v, want a duplicate skip", fr.Skipped, fr.Err)
+		}
+	})
+
+	t.Run("HIDDEN node counts as live and is skipped", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		writeCard(t, cardRoot, map[string]string{"DSC0001.JPG": "hidden-node-bytes"})
+
+		client := &fakeCheckContentClient{checkFunc: prescreenServer(true, liveDuplicate("HIDDEN"))}
+		e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
 		}
 		fr := res.Files[0]
+		if !fr.Skipped {
+			t.Errorf("a HIDDEN duplicate must be skipped, got Skipped=false")
+		}
+		if len(client.calls) != 0 {
+			t.Errorf("expected 0 PostNodeCreated calls, got %d", len(client.calls))
+		}
+	})
+
+	t.Run("full-hash match on a non-live node proceeds", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		writeCard(t, cardRoot, map[string]string{"DSC0004.JPG": "archived-node-content"})
+
+		client := &fakeCheckContentClient{checkFunc: prescreenServer(true, liveDuplicate("ARCHIVED"))}
+		e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		fr := res.Files[0]
+		if fr.Skipped || fr.Err != nil {
+			t.Errorf("ARCHIVED duplicate: Skipped=%v Err=%v, want ingested", fr.Skipped, fr.Err)
+		}
+		if len(client.calls) != 1 {
+			t.Errorf("expected 1 PostNodeCreated call, got %d", len(client.calls))
+		}
+		if _, err := os.Stat(fr.ArchivePath); err != nil {
+			t.Errorf("archive copy missing: %v", err)
+		}
+	})
+
+	t.Run("a match on this file's own archive path is not a duplicate", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		writeCard(t, cardRoot, map[string]string{"DSC0009.JPG": "self-indexed-bytes"})
+		archiveRoot := filepath.Join(dir, "archive")
+
+		client := &fakeCheckContentClient{}
+		client.checkFunc = func(ctx context.Context, q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+			// The server already indexed the copy this run just wrote:
+			// the match is at this file's own archive container path
+			// (newTestEngine maps archiveRoot to /storage/archive).
+			if _, err := os.Stat(filepath.Join(archiveRoot, "DSC0009.JPG")); err != nil {
+				t.Fatalf("archive copy not found at check time: %v", err)
+			}
+			self := liveDuplicate("ACTIVE")
+			self.FilePath = "/storage/archive/DSC0009.JPG"
+			return prescreenServer(true, self)(ctx, q)
+		}
+		e := newTestEngine(t, client, archiveRoot, filepath.Join(dir, "local"))
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		fr := res.Files[0]
+		if fr.Skipped || fr.Err != nil {
+			t.Fatalf("Skipped=%v Err=%v, want ingested", fr.Skipped, fr.Err)
+		}
+		if _, err := os.Stat(fr.ArchivePath); err != nil {
+			t.Errorf("own archive copy must not be removed: %v", err)
+		}
+	})
+
+	t.Run("possibleMatch with a full-hash miss proceeds", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		writeCard(t, cardRoot, map[string]string{"DSC0002.JPG": "unique-image-bytes"})
+
+		client := &fakeCheckContentClient{checkFunc: prescreenServer(true, branchdam.ContentCheckResult{Found: false})}
+		e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		fr := res.Files[0]
+		if fr.Err != nil {
+			t.Fatalf("unexpected file error: %v", fr.Err)
+		}
 		if fr.Skipped {
-			t.Errorf("expected non-live (ARCHIVED) duplicate to NOT be skipped, got Skipped=true")
+			t.Errorf("expected file to NOT be skipped on a fast-hash false positive")
+		}
+		if len(client.checkCalls) != 2 {
+			t.Errorf("expected 2 check calls, got %d", len(client.checkCalls))
+		}
+		if len(client.calls) != 1 {
+			t.Errorf("expected 1 PostNodeCreated call, got %d", len(client.calls))
+		}
+		if _, err := os.Stat(fr.ArchivePath); err != nil {
+			t.Errorf("archive file missing: %v", err)
+		}
+		if _, err := os.Stat(fr.LocalPath); err != nil {
+			t.Errorf("local file missing: %v", err)
+		}
+	})
+
+	t.Run("no possibleMatch never sends the full hash", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		writeCard(t, cardRoot, map[string]string{"DSC0003.JPG": "new-image-bytes"})
+
+		client := &fakeCheckContentClient{checkFunc: prescreenServer(false, branchdam.ContentCheckResult{})}
+		e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		fr := res.Files[0]
+		if fr.Skipped || fr.Err != nil {
+			t.Errorf("Skipped=%v Err=%v, want ingested", fr.Skipped, fr.Err)
+		}
+		if len(client.checkCalls) != 1 || client.checkCalls[0].FullHash != "" {
+			t.Errorf("check calls = %+v, want only the fast pre-screen", client.checkCalls)
 		}
 		if len(client.calls) != 1 {
 			t.Errorf("expected 1 PostNodeCreated call, got %d", len(client.calls))
 		}
 	})
 
-	t.Run("server 404 on preflight latches and skips preflight for remaining files", func(t *testing.T) {
+	t.Run("older server's 400 falls back to the full-hash lookup without latching", func(t *testing.T) {
 		dir := t.TempDir()
 		cardRoot := filepath.Join(dir, "card")
-		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0001.JPG"), []byte("file1"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0002.JPG"), []byte("file2"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0003.JPG"), []byte("file3"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeCard(t, cardRoot, map[string]string{
+			"DSC0001.JPG": "file1",
+			"DSC0002.JPG": "file2",
+			"DSC0003.JPG": "file3",
+		})
 
-		client := &fakeCheckContentClient{
-			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-				return branchdam.ContentCheckResult{}, &branchdam.HTTPError{StatusCode: http.StatusNotFound, Body: "404 page not found"}
-			},
-		}
+		client := &fakeCheckContentClient{checkFunc: oldServer(liveDuplicate("ACTIVE"))}
+		e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
 
-		archiveRoot := filepath.Join(dir, "archive")
-		localRoot := filepath.Join(dir, "local")
-		e := newTestEngine(t, client, archiveRoot, localRoot)
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		if len(res.Files) != 3 {
+			t.Fatalf("got %d files, want 3", len(res.Files))
+		}
+		for _, fr := range res.Files {
+			if fr.Err != nil || !fr.Skipped || fr.ExistingNodeUUID == "" {
+				t.Errorf("%s: Skipped=%v Err=%v, want a duplicate skip via the full-hash lookup", fr.SourcePath, fr.Skipped, fr.Err)
+			}
+		}
+		// One rejected pre-screen, then a full-hash lookup per file: the
+		// 400 switches the pass to full-hash lookups, it doesn't disable
+		// dedup.
+		if len(client.checkCalls) != 4 {
+			t.Fatalf("expected 4 check calls (1 rejected pre-screen + 3 full-hash lookups), got %d: %+v", len(client.checkCalls), client.checkCalls)
+		}
+		if client.checkCalls[0].FullHash != "" {
+			t.Errorf("first call should be the fast pre-screen, got %+v", client.checkCalls[0])
+		}
+		for i, q := range client.checkCalls[1:] {
+			if q.FullHash == "" {
+				t.Errorf("call %d after the 400 has no fullHash: %+v", i+1, q)
+			}
+		}
+		if len(client.calls) != 0 {
+			t.Errorf("expected 0 PostNodeCreated calls, got %d", len(client.calls))
+		}
+	})
+
+	t.Run("400 on the full-hash confirm fails open without latching", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		writeCard(t, cardRoot, map[string]string{"DSC0001.JPG": "file1", "DSC0002.JPG": "file2"})
+
+		client := &fakeCheckContentClient{checkFunc: func(_ context.Context, q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+			if q.FullHash == "" {
+				return branchdam.ContentCheckResult{PossibleMatch: true}, nil
+			}
+			return branchdam.ContentCheckResult{}, &branchdam.HTTPError{StatusCode: http.StatusBadRequest, Body: "bad request"}
+		}}
+		e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+
+		res, err := e.IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		for _, fr := range res.Files {
+			if fr.Skipped || fr.Err != nil {
+				t.Errorf("%s: Skipped=%v Err=%v, want ingested", fr.SourcePath, fr.Skipped, fr.Err)
+			}
+		}
+		if len(client.checkCalls) != 4 {
+			t.Errorf("expected 4 check calls (both files fully checked), got %d", len(client.checkCalls))
+		}
+	})
+
+	t.Run("server 404 latches and skips the check for remaining files", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		writeCard(t, cardRoot, map[string]string{
+			"DSC0001.JPG": "file1",
+			"DSC0002.JPG": "file2",
+			"DSC0003.JPG": "file3",
+		})
+
+		client := &fakeCheckContentClient{checkFunc: func(context.Context, branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+			return branchdam.ContentCheckResult{}, &branchdam.HTTPError{StatusCode: http.StatusNotFound, Body: "404 page not found"}
+		}}
+		e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
 
 		res, err := e.IngestCard(context.Background(), cardRoot)
 		if err != nil {
@@ -1106,111 +1326,15 @@ func TestIngestFileDedupPreFlight(t *testing.T) {
 		}
 	})
 
-	t.Run("fast-hash false positive proceeds with DualWrite", func(t *testing.T) {
+	t.Run("server network failure fails open and proceeds", func(t *testing.T) {
 		dir := t.TempDir()
 		cardRoot := filepath.Join(dir, "card")
-		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0002.JPG"), []byte("unique-image-bytes"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeCard(t, cardRoot, map[string]string{"DSC0004.JPG": "failopen-image-bytes"})
 
-		client := &fakeCheckContentClient{
-			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-				if fullHash == "" {
-					// Fast-hash collision / false positive
-					return branchdam.ContentCheckResult{Found: true}, nil
-				}
-				// Full-hash mismatch -> not found
-				return branchdam.ContentCheckResult{Found: false}, nil
-			},
-		}
-
-		archiveRoot := filepath.Join(dir, "archive")
-		localRoot := filepath.Join(dir, "local")
-		e := newTestEngine(t, client, archiveRoot, localRoot)
-
-		res, err := e.IngestCard(context.Background(), cardRoot)
-		if err != nil {
-			t.Fatalf("IngestCard: %v", err)
-		}
-		if len(res.Files) != 1 {
-			t.Fatalf("got %d files, want 1", len(res.Files))
-		}
-		fr := res.Files[0]
-		if fr.Err != nil {
-			t.Fatalf("unexpected file error: %v", fr.Err)
-		}
-		if fr.Skipped {
-			t.Errorf("expected file to NOT be skipped on false positive, got Skipped=true")
-		}
-		if len(client.calls) != 1 {
-			t.Errorf("expected 1 PostNodeCreated call, got %d", len(client.calls))
-		}
-		if _, err := os.Stat(fr.ArchivePath); err != nil {
-			t.Errorf("archive file missing: %v", err)
-		}
-		if _, err := os.Stat(fr.LocalPath); err != nil {
-			t.Errorf("local file missing: %v", err)
-		}
-	})
-
-	t.Run("fast-hash not found skips full-hash check and proceeds with DualWrite", func(t *testing.T) {
-		dir := t.TempDir()
-		cardRoot := filepath.Join(dir, "card")
-		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0003.JPG"), []byte("new-image-bytes"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		client := &fakeCheckContentClient{
-			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-				return branchdam.ContentCheckResult{Found: false}, nil
-			},
-		}
-
-		archiveRoot := filepath.Join(dir, "archive")
-		localRoot := filepath.Join(dir, "local")
-		e := newTestEngine(t, client, archiveRoot, localRoot)
-
-		res, err := e.IngestCard(context.Background(), cardRoot)
-		if err != nil {
-			t.Fatalf("IngestCard: %v", err)
-		}
-		fr := res.Files[0]
-		if fr.Skipped {
-			t.Errorf("expected file to NOT be skipped, got Skipped=true")
-		}
-		if len(client.checkCalls) != 1 {
-			t.Errorf("expected only 1 check call (fastHash), got %d", len(client.checkCalls))
-		}
-		if len(client.calls) != 1 {
-			t.Errorf("expected 1 PostNodeCreated call, got %d", len(client.calls))
-		}
-	})
-
-	t.Run("server network failure fails open and proceeds with DualWrite", func(t *testing.T) {
-		dir := t.TempDir()
-		cardRoot := filepath.Join(dir, "card")
-		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0004.JPG"), []byte("failopen-image-bytes"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		client := &fakeCheckContentClient{
-			checkFunc: func(_ context.Context, _, _ string) (branchdam.ContentCheckResult, error) {
-				return branchdam.ContentCheckResult{}, fmt.Errorf("connection refused")
-			},
-		}
-
-		archiveRoot := filepath.Join(dir, "archive")
-		localRoot := filepath.Join(dir, "local")
-		e := newTestEngine(t, client, archiveRoot, localRoot)
+		client := &fakeCheckContentClient{checkFunc: func(context.Context, branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+			return branchdam.ContentCheckResult{}, fmt.Errorf("connection refused")
+		}}
+		e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
 
 		res, err := e.IngestCard(context.Background(), cardRoot)
 		if err != nil {
@@ -1221,7 +1345,7 @@ func TestIngestFileDedupPreFlight(t *testing.T) {
 			t.Fatalf("unexpected error: %v", fr.Err)
 		}
 		if fr.Skipped {
-			t.Errorf("expected file to NOT be skipped on network failure, got Skipped=true")
+			t.Errorf("expected file to NOT be skipped on network failure")
 		}
 		if len(client.calls) != 1 {
 			t.Errorf("expected 1 PostNodeCreated call, got %d", len(client.calls))
@@ -1231,17 +1355,10 @@ func TestIngestFileDedupPreFlight(t *testing.T) {
 	t.Run("disabled preflight skips CheckContent entirely", func(t *testing.T) {
 		dir := t.TempDir()
 		cardRoot := filepath.Join(dir, "card")
-		if err := os.MkdirAll(cardRoot, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(cardRoot, "DSC0005.JPG"), []byte("disabled-preflight-bytes"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeCard(t, cardRoot, map[string]string{"DSC0005.JPG": "disabled-preflight-bytes"})
 
 		client := &fakeCheckContentClient{}
-		archiveRoot := filepath.Join(dir, "archive")
-		localRoot := filepath.Join(dir, "local")
-		e := newTestEngine(t, client, archiveRoot, localRoot)
+		e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
 		e.Ingest.PreflightTimeoutSecs = -1
 
 		res, err := e.IngestCard(context.Background(), cardRoot)
@@ -1274,9 +1391,7 @@ func TestIngestFileDedupPreFlight(t *testing.T) {
 		}
 
 		client := &fakeCheckContentClient{
-			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-				return branchdam.ContentCheckResult{Found: false}, nil
-			},
+			checkFunc: prescreenServer(false, branchdam.ContentCheckResult{}),
 		}
 		archiveRoot := filepath.Join(dir, "archive")
 		localRoot := filepath.Join(dir, "local")
@@ -1523,5 +1638,60 @@ func TestIngestCardUploadStreamPauseOnMetered(t *testing.T) {
 	}
 	if len(uploader3.uploadCalls) != 1 {
 		t.Errorf("expected 1 upload call when PauseUploadOnMetered is false, got %d", len(uploader3.uploadCalls))
+	}
+}
+
+// TestDedupStateNoteErrorLatches pins which failures switch the content
+// check off for the rest of a pass: the ones every later file would hit too.
+func TestDedupStateNoteErrorLatches(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   error
+		latch bool
+	}{
+		{"transport error", errors.New("dial tcp: connection refused"), true},
+		{"404 route missing", &branchdam.HTTPError{StatusCode: 404}, true},
+		{"501 not implemented", &branchdam.HTTPError{StatusCode: 501}, true},
+		{"401 invalid key", &branchdam.HTTPError{StatusCode: 401}, true},
+		{"403 forbidden", &branchdam.HTTPError{StatusCode: 403}, true},
+		{"429 rate limited", &branchdam.HTTPError{StatusCode: 429}, true},
+		{"400 bad request", &branchdam.HTTPError{StatusCode: 400}, false},
+		{"500 server error", &branchdam.HTTPError{StatusCode: 500}, false},
+		{"503 unavailable", &branchdam.HTTPError{StatusCode: 503}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var d dedupState
+			d.noteError(tc.err)
+			if d.unavailable != tc.latch {
+				t.Errorf("unavailable = %v, want %v", d.unavailable, tc.latch)
+			}
+		})
+	}
+}
+
+// TestCheckContentDedupWarnsOnTheLatchingFailure: the failure that turns
+// dedup off for the pass is logged at Warn (visible at the default Info
+// level); only the files after it, which skip the check, go quiet.
+func TestCheckContentDedupWarnsOnTheLatchingFailure(t *testing.T) {
+	buf := captureSlog(t)
+	client := &fakeCheckContentClient{checkFunc: func(context.Context, branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+		return branchdam.ContentCheckResult{}, &branchdam.HTTPError{StatusCode: 404, Body: "404 page not found"}
+	}}
+	e := newTestEngine(t, client, t.TempDir(), t.TempDir())
+	dedup := &dedupState{}
+	wr := WriteResult{FastHash: "0123456789abcdef", FullHash: strings.Repeat("a", 64), SizeBytes: 10}
+
+	if skip, _, _ := e.checkContentDedup(context.Background(), "/card/A.JPG", wr, "", 5, dedup); skip {
+		t.Fatal("a failed check must fail open")
+	}
+	if !dedup.unavailable {
+		t.Fatal("a 404 must latch unavailable")
+	}
+	if !strings.Contains(buf.String(), `"level":"WARN"`) || !strings.Contains(buf.String(), "content check pre-flight failed") {
+		t.Errorf("the latching failure was not logged at WARN:\n%s", buf.String())
+	}
+	if skip, _, _ := e.checkContentDedup(context.Background(), "/card/B.JPG", wr, "", 5, dedup); skip || len(client.checkCalls) != 1 {
+		t.Errorf("after the latch: skip=%v, calls=%d, want no further request", skip, len(client.checkCalls))
 	}
 }

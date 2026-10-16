@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/zeebo/blake3"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
@@ -63,7 +62,7 @@ type nodeCreator interface {
 // contentChecker is the subset of *branchdam.Client's surface Engine needs for
 // content deduplication pre-flight checks.
 type contentChecker interface {
-	CheckContent(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error)
+	CheckContent(ctx context.Context, q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error)
 }
 
 // uploader is the subset of *branchdam.Client's surface Engine needs for direct HTTP streaming ingest.
@@ -204,11 +203,14 @@ type CardResult struct {
 	Files []FileResult
 }
 
-// isLiveLifecycleState returns true if lifecycleState represents an active, live node.
-// An empty string (default/unspecified) or "ACTIVE" is considered live. Non-live states
-// (e.g. "ARCHIVED", "TRASHED", "DELETED") do not prevent ingest so content is not lost.
+// isLiveLifecycleState returns true if lifecycleState represents a live node
+// -- the same set branchDAM's check-content pre-screen counts: ACTIVE and
+// HIDDEN (a hidden node is still in the library, just out of the default
+// views). An empty string (unspecified) is treated as live too. Other states
+// (ARCHIVED, MISSING, TRASHED, ...) do not prevent ingest, so content is not
+// lost.
 func isLiveLifecycleState(state string) bool {
-	return state == "" || strings.EqualFold(state, "ACTIVE")
+	return state == "" || strings.EqualFold(state, "ACTIVE") || strings.EqualFold(state, "HIDDEN")
 }
 
 // IngestCard walks cardRoot (a mounted card's root directory, or the
@@ -256,7 +258,7 @@ func isLiveLifecycleState(state string) bool {
 // fast-path here; queue.db's BySourcePath check in the offline twin).
 func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, error) {
 	stemSuffix := make(map[string]string)
-	var dedupUnavailable bool
+	var dedup dedupState
 	var result CardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -292,7 +294,7 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		result.Files = append(result.Files, e.ingestFile(ctx, path, stemSuffix, &dedupUnavailable))
+		result.Files = append(result.Files, e.ingestFile(ctx, path, stemSuffix, &dedup))
 		return nil
 	})
 	if err != nil {
@@ -306,18 +308,21 @@ func (e *Engine) IngestCard(ctx context.Context, cardRoot string) (CardResult, e
 
 // ingestFile runs the full pipeline for one source file: metadata
 // extraction (needed up front to fill the naming template), dual-copy
-// write, verify, DJI .srt GPS, and (for non-sidecar files) registration.
+// write, content dedup, verify, DJI .srt GPS, and (for non-sidecar files)
+// registration.
 //
 // Ordering matters for what a failure leaves behind. Everything that can
 // fail without touching the destinations -- naming, the archive path's
-// container mapping, the pre-flight dedup -- runs before DualWrite. A
-// failed verify (or an unbuffered verify the config requires but didn't
-// get) removes both copies this call just created. Once both copies are
+// container mapping -- runs before DualWrite. The content dedup needs the
+// hashes DualWrite computes in flight (the card is read once), so it runs
+// right after the copy; a confirmed duplicate removes both copies this
+// call just created. A failed verify (or an unbuffered verify the config
+// requires but didn't get) removes them too. Once both copies are
 // verified the file is registered by registerNode, which records the
 // intent in queue.db before the POST. And a later run that finds the
 // copies already in place does not take that as proof of registration
 // (confirmRegistered).
-func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string, dedupUnavailable *bool) FileResult {
+func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[string]string, dedup *dedupState) FileResult {
 	// UploadStream mode sends bytes directly to the server upload endpoint;
 	// server-side dedup is the backstop for that path.
 	if e.Ingest.UploadStream {
@@ -377,7 +382,7 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 			fr.SkipReason = alreadyIngestedReason
 			return fr
 		}
-		return e.confirmRegistered(ctx, fr, srcInfo, exif, dedupUnavailable)
+		return e.confirmRegistered(ctx, fr, srcInfo, exif, dedup)
 	}
 
 	// Map the archive path to its container path before anything is
@@ -394,22 +399,38 @@ func (e *Engine) ingestFile(ctx context.Context, srcPath string, stemSuffix map[
 		containerPath = cp
 	}
 
-	// Pre-flight BLAKE3 content dedup check before DualWrite.
-	if !fr.IsSidecar {
-		if skip, existingUUID, skipReason := e.checkContentDedup(ctx, srcPath, srcInfo.Size(), config.DefaultPreflightTimeoutSecs, dedupUnavailable); skip {
-			fr.Skipped = true
-			fr.SkipReason = skipReason
-			fr.ExistingNodeUUID = existingUUID
-			return fr
-		}
-	}
-
 	writeRes, err := DualWrite(srcPath, archivePath, localPath, e.progressOpts(ctx, localPath, ProgressPhaseCopying, srcInfo.Size())...)
 	if err != nil {
 		fr.Err = fmt.Errorf("dual write: %w", err)
 		return fr
 	}
 	fr.Write = writeRes
+
+	// Content dedup against the library, using the hashes DualWrite just
+	// computed in flight: the card is read once (invariant 1), never
+	// re-read to hash it for this check. A confirmed live duplicate means
+	// the two copies DualWrite itself just created (O_EXCL, so they are
+	// ours) are removed and nothing is registered. It runs before Verify,
+	// so a duplicate costs no verify pass either.
+	// containerPath (mapped above, before the copy) is this file's own
+	// archive container path: a match there is the copy just written.
+	if !fr.IsSidecar {
+		if skip, existingUUID, skipReason := e.checkContentDedup(ctx, srcPath, writeRes, containerPath, config.DefaultPreflightTimeoutSecs, dedup); skip {
+			// A copy that cannot be removed is a redundant, unregistered
+			// copy nothing will ever clean up (a later run skips it on the
+			// existing node), so say so in the result instead of reporting
+			// a clean skip.
+			for _, p := range []string{archivePath, localPath} {
+				if rmErr := removeDuplicateCopy(srcPath, p); rmErr != nil {
+					skipReason += fmt.Sprintf("; this run's copy at %s was left behind (%v) -- delete it by hand", p, rmErr)
+				}
+			}
+			fr.Skipped = true
+			fr.SkipReason = skipReason
+			fr.ExistingNodeUUID = existingUUID
+			return fr
+		}
+	}
 
 	// Preserve the source's original mtime on both destinations -- an
 	// ingested master's mtime should reflect when it was captured/written
@@ -615,8 +636,11 @@ func (e *Engine) registerNode(ctx context.Context, fr *FileResult, srcInfo os.Fi
 //     before its POST): the registration was accepted, or is queued and
 //     Drain is retrying it. Skip.
 //  2. Otherwise hash the local copy (a cache-defeating read of the SSD,
-//     not the card) and ask the server's check-content. A live node with
-//     this content: skip.
+//     not the card) and ask the server's check-content by that full hash
+//     (serverHasLiveContent; no pre-screen, the full hash is in hand). A
+//     live node (ACTIVE or HIDDEN) with this content: skip -- reported as
+//     this file's registration when the node is at this file's own
+//     archive container path, otherwise as the server's existing node.
 //  3. Otherwise -- not found, or the server can't say -- register it now:
 //     verify the archive copy against that hash, apply RequireUnbuffered to
 //     both reads, then registerNode as for a fresh copy. Registering
@@ -627,7 +651,7 @@ func (e *Engine) registerNode(ctx context.Context, fr *FileResult, srcInfo os.Fi
 // run's files. "Identical" is ResolveDestination's sampled FastHash match
 // against the card, the same evidence the old unconditional skip relied
 // on; the hash registered is that of the copies themselves.
-func (e *Engine) confirmRegistered(ctx context.Context, fr FileResult, srcInfo os.FileInfo, exif *ExifResult, dedupUnavailable *bool) FileResult {
+func (e *Engine) confirmRegistered(ctx context.Context, fr FileResult, srcInfo os.FileInfo, exif *ExifResult, dedup *dedupState) FileResult {
 	archivePath, localPath := fr.ArchivePath, fr.LocalPath
 
 	if e.Queue != nil {
@@ -664,10 +688,22 @@ func (e *Engine) confirmRegistered(ctx context.Context, fr FileResult, srcInfo o
 		return fr
 	}
 
-	if found, nodeUUID := e.serverHasLiveContent(ctx, fastHash, fullHash, dedupUnavailable); found {
+	// Mapped up front so the server's answer can be told apart: a live node
+	// at this file's own archive container path is this very copy, already
+	// registered (an earlier run's registration, or the server's own scan
+	// of the archive) -- evidence of registration, never a duplicate. A
+	// mapping error only matters if the copies get registered below.
+	containerPath, containerErr := ToContainerPath(e.Mappings, archivePath)
+
+	if res, found := e.serverHasLiveContent(ctx, fr.SourcePath, fastHash, size, fullHash, dedup); found {
 		fr.Skipped = true
-		fr.ExistingNodeUUID = nodeUUID
-		fr.SkipReason = fmt.Sprintf("%s; server already has it as node %s", alreadyIngestedReason, nodeUUID)
+		if containerErr == nil && res.FilePath == containerPath {
+			fr.NodeUUID = res.NodeUUID
+			fr.SkipReason = fmt.Sprintf("%s; registered as node %s", alreadyIngestedReason, res.NodeUUID)
+		} else {
+			fr.ExistingNodeUUID = res.NodeUUID
+			fr.SkipReason = fmt.Sprintf("%s; server already has it as node %s", alreadyIngestedReason, res.NodeUUID)
+		}
 		return fr
 	}
 
@@ -688,9 +724,8 @@ func (e *Engine) confirmRegistered(ctx context.Context, fr FileResult, srcInfo o
 		return fr
 	}
 
-	containerPath, err := ToContainerPath(e.Mappings, archivePath)
-	if err != nil {
-		fr.Err = err
+	if containerErr != nil {
+		fr.Err = containerErr
 		return fr
 	}
 	fr.Write = WriteResult{ArchivePath: archivePath, LocalPath: localPath, SizeBytes: size, FullHash: fullHash, FastHash: fastHash}
@@ -700,33 +735,52 @@ func (e *Engine) confirmRegistered(ctx context.Context, fr FileResult, srcInfo o
 }
 
 // serverHasLiveContent asks GET /api/v1/agent/check-content whether a
-// live node already has this content. found=false covers "not there" and
-// "couldn't ask" alike (no checker, pre-flight disabled, the endpoint
-// latched unavailable earlier in this pass, or an error) -- the caller
-// then registers, which the server dedups by full_hash if it does have it.
-func (e *Engine) serverHasLiveContent(ctx context.Context, fastHash, fullHash string, dedupUnavailable *bool) (found bool, nodeUUID string) {
-	if (dedupUnavailable != nil && *dedupUnavailable) || e.Ingest.PreflightTimeoutSecs < 0 || e.Client == nil {
-		return false, ""
+// live node (ACTIVE or HIDDEN) already has the content of an
+// already-present local copy -- confirmRegistered's step 2. The full hash
+// is already in hand, so there is no pre-screen: it goes straight to the
+// definitive full-hash lookup, sending fastHash and sizeBytes alongside
+// when known. The per-pass dedupState rules are checkContentDedup's: a
+// 400 means a server predating the pre-screen, so the lookup is retried
+// once in the form such servers accept (fastHash + fullHash) and
+// dedup.fullOnly makes the rest of the pass use that form; a failure
+// noteError latches (transport error, 404/501, 401/403, 429) sets
+// dedup.unavailable for the rest of the pass.
+// found=false covers "not there" and "couldn't ask" alike (no checker,
+// pre-flight disabled, unavailable, or an error) -- the caller then
+// registers, which the server dedups by full_hash if it does have it.
+func (e *Engine) serverHasLiveContent(ctx context.Context, srcPath, fastHash string, size int64, fullHash string, dedup *dedupState) (res branchdam.ContentCheckResult, found bool) {
+	if dedup == nil {
+		dedup = &dedupState{}
 	}
-	checker, ok := e.Client.(contentChecker)
+	if dedup.unavailable || fullHash == "" {
+		return branchdam.ContentCheckResult{}, false
+	}
+	call, ok := e.contentCheckCall(ctx, config.DefaultPreflightTimeoutSecs)
 	if !ok {
-		return false, ""
+		return branchdam.ContentCheckResult{}, false
 	}
-	timeout := time.Duration(config.DefaultPreflightTimeoutSecs) * time.Second
-	if e.Ingest.PreflightTimeoutSecs > 0 {
-		timeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
+
+	fullForm := branchdam.ContentCheckQuery{FastHash: fastHash, FullHash: fullHash}
+	var err error
+	if dedup.fullOnly {
+		res, err = call(fullForm)
+	} else {
+		res, err = call(branchdam.ContentCheckQuery{FastHash: fastHash, SizeBytes: size, FullHash: fullHash})
+		if err != nil && isBadRequest(err) {
+			dedup.fullOnly = true
+			slog.Info("ingest: server rejected the content lookup with 400 (older server) -- using the full-hash lookup for this pass", "source", srcPath, "err", err)
+			res, err = call(fullForm)
+		}
 	}
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	res, err := checker.CheckContent(cctx, fastHash, fullHash)
-	cancel()
 	if err != nil {
-		slog.Warn("ingest: could not ask the server whether an already-present copy is registered -- registering it", "err", err)
-		return false, ""
+		dedup.noteError(err)
+		slog.Warn("ingest: could not ask the server whether an already-present copy is registered -- registering it", "source", srcPath, "err", err)
+		return branchdam.ContentCheckResult{}, false
 	}
 	if res.Found && isLiveLifecycleState(res.LifecycleState) {
-		return true, res.NodeUUID
+		return res, true
 	}
-	return false, ""
+	return branchdam.ContentCheckResult{}, false
 }
 
 func (e *Engine) now() time.Time {
@@ -915,93 +969,175 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string) FileResul
 	return fr
 }
 
-// blake3File computes the BLAKE3-256 hex digest of the file at p in a single pass.
-func blake3File(p string) (string, error) {
-	f, err := os.Open(p) //nolint:gosec // path is our source file
-	if err != nil {
-		return "", fmt.Errorf("open for blake3: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	h := blake3.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", fmt.Errorf("hash blake3: %w", err)
-	}
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
+// dedupState is one ingest pass's memory of how the server answered the
+// content dedup check, so a pass does not keep asking a question the server
+// cannot answer. It lives for one IngestCard/IngestCardOffline call; the
+// next pass (the next card) starts fresh, since the server may have been
+// upgraded or come back in between.
+type dedupState struct {
+	// unavailable: the endpoint is missing (404/501), the server is
+	// unreachable (transport error, timeout), refuses the pass's API key
+	// (401/403) or asks the agent to back off (429). The remaining files of the
+	// pass skip the check entirely (fail-open).
+	unavailable bool
+	// fullOnly: the server rejected the fast-hash pre-screen with 400, so
+	// it predates the pre-screen. The remaining files of the pass go
+	// straight to the full-hash lookup, which such a server does support;
+	// dedup keeps working.
+	fullOnly bool
 }
 
-// checkContentDedup performs the best-effort pre-flight BLAKE3 content dedup check.
-// It queries GET /api/v1/agent/check-content with fastHash (xxHash64 sampled via fastHashFile
-// using canonical 2MiB regions matching the server's fast_hash column), and on a hit
-// confirms with fullHash (BLAKE3-256). If confirmed duplicate with a live lifecycle state,
-// returns skip=true along with the existing node UUID and human-readable skip reason.
-func (e *Engine) checkContentDedup(ctx context.Context, srcPath string, srcSize int64, defaultTimeoutSecs int, dedupUnavailable *bool) (skip bool, existingNodeUUID, skipReason string) {
-	if (dedupUnavailable != nil && *dedupUnavailable) || e.Ingest.PreflightTimeoutSecs < 0 || e.Client == nil {
-		return false, "", ""
+// noteError records what a failed check-content call says about the
+// server: a transport error, 404/501 (no such endpoint), 401/403 (the
+// pass's API key is refused -- it is loaded once per pass, so every later
+// file would be refused too) or 429 (back off) latches unavailable; any
+// other status (400, other 5xx, ...) is about this request only and
+// latches nothing. Callers log the failure before calling this, so the
+// failure that latches is the one logged at Warn.
+func (d *dedupState) noteError(err error) {
+	var he *branchdam.HTTPError
+	if !errors.As(err, &he) {
+		d.unavailable = true
+		return
+	}
+	switch he.StatusCode {
+	case http.StatusNotFound, http.StatusNotImplemented,
+		http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		d.unavailable = true
+	}
+}
+
+// isBadRequest reports whether err is an HTTP 400 from the server.
+func isBadRequest(err error) bool {
+	var he *branchdam.HTTPError
+	return errors.As(err, &he) && he.StatusCode == http.StatusBadRequest
+}
+
+// removeDuplicateFn is os.Remove, indirected so tests can make the
+// removal of a duplicate's copy fail.
+var removeDuplicateFn = os.Remove
+
+// removeDuplicateCopy removes a copy this ingest pass itself just wrote
+// (DualWrite's O_EXCL create or the offline temp name) after the server
+// confirmed the content is already in the library. A failed removal is
+// not fatal -- the content is safe in the library either way, and the
+// leftover is a redundant copy, not a lost one -- but it is returned so the
+// caller can report the leftover.
+func removeDuplicateCopy(srcPath, p string) error {
+	if err := removeDuplicateFn(p); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		slog.Warn("ingest: failed to remove copy of a duplicate file", "source", srcPath, "path", p, "err", err)
+		return err
+	}
+	// Make the removal durable, as DualWrite does for the create: a crash
+	// right after must not bring back an unregistered copy.
+	if err := syncParentDirFn(filepath.Dir(p)); err != nil {
+		slog.Warn("ingest: fsync after removing a duplicate copy failed", "path", p, "err", err)
+	}
+	return nil
+}
+
+// contentCheckCall returns a function that makes one check-content
+// request bounded by the per-request pre-flight timeout
+// (Ingest.PreflightTimeoutSecs, or defaultTimeoutSecs when that is 0), or
+// ok=false when the check is disabled (PreflightTimeoutSecs < 0) or the
+// client cannot make it.
+func (e *Engine) contentCheckCall(ctx context.Context, defaultTimeoutSecs int) (call func(branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error), ok bool) {
+	if e.Ingest.PreflightTimeoutSecs < 0 || e.Client == nil {
+		return nil, false
 	}
 	checker, ok := e.Client.(contentChecker)
 	if !ok {
-		return false, "", ""
+		return nil, false
 	}
 	timeout := time.Duration(defaultTimeoutSecs) * time.Second
 	if e.Ingest.PreflightTimeoutSecs > 0 {
 		timeout = time.Duration(e.Ingest.PreflightTimeoutSecs) * time.Second
 	}
+	return func(q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+		cCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return checker.CheckContent(cCtx, q)
+	}, true
+}
 
-	fastHash, err := fastHashFile(srcPath, srcSize)
-	if err != nil {
-		slog.Warn("ingest: pre-flight fast hash failed", "source", srcPath, "err", err)
+// checkContentDedup is the best-effort content dedup check against
+// GET /api/v1/agent/check-content. It runs after the copy, on the hashes
+// the copy computed in flight (wr.FastHash, wr.FullHash), so it never reads
+// the card itself (invariant 1).
+//
+//  1. Fast pre-screen: fastHash + sizeBytes. possibleMatch=false (the usual
+//     answer for new media) ends the check; the full hash never leaves the
+//     agent.
+//  2. On possibleMatch, confirm with fullHash. A found node in a live
+//     state (ACTIVE or HIDDEN) is a duplicate: skip=true with the existing
+//     node's UUID and a human-readable reason.
+//
+// A server predating the pre-screen answers step 1 with 400; that is not
+// "dedup unavailable": the check goes straight to step 2, and dedup.fullOnly
+// makes the rest of the pass do the same. Every other failure fails open
+// (skip=false) and may latch dedup.unavailable (see noteError).
+//
+// ownContainerPath is the container path this file's own archive copy
+// will be registered under (empty when there is none yet): a match on that
+// exact path is the copy just written, not an earlier one, and is never
+// treated as a duplicate.
+func (e *Engine) checkContentDedup(ctx context.Context, srcPath string, wr WriteResult, ownContainerPath string, defaultTimeoutSecs int, dedup *dedupState) (skip bool, existingNodeUUID, skipReason string) {
+	if dedup == nil {
+		dedup = &dedupState{}
+	}
+	if dedup.unavailable || wr.FullHash == "" {
 		return false, "", ""
 	}
-
-	pCtx, pCancel := context.WithTimeout(ctx, timeout)
-	res, err := checker.CheckContent(pCtx, fastHash, "")
-	pCancel()
-	if err != nil {
-		if dedupUnavailable != nil && *dedupUnavailable {
-			slog.Debug("ingest: content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
+	call, ok := e.contentCheckCall(ctx, defaultTimeoutSecs)
+	if !ok {
+		return false, "", ""
+	}
+	logFailure := func(msg string, err error) {
+		if dedup.unavailable {
+			slog.Debug(msg, "source", srcPath, "err", err)
 		} else {
-			slog.Warn("ingest: content check pre-flight failed (fail-open)", "source", srcPath, "err", err)
+			slog.Warn(msg, "source", srcPath, "err", err)
 		}
-		if dedupUnavailable != nil {
-			var he *branchdam.HTTPError
-			if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented || he.StatusCode == http.StatusBadRequest) {
-				*dedupUnavailable = true
-			}
-		}
-		return false, "", ""
 	}
 
-	if !res.Found {
-		return false, "", ""
+	if !dedup.fullOnly {
+		res, err := call(branchdam.ContentCheckQuery{FastHash: wr.FastHash, SizeBytes: wr.SizeBytes})
+		switch {
+		case err != nil && isBadRequest(err):
+			dedup.fullOnly = true
+			slog.Info("ingest: server rejected the fast-hash pre-screen (older server) -- using the full-hash lookup for this pass", "source", srcPath, "err", err)
+		case err != nil:
+			logFailure("ingest: content check pre-flight failed (fail-open)", err)
+			dedup.noteError(err)
+			return false, "", ""
+		case !res.PossibleMatch && !res.Found:
+			return false, "", ""
+		}
 	}
 
-	fullHash, err := blake3File(srcPath)
+	res, err := call(branchdam.ContentCheckQuery{FastHash: wr.FastHash, FullHash: wr.FullHash})
 	if err != nil {
-		slog.Warn("ingest: pre-flight full hash failed", "source", srcPath, "err", err)
+		logFailure("ingest: content check pre-flight confirmation failed (fail-open)", err)
+		dedup.noteError(err)
 		return false, "", ""
 	}
-
-	pCtx2, pCancel2 := context.WithTimeout(ctx, timeout)
-	res2, err := checker.CheckContent(pCtx2, fastHash, fullHash)
-	pCancel2()
-	if err != nil {
-		if dedupUnavailable != nil && *dedupUnavailable {
-			slog.Debug("ingest: content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
-		} else {
-			slog.Warn("ingest: content check pre-flight confirmation failed (fail-open)", "source", srcPath, "err", err)
-		}
-		if dedupUnavailable != nil {
-			var he *branchdam.HTTPError
-			if !errors.As(err, &he) || (he.StatusCode == http.StatusNotFound || he.StatusCode == http.StatusNotImplemented || he.StatusCode == http.StatusBadRequest) {
-				*dedupUnavailable = true
-			}
-		}
+	if !res.Found || !isLiveLifecycleState(res.LifecycleState) {
 		return false, "", ""
 	}
-
-	if res2.Found && isLiveLifecycleState(res2.LifecycleState) {
-		return true, res2.NodeUUID, fmt.Sprintf("duplicate: already in library as node %s at %s", res2.NodeUUID, res2.FilePath)
+	if ownContainerPath != "" && res.FilePath == ownContainerPath {
+		// The server already indexed the copy this run just wrote (e.g. a
+		// watcher on the archive): that is this file, not a duplicate.
+		return false, "", ""
 	}
-	return false, "", ""
+	// Known window: check-content names one node per hash. If a server
+	// watcher indexed this run's archive copy in the moments between
+	// DualWrite and this answer, but the answer names an older node, the
+	// caller still removes the copy, and the watcher then marks the node
+	// it just created MISSING (rows are never deleted server-side). No
+	// content is lost -- the older node holds it -- and no endpoint lists
+	// every node with a hash, so a re-query could not close the window.
+	return true, res.NodeUUID, fmt.Sprintf("duplicate: already in library as node %s at %s", res.NodeUUID, res.FilePath)
 }

@@ -196,7 +196,33 @@ func TestHandleActionPairWithoutSourceSkipsConfirm(t *testing.T) {
 	}
 }
 
+// waitDeepLinkQueueIdle waits for a deep-link worker another test started
+// in the background (the action handler runs submitDeepLink on its own
+// goroutine) to finish. deepLinkQueue is package-level, so a worker still
+// running would take this test's links and confirm them through that
+// test's dialog func, never this one's.
+func waitDeepLinkQueueIdle(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		deepLinkQueue.mu.Lock()
+		idle := !deepLinkQueue.running
+		if idle {
+			deepLinkQueue.pending, deepLinkQueue.has = "", false
+		}
+		deepLinkQueue.mu.Unlock()
+		if idle {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a deep-link worker from another test is still running")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestSubmitDeepLinkCoalescesToLatest(t *testing.T) {
+	waitDeepLinkQueueIdle(t)
 	settings := &spySettings{}
 	release := make(chan struct{})
 	entered := make(chan struct{}, 8)

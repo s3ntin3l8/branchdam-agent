@@ -20,7 +20,7 @@ import "encoding/json"
 // branchdam's internal/agent/types.go or internal/httpapi/routes.go's agent
 // DTOs change; conformance_test.go asserts it matches the committed golden
 // fixture.
-const ContractVersion = "branchdam@11906bb"
+const ContractVersion = "branchdam@fcc7e2d"
 
 // Event type constants, matching the event_queue.event_type CHECK
 // constraint (internal/agent/types.go in branchdam).
@@ -324,6 +324,10 @@ type NodeStatusEntry struct {
 	LifecycleState string `json:"lifecycleState,omitempty"`
 	Tier           string `json:"tier,omitempty"`
 	Verified       bool   `json:"verified"`
+	// FullHash is the node's stored BLAKE3-256 full_hash (empty when it has
+	// none). Mirrored for parity with the pinned server revision and pinned
+	// by node_status_response.golden.json; nothing reads it yet.
+	FullHash string `json:"fullHash,omitempty"`
 }
 
 // NodeStatusResponse is the response body for POST /api/v1/agent/node-status
@@ -333,11 +337,19 @@ type NodeStatusResponse struct {
 }
 
 // ContentCheckResult is the response body for GET /api/v1/agent/check-content.
+//
+// Found is true only for a definitive full-hash match, and only then are
+// NodeUUID, FilePath and LifecycleState set. PossibleMatch answers the fast
+// pre-screen (a fastHash, and size when both sides know it, matches a live
+// ACTIVE or HIDDEN node); on a full-hash request it mirrors Found. Servers
+// predating the pre-screen never send it.
 type ContentCheckResult struct {
 	Found          bool   `json:"found"`
+	PossibleMatch  bool   `json:"possibleMatch"`
 	NodeUUID       string `json:"nodeUuid,omitempty"`
 	FilePath       string `json:"filePath,omitempty"`
 	LifecycleState string `json:"lifecycleState,omitempty"`
+	IndexingStatus string `json:"indexingStatus,omitempty"`
 }
 
 // AgentScratchStorageDTO mirrors the scratchStorage sub-object of

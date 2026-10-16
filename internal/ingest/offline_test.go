@@ -989,11 +989,7 @@ type timeoutCheckClient struct {
 	fakeClient
 }
 
-func (timeoutCheckClient) CheckContent(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-	if fastHash == "" && fullHash == "" {
-		// Run-level reachability probe succeeds so per-file check is reached
-		return branchdam.ContentCheckResult{Found: false}, nil
-	}
+func (timeoutCheckClient) CheckContent(ctx context.Context, _ branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
 	<-ctx.Done()
 	return branchdam.ContentCheckResult{}, ctx.Err()
 }
@@ -1005,9 +1001,10 @@ type duplicateCheckClient struct {
 	lifecycleState string
 }
 
-func (d duplicateCheckClient) CheckContent(ctx context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-	if fullHash == "" {
-		return branchdam.ContentCheckResult{Found: true}, nil
+func (d duplicateCheckClient) CheckContent(ctx context.Context, q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+	if q.FullHash == "" {
+		// branchDAM's fast pre-screen: a possible match, no details.
+		return branchdam.ContentCheckResult{PossibleMatch: true}, nil
 	}
 	state := d.lifecycleState
 	if state == "" {
@@ -1015,6 +1012,7 @@ func (d duplicateCheckClient) CheckContent(ctx context.Context, fastHash, fullHa
 	}
 	return branchdam.ContentCheckResult{
 		Found:          true,
+		PossibleMatch:  true,
 		NodeUUID:       d.nodeUUID,
 		FilePath:       d.filePath,
 		LifecycleState: state,
@@ -1121,9 +1119,92 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 		if fr.Queued {
 			t.Errorf("expected Queued=false for duplicate")
 		}
-		// Ensure local file was never written
+		// Neither the final local copy nor the agent's temp copy remains,
+		// and no queue row claims the file.
 		if _, err := os.Stat(fr.LocalPath); !os.IsNotExist(err) {
 			t.Errorf("local file should not exist, err=%v", err)
+		}
+		if _, err := os.Stat(localTempName(fr.LocalPath)); !os.IsNotExist(err) {
+			t.Errorf("temp copy of a duplicate should be removed, err=%v", err)
+		}
+		if _, found, err := store.BySourcePath(context.Background(), fr.SourcePath); err != nil || found {
+			t.Errorf("BySourcePath: found=%v err=%v, want no queue row for a duplicate", found, err)
+		}
+	})
+
+	t.Run("HIDDEN duplicate is skipped", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		writeCard(t, cardRoot, map[string]string{"IMG_HIDDEN.jpg": "offline-hidden-content"})
+
+		store := openStoreT(t)
+		client := &duplicateCheckClient{
+			nodeUUID:       "0190f1a2-offline-hidden-uuid",
+			filePath:       "/storage/archive/2026/IMG_HIDDEN.jpg",
+			lifecycleState: "HIDDEN",
+		}
+		e := newOfflineTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"), "/storage/staging/agent-1", store)
+
+		res, err := e.IngestCardOffline(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCardOffline: %v", err)
+		}
+		fr := res.Files[0]
+		if !fr.Skipped || fr.Queued || fr.ExistingNodeUUID != "0190f1a2-offline-hidden-uuid" {
+			t.Errorf("Skipped=%v Queued=%v ExistingNodeUUID=%q, want a duplicate skip", fr.Skipped, fr.Queued, fr.ExistingNodeUUID)
+		}
+	})
+
+	t.Run("no empty-hash probe; every request carries a hash", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		writeCard(t, cardRoot, map[string]string{"IMG_1.jpg": "file1", "IMG_2.jpg": "file2"})
+
+		store := openStoreT(t)
+		client := &fakeCheckContentClient{checkFunc: prescreenServer(false, branchdam.ContentCheckResult{})}
+		e := newOfflineTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"), "/storage/staging/agent-1", store)
+		n := 0
+		e.NewNodeUUID = func() (string, error) { n++; return fmt.Sprintf("0000000-fake-uuid-%d", n), nil }
+
+		res, err := e.IngestCardOffline(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCardOffline: %v", err)
+		}
+		for _, fr := range res.Files {
+			if !fr.Queued || fr.Err != nil {
+				t.Errorf("%s: Queued=%v Err=%v, want queued", fr.SourcePath, fr.Queued, fr.Err)
+			}
+		}
+		if len(client.checkCalls) != 2 {
+			t.Fatalf("expected one pre-screen per file (2), got %d: %+v", len(client.checkCalls), client.checkCalls)
+		}
+		for _, q := range client.checkCalls {
+			if q.FastHash == "" || q.SizeBytes <= 0 || q.FullHash != "" {
+				t.Errorf("query %+v, want a fast pre-screen with fastHash and sizeBytes", q)
+			}
+		}
+	})
+
+	t.Run("older server's 400 falls back to the full-hash lookup", func(t *testing.T) {
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		writeCard(t, cardRoot, map[string]string{"IMG_1.jpg": "file1", "IMG_2.jpg": "file2"})
+
+		store := openStoreT(t)
+		client := &fakeCheckContentClient{checkFunc: oldServer(liveDuplicate("ACTIVE"))}
+		e := newOfflineTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"), "/storage/staging/agent-1", store)
+
+		res, err := e.IngestCardOffline(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCardOffline: %v", err)
+		}
+		for _, fr := range res.Files {
+			if !fr.Skipped || fr.Queued || fr.Err != nil {
+				t.Errorf("%s: Skipped=%v Queued=%v Err=%v, want a duplicate skip", fr.SourcePath, fr.Skipped, fr.Queued, fr.Err)
+			}
+		}
+		if len(client.checkCalls) != 3 {
+			t.Errorf("expected 3 check calls (1 rejected pre-screen + 2 full-hash lookups), got %d: %+v", len(client.checkCalls), client.checkCalls)
 		}
 	})
 
@@ -1179,11 +1260,7 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 		store := openStoreT(t)
 		callCount := 0
 		client := &fakeCheckContentClient{
-			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-				if fastHash == "" && fullHash == "" {
-					// Probe succeeds
-					return branchdam.ContentCheckResult{}, nil
-				}
+			checkFunc: func(context.Context, branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
 				callCount++
 				// Return 500 HTTPError (server reachable, per-request error)
 				return branchdam.ContentCheckResult{}, &branchdam.HTTPError{StatusCode: http.StatusInternalServerError, Body: "internal error"}
@@ -1228,13 +1305,9 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 		store := openStoreT(t)
 		callCount := 0
 		client := &fakeCheckContentClient{
-			checkFunc: func(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-				if fastHash == "" && fullHash == "" {
-					// Probe succeeds
-					return branchdam.ContentCheckResult{}, nil
-				}
+			checkFunc: func(context.Context, branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
 				callCount++
-				return branchdam.ContentCheckResult{Found: false}, nil
+				return branchdam.ContentCheckResult{}, nil
 			},
 		}
 		archiveRoot := filepath.Join(dir, "archive")
@@ -1278,8 +1351,8 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 // for the "reformatted card reads as already queued" data-loss bug: a
 // camera restarts its file counter after a format, so a second card
 // mounted at the same path yields the same source paths with different
-// content. queue.db rows are never deleted, so a source-path-only match
-// used to report every such file as AlreadyQueued without copying it --
+// content. queue.db rows are kept for months (queue.GCRetention), so a
+// source-path-only match used to report every such file as AlreadyQueued without copying it --
 // the summary read as success, auto-eject fired, and the photos were only
 // ever on the card. A path match must count as a resume only when the
 // stored size and mtime also match.

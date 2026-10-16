@@ -34,10 +34,10 @@ func forceBufferedVerify(t *testing.T) {
 // check) whose POST outcome is decided per call by post.
 type scriptedClient struct {
 	post  func(ctx context.Context, payload branchdam.NodeCreatedPayload, eventUUID string) (*branchdam.EventResponse, error)
-	check func(fastHash, fullHash string) (branchdam.ContentCheckResult, error)
+	check func(q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error)
 
 	posts      []branchdam.NodeCreatedPayload
-	checkCalls []string // fullHash of each CheckContent call
+	checkCalls []branchdam.ContentCheckQuery // every CheckContent query, in order
 }
 
 func (c *scriptedClient) PostNodeCreatedWithUUID(ctx context.Context, _ string, payload branchdam.NodeCreatedPayload, eventUUID string) (*branchdam.EventResponse, error) {
@@ -50,10 +50,14 @@ func (c *scriptedClient) PostNodeCreatedWithUUID(ctx context.Context, _ string, 
 
 type scriptedCheckClient struct{ *scriptedClient }
 
-func (c scriptedCheckClient) CheckContent(_ context.Context, fastHash, fullHash string) (branchdam.ContentCheckResult, error) {
-	c.checkCalls = append(c.checkCalls, fullHash)
+// The fake must stay a contentChecker: a signature drift would silently
+// turn every content check in these tests into "no checker".
+var _ contentChecker = scriptedCheckClient{}
+
+func (c scriptedCheckClient) CheckContent(_ context.Context, q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+	c.checkCalls = append(c.checkCalls, q)
 	if c.check != nil {
-		return c.check(fastHash, fullHash)
+		return c.check(q)
 	}
 	return branchdam.ContentCheckResult{}, nil
 }
@@ -240,8 +244,8 @@ func TestIngestCardReingestSkipsWhenServerHasContent(t *testing.T) {
 	want := blake3Hex(t, filepath.Join(localRoot, "IMG_0004.jpg"))
 
 	base := &scriptedClient{}
-	base.check = func(_, fullHash string) (branchdam.ContentCheckResult, error) {
-		if fullHash == want {
+	base.check = func(q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+		if q.FullHash == want {
 			return branchdam.ContentCheckResult{Found: true, NodeUUID: "node-on-server", LifecycleState: "ACTIVE"}, nil
 		}
 		return branchdam.ContentCheckResult{}, nil
@@ -259,6 +263,184 @@ func TestIngestCardReingestSkipsWhenServerHasContent(t *testing.T) {
 	}
 	if len(base.posts) != 0 {
 		t.Errorf("posts = %d, want 0", len(base.posts))
+	}
+}
+
+// seedPresentCopies writes content under name to the card and to both
+// destinations, so the next IngestCard finds the copies already in place
+// (ResolveDestination's AlreadyIngested) and goes through confirmRegistered.
+func seedPresentCopies(t *testing.T, cardRoot, archiveRoot, localRoot, name string, content []byte) {
+	t.Helper()
+	for _, root := range []string{cardRoot, archiveRoot, localRoot} {
+		writeCardFile(t, root, name, content)
+	}
+}
+
+// confirmRegistered already has the local copy's full hash, so it asks the
+// definitive full-hash lookup straight away (with fastHash and sizeBytes),
+// never the fast pre-screen.
+func TestIngestCardReingestQueriesFullHashWithFastHashAndSize(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot, archiveRoot, localRoot := filepath.Join(dir, "card"), filepath.Join(dir, "archive"), filepath.Join(dir, "local")
+	content := []byte("photo-bytes-7")
+	seedPresentCopies(t, cardRoot, archiveRoot, localRoot, "IMG_0007.jpg", content)
+	localCopy := filepath.Join(localRoot, "IMG_0007.jpg")
+	wantFull := blake3Hex(t, localCopy)
+	wantFast, err := fastHashFile(localCopy, int64(len(content)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := &scriptedClient{}
+	base.check = func(branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+		return branchdam.ContentCheckResult{Found: false}, nil
+	}
+	e := newTestEngine(t, scriptedCheckClient{base}, archiveRoot, localRoot)
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := res.Files[0]
+	if fr.Err != nil || fr.Skipped || fr.EventID == "" {
+		t.Fatalf("result = {Err:%v Skipped:%v EventID:%q}, want the unregistered copies registered", fr.Err, fr.Skipped, fr.EventID)
+	}
+	want := branchdam.ContentCheckQuery{FastHash: wantFast, SizeBytes: int64(len(content)), FullHash: wantFull}
+	if len(base.checkCalls) != 1 || base.checkCalls[0] != want {
+		t.Errorf("CheckContent queries = %+v, want exactly [%+v]", base.checkCalls, want)
+	}
+}
+
+// A 400 on confirmRegistered's lookup means a server predating the
+// pre-screen: the lookup is retried once as fastHash+fullHash (the form such
+// servers accept), the answer is honoured, and the rest of the pass uses
+// that form straight away -- a 400 never makes dedup "unavailable".
+func TestIngestCardReingestFallsBackToFullHashOnlyOn400(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot, archiveRoot, localRoot := filepath.Join(dir, "card"), filepath.Join(dir, "archive"), filepath.Join(dir, "local")
+	seedPresentCopies(t, cardRoot, archiveRoot, localRoot, "IMG_0008.jpg", []byte("photo-bytes-8"))
+	seedPresentCopies(t, cardRoot, archiveRoot, localRoot, "IMG_0009.jpg", []byte("photo-bytes-9"))
+	hash8 := blake3Hex(t, filepath.Join(localRoot, "IMG_0008.jpg"))
+	hash9 := blake3Hex(t, filepath.Join(localRoot, "IMG_0009.jpg"))
+
+	base := &scriptedClient{}
+	base.check = func(q branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+		if q.SizeBytes != 0 {
+			return branchdam.ContentCheckResult{}, &branchdam.HTTPError{StatusCode: 400, Body: "unknown parameter sizeBytes"}
+		}
+		switch q.FullHash {
+		case hash8:
+			return branchdam.ContentCheckResult{Found: true, NodeUUID: "node-8", FilePath: "/elsewhere/IMG_0008.jpg", LifecycleState: "ACTIVE"}, nil
+		case hash9:
+			return branchdam.ContentCheckResult{Found: true, NodeUUID: "node-9", FilePath: "/elsewhere/IMG_0009.jpg", LifecycleState: "HIDDEN"}, nil
+		}
+		return branchdam.ContentCheckResult{}, nil
+	}
+	e := newTestEngine(t, scriptedCheckClient{base}, archiveRoot, localRoot)
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Files) != 2 {
+		t.Fatalf("files = %d, want 2", len(res.Files))
+	}
+	for i, wantNode := range []string{"node-8", "node-9"} {
+		fr := res.Files[i]
+		if fr.Err != nil || !fr.Skipped || fr.ExistingNodeUUID != wantNode {
+			t.Errorf("file %d = {Err:%v Skipped:%v ExistingNodeUUID:%q}, want a skip on %s (HIDDEN counts as live)", i, fr.Err, fr.Skipped, fr.ExistingNodeUUID, wantNode)
+		}
+	}
+	if len(base.posts) != 0 {
+		t.Errorf("posts = %d, want 0", len(base.posts))
+	}
+	// File 1: the full query (400), then the retry without sizeBytes.
+	// File 2: straight to the retry form -- fullOnly latched for the pass.
+	if len(base.checkCalls) != 3 {
+		t.Fatalf("CheckContent queries = %+v, want 3 (400, retry, retry form)", base.checkCalls)
+	}
+	if base.checkCalls[0].SizeBytes == 0 || base.checkCalls[1].SizeBytes != 0 || base.checkCalls[2].SizeBytes != 0 {
+		t.Errorf("CheckContent queries = %+v, want sizeBytes only on the first", base.checkCalls)
+	}
+	for i, q := range base.checkCalls {
+		if q.FullHash == "" || q.FastHash == "" {
+			t.Errorf("query %d = %+v, want fastHash and fullHash on every lookup", i, q)
+		}
+	}
+	for _, name := range []string{"IMG_0008.jpg", "IMG_0009.jpg"} {
+		for _, root := range []string{archiveRoot, localRoot} {
+			if _, err := os.Stat(filepath.Join(root, name)); err != nil {
+				t.Errorf("pre-existing copy %s removed: %v", filepath.Join(root, name), err)
+			}
+		}
+	}
+}
+
+// When check-content is missing (404), confirmRegistered fails open and
+// registers; the rest of the pass does not ask again.
+func TestIngestCardReingestRegistersWhenContentCheckUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot, archiveRoot, localRoot := filepath.Join(dir, "card"), filepath.Join(dir, "archive"), filepath.Join(dir, "local")
+	seedPresentCopies(t, cardRoot, archiveRoot, localRoot, "IMG_0010.jpg", []byte("photo-bytes-10"))
+	seedPresentCopies(t, cardRoot, archiveRoot, localRoot, "IMG_0011.jpg", []byte("photo-bytes-11"))
+
+	base := &scriptedClient{}
+	base.check = func(branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+		return branchdam.ContentCheckResult{}, &branchdam.HTTPError{StatusCode: 404, Body: "not found"}
+	}
+	e := newTestEngine(t, scriptedCheckClient{base}, archiveRoot, localRoot)
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, fr := range res.Files {
+		if fr.Err != nil || fr.Skipped || fr.EventID == "" {
+			t.Errorf("file %d = {Err:%v Skipped:%v EventID:%q}, want registered (fail-open)", i, fr.Err, fr.Skipped, fr.EventID)
+		}
+	}
+	if len(base.posts) != 2 {
+		t.Errorf("posts = %d, want 2", len(base.posts))
+	}
+	if len(base.checkCalls) != 1 {
+		t.Errorf("CheckContent called %d times, want 1: a 404 latches unavailable for the pass", len(base.checkCalls))
+	}
+}
+
+// A live node at this file's own archive container path is this very copy,
+// already registered (e.g. the server's own scan of the archive): it is
+// evidence of registration -- skipped as this file's node, never reported
+// as a duplicate of something else, and nothing is removed or re-posted.
+func TestIngestCardReingestOwnPathMatchIsRegistrationNotDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot, archiveRoot, localRoot := filepath.Join(dir, "card"), filepath.Join(dir, "archive"), filepath.Join(dir, "local")
+	content := []byte("photo-bytes-12")
+	seedPresentCopies(t, cardRoot, archiveRoot, localRoot, "IMG_0012.jpg", content)
+
+	base := &scriptedClient{}
+	base.check = func(branchdam.ContentCheckQuery) (branchdam.ContentCheckResult, error) {
+		return branchdam.ContentCheckResult{Found: true, NodeUUID: "node-own", FilePath: "/storage/archive/IMG_0012.jpg", LifecycleState: "ACTIVE"}, nil
+	}
+	e := newTestEngine(t, scriptedCheckClient{base}, archiveRoot, localRoot)
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := res.Files[0]
+	if fr.Err != nil || !fr.Skipped || fr.NodeUUID != "node-own" || fr.ExistingNodeUUID != "" {
+		t.Fatalf("result = {Err:%v Skipped:%v NodeUUID:%q ExistingNodeUUID:%q}, want a skip as this file's own registration", fr.Err, fr.Skipped, fr.NodeUUID, fr.ExistingNodeUUID)
+	}
+	if !strings.Contains(fr.SkipReason, "registered as node node-own") || strings.Contains(fr.SkipReason, "duplicate") {
+		t.Errorf("SkipReason = %q, want it to name the registration, not a duplicate", fr.SkipReason)
+	}
+	if len(base.posts) != 0 {
+		t.Errorf("posts = %d, want 0", len(base.posts))
+	}
+	for _, root := range []string{archiveRoot, localRoot} {
+		if got, err := os.ReadFile(filepath.Join(root, "IMG_0012.jpg")); err != nil || !bytes.Equal(got, content) {
+			t.Errorf("%s: pre-existing copy changed or removed (err=%v)", root, err)
+		}
 	}
 }
 
@@ -492,5 +674,115 @@ func TestCompleteResumedLocalCopyHonoursRequireUnbuffered(t *testing.T) {
 	}
 	if _, err := os.Stat(localPath); err != nil {
 		t.Errorf("copy not placed: %v", err)
+	}
+}
+
+// With a queue, a fresh copy the server confirms as a live duplicate is
+// removed before registration, so registerNode never runs: no queue row
+// (a row would claim content that is not in the archive) and no POST.
+func TestIngestCardDuplicateWritesNoQueueRow(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	writeCardFile(t, cardRoot, "DSC0001.JPG", []byte("duplicate-image-bytes"))
+
+	client := &fakeCheckContentClient{checkFunc: prescreenServer(true, liveDuplicate("HIDDEN"))}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+	store := openStoreT(t)
+	e.Queue = store
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := res.Files[0]
+	if fr.Err != nil || !fr.Skipped || fr.Queued || fr.ExistingNodeUUID == "" {
+		t.Fatalf("result = {Err:%v Skipped:%v Queued:%v ExistingNodeUUID:%q}, want a duplicate skip", fr.Err, fr.Skipped, fr.Queued, fr.ExistingNodeUUID)
+	}
+	for _, p := range []string{fr.ArchivePath, fr.LocalPath} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: this run's copy of a duplicate must be removed (err=%v)", p, err)
+		}
+	}
+	rows, err := store.All(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 || len(client.calls) != 0 {
+		t.Errorf("queue rows = %d, posts = %d, want 0 and 0 for a duplicate", len(rows), len(client.calls))
+	}
+}
+
+// TestIngestCardDuplicateRemovalSyncsDirs: removing a duplicate's two
+// copies is made durable -- both parent directories are fsynced after the
+// removal, as DualWrite fsyncs them after the create.
+func TestIngestCardDuplicateRemovalSyncsDirs(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	writeCardFile(t, cardRoot, "DSC0001.JPG", []byte("duplicate-image-bytes"))
+
+	client := &fakeCheckContentClient{checkFunc: prescreenServer(true, liveDuplicate("ACTIVE"))}
+	e := newTestEngine(t, client, filepath.Join(dir, "archive"), filepath.Join(dir, "local"))
+	synced := recordDirSyncs(t)
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := res.Files[0]
+	if !fr.Skipped || fr.ExistingNodeUUID == "" {
+		t.Fatalf("result = {Skipped:%v ExistingNodeUUID:%q}, want a duplicate skip", fr.Skipped, fr.ExistingNodeUUID)
+	}
+	// DualWrite syncs each directory once for the create; the removal
+	// must sync each one again.
+	count := map[string]int{}
+	for _, d := range synced() {
+		count[d]++
+	}
+	for _, p := range []string{fr.ArchivePath, fr.LocalPath} {
+		if got := count[filepath.Dir(p)]; got < 2 {
+			t.Errorf("%s synced %d times, want the create's sync plus one after the removal", filepath.Dir(p), got)
+		}
+	}
+}
+
+// TestIngestCardDuplicateRemovalFailureIsReported: a duplicate whose copy
+// cannot be removed is not reported as a clean skip -- the reason names
+// the leftover so the operator can delete it.
+func TestIngestCardDuplicateRemovalFailureIsReported(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	writeCardFile(t, cardRoot, "DSC0001.JPG", []byte("duplicate-image-bytes"))
+
+	client := &fakeCheckContentClient{checkFunc: prescreenServer(true, liveDuplicate("ACTIVE"))}
+	archiveRoot := filepath.Join(dir, "archive")
+	e := newTestEngine(t, client, archiveRoot, filepath.Join(dir, "local"))
+	orig := removeDuplicateFn
+	removeDuplicateFn = func(p string) error {
+		if strings.HasPrefix(p, archiveRoot) {
+			return &os.PathError{Op: "remove", Path: p, Err: errors.New("device busy")}
+		}
+		return orig(p)
+	}
+	t.Cleanup(func() { removeDuplicateFn = orig })
+
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr := res.Files[0]
+	if !fr.Skipped || fr.Err != nil {
+		t.Fatalf("result = {Skipped:%v Err:%v}, want a duplicate skip", fr.Skipped, fr.Err)
+	}
+	if !strings.Contains(fr.SkipReason, "left behind") || !strings.Contains(fr.SkipReason, fr.ArchivePath) {
+		t.Errorf("SkipReason = %q, want it to name the leftover archive copy", fr.SkipReason)
+	}
+	if strings.Contains(fr.SkipReason, fr.LocalPath) {
+		t.Errorf("SkipReason = %q names the local copy, which was removed", fr.SkipReason)
+	}
+	if _, err := os.Stat(fr.ArchivePath); err != nil {
+		t.Errorf("archive copy: %v, want it still on disk (its removal failed)", err)
+	}
+	if _, err := os.Stat(fr.LocalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("local copy: err=%v, want it removed", err)
 	}
 }

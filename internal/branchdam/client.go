@@ -310,22 +310,40 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	return nil
 }
 
-// CheckContent calls GET /api/v1/agent/check-content.
-// fastHash is optional (empty string = skip fast pre-screen).
-// Returns (result, nil) on success; (zero, err) on network failure.
-// Callers treat any network error as "not found" (fail-open) so ingest
-// proceeds rather than blocking on server unavailability.
-func (c *Client) CheckContent(ctx context.Context, fastHash, fullHash string) (ContentCheckResult, error) {
+// ContentCheckQuery is the query of one GET /api/v1/agent/check-content
+// call. The server picks the mode from which hash is set:
+//
+//   - FastHash (+ SizeBytes) without FullHash is the fast pre-screen: the
+//     answer is only PossibleMatch, never which node matched.
+//   - FullHash is the definitive lookup (FastHash and SizeBytes are then
+//     format-checked but otherwise ignored).
+//
+// SizeBytes <= 0 is not sent ("unknown"). Servers predating the pre-screen
+// reject a request without FullHash with 400.
+type ContentCheckQuery struct {
+	FastHash  string
+	SizeBytes int64
+	FullHash  string
+}
+
+// CheckContent calls GET /api/v1/agent/check-content with q.
+// Returns (result, nil) on success; (zero, err) on network failure or a
+// non-2xx status (*HTTPError). Callers treat any error as "not found"
+// (fail-open) so ingest proceeds rather than blocking on the server.
+func (c *Client) CheckContent(ctx context.Context, q ContentCheckQuery) (ContentCheckResult, error) {
 	params := url.Values{}
-	if fastHash != "" {
-		params.Set("fastHash", fastHash)
+	if q.FastHash != "" {
+		params.Set("fastHash", q.FastHash)
 	}
-	if fullHash != "" {
-		params.Set("fullHash", fullHash)
+	if q.SizeBytes > 0 {
+		params.Set("sizeBytes", strconv.FormatInt(q.SizeBytes, 10))
+	}
+	if q.FullHash != "" {
+		params.Set("fullHash", q.FullHash)
 	}
 	path := "/api/v1/agent/check-content"
-	if q := params.Encode(); q != "" {
-		path += "?" + q
+	if enc := params.Encode(); enc != "" {
+		path += "?" + enc
 	}
 	var out ContentCheckResult
 	if err := c.get(ctx, path, &out); err != nil {

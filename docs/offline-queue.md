@@ -60,17 +60,23 @@ Two more online-ingest rules close the "copied but never registered" gap without
   mapping fails the file while both destinations are still empty.
 - A re-run that finds identical copies already at both destinations no longer takes that as proof
   of registration. It skips only when a queue row claims the copies or `check-content` finds a live
-  node with their BLAKE3 (hashed from the local copy, not the card); otherwise it verifies the
-  archive copy against that hash -- honouring `ingest.requireUnbuffered` -- and registers the copies
-  (the server ignores an `EVENT_NODE_CREATED` whose `full_hash` a live node already has). A fresh
-  copy that fails a required unbuffered verify is removed, so the next run copies and checks again
-  instead of finding it "already ingested".
+  (`ACTIVE` or `HIDDEN`) node with their BLAKE3 (hashed from the local copy, not the card, and looked
+  up by full hash directly, with the fast hash and size alongside; the same per-pass rules as the
+  fresh-copy dedup apply -- a 400 retries as a plain full-hash lookup, a transport error, 404/501,
+  401/403 or 429 stops asking for the rest of the pass). A live node at the file's own archive path is its own
+  registration, not a duplicate. Otherwise it verifies the archive copy against that hash --
+  honouring `ingest.requireUnbuffered` -- and registers the copies (the server ignores an
+  `EVENT_NODE_CREATED` whose `full_hash` a live node already has). A fresh copy that fails a
+  required unbuffered verify is removed, so the next run copies and checks again instead of finding
+  it "already ingested".
 
 ## Ordering invariants
 
-**1. `queue.db`'s row commits before any network mutation.** `Engine.ingestFileOffline` optionally
-queries `GET /api/v1/agent/check-content` (pre-flight BLAKE3 content dedup), writes and verifies the
-local copy, then `Store.InsertPending` -- the durability boundary -- *then* makes one best-effort
+**1. `queue.db`'s row commits before any network mutation.** `Engine.ingestFileOffline` writes the
+local copy under its temp name (hashing it in flight), optionally queries `GET
+/api/v1/agent/check-content` with those hashes (fast-hash pre-screen, then a full-hash confirm only
+on a possible match; a confirmed live duplicate removes the temp copy and queues nothing), verifies
+the copy, then `Store.InsertPending` -- the durability boundary -- *then* makes one best-effort
 opportunistic `PostNodeCreated` attempt. A crash between the POST succeeding and the row being written
 would leave a server-side node nothing local remembers, with no read endpoint to recover it; getting
 the order backwards was the first thing worth getting wrong here, so it isn't.
@@ -138,10 +144,13 @@ own `offline.drainIntervalSecs` timer, issue #32) into backoff rather than a tig
 itself (network down, NAS unmounted). `archive_copy` turns terminal `FAILED` only for the cases
 retrying can't fix -- a different file at the archive path, a local copy that no longer matches its
 queued hash (edited in place before or during the copy: the copy hashes the bytes as it reads them,
-so the edited bytes never reach the archive name), or a placed copy that reads back from the
-archive with the wrong hash on two attempts in a row (once is retried: a flaky mount can do that;
-twice means the archive isn't storing the bytes it is given) -- and all show up in the queue's
-failed count with the reason in `archive_copy_last_error`. `rebase` also has a terminal `FAILED`
+so the edited bytes never reach the archive name), or an archive copy that reads back with the
+wrong hash on two attempts in a row (once is retried: a flaky mount can do that; twice means the
+archive isn't storing the bytes it is given) -- and all show up in the queue's failed count with
+the reason in `archive_copy_last_error`. A file already at the archive path with exactly the local
+copy's size counts as a read-back mismatch, not a conflict: it is typically the agent's own copy,
+left in place when an earlier attempt's post-rename read-back errored. Unlike a copy the attempt
+just placed, it is never removed, since the agent can't prove it wrote it. `rebase` also has a terminal `FAILED`
 state, reached only when the server's rebase handler itself refused the request for a reason that
 won't change on its own (`internal/branchdam.HTTPError`'s `Classification()`: a problem+json
 400/404/409/410/413/422 such as an `ARCHIVED` node, a `fullHash` conflict or a read-only non-Tier-3
@@ -156,9 +165,10 @@ What the operator does depends on which step failed:
 - **`rebase` FAILED** -- read `rebase_last_error`, fix the server-side cause (e.g. un-archive the
   node, or correct the storage location), then run `queue-drain -retry-failed`.
 - **`archive_copy` FAILED** -- read `archive_copy_last_error`. For a conflict, move or rename the
-  file already at the archive path (it is never overwritten); for a local-copy mismatch, restore the
-  local edit copy to the bytes that were ingested (or re-ingest from the card). Then run
-  `queue-drain -retry-failed`.
+  file already at the archive path (it is never overwritten); for a read-back mismatch, check the
+  archive mount and move or rename any file the error says was left in place; for a local-copy
+  mismatch, restore the local edit copy to the bytes that were ingested (or re-ingest from the
+  card). Then run `queue-drain -retry-failed`.
 
 `queue-drain -retry-failed` puts every failed archive copy and rebase back to `PENDING`
 (`queue.Store.ResetFailed`) and drains.
