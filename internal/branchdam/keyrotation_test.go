@@ -497,9 +497,10 @@ func TestStaleKeyRequestRetriedWithCurrentKey(t *testing.T) {
 // detector-ingest and drain goroutines at once. Every racer presents the
 // old key and sees the rotation; one adopts it, the key is stored once,
 // and every caller ends on the new key. The persister holds the first
-// adopter until all racers have had the chance to reach it, so a missing
-// adoptMu (not only a missing stale check) lets several through and
-// fails the test. Run under -race.
+// adopter until every racer has sent its handshake on the old key and
+// had the chance to reach it, so a missing adoptMu lets several through
+// and fails the test. The stale check, which that hold keeps the racers
+// from reaching, is pinned separately after the race. Run under -race.
 func TestConcurrentHandshakesAdoptOnce(t *testing.T) {
 	const racers = 8
 	k1, k2 := randomKey(t), randomKey(t)
@@ -508,11 +509,15 @@ func TestConcurrentHandshakesAdoptOnce(t *testing.T) {
 	var stored []string
 	arrived := make(chan struct{}, racers)
 	c := New(srv.URL, k1, WithKeyPersister(func(_ context.Context, apiKey string) error {
-		arrived <- struct{}{}
-		// Wait until every racer has arrived, or long enough that the
-		// ones adoptMu turned away have long since returned.
+		select {
+		case arrived <- struct{}{}:
+		default: // more persists than racers: the assertions below fail
+		}
+		// Wait until every racer has handshaken on k1 and arrived here,
+		// or long enough that the ones adoptMu turned away have long since
+		// returned.
 		deadline := time.After(300 * time.Millisecond)
-		for len(arrived) < racers {
+		for len(arrived) < racers || countEntries(rs.entries(), handshakePath+" k1") < racers {
 			select {
 			case <-deadline:
 				goto store
@@ -550,6 +555,18 @@ func TestConcurrentHandshakesAdoptOnce(t *testing.T) {
 	}
 	if c.currentKey() != k2 {
 		t.Fatal("client did not end on the rotated key")
+	}
+
+	// The stale guard: a rotation offered to a handshake made on the key
+	// the client has already left is not adopted (or stored) again.
+	mu.Unlock()
+	if hs := c.adoptRotation(context.Background(), HandshakeRequest{AgentID: "agent-1"}, k1,
+		&PendingRotationHint{KeyID: 2, SealedAPIKey: sealForTest(t, k1, k2)}); hs != nil {
+		t.Fatal("a rotation offered for the abandoned key was adopted")
+	}
+	mu.Lock()
+	if len(stored) != 1 {
+		t.Fatalf("stored %d keys after a stale rotation, want 1", len(stored))
 	}
 }
 

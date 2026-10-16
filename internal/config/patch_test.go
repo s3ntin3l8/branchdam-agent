@@ -289,9 +289,10 @@ func TestPatchCreatesMissingFile(t *testing.T) {
 	}
 }
 
-// TestPatchLockedCheckAbortsBeforeWrite: a failing check (SetRotatedAPIKey's
-// placeholder guard) leaves the file byte-for-byte as it was, and the check
-// sees the root the patch would have rewritten.
+// TestPatchLockedCheckAbortsBeforeWrite: a failing check (a stub standing
+// in for SetRotatedAPIKey's placeholder guard) returns its own error, sees
+// the root the patch would have rewritten, and leaves the file
+// byte-for-byte as it was.
 func TestPatchLockedCheckAbortsBeforeWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	orig := []byte("# keep me\nserver:\n  apiKey: old-key # trailing\n")
@@ -300,7 +301,9 @@ func TestPatchLockedCheckAbortsBeforeWrite(t *testing.T) {
 	}
 	errCheck := errors.New("refused")
 	var sawKey string
-	patchMu.Lock()
+	// patchLocked's caller holds patchMu; this test is the only writer, so
+	// it calls it bare rather than risk hanging if patchLocked ever took
+	// the lock itself.
 	err := patchLocked(path, map[string]any{"server.apiKey": "new-key"}, func(root *yaml.Node) error {
 		if i := findKey(root, "server"); i >= 0 {
 			if j := findKey(root.Content[i+1], "apiKey"); j >= 0 {
@@ -309,7 +312,6 @@ func TestPatchLockedCheckAbortsBeforeWrite(t *testing.T) {
 		}
 		return errCheck
 	})
-	patchMu.Unlock()
 	if !errors.Is(err, errCheck) {
 		t.Fatalf("err = %v, want the check's error", err)
 	}
