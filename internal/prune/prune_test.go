@@ -79,6 +79,13 @@ func pruneTestFixture(t *testing.T) (config.Config, *queue.Store, string) {
 // contract) unless overridden by ageHours.
 func insertDoneRow(t *testing.T, store *queue.Store, nodeUUID, localPath, content string, ageHours int, kind string) {
 	t.Helper()
+	insertDoneRowWithHash(t, store, nodeUUID, localPath, content, ageHours, kind, testFullHash)
+}
+
+// insertDoneRowWithHash is insertDoneRow with the full hash recorded at
+// ingest given explicitly ("" for a row that recorded none).
+func insertDoneRowWithHash(t *testing.T, store *queue.Store, nodeUUID, localPath, content string, ageHours int, kind, fullHash string) {
+	t.Helper()
 	if err := os.WriteFile(localPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +110,7 @@ func insertDoneRow(t *testing.T, store *queue.Store, nodeUUID, localPath, conten
 		FileExt:              filepath.Ext(localPath),
 		SizeBytes:            info.Size(),
 		MtimeUnix:            info.ModTime().Unix(),
-		FullHash:             testFullHash,
+		FullHash:             fullHash,
 		FastHash:             "abc",
 	}); err != nil {
 		t.Fatalf("InsertPending: %v", err)
@@ -200,6 +207,28 @@ func TestPassKeepsFileOnHashMismatch(t *testing.T) {
 	}
 	if !strings.Contains(out, "[SKIP] "+path) || !strings.Contains(out, "does not match") {
 		t.Errorf("output = %q, want a [SKIP] line for the mismatch", out)
+	}
+}
+
+// TestPassKeepsFileWithNoRecordedHash: a row that recorded no hash at
+// ingest has nothing to compare the server's hash with, so it is kept.
+func TestPassKeepsFileWithNoRecordedHash(t *testing.T) {
+	cfg, store, root := pruneTestFixture(t)
+	cfg.Prune = config.PruneConfig{Enabled: true, MinAgeHours: 24}
+	uuid := "0190f1a2-0000-7000-8000-0000000000b4"
+	path := filepath.Join(root, "nohash.mov")
+	insertDoneRowWithHash(t, store, uuid, path, "nohash-content", 48, queue.KindMedia, "")
+
+	stats, out := runPass(t, cfg, store, map[string]branchdam.NodeStatusEntry{uuid: verifiedEntry(uuid)})
+
+	if stats.Pruned != 0 || stats.SkippedHashMismatch != 1 {
+		t.Errorf("stats = %+v, want Pruned=0 SkippedHashMismatch=1", stats)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("local copy must be kept when no hash was recorded: %v", err)
+	}
+	if !strings.Contains(out, "[SKIP] "+path) {
+		t.Errorf("output = %q, want a [SKIP] line", out)
 	}
 }
 
