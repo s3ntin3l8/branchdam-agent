@@ -166,6 +166,31 @@ func TestTriggerIngestOfflineFallbackUnconfiguredShowsError(t *testing.T) {
 	}
 }
 
+// TestTriggerIngestNoWaitNASUnreachableNotifiesOnce: with the NAS down
+// and the gate held, a no-wait ingest reports the NAS reason, and the
+// operator gets that one notification, not a second gate-busy one.
+func TestTriggerIngestNoWaitNASUnreachableNotifiesOnce(t *testing.T) {
+	r := NewRunner(&fakeIngester{}, []string{"/media/card"}, "/scratch")
+	r.SetArchiveRoot("/nas/archive")
+	r.SetArchiveProber(func(context.Context, string) bool { return false })
+	var msgs []string
+	r.SetErrorNotifier(func(_, message string) { msgs = append(msgs, message) })
+	release, ok := r.TryLockIdle()
+	if !ok {
+		t.Fatal("TryLockIdle on an idle runner failed")
+	}
+	defer release()
+
+	sum := r.TriggerIngestNoWait(context.Background(), "/media/card")
+	want := "NAS unreachable. Set offline.queueDbPath to enable field ingest"
+	if sum.Err == nil || sum.Err.Error() != want {
+		t.Errorf("Err = %v, want %q", sum.Err, want)
+	}
+	if len(msgs) != 1 || msgs[0] != want {
+		t.Errorf("notifications = %q, want only the NAS one", msgs)
+	}
+}
+
 func TestTriggerIngestProberTrueRunsOnline(t *testing.T) {
 	fi := &fakeIngester{
 		result: ingest.CardResult{

@@ -993,7 +993,10 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 			notifyErr("branchDAM Ingest", msg)
 		}
 		if !acquireGate() {
-			return r.gateBusy(cardPath, notifyErr)
+			// The operator already has the NAS notice: return its
+			// reason, not a second, gate-busy one. (r.last is only
+			// written under the gate, so it is left as it was.)
+			return summary
 		}
 		r.mu.Lock()
 		r.last = &summary

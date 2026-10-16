@@ -1029,7 +1029,7 @@ func (s *StatusServer) handleActionIngestStart(w http.ResponseWriter, r *http.Re
 			sum := s.Actions.TriggerIngestNoWait(ctx, p)
 			if errors.Is(sum.Err, ErrGateBusy) {
 				// TriggerIngestNoWait has already notified the operator.
-				log.Printf("tray: ingest-start: batch stopped, %d of %d volumes not ingested: %v", len(paths)-i, len(paths), sum.Err)
+				log.Printf("tray: ingest-start: batch stopped, %d of %d volumes not ingested: %v", len(paths)-i, len(paths), ErrGateBusy)
 				return
 			}
 			if sum.Canceled {
