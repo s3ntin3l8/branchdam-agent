@@ -212,7 +212,7 @@ func (zeroReader) Read(p []byte) (int, error) {
 // same X-Timestamp/X-Nonce/X-Signature as every other agent request,
 // keyed by the raw API key over method, path, nonce, timestamp and body.
 func TestUploadSignsSmallBodies(t *testing.T) {
-	const key = "0123456789abcdef0123456789abcdef"
+	const key = "0123456789abcdef0123456789abcdef" // pragma: allowlist secret
 	var mu sync.Mutex
 	var gotSig, wantSig, gotLen string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

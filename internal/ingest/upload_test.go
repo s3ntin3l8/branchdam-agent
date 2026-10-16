@@ -391,6 +391,100 @@ func TestUploadStreamSidecarDeferredWithMaster(t *testing.T) {
 	noAgentTemps(t, localRoot)
 }
 
+// TestUploadStreamSidecarStagesInItsMastersDirectory: a sidecar renders
+// its master's directory (capture date, camera model), so staging its temp
+// copy leaves no empty directory of its own behind.
+func TestUploadStreamSidecarStagesInItsMastersDirectory(t *testing.T) {
+	dir := t.TempDir()
+	cardRoot := filepath.Join(dir, "card")
+	localRoot := filepath.Join(dir, "local")
+	writeUploadCardFile(t, cardRoot, "DCIM/IMG_0001.dng", "raw bytes", time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC))
+	writeUploadCardFile(t, cardRoot, "DCIM/IMG_0001.xmp", "<xmp/>", time.Date(2026, 9, 9, 9, 0, 0, 0, time.UTC))
+
+	u := &recordingUploader{relPath: func(o branchdam.UploadOptions) string { return "2026/03_unknown_camera/" + o.Filename }}
+	e := newUploadEngine(u, localRoot)
+	e.Ingest.PathTemplate = "{yyyy}/{mm}_{camera_model}/{original_name}"
+	res, err := e.IngestCard(context.Background(), cardRoot)
+	if err != nil {
+		t.Fatalf("IngestCard: %v", err)
+	}
+	for _, fr := range res.Files {
+		if fr.Err != nil {
+			t.Fatalf("%s: %v", fr.SourcePath, fr.Err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(localRoot, "2026", "09_unknown_camera")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the sidecar's own date directory exists (err %v); it must stage in its master's", err)
+	}
+	if _, err := os.Stat(filepath.Join(localRoot, "2026", "03_unknown_camera", "IMG_0001.xmp")); err != nil {
+		t.Errorf("sidecar local copy: %v", err)
+	}
+	noAgentTemps(t, localRoot)
+}
+
+// TestUploadStreamReinsertMovesTheDeferredCopy: a metered pass left the
+// copy at the agent's own name; when the server then places the node
+// elsewhere, the re-insert moves that copy there instead of leaving two
+// identical files. A copy that was edited meanwhile stays where it is.
+func TestUploadStreamReinsertMovesTheDeferredCopy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		edited bool
+	}{
+		{"unchanged deferred copy is moved", false},
+		{"edited deferred copy is left alone", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cardRoot := filepath.Join(dir, "card")
+			localRoot := filepath.Join(dir, "local")
+			const content = "card bytes"
+			writeUploadCardFile(t, cardRoot, "IMG_0001.JPG", content, time.Time{})
+
+			u := &recordingUploader{relPath: func(branchdam.UploadOptions) string { return "2026/IMG_0001_2.JPG" }}
+			e := newUploadEngine(u, localRoot)
+			e.Ingest.PauseUploadOnMetered = true
+			e.IsMetered = func() (bool, error) { return true, nil }
+			if _, err := e.IngestCard(context.Background(), cardRoot); err != nil {
+				t.Fatalf("metered IngestCard: %v", err)
+			}
+			deferred := filepath.Join(localRoot, "2026", "IMG_0001.JPG")
+			if _, err := os.Stat(deferred); err != nil {
+				t.Fatalf("deferred copy: %v", err)
+			}
+			if tc.edited {
+				// Same size, so the identity check still finds it; the full
+				// hash is what tells it apart.
+				if err := os.WriteFile(deferred, []byte("card BYTES"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			e.IsMetered = func() (bool, error) { return false, nil }
+			res, err := e.IngestCard(context.Background(), cardRoot)
+			if err != nil {
+				t.Fatalf("unmetered IngestCard: %v", err)
+			}
+			fr := res.Files[0]
+			if fr.Err != nil {
+				t.Fatalf("file error: %v", fr.Err)
+			}
+			server := filepath.Join(localRoot, "2026", "IMG_0001_2.JPG")
+			if b, err := os.ReadFile(server); err != nil || string(b) != content {
+				t.Errorf("copy at the server's path = %q, %v; want %q", b, err, content)
+			}
+			_, err = os.Stat(deferred)
+			if tc.edited && err != nil {
+				t.Errorf("edited deferred copy was touched: %v", err)
+			}
+			if !tc.edited && !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("deferred copy still at its own name (err %v); want it moved", err)
+			}
+			noAgentTemps(t, localRoot)
+		})
+	}
+}
+
 // TestUploadStreamFailureLeavesNoLocalFiles: a failed upload removes the
 // staged copy -- no temp and nothing at a final name.
 func TestUploadStreamFailureLeavesNoLocalFiles(t *testing.T) {

@@ -111,6 +111,9 @@ type uploadedMaster struct {
 	srcPath          string
 	cameraModel      string
 	captureTimestamp int64
+	// vars is the master's own template input, so a sidecar renders the
+	// same directory (camera model, capture date) as its master.
+	vars TemplateVars
 	// finalName is the base name the master ended up with: the server's
 	// (possibly collision-suffixed) name, or the deferred local copy's.
 	finalName string
@@ -201,19 +204,21 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string, pass *upl
 		cameraModel = exif.CameraModel
 	}
 
+	vars := buildTemplateVars(exif, srcPath, srcInfo.ModTime())
 	fr = e.uploadFile(ctx, fr, uploadItem{
 		srcPath:          srcPath,
 		info:             srcInfo,
 		uploadName:       filepath.Base(srcPath),
 		cameraModel:      cameraModel,
 		captureTimestamp: captureTimestamp,
-		vars:             buildTemplateVars(exif, srcPath, srcInfo.ModTime()),
+		vars:             vars,
 	})
 
 	m := &uploadedMaster{
 		srcPath:          srcPath,
 		cameraModel:      cameraModel,
 		captureTimestamp: captureTimestamp,
+		vars:             vars,
 		deferred:         fr.Deferred,
 		failed:           fr.Err != nil,
 	}
@@ -265,6 +270,11 @@ func (e *Engine) uploadSidecar(ctx context.Context, srcPath string, pass *upload
 		it.uploadName = name
 		it.cameraModel = master.cameraModel
 		it.captureTimestamp = master.captureTimestamp
+		// Render the master's directory, not an exif-less sidecar's
+		// ("unknown_camera"): the temp copy is staged there, and the
+		// deferred-copy lookup resolves there.
+		it.vars.CameraModel = master.vars.CameraModel
+		it.vars.CapturedAt = master.vars.CapturedAt
 		if master.deferred {
 			it.forceDefer = true
 			if master.localDir != "" {
@@ -451,6 +461,12 @@ func (e *Engine) streamUpload(ctx context.Context, fr FileResult, it uploadItem)
 	localPath := filepath.Join(e.Ingest.LocalEditRoot, rel)
 	fr.LocalPath = localPath
 
+	if moved := e.moveDeferredCopy(ctx, it, localPath, fr.Write.FullHash); moved {
+		_ = os.Remove(tmpPath)
+		e.localPHash(ctx, &fr, localPath)
+		return fr
+	}
+
 	placed, err := placeLocalCopy(ctx, tmpPath, localPath, fr.Write.FullHash)
 	if err != nil {
 		fr.Err = fmt.Errorf("place local copy of %s (node %s uploaded): %w", it.srcPath, upResp.NodeUUID, err)
@@ -464,6 +480,56 @@ func (e *Engine) streamUpload(ctx context.Context, fr FileResult, it uploadItem)
 	}
 	e.localPHash(ctx, &fr, localPath)
 	return fr
+}
+
+// moveDeferredCopy handles a card re-inserted after a metered pass
+// deferred this file: that pass left a verified local copy at the agent's
+// own rendered name, and the server may now have placed the node
+// elsewhere (a collision suffix, or a camera model it probed itself). The
+// earlier copy is moved to the server's path so the edit tree holds one
+// copy, not two -- but only when it still holds exactly the uploaded
+// bytes (full BLAKE3, so an edited copy is never moved) and nothing is at
+// the server's path yet. Otherwise the earlier copy stays where it is and
+// the caller places the fresh one; a WARN names both. Reports whether the
+// earlier copy now sits at localPath.
+func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath, wantHash string) bool {
+	vars := it.vars
+	if it.uploadName != "" {
+		vars.OriginalName = it.uploadName
+	}
+	res := ResolveDestination([]string{e.Ingest.LocalEditRoot}, e.Ingest.PathTemplate, vars, it.srcPath, "")
+	if !res.AlreadyIngested {
+		return false
+	}
+	prior := filepath.Join(e.Ingest.LocalEditRoot, res.RelPath)
+	if prior == localPath {
+		return false // placeLocalCopy keeps the identical file
+	}
+	if _, err := os.Lstat(localPath); !errors.Is(err, fs.ErrNotExist) {
+		slog.Warn("upload: an earlier deferred copy stays at its own name; the server placed this file elsewhere",
+			"deferred", prior, "local", localPath)
+		return false
+	}
+	if vr, err := Verify(prior, wantHash, WithContext(ctx)); err != nil || !vr.Verified {
+		slog.Warn("upload: an earlier deferred copy no longer matches the card; leaving it in place",
+			"deferred", prior, "local", localPath, "err", err)
+		return false
+	}
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		slog.Warn("upload: could not move the earlier deferred copy", "deferred", prior, "local", localPath, "err", err)
+		return false
+	}
+	if err := renameNoClobber(prior, localPath); err != nil {
+		slog.Warn("upload: could not move the earlier deferred copy", "deferred", prior, "local", localPath, "err", err)
+		return false
+	}
+	if dir := filepath.Dir(prior); dir != filepath.Dir(localPath) {
+		if dirErr := syncParentDirFn(dir); dirErr != nil {
+			slog.Warn("upload: dir fsync failed; entry may not be durable on power loss", "dir", dir, "err", dirErr)
+		}
+	}
+	slog.Info("upload: moved the earlier deferred copy to the server's path", "from", prior, "to", localPath)
+	return true
 }
 
 // uploadLocalCopy streams the verified local copy at p to the server.

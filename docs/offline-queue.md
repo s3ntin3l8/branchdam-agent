@@ -340,9 +340,13 @@ branchdam-agent ingest -config config.yaml -card /media/$USER/UNTITLED -upload
 With `ingest.pauseUploadOnMetered: true` and a metered (or unprobeable) link, the upload and its
 sidecars are skipped: the verified local copy is placed under the agent's own `pathTemplate`
 (collision-suffixed like dual-write mode) and the file is reported **Deferred**, so the summary
-is not OK and the card is not ejected. Re-inserting the card -- still metered or not -- finds that
-copy (identical bytes at the planned name) and reuses it rather than failing on the existing
-file; on an unmetered link it then uploads.
+is not OK and the card is not ejected. Re-inserting the card while still metered finds that copy
+(identical bytes at the planned name) and reuses it rather than failing on the existing file. On
+an unmetered link it then uploads, and the server's `relativePath` decides the final name: when
+that differs from the deferred copy's (a server collision suffix, or a camera model the server
+probed itself), the deferred copy is moved there -- only if it still holds exactly the uploaded
+bytes (full BLAKE3) and nothing is at the server's path yet. Otherwise it stays where it is, the
+fresh copy is placed at the server's path, and a WARN names both.
 
 Deferred uploads are **not** written to `queue.db`, so nothing retries them until the card is
 re-inserted. Upload mode writes no queue rows at all: the server registers the node in the
