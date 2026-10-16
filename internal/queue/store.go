@@ -17,7 +17,14 @@ package queue
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -154,23 +161,72 @@ func (r Record) Failed() bool {
 	return r.ArchiveCopyStatus == StatusFailed || r.RebaseStatus == StatusFailed
 }
 
-// Store wraps queue.db. A single *sql.DB with SetMaxOpenConns(1): SQLite
-// pragmas (journal_mode, synchronous, busy_timeout) are connection-scoped,
-// not database-scoped, so a pool of more than one connection would apply
-// them to whichever connection happened to run the PRAGMA statement and
-// leave the others at SQLite's defaults -- the same trap class as
-// branchDAM's own PRAGMA foreign_keys invariant (see that repo's AGENTS.md).
-// One connection also matches this package's actual concurrency
-// requirement: one agent process, one queue.db, never written from two
-// goroutines at once.
+// Store wraps queue.db. A single *sql.DB with SetMaxOpenConns(1): one
+// agent process, one queue.db, never written from two goroutines at once.
+// SQLite pragmas (synchronous, busy_timeout, foreign_keys) are
+// connection-scoped, not database-scoped -- the same trap class as
+// branchDAM's own PRAGMA foreign_keys invariant (see that repo's
+// AGENTS.md) -- so they are set in the DSN (_pragma, see dsn), which the
+// driver applies to every connection it opens. database/sql replaces a
+// connection after a driver error or when the idle one is closed, and an
+// Exec'd PRAGMA would have covered only the first.
 type Store struct {
 	db *sql.DB
+
+	gcMu   sync.Mutex
+	lastGC time.Time
 }
 
-// Open opens (creating if needed) the queue.db at path, sets its durability
-// pragmas, and ensures the schema exists.
+// pragmas are applied by the driver to every new connection. The driver
+// (modernc.org/sqlite's applyQueryParams) decides the order: it runs
+// busy_timeout first, so the others already wait on a locked database,
+// then the rest sorted.
+// journal_mode=WAL + synchronous=FULL: every status-transition UPDATE in
+// this file (and the initial INSERT in InsertPending) fsyncs before its
+// call returns -- the durability floor the crash-safety AC depends on.
+// WAL alone (synchronous=NORMAL, SQLite's own WAL default) can lose the
+// last commit on a power-loss-class crash; FULL is the one that doesn't.
+var pragmas = []string{
+	"busy_timeout(5000)",
+	"journal_mode(WAL)",
+	"synchronous(FULL)",
+	"foreign_keys(1)",
+}
+
+// dsn builds the driver DSN for the queue.db at path: an absolute
+// "file:" URI with the path percent-escaped, plus the _pragma list. The
+// driver hands a "file:" DSN to SQLite as a URI, and SQLite reads '?' as
+// the start of the parameters, '#' as a fragment and '%' as an escape --
+// so an unescaped "file:"+path silently opened a different file for a
+// path containing any of them. url.URL escapes exactly those (and
+// spaces). A Windows drive path becomes file:///C:/..., which SQLite
+// accepts.
+func dsn(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	p := filepath.ToSlash(abs)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	q := url.Values{}
+	for _, pr := range pragmas {
+		q.Add("_pragma", pr)
+	}
+	u := url.URL{Scheme: "file", Path: p, RawQuery: q.Encode()}
+	return u.String(), nil
+}
+
+// Open opens (creating if needed) the queue.db at path, with its
+// durability pragmas set on every connection, and ensures the schema
+// exists.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", "file:"+path)
+	d, err := dsn(path)
+	if err != nil {
+		return nil, fmt.Errorf("queue: open %s: %w", path, err)
+	}
+	db, err := sql.Open("sqlite", d)
 	if err != nil {
 		return nil, fmt.Errorf("queue: open %s: %w", path, err)
 	}
@@ -179,33 +235,18 @@ func Open(path string) (*Store, error) {
 	s := &Store{db: db}
 	if err := s.init(); err != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, fmt.Errorf("queue: open %s: %w", path, err)
 	}
 	return s, nil
 }
 
 func (s *Store) init() error {
-	// journal_mode=WAL + synchronous=FULL: every status-transition UPDATE in
-	// this file (and the initial INSERT in InsertPending) fsyncs before its
-	// call returns -- the durability floor the crash-safety AC depends on.
-	// WAL alone (synchronous=NORMAL, SQLite's own WAL default) can lose the
-	// last commit on a power-loss-class crash; FULL is the one that doesn't.
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA synchronous=FULL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-	}
-	for _, p := range pragmas {
-		if _, err := s.db.Exec(p); err != nil {
-			return fmt.Errorf("queue: set pragma %q: %w", p, err)
-		}
-	}
-
-	if err := s.migrate(); err != nil {
+	// Ping opens the first connection, which is where the driver runs the
+	// _pragma list -- surfacing a bad path or a pragma failure here.
+	if err := s.db.Ping(); err != nil {
 		return err
 	}
-	return nil
+	return s.migrate()
 }
 
 // Close closes the underlying database.
@@ -607,6 +648,101 @@ WHERE rebase_status = ?`,
 		return ResetCounts{}, fmt.Errorf("queue: reset failed: commit: %w", err)
 	}
 	return c, nil
+}
+
+// GCRetention is how old (by created_at_unix) a finished row must be
+// before CollectGarbage may delete it. Deliberately long: a row is the
+// agent's only memory that a source file was already ingested (offline
+// resume, BySourcePath) and of who owns a local edit-copy name
+// (ByLocalPath), so it is kept for a season, not a week.
+const GCRetention = 90 * 24 * time.Hour
+
+// GCInterval throttles CollectGarbageIfDue to one sweep per Store per
+// interval: a sweep stats every old finished row's local copy, which is
+// cheap once a day and wasteful on every 5s drain tick.
+const GCInterval = 24 * time.Hour
+
+// CollectGarbageIfDue runs CollectGarbage(ctx, now, GCRetention) if no
+// sweep has completed on this Store within GCInterval of now; otherwise it
+// returns (0, nil) without touching the database. A sweep that fails (a
+// locked database, ctx cancelled at shutdown) does not count, so the next
+// call tries again.
+func (s *Store) CollectGarbageIfDue(ctx context.Context, now time.Time) (int, error) {
+	s.gcMu.Lock()
+	prev := s.lastGC
+	if !prev.IsZero() && now.Sub(prev) < GCInterval {
+		s.gcMu.Unlock()
+		return 0, nil
+	}
+	s.lastGC = now // claimed, so a concurrent caller doesn't sweep too
+	s.gcMu.Unlock()
+	n, err := s.CollectGarbage(ctx, now, GCRetention)
+	if err != nil {
+		s.gcMu.Lock()
+		if s.lastGC.Equal(now) {
+			s.lastGC = prev
+		}
+		s.gcMu.Unlock()
+	}
+	return n, err
+}
+
+// CollectGarbage deletes rows nothing will need again and returns how many.
+// A row is deleted only when all of these hold:
+//
+//   - it finished successfully (terminal and not FAILED): pending rows are
+//     Drain's work list, and FAILED rows wait for an operator (or
+//     `queue-drain -retry-failed`) -- neither is ever collected;
+//   - it was created more than retention before now;
+//   - its local edit copy is gone (Lstat says it does not exist). While the
+//     copy exists the row is what prune checks before deleting it, and what
+//     marks the name as the agent's own; a stat error other than "not
+//     there" keeps the row.
+//
+// Candidates are listed first and the connection released before any stat
+// (the pool has one connection), and each DELETE re-checks the
+// finished-and-old predicate, so a row changed in between is kept.
+func (s *Store) CollectGarbage(ctx context.Context, now time.Time, retention time.Duration) (int, error) {
+	cutoff := now.Add(-retention).Unix()
+	finishedOld := `(` + terminalSQL + `) AND NOT ` + failedSQL + ` AND created_at_unix < ?`
+
+	rows, err := s.db.QueryContext(ctx, `SELECT id, local_path FROM queue_nodes WHERE `+finishedOld+` ORDER BY id ASC`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("queue: gc: list candidates: %w", err)
+	}
+	type candidate struct {
+		id        int64
+		localPath string
+	}
+	var cands []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.localPath); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("queue: gc: scan candidate: %w", err)
+		}
+		cands = append(cands, c)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("queue: gc: list candidates: %w", err)
+	}
+	_ = rows.Close()
+
+	deleted := 0
+	for _, c := range cands {
+		if _, err := os.Lstat(c.localPath); !errors.Is(err, fs.ErrNotExist) {
+			continue // still there (prune may want it), or unknown: keep
+		}
+		res, err := s.db.ExecContext(ctx, `DELETE FROM queue_nodes WHERE id = ? AND `+finishedOld, c.id, cutoff)
+		if err != nil {
+			return deleted, fmt.Errorf("queue: gc: delete row %d: %w", c.id, err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			deleted += int(n)
+		}
+	}
+	return deleted, nil
 }
 
 const selectCols = `SELECT

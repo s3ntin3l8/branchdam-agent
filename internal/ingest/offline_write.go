@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -93,6 +94,15 @@ var ErrArchiveConflict = errors.New("archive destination exists with different c
 // ErrArchiveConflict this cannot heal by retrying, so Drain fails the row.
 var ErrLocalCopyMismatch = errors.New("local copy no longer matches the queued hash")
 
+// ErrArchiveVerifyMismatch is returned (wrapped) by CopyToArchive when the
+// copy it just placed reads back from the archive with the wrong hash,
+// although the bytes it wrote hashed correctly on the way in. The placed
+// copy (the agent's own) is removed. Once is worth a retry -- a flaky
+// mount or a cache can produce it -- but a second in a row means the
+// archive is not storing these bytes faithfully, and Drain fails the row
+// instead of copying the same file to the NAS every few minutes forever.
+var ErrArchiveVerifyMismatch = errors.New("archive copy did not read back with the queued hash")
+
 // archiveVerifyFn is the Verify CopyToArchive runs against the archive
 // path (both the "already there?" check and the post-rename check). A
 // package var so tests can inject a read failure; production is Verify.
@@ -130,6 +140,13 @@ func tempArchiveName(archivePath string) string {
 // window only against another process creating finalPath in between --
 // this agent never does, and every final name it picks was free a moment
 // earlier.
+//
+// After the rename the parent directory is fsynced, so the new name is
+// durable on power loss -- the same guarantee DualWrite gives its two
+// destinations. A failed dir fsync is logged, not returned: the file is
+// complete and in place; only its directory entry might not survive a
+// power cut, and the caller's own record (a queue row, a later verify)
+// re-checks that anyway.
 func renameNoClobber(tmpPath, finalPath string) error {
 	if _, err := os.Lstat(finalPath); err == nil {
 		return fmt.Errorf("ingest: place %s: %w", finalPath, errDestinationExists)
@@ -138,6 +155,10 @@ func renameNoClobber(tmpPath, finalPath string) error {
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		return fmt.Errorf("ingest: rename %s to %s: %w", tmpPath, finalPath, err)
+	}
+	dir := filepath.Dir(finalPath)
+	if err := syncParentDirFn(dir); err != nil {
+		slog.Warn("ingest: dir fsync after rename failed; entry may not be durable on power loss", "dir", dir, "err", err)
 	}
 	return nil
 }
@@ -161,7 +182,11 @@ func renameNoClobber(tmpPath, finalPath string) error {
 //     deterministically-named temp file in the same directory (so the
 //     rename is same-filesystem-atomic), hashes the bytes as they stream,
 //     and renames into place (refusing to clobber) only after a successful
-//     fsync+close and a hash match. A local copy that no longer matches
+//     fsync+close and a hash match. The temp copy gets the local copy's
+//     mtime (the card file's own, set at ingest) before the rename, so the
+//     archive master carries the capture-side mtime like an online
+//     DualWrite master does, and the archive directory is fsynced after
+//     the rename (renameNoClobber). A local copy that no longer matches
 //     wantFullHash returns ErrLocalCopyMismatch and never reaches the final
 //     name. Any leftover temp file from a previous killed attempt is
 //     removed before starting -- it never got renamed into place and is
@@ -204,6 +229,10 @@ func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOpt
 		return fmt.Errorf("ingest: open local copy %s: %w", localPath, err)
 	}
 	defer func() { _ = src.Close() }()
+	srcInfo, err := src.Stat()
+	if err != nil {
+		return fmt.Errorf("ingest: stat local copy %s: %w", localPath, err)
+	}
 
 	dst, err := createExclusive(tmpPath)
 	if err != nil {
@@ -236,6 +265,10 @@ func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOpt
 			ErrLocalCopyMismatch, localPath, got, wantFullHash, archivePath)
 	}
 
+	// Soft contract, as for every destination (preserveMtimeAt): a failed
+	// Chtimes is logged, not fatal.
+	preserveMtimeAt(localPath, tmpPath, srcInfo.ModTime())
+
 	if err := renameNoClobber(tmpPath, archivePath); err != nil {
 		_ = os.Remove(tmpPath)
 		return err // transient: the next attempt re-examines whatever is there now
@@ -255,7 +288,7 @@ func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOpt
 		// place (renameNoClobber refused any other), so removing it
 		// deletes only the agent's own bad copy.
 		_ = os.Remove(archivePath)
-		return fmt.Errorf("ingest: archive copy %s did not verify (got %s, want %s) -- removed, will retry", archivePath, vr.Hash, wantFullHash)
+		return fmt.Errorf("%w: %s read back as %s, want %s -- removed", ErrArchiveVerifyMismatch, archivePath, vr.Hash, wantFullHash)
 	}
 	return nil
 }

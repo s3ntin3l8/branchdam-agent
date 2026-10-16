@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
@@ -81,6 +83,9 @@ type DrainStats struct {
 	RebasesDone         int
 	RebasesFailed       int
 	Remaining           int // rows still not Done() after this pass
+	// RowsCollected counts finished rows deleted by this pass's queue GC
+	// sweep (queue.Store.CollectGarbageIfDue) -- 0 on most passes.
+	RowsCollected int
 }
 
 // Drain runs exactly one pass over store's pending rows: an opportunistic
@@ -174,7 +179,18 @@ func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID 
 			// and CopyToArchive will never resolve either by deleting
 			// something. Fail the step so it stops cycling and shows up
 			// in Counts().Failed with the reason in archive_copy_last_error.
-			if errors.Is(err, ErrArchiveConflict) || errors.Is(err, ErrLocalCopyMismatch) {
+			//
+			// A placed copy that read back wrong is retried once; a second
+			// consecutive ErrArchiveVerifyMismatch (the previous attempt's
+			// recorded error says so) fails the row too, so a NAS that
+			// doesn't store the bytes it's given can't keep the row
+			// copying forever. The attempt counter gates it as well:
+			// ResetFailed zeroes the counter but keeps last_error, and a
+			// row an operator just reset gets its grace retry again.
+			repeatMismatch := errors.Is(err, ErrArchiveVerifyMismatch) &&
+				r.ArchiveCopyAttempts > 0 &&
+				strings.Contains(r.ArchiveCopyLastError, ErrArchiveVerifyMismatch.Error())
+			if errors.Is(err, ErrArchiveConflict) || errors.Is(err, ErrLocalCopyMismatch) || repeatMismatch {
 				if markErr := store.MarkArchiveCopyFailed(ctx, r.NodeUUID, err.Error()); markErr == nil {
 					stats.ArchiveCopiesFailed++
 				}
@@ -250,6 +266,15 @@ func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID 
 		return stats, fmt.Errorf("ingest: drain: final pending count: %w", err)
 	}
 	stats.Remaining = len(final)
+
+	// Row GC piggybacks on the drain timer, throttled inside the store to
+	// one sweep per queue.GCInterval. Best-effort: a failure never fails
+	// the pass.
+	if n, gcErr := store.CollectGarbageIfDue(ctx, nowT); gcErr != nil {
+		slog.Warn("ingest: drain: queue row GC failed", "err", gcErr)
+	} else {
+		stats.RowsCollected = n
+	}
 
 	return stats, nil
 }

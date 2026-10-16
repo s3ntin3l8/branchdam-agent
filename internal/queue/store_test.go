@@ -3,7 +3,9 @@ package queue
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -880,5 +882,200 @@ func TestMigrateV2ToV3AddsOriginDefaultingToOffline(t *testing.T) {
 	}
 	if rec.Origin != OriginOffline {
 		t.Errorf("Origin = %q, want %q", rec.Origin, OriginOffline)
+	}
+}
+
+// TestOpenEscapesAwkwardPaths: '?', '#', '%' and spaces in the queue.db
+// path must reach SQLite as part of the file name. Unescaped, SQLite reads
+// '?' as the start of URI parameters (and '#' as a fragment) and opens a
+// different (truncated) path. Windows forbids '?' in file names, so there
+// the path exercises '#', '%' and spaces only.
+func TestOpenEscapesAwkwardPaths(t *testing.T) {
+	parent := t.TempDir()
+	dirName, fileName := "state dir?x=1#frag%41", "queue 100%?.db"
+	if runtime.GOOS == "windows" {
+		dirName, fileName = "state dir #frag%41", "queue 100%#.db"
+	}
+	dir := filepath.Join(parent, dirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, fileName)
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(%q): %v", path, err)
+	}
+	if err := s.InsertPending(context.Background(), sampleRecord("uuid-awkward", "a.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("queue.db not created at the exact path: %v", err)
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("parent dir holds %v, want only the state dir (no file at a truncated path)", names)
+	}
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s2.Close() }()
+	if _, ok, err := s2.ByNodeUUID(context.Background(), "uuid-awkward"); err != nil || !ok {
+		t.Errorf("reopened store lost the row: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestPragmasAppliedToEveryConnection: database/sql may replace the pool's
+// connection at any time; the replacement must carry the same pragmas.
+func TestPragmasAppliedToEveryConnection(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	s.db.SetMaxIdleConns(0) // every query below gets a brand-new connection
+
+	for i := 0; i < 2; i++ {
+		var busy, sync, fk int
+		var journal string
+		if err := s.db.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busy); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&sync); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&fk); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journal); err != nil {
+			t.Fatal(err)
+		}
+		if busy != 5000 || sync != 2 || fk != 1 || journal != "wal" {
+			t.Errorf("connection %d: busy_timeout=%d synchronous=%d foreign_keys=%d journal_mode=%s, want 5000/2/1/wal", i, busy, sync, fk, journal)
+		}
+	}
+}
+
+// gcFixture inserts a row, drives it to the given state, backdates its
+// created_at and points its local_path at a file that exists or not.
+func gcFixture(t *testing.T, s *Store, id, state string, age time.Duration, localExists bool) {
+	t.Helper()
+	ctx := context.Background()
+	rec := sampleRecord(id, id+".jpg")
+	rec.LocalPath = filepath.Join(t.TempDir(), id+".jpg")
+	if state == "sidecar-done" {
+		rec.Kind = KindSidecar
+	}
+	if localExists {
+		if err := os.WriteFile(rec.LocalPath, []byte(id), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.InsertPending(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	switch state {
+	case "done":
+		_ = s.MarkNodeCreatedSubmitted(ctx, id, "evt", time.Now())
+		_ = s.MarkArchiveCopyDone(ctx, id)
+		_ = s.MarkRebaseDone(ctx, id)
+	case "sidecar-done":
+		_ = s.MarkArchiveCopyDone(ctx, id)
+	case "archive-failed":
+		_ = s.MarkArchiveCopyFailed(ctx, id, "conflict")
+	case "rebase-failed":
+		_ = s.MarkArchiveCopyDone(ctx, id)
+		_ = s.MarkRebaseFailed(ctx, id, "archived")
+	case "pending":
+	default:
+		t.Fatalf("unknown state %q", state)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE queue_nodes SET created_at_unix = ? WHERE node_uuid = ?`, time.Now().Add(-age).Unix(), id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCollectGarbageDeletesOnlyFinishedOldRowsWithoutLocalCopy pins every
+// condition under which a row is kept.
+func TestCollectGarbageDeletesOnlyFinishedOldRowsWithoutLocalCopy(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	old := GCRetention + 24*time.Hour
+	gcFixture(t, s, "done-old-gone", "done", old, false)
+	gcFixture(t, s, "sidecar-old-gone", "sidecar-done", old, false)
+	gcFixture(t, s, "done-old-present", "done", old, true) // prune may still need it
+	gcFixture(t, s, "done-young-gone", "done", time.Hour, false)
+	gcFixture(t, s, "archive-failed-old", "archive-failed", old, false)
+	gcFixture(t, s, "rebase-failed-old", "rebase-failed", old, false)
+	gcFixture(t, s, "pending-old", "pending", old, false)
+
+	n, err := s.CollectGarbage(ctx, time.Now(), GCRetention)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("deleted %d rows, want 2", n)
+	}
+	all, err := s.All(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	left := map[string]bool{}
+	for _, r := range all {
+		left[r.NodeUUID] = true
+	}
+	for _, id := range []string{"done-old-gone", "sidecar-old-gone"} {
+		if left[id] {
+			t.Errorf("%s kept, want collected", id)
+		}
+	}
+	for _, id := range []string{"done-old-present", "done-young-gone", "archive-failed-old", "rebase-failed-old", "pending-old"} {
+		if !left[id] {
+			t.Errorf("%s collected, want kept", id)
+		}
+	}
+}
+
+// TestCollectGarbageIfDueThrottles: one sweep per GCInterval per Store.
+func TestCollectGarbageIfDueThrottles(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	old := GCRetention + 24*time.Hour
+
+	gcFixture(t, s, "first", "done", old, false)
+	if n, err := s.CollectGarbageIfDue(ctx, now); err != nil || n != 1 {
+		t.Fatalf("first sweep: n=%d err=%v, want 1", n, err)
+	}
+	gcFixture(t, s, "second", "done", old, false)
+	if n, err := s.CollectGarbageIfDue(ctx, now.Add(time.Hour)); err != nil || n != 0 {
+		t.Fatalf("sweep within GCInterval: n=%d err=%v, want 0 (throttled)", n, err)
+	}
+	if n, err := s.CollectGarbageIfDue(ctx, now.Add(GCInterval)); err != nil || n != 1 {
+		t.Fatalf("sweep after GCInterval: n=%d err=%v, want 1", n, err)
+	}
+}
+
+// TestCollectGarbageIfDueRetriesAfterAFailedSweep: a sweep that errors
+// (here: ctx already cancelled) must not count as the day's sweep.
+func TestCollectGarbageIfDueRetriesAfterAFailedSweep(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	gcFixture(t, s, "gone", "done", GCRetention+24*time.Hour, false)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.CollectGarbageIfDue(cancelled, now); err == nil {
+		t.Fatal("sweep with a cancelled ctx returned no error")
+	}
+	if n, err := s.CollectGarbageIfDue(context.Background(), now.Add(time.Minute)); err != nil || n != 1 {
+		t.Fatalf("sweep after a failed one: n=%d err=%v, want it to run and collect 1", n, err)
 	}
 }
