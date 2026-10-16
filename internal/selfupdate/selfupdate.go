@@ -232,14 +232,17 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 // applyAllTargets swaps every target in layout (siblings first, Primary
 // last) through applyOne, which must leave the replaced binary at
 // "<target>.previous" on success (Apply's per-target OldSavePath), and
-// makes the whole swap all-or-nothing:
+// makes the whole swap all-or-nothing for every failure the process
+// survives:
 //
-//   - Any stale rollback sidecar is removed before the first target is
-//     touched. Each swap overwrites that target's ".previous" with the
-//     version being replaced now, so a prior Apply's rollback cannot
-//     survive this call either way; leaving its sidecar in place across
-//     a partial failure is exactly what used to advertise "Roll back to
-//     vX" over backups that were really a mix of vX and currentVersion.
+//   - A prior Apply's rollback sidecar is removed right after the first
+//     target swaps, before any other target is touched. That swap has
+//     overwritten the first ".previous", so the prior rollback no longer
+//     describes every backup; leaving its sidecar in place across a later
+//     failure is exactly what used to advertise "Roll back to vX" over
+//     backups that were really a mix of vX and currentVersion. A failure
+//     before any swap (download, checksum, signature) keeps it: nothing
+//     was replaced, so the prior rollback is still coherent.
 //   - If applyOne fails on any target, every target already swapped is
 //     restored from its own fresh ".previous" (most recent first) and that
 //     backup is removed, so the install ends back on currentVersion
@@ -251,16 +254,29 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 //
 // A restore failure during that unwind is joined into the returned error
 // and leaves that target's ".previous" in place for manual recovery.
+//
+// A crash (power loss, kill) between the first swap and the sidecar write
+// is not covered: it can leave some targets on the new version, with the
+// sidecar already removed, so no rollback is offered. Running update again
+// finishes the job: the Primary swaps last, so until it has swapped it
+// still reports currentVersion and the update is offered again, and once
+// it has, every target is already on the new version.
 func applyAllTargets(layout InstallLayout, currentVersion string, applyOne func(target string) error) error {
 	sidecar := layout.Primary + rollbackVersionSuffix
-	if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("selfupdate: clear stale rollback metadata: %w", err)
-	}
 
 	var swapped []string
 	for _, target := range layout.orderedTargets() {
 		if err := applyOne(target); err != nil {
+			err = recoverFailedSwap(target, err)
+			if len(swapped) == 0 {
+				return withdrawRollbackIfBroken(target, sidecar, err)
+			}
 			return restoreSwapped(swapped, err)
+		}
+		if len(swapped) == 0 {
+			if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return restoreSwapped([]string{target}, fmt.Errorf("selfupdate: clear stale rollback metadata: %w", err))
+			}
 		}
 		swapped = append(swapped, target)
 	}
@@ -269,6 +285,39 @@ func applyAllTargets(layout InstallLayout, currentVersion string, applyOne func(
 		return restoreSwapped(swapped, fmt.Errorf("selfupdate: record previous version for rollback: %w", err))
 	}
 	return nil
+}
+
+// recoverFailedSwap puts target back when a failed swap left nothing at
+// its path: go-selfupdate moves the current binary aside to ".previous"
+// before moving the new one in, and when that second rename fails and its
+// own rename back fails too, target is missing and the binary being
+// replaced sits only at ".previous". (update.RollbackError reports that
+// case, but only on Apply's unwrapped error, so the file system is checked
+// instead.) Any failure to put it back is joined into cause.
+func recoverFailedSwap(target string, cause error) error {
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		return cause
+	}
+	if err := os.Rename(target+rollbackSuffix, target); err != nil {
+		return errors.Join(cause, fmt.Errorf("selfupdate: put %s back after failed swap: %w", target, err))
+	}
+	return cause
+}
+
+// withdrawRollbackIfBroken handles a failure on the first target, before
+// anything was swapped. A prior Apply's rollback stays advertised only
+// while that target's ".previous" is still there: go-selfupdate removes
+// it just before moving the current binary aside, so a failure at or
+// after that point has consumed it (recoverFailedSwap may also have moved
+// it back into place).
+func withdrawRollbackIfBroken(target, sidecar string, cause error) error {
+	if _, err := os.Lstat(target + rollbackSuffix); err == nil {
+		return cause
+	}
+	if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.Join(cause, fmt.Errorf("selfupdate: withdraw rollback metadata: %w", err))
+	}
+	return cause
 }
 
 // restoreSwapped undoes a partial applyAllTargets: every target in swapped

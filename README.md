@@ -388,12 +388,15 @@ Headless hosts (Linux, or a Windows/macOS console-only install) get the same thi
 config.yaml [-check] [-yes]`.
 
 **Rollback.** A successful apply keeps the version it replaced (a `.previous` backup next to each
-binary, plus a version sidecar written only once every binary has been swapped -- a failure part
-way through restores the binaries already replaced, so an install never ends up on mixed
-versions). The tray menu shows "Roll back to vX.Y.Z" whenever one is
+binary, plus a version sidecar written only once every binary has been swapped -- a failed apply
+restores the binaries already replaced, so it never leaves mixed versions behind). A crash part
+way through an apply can, with no rollback offered; running the update again finishes it. The
+tray menu shows "Roll back to vX.Y.Z" whenever one is
 available; the headless equivalent is `branchdam-agent update -rollback [-yes]`. Rollback makes no
-network call at all, so it works even with `selfUpdate.enabled: false`. Once used (or once a new
-`Apply` succeeds), the backup is consumed and the affordance disappears until the next update.
+network call at all, so it works even with `selfUpdate.enabled: false`. Once used, the backup is
+consumed and the affordance disappears until the next update. A later update replaces it with
+the version that update replaced, and withdraws it if that update fails after replacing any
+binary; an update that fails before replacing anything (download, checksum or signature) keeps it.
 
 See [`docs/platform-support.md`](docs/platform-support.md) for the
 full per-platform breakdown (why Windows ships two `.exe`s, the `fyne.io/systray` cross-compile

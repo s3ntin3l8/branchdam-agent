@@ -397,9 +397,9 @@ func fetchAttestation(ctx context.Context, url string) ([]byte, error) {
 // success; one of ErrSigstoreAttestationMissing or
 // ErrSigstoreAttestationDownload on failure.
 //
-// Called once per Apply, BEFORE the sidecar-write step (so a failed
-// preflight never leaves a "previous version" sidecar orphaning an
-// unapplied-update backup) and BEFORE any per-target UpdateTo.
+// Called once per Apply, BEFORE any per-target UpdateTo, so a missing or
+// undownloadable attestation fails the update before any binary or
+// rollback backup is touched.
 func sigstorePreflight(ctx context.Context, assets []assetAttestation, cache *attestCache) error {
 	for _, a := range assets {
 		// Skip the network round trip if this asset was already
