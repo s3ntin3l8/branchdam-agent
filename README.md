@@ -388,7 +388,9 @@ Headless hosts (Linux, or a Windows/macOS console-only install) get the same thi
 config.yaml [-check] [-yes]`.
 
 **Rollback.** A successful apply keeps the version it replaced (a `.previous` backup next to each
-binary, plus a version sidecar). The tray menu shows "Roll back to vX.Y.Z" whenever one is
+binary, plus a version sidecar written only once every binary has been swapped -- a failure part
+way through restores the binaries already replaced, so an install never ends up on mixed
+versions). The tray menu shows "Roll back to vX.Y.Z" whenever one is
 available; the headless equivalent is `branchdam-agent update -rollback [-yes]`. Rollback makes no
 network call at all, so it works even with `selfUpdate.enabled: false`. Once used (or once a new
 `Apply` succeeds), the backup is consumed and the affordance disappears until the next update.

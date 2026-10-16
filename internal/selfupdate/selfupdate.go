@@ -52,7 +52,9 @@ package selfupdate
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/Masterminds/semver/v3"
@@ -140,17 +142,20 @@ func (u *Updater) Check(ctx context.Context, currentVersion string) (CheckResult
 // tracking upstream if the configured Validator ever changes. See
 // docs/platform-support.md's Known gaps.
 //
-// The version being replaced (currentVersion) is recorded in a sidecar
-// file next to layout.Primary's own backup BEFORE any target is touched,
-// not after -- see rollback.go's PreviousVersion/HasRollback/Rollback for
-// how that sidecar is used, and the write site below for why writing it
-// first (rather than after every target succeeds) is what keeps a
-// sidecar-write failure from ever orphaning an already-successful
-// target's backup.
+// The multi-target swap is all-or-nothing (see applyAllTargets): the
+// version being replaced (currentVersion) is recorded in the rollback
+// sidecar next to layout.Primary's own backup only AFTER every target has
+// swapped, and a failure on any target -- or on the sidecar write itself
+// -- restores every target already swapped from its fresh ".previous"
+// backup, so a partial failure never leaves the install at mixed versions
+// or advertises a rollback whose label doesn't match the backups on disk.
+// See rollback.go's PreviousVersion/HasRollback/Rollback for how that
+// sidecar is used.
 //
 // ctx should not be tied to a signal-derived cancellation for the whole
 // call: a cancel landing between the sibling apply and the primary apply
-// would leave the two at different versions. Callers should use
+// would abort the update and unwind the already-swapped sibling (see
+// applyAllTargets), wasting the download. Callers should use
 // context.WithoutCancel plus their own timeout instead of passing a
 // shutdown context straight through.
 func (u *Updater) Apply(ctx context.Context, currentVersion string, layout InstallLayout) (string, error) {
@@ -192,21 +197,7 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 		return "", err
 	}
 
-	// Written BEFORE any target is touched, deliberately -- a Hermes
-	// review finding on this PR caught that writing it only after every
-	// UpdateTo succeeded meant a sidecar-write failure (e.g. a transient
-	// disk error) returned an error even though every target was already
-	// live on the new version, orphaning their just-created ".previous"
-	// backups with HasRollback permanently false until the next Apply.
-	// Writing it first is safe: HasRollback/RollbackInfo require BOTH the
-	// sidecar AND layout.Primary's own backup to exist, so a sidecar that
-	// briefly exists before any backup does (e.g. the very first target's
-	// UpdateTo then fails) still correctly reports no rollback available.
-	if err := os.WriteFile(layout.Primary+rollbackVersionSuffix, []byte(currentVersion), 0o600); err != nil {
-		return "", fmt.Errorf("selfupdate: record previous version for rollback: %w", err)
-	}
-
-	for _, target := range layout.orderedTargets() {
+	err = applyAllTargets(layout, currentVersion, func(target string) error {
 		targetUpdater, err := su.NewUpdater(su.Config{
 			// The composed validator runs SHA256 (defense in depth)
 			// then Sigstore verify. The cache is populated by the
@@ -215,11 +206,15 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 			OldSavePath: target + rollbackSuffix,
 		})
 		if err != nil {
-			return "", fmt.Errorf("selfupdate: configure updater for %s: %w", target, err)
+			return fmt.Errorf("selfupdate: configure updater for %s: %w", target, err)
 		}
 		if err := targetUpdater.UpdateTo(ctx, release, target); err != nil {
-			return "", fmt.Errorf("selfupdate: apply %s to %s: %w", release.Version(), target, err)
+			return fmt.Errorf("selfupdate: apply %s to %s: %w", release.Version(), target, err)
 		}
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
 
 	// Every target is already live on the new version by this point, so a
@@ -232,4 +227,65 @@ func (u *Updater) Apply(ctx context.Context, currentVersion string, layout Insta
 	}
 
 	return release.Version(), nil
+}
+
+// applyAllTargets swaps every target in layout (siblings first, Primary
+// last) through applyOne, which must leave the replaced binary at
+// "<target>.previous" on success (Apply's per-target OldSavePath), and
+// makes the whole swap all-or-nothing:
+//
+//   - Any stale rollback sidecar is removed before the first target is
+//     touched. Each swap overwrites that target's ".previous" with the
+//     version being replaced now, so a prior Apply's rollback cannot
+//     survive this call either way; leaving its sidecar in place across
+//     a partial failure is exactly what used to advertise "Roll back to
+//     vX" over backups that were really a mix of vX and currentVersion.
+//   - If applyOne fails on any target, every target already swapped is
+//     restored from its own fresh ".previous" (most recent first) and that
+//     backup is removed, so the install ends back on currentVersion
+//     everywhere with no rollback advertised.
+//   - Only once every target has swapped is the sidecar written. A
+//     sidecar-write failure is treated like a target failure (every
+//     target is restored): a new version without a matching rollback
+//     label would otherwise orphan the fresh backups.
+//
+// A restore failure during that unwind is joined into the returned error
+// and leaves that target's ".previous" in place for manual recovery.
+func applyAllTargets(layout InstallLayout, currentVersion string, applyOne func(target string) error) error {
+	sidecar := layout.Primary + rollbackVersionSuffix
+	if err := os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("selfupdate: clear stale rollback metadata: %w", err)
+	}
+
+	var swapped []string
+	for _, target := range layout.orderedTargets() {
+		if err := applyOne(target); err != nil {
+			return restoreSwapped(swapped, err)
+		}
+		swapped = append(swapped, target)
+	}
+
+	if err := os.WriteFile(sidecar, []byte(currentVersion), 0o600); err != nil {
+		return restoreSwapped(swapped, fmt.Errorf("selfupdate: record previous version for rollback: %w", err))
+	}
+	return nil
+}
+
+// restoreSwapped undoes a partial applyAllTargets: every target in swapped
+// is restored from its ".previous" backup in reverse swap order, and the
+// consumed backup removed. cause is always returned (joined with any
+// restore failure) so the caller still reports the original apply error.
+func restoreSwapped(swapped []string, cause error) error {
+	errs := []error{cause}
+	for i := len(swapped) - 1; i >= 0; i-- {
+		target := swapped[i]
+		if err := restoreOne(target); err != nil {
+			errs = append(errs, fmt.Errorf("selfupdate: restore %s after failed apply: %w", target, err))
+			continue
+		}
+		if err := os.Remove(target + rollbackSuffix); err != nil && !os.IsNotExist(err) {
+			slog.Warn("selfupdate: could not remove consumed backup after failed apply", "path", target+rollbackSuffix, "err", err)
+		}
+	}
+	return errors.Join(errs...)
 }
