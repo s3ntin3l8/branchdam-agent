@@ -189,7 +189,7 @@ func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOpt
 				return nil
 			}
 		}
-		return fmt.Errorf("%w: %s already exists and is not this file (want BLAKE3 %s); nothing was overwritten -- move or rename the existing file, then retry this queue row",
+		return fmt.Errorf("%w: %s already exists and does not match the queued hash (BLAKE3 %s); nothing was overwritten -- move or rename the existing file, then retry this queue row",
 			ErrArchiveConflict, archivePath, wantFullHash)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("ingest: stat archive dest %s: %w", archivePath, err)

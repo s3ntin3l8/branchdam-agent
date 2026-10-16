@@ -128,8 +128,11 @@ func TestClientPost401PlainTextNotJSON(t *testing.T) {
 	if httpErr.Body != "invalid or missing X-API-Key" {
 		t.Errorf("Body = %q, want the raw plain-text message", httpErr.Body)
 	}
-	if httpErr.Retryable() {
-		t.Error("401 must not be retryable")
+	// A rejected key is fixed by re-pairing or a config change, after
+	// which every queued request must still go through -- so it is
+	// retryable, never a reason to drop work.
+	if !httpErr.Retryable() {
+		t.Error("401 must be retryable")
 	}
 }
 
@@ -145,11 +148,13 @@ func TestClientPost503ServiceMisconfigured(t *testing.T) {
 	if !asHTTPError(err, &httpErr) {
 		t.Fatalf("error is not *HTTPError: %v", err)
 	}
-	if httpErr.Retryable() {
-		t.Error("503 auth-misconfigured must not be retryable")
+	// A server-side key misconfiguration clears once the operator fixes
+	// it; the request itself was fine.
+	if !httpErr.Retryable() {
+		t.Error("503 auth-misconfigured must be retryable")
 	}
-	if httpErr.Classification() != ClassificationFatal {
-		t.Errorf("Classification() = %v, want ClassificationFatal", httpErr.Classification())
+	if httpErr.Classification() != ClassificationTransient {
+		t.Errorf("Classification() = %v, want ClassificationTransient", httpErr.Classification())
 	}
 }
 
@@ -472,7 +477,7 @@ func TestClientRebaseReturnsRebasedOrCreated(t *testing.T) {
 func TestClientRebaseReadOnlyTargetRefused400(t *testing.T) {
 	srv, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"title":"rebase target resolves to read-only tier"}`))
+		_, _ = w.Write([]byte(`{"title":"Bad Request","status":400,"detail":"rebase to read-only tier TIER1_SSD_CACHE refused for path \"/storage/archive/f.arw\""}`))
 	})
 	_ = srv
 

@@ -600,7 +600,11 @@ const archiveProbeTimeout = 2 * time.Second
 
 // archiveReachable reports whether Ingest.ArchiveRoot is currently a
 // usable directory, via e.ArchiveReachable when set (tests) or a stat
-// bounded by archiveProbeTimeout.
+// bounded by archiveProbeTimeout. On a hung mount the stat goroutine
+// outlives the timeout: it stays parked in the syscall until the kernel
+// returns, then writes to the buffered channel and exits. That is at most
+// one goroutine per offline ingest pass, the same trade-off as
+// cmd/branchdam-agent's probeArchive.
 func (e *Engine) archiveReachable(ctx context.Context) bool {
 	if e.ArchiveReachable != nil {
 		return e.ArchiveReachable(ctx, e.Ingest.ArchiveRoot)

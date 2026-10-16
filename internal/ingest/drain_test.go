@@ -179,7 +179,9 @@ func TestDrainClassifiesFatalRebaseErrorAsTerminal(t *testing.T) {
 
 	client := &fakeDrainClient{
 		rebase: func(branchdam.RebaseRequest) (*branchdam.RebaseResponse, error) {
-			return nil, &branchdam.HTTPError{StatusCode: 400, Body: "node is archived, refusing to rebase"}
+			// handleAgentRebase's refusal for an ARCHIVED node: a Huma
+			// problem document, 404 "asset not found".
+			return nil, &branchdam.HTTPError{StatusCode: 404, Body: `{"title":"Not Found","status":404,"detail":"asset not found"}`}
 		},
 	}
 	t0 := time.Unix(1_800_000_000, 0)
@@ -269,6 +271,167 @@ func TestDrainRetriesTransientRebaseError(t *testing.T) {
 	}
 	if stats2.RebasesDone != 1 {
 		t.Errorf("RebasesDone = %d, want 1 after backoff elapses", stats2.RebasesDone)
+	}
+}
+
+// TestDrainAuthAndServerErrorsLeaveRebasePending: a rejected key, a server
+// whose agent auth is misconfigured, a timeout or a rate limit says nothing
+// permanent about the row. Each must leave the rebase PENDING with one
+// recorded attempt and a backoff, never FAILED (which Drain never retries).
+func TestDrainAuthAndServerErrorsLeaveRebasePending(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"401 invalid key", &branchdam.HTTPError{StatusCode: 401, Body: "invalid or missing X-API-Key"}},
+		{"401 bad signature", &branchdam.HTTPError{StatusCode: 401, Body: "invalid or missing signature"}},
+		{"403 forbidden", &branchdam.HTTPError{StatusCode: 403, Body: `{"title":"Forbidden","status":403,"detail":"agent machine principal required"}`}},
+		{"503 auth not configured", &branchdam.HTTPError{StatusCode: 503, Body: "agent authentication is not configured"}},
+		{"408 timeout", &branchdam.HTTPError{StatusCode: 408, Body: "request timeout"}},
+		{"429 rate limited", &branchdam.HTTPError{StatusCode: 429, Body: "too many requests"}},
+		{"404 route missing", &branchdam.HTTPError{StatusCode: 404, Body: "404 page not found"}},
+		{"400 tier-3 file not visible yet", &branchdam.HTTPError{StatusCode: 400, Body: `{"title":"Bad Request","status":400,"detail":"rebase to read-only tier TIER3_MASTER_ARCHIVE refused for path \"/a\": no file exists there yet"}`}},
+		{"transport error", fmt.Errorf("branchdam: request /api/v1/agent/rebase: %w", context.DeadlineExceeded)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := openStoreT(t)
+			seedMediaRow(t, store, dir, "uuid-1", []byte("hello"))
+			client := &fakeDrainClient{
+				rebase: func(branchdam.RebaseRequest) (*branchdam.RebaseResponse, error) { return nil, tc.err },
+			}
+			t0 := time.Unix(1_800_000_000, 0)
+			if _, err := Drain(context.Background(), client, store, "agent-1", fixedNow(t0)); err != nil {
+				t.Fatal(err)
+			}
+			afterDwell := t0.Add(MinRebaseDwell + time.Second)
+			stats, err := Drain(context.Background(), client, store, "agent-1", fixedNow(afterDwell))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(client.rebaseCalls) != 1 {
+				t.Fatalf("rebase calls = %d, want 1", len(client.rebaseCalls))
+			}
+			if stats.RebasesFailed != 0 {
+				t.Errorf("RebasesFailed = %d, want 0", stats.RebasesFailed)
+			}
+			rec, _, err := store.ByNodeUUID(context.Background(), "uuid-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rec.RebaseStatus != queue.StatusPending {
+				t.Errorf("RebaseStatus = %q, want PENDING", rec.RebaseStatus)
+			}
+			if rec.RebaseAttempts != 1 {
+				t.Errorf("RebaseAttempts = %d, want 1", rec.RebaseAttempts)
+			}
+			if want := backoffFor(1, afterDwell).Unix(); rec.RebaseNextAttemptUnix != want {
+				t.Errorf("RebaseNextAttemptUnix = %d, want %d (backoff)", rec.RebaseNextAttemptUnix, want)
+			}
+			if stats.Remaining != 1 {
+				t.Errorf("Remaining = %d, want 1", stats.Remaining)
+			}
+		})
+	}
+}
+
+// TestDrainRetriesRebaseAfterResetFailed: a row FAILED by a fatal rebase
+// error is picked up again once ResetFailed puts it back to PENDING, and
+// completes when the server now accepts it.
+func TestDrainRetriesRebaseAfterResetFailed(t *testing.T) {
+	dir := t.TempDir()
+	store := openStoreT(t)
+	seedMediaRow(t, store, dir, "uuid-reset", []byte("hello"))
+
+	refuse := true
+	client := &fakeDrainClient{
+		rebase: func(req branchdam.RebaseRequest) (*branchdam.RebaseResponse, error) {
+			if refuse {
+				return nil, &branchdam.HTTPError{StatusCode: 409, Body: `{"title":"Conflict","status":409,"detail":"node already has a different fullHash"}`}
+			}
+			return &branchdam.RebaseResponse{NodeUUID: req.NodeUUID, Status: "REBASED"}, nil
+		},
+	}
+	t0 := time.Unix(1_800_000_000, 0)
+	ctx := context.Background()
+	if _, err := Drain(ctx, client, store, "agent-1", fixedNow(t0)); err != nil {
+		t.Fatal(err)
+	}
+	if stats, err := Drain(ctx, client, store, "agent-1", fixedNow(t0.Add(MinRebaseDwell+time.Second))); err != nil || stats.RebasesFailed != 1 {
+		t.Fatalf("stats=%+v err=%v, want one FAILED rebase", stats, err)
+	}
+
+	n, err := store.ResetFailed(ctx)
+	if err != nil || n != (queue.ResetCounts{Rebases: 1}) {
+		t.Fatalf("ResetFailed = %+v, %v; want 1 rebase, nil", n, err)
+	}
+	refuse = false
+	stats, err := Drain(ctx, client, store, "agent-1", fixedNow(t0.Add(MinRebaseDwell+2*time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RebasesDone != 1 || stats.Remaining != 0 {
+		t.Errorf("stats = %+v, want the reset row rebased", stats)
+	}
+}
+
+// TestDrainRetriesArchiveCopyAfterResetFailed: an archive copy FAILED
+// because a different file occupied the archive path is retried once
+// ResetFailed puts it back to PENDING -- after the operator moved the
+// conflicting file aside, the next pass copies, verifies and (past the
+// dwell) rebases the row.
+func TestDrainRetriesArchiveCopyAfterResetFailed(t *testing.T) {
+	dir := t.TempDir()
+	store := openStoreT(t)
+	seedMediaRow(t, store, dir, "uuid-copy", []byte("hello"))
+	archivePath := filepath.Join(dir, "archive", "uuid-copy.bin")
+	if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archivePath, []byte("someone else's master"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &fakeDrainClient{}
+	t0 := time.Unix(1_800_000_000, 0)
+	ctx := context.Background()
+	stats, err := Drain(ctx, client, store, "agent-1", fixedNow(t0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ArchiveCopiesFailed != 1 {
+		t.Fatalf("ArchiveCopiesFailed = %d, want 1 (conflicting file at the archive path)", stats.ArchiveCopiesFailed)
+	}
+	if rec, _, _ := store.ByNodeUUID(ctx, "uuid-copy"); rec.ArchiveCopyStatus != queue.StatusFailed {
+		t.Fatalf("ArchiveCopyStatus = %q, want FAILED", rec.ArchiveCopyStatus)
+	}
+
+	// The operator moves the conflicting file aside, then resets.
+	if err := os.Rename(archivePath, archivePath+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := store.ResetFailed(ctx)
+	if err != nil || n != (queue.ResetCounts{ArchiveCopies: 1}) {
+		t.Fatalf("ResetFailed = %+v, %v; want 1 archive copy, nil", n, err)
+	}
+
+	stats, err = Drain(ctx, client, store, "agent-1", fixedNow(t0.Add(time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ArchiveCopiesDone != 1 {
+		t.Errorf("ArchiveCopiesDone = %d, want 1 after reset", stats.ArchiveCopiesDone)
+	}
+	if got, err := os.ReadFile(archivePath); err != nil || string(got) != "hello" {
+		t.Errorf("archive file = %q, %v; want the row's own bytes", got, err)
+	}
+	stats, err = Drain(ctx, client, store, "agent-1", fixedNow(t0.Add(MinRebaseDwell+2*time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RebasesDone != 1 || stats.Remaining != 0 {
+		t.Errorf("stats = %+v, want the row rebased and finished", stats)
 	}
 }
 

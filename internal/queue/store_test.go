@@ -321,6 +321,90 @@ func TestMarkTransitions(t *testing.T) {
 	}
 }
 
+// TestResetFailed: FAILED archive copies and FAILED rebases go back to
+// PENDING with a fresh attempt counter and no backoff (so Pending()
+// returns them again), keeping the last error; rows in any other state are
+// untouched, and the counts say how many of each were reset.
+func TestResetFailed(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	for _, u := range []string{"rebase-failed-1", "rebase-failed-2", "copy-failed", "pending", "done"} {
+		if err := s.InsertPending(ctx, sampleRecord(u, u+".jpg")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	future := time.Unix(1700009999, 0)
+	for _, u := range []string{"rebase-failed-1", "rebase-failed-2", "pending", "done"} {
+		if err := s.MarkArchiveCopyDone(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, u := range []string{"rebase-failed-1", "rebase-failed-2", "pending"} {
+		if err := s.MarkRebaseAttempt(ctx, u, "HTTP 401", future); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, u := range []string{"rebase-failed-1", "rebase-failed-2"} {
+		if err := s.MarkRebaseFailed(ctx, u, "HTTP 409"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.MarkArchiveCopyAttempt(ctx, "copy-failed", "nas unreachable", future); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkArchiveCopyFailed(ctx, "copy-failed", "archive conflict"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkRebaseDone(ctx, "done"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ResetFailed(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (ResetCounts{ArchiveCopies: 1, Rebases: 2}) {
+		t.Errorf("ResetFailed = %+v, want 1 archive copy and 2 rebases", got)
+	}
+
+	for _, u := range []string{"rebase-failed-1", "rebase-failed-2"} {
+		r, _, _ := s.ByNodeUUID(ctx, u)
+		if r.RebaseStatus != StatusPending || r.RebaseAttempts != 0 || r.RebaseNextAttemptUnix != 0 {
+			t.Errorf("%s after reset: status=%q attempts=%d next=%d, want PENDING/0/0", u, r.RebaseStatus, r.RebaseAttempts, r.RebaseNextAttemptUnix)
+		}
+		if r.RebaseLastError != "HTTP 409" {
+			t.Errorf("%s: RebaseLastError = %q, want the failure reason kept", u, r.RebaseLastError)
+		}
+		if r.Done() || r.Failed() {
+			t.Errorf("%s: Done()=%v Failed()=%v after reset, want it back in Pending()", u, r.Done(), r.Failed())
+		}
+	}
+	r, _, _ := s.ByNodeUUID(ctx, "copy-failed")
+	if r.ArchiveCopyStatus != StatusPending || r.ArchiveCopyAttempts != 0 || r.ArchiveCopyNextAttemptUnix != 0 {
+		t.Errorf("copy-failed after reset: status=%q attempts=%d next=%d, want PENDING/0/0", r.ArchiveCopyStatus, r.ArchiveCopyAttempts, r.ArchiveCopyNextAttemptUnix)
+	}
+	if r.ArchiveCopyLastError != "archive conflict" {
+		t.Errorf("ArchiveCopyLastError = %q, want the failure reason kept", r.ArchiveCopyLastError)
+	}
+	if r, _, _ := s.ByNodeUUID(ctx, "pending"); r.RebaseAttempts != 1 || r.RebaseNextAttemptUnix != future.Unix() {
+		t.Errorf("PENDING row's backoff was touched: %+v", r)
+	}
+	if r, _, _ := s.ByNodeUUID(ctx, "done"); r.RebaseStatus != StatusDone {
+		t.Errorf("DONE row changed to %q", r.RebaseStatus)
+	}
+	c, err := s.Counts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Failed != 0 || c.AwaitingRebase != 3 || c.AwaitingUpload != 1 {
+		t.Errorf("Counts = %+v, want Failed=0 AwaitingRebase=3 AwaitingUpload=1", c)
+	}
+
+	if again, err := s.ResetFailed(ctx); err != nil || again != (ResetCounts{}) {
+		t.Errorf("second reset = %+v, %v; want zero counts, nil", again, err)
+	}
+}
+
 func TestBySourcePathResume(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

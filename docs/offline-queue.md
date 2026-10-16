@@ -35,7 +35,7 @@ One `queue_nodes` row per ingested file, three independent status columns:
 |---|---|---|
 | `node_created` | `PENDING` → `SUBMITTED` | `EVENT_NODE_CREATED` was accepted (202) against the row's Tier-0 container path. `SUBMITTED` means *enqueued* server-side, not *applied* -- branchDAM's own drainer applies it asynchronously (contract gap 3: no feedback channel). |
 | `archive_copy` | `PENDING` → `DONE` \| `FAILED` | The row's local edit copy has been copied into the final Tier-3 archive path and cache-defeating-verified against the hash computed at ingest time. `FAILED` is terminal: a different file already occupies the archive path (it is never overwritten), or the local copy no longer matches its queued hash. A row whose archive copy failed never reaches `rebase`. |
-| `rebase` | `PENDING` → `DONE` \| `FAILED` | `POST /api/v1/agent/rebase` moved the tracked node's `file_path` from the Tier-0 path to the real Tier-3 path. `FAILED` is terminal (a classified-fatal server error, e.g. the node was `ARCHIVED`) -- Drain never retries it. |
+| `rebase` | `PENDING` → `DONE` \| `FAILED` | `POST /api/v1/agent/rebase` moved the tracked node's `file_path` from the Tier-0 path to the real Tier-3 path. `FAILED` is terminal (a classified-fatal server error, e.g. the node was `ARCHIVED`) -- Drain never retries it on its own; `queue-drain -retry-failed` re-queues it. |
 
 A `SIDECAR`-kind row (`.xmp`/`.srt`) only ever needs `archive_copy`: `node_created` and `rebase`
 are `SKIPPED` at insert time, matching the online path's own "sidecars are copied but never
@@ -113,9 +113,11 @@ own `offline.drainIntervalSecs` timer, issue #32) into backoff rather than a tig
 itself (network down, NAS unmounted). `archive_copy` turns terminal `FAILED` only for the two cases
 retrying can never fix -- a different file at the archive path, or a local copy that no longer
 matches its queued hash -- and both show up in the queue's failed count with the reason in
-`archive_copy_last_error`. `rebase` also has a terminal `FAILED` state: a classified-fatal server
-error (`internal/branchdam.HTTPError`'s `Classification()`, e.g. `ErrArchivedNode`) means retrying
-can never succeed.
+`archive_copy_last_error`. `rebase` also has a terminal `FAILED` state, reached only when the
+server's rebase handler itself refused the request for a reason that won't change on its own
+(`internal/branchdam.HTTPError`'s `Classification()`: a problem+json 400/404/409/410/413/422 such
+as an `ARCHIVED` node, a `fullHash` conflict or a read-only non-Tier-3 target, or a recognised fatal
+`code`); 401/403/408/429, every 5xx and transport errors stay `PENDING` with backoff.
 
 What the operator does depends on which step failed:
 
@@ -126,8 +128,8 @@ What the operator does depends on which step failed:
   local edit copy to the bytes that were ingested (or re-ingest from the card). Then run
   `queue-drain -retry-failed`.
 
-`queue-drain -retry-failed` (resetting both kinds of FAILED row to pending) arrives with the A5
-change; until it ships, the reset is a manual `UPDATE` of the row's status in `queue.db`.
+`queue-drain -retry-failed` puts every failed archive copy and rebase back to `PENDING`
+(`queue.Store.ResetFailed`) and drains.
 
 One `archive_copy` failure mode does NOT self-clear, and there's no terminal state to catch it: if
 the local edit copy is deleted (by the user, by disk cleanup, by anything) before `archive_copy`

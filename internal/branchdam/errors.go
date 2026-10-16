@@ -1,8 +1,10 @@
 package branchdam
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -56,70 +58,73 @@ func ValidateEdgeAttached(p EdgeAttachedPayload) error {
 	return nil
 }
 
-// Classification is the retry disposition the branchdam server intends for
-// an error, per the plan's "fatal vs. transient" conformance section. This
-// is advisory on the client -- the server enforces its own retry policy
-// asynchronously in the drainer, invisibly to the agent (plan gap 3) -- but
-// a client that already knows an error is fatal should not burn its own
-// retry budget resending it.
+// Classification is the retry disposition for a failed agent API call:
+// whether resending the same request later can succeed (Transient) or the
+// server has refused it for a reason that will not change on its own
+// (Fatal). The offline drainer (internal/ingest/drain.go) marks a rebase
+// row terminally FAILED only on ClassificationFatal and retries everything
+// else with backoff, so the default here is deliberately Transient: an
+// error wrongly called fatal strands a row until an operator resets it
+// (`queue-drain -retry-failed`), while one wrongly called transient merely
+// costs a request every few minutes.
 type Classification int
 
 const (
-	// ClassificationUnknown is returned when the client cannot tell from an
-	// HTTP-transport error alone (e.g. a plain network failure) whether the
-	// underlying condition is fatal or transient. Treat as transient/retryable
-	// unless proven otherwise -- see IsRetryable.
+	// ClassificationUnknown is the zero value. HTTPError.Classification
+	// never returns it; it remains for callers that classify a non-HTTP
+	// error themselves and want to say "can't tell" -- treat it as
+	// transient.
 	ClassificationUnknown Classification = iota
 	ClassificationFatal
 	ClassificationTransient
 )
 
-// fatalSubstrings and transientSubstrings match the server's own
-// error-message vocabulary (internal/agent/types.go's sentinel errors and
-// internal/agent/drainer.go's isFatal set) closely enough to classify an
-// error string surfaced in an HTTP response body. This is best-effort
-// string matching, not a wire-level error code -- branchDAM has no
-// structured error taxonomy on these routes (plain-text bodies for auth
-// failures, Huma's generic error shape otherwise) -- so a change to the
-// server's wording can silently defeat this; it exists to avoid burning a
-// retry budget on an error the server documents as permanent, not to be a
-// source of truth.
-var fatalSubstrings = []string{
-	"malformed event payload",
-	"unknown event type",
-	"invalid or empty node_uuid",
-	"rebase target resolves to read-only tier",
-	"node is archived, refusing to rebase",
-	"edge would create a cycle",
-	"constraint failed",
+// fatalCodes / transientCodes map the machine-readable `code` field of the
+// server's problem+json error envelope (branchDAM's planned uniform agent
+// error envelope, which keeps HTTP statuses unchanged and adds `code`) to a
+// Classification. A recognized code wins over every other signal; an
+// unrecognized or absent code falls through to the body hints and status
+// rules below, so this package works against servers that predate the
+// field and keeps working if a new code appears.
+var fatalCodes = map[string]bool{
+	"HASH_CONFLICT":     true, // node already has a different fullHash
+	"NODE_ARCHIVED":     true, // refusing to resurrect a superseded version
+	"NODE_NOT_OWNER":    true, // node was created by a different device
+	"VALIDATION_FAILED": true, // request itself is malformed
+	"TARGET_READ_ONLY":  true, // target resolves to a read-only, non-Tier-3 location
 }
 
-var transientSubstrings = []string{
-	"media node not found",
-	"rebase target resolves to tier 3 but the file does not exist there yet",
+var transientCodes = map[string]bool{
+	"AUTH_INVALID_KEY":             true, // fixed by re-pairing or a config change, not by dropping the row
+	"AUTH_INVALID_SIGNATURE":       true,
+	"AUTH_NOT_CONFIGURED":          true, // server-side key misconfiguration
+	"NODE_NOT_FOUND":               true, // EVENT_NODE_CREATED not applied yet
+	"ARCHIVE_FILE_NOT_YET_PRESENT": true, // NAS view on the server lags the agent's copy
+	"RATE_LIMITED":                 true,
 }
 
-// ClassifyError applies fatalSubstrings/transientSubstrings to msg (a
-// lowercased error message, typically an HTTP response body) and returns the
-// resulting Classification. See the fatal-vs-transient table in the plan's
-// conformance contract: fatal errors get zero retries (malformed payload,
-// unknown event type, invalid node UUID, read-only non-Tier-3 rebase,
-// ARCHIVED node, would-create-cycle, and any error containing "constraint
-// failed"); transient errors get the normal retry/backoff budget
-// (node-not-found, ErrArchiveFileNotYetPresent).
-func ClassifyError(msg string) Classification {
-	lower := strings.ToLower(msg)
-	for _, s := range fatalSubstrings {
-		if strings.Contains(lower, s) {
-			return ClassificationFatal
-		}
-	}
-	for _, s := range transientSubstrings {
-		if strings.Contains(lower, s) {
-			return ClassificationTransient
-		}
-	}
-	return ClassificationUnknown
+// transientBodyHints are messages from handleAgentRebase (branchDAM's
+// internal/httpapi/routes.go) and the auth middleware that arrive as 400
+// but describe a condition that clears by itself. Matched
+// case-insensitively against the raw body, before the status rules, so
+// each entry must be specific to its 400 source: a generic phrase here
+// would override a genuine fatal refusal that happened to contain it.
+var transientBodyHints = []string{
+	// 400: Tier-3 target the server cannot see yet (archive mount lag).
+	"no file exists there yet",
+	"file does not exist there yet",
+	// 400: the server's own stat of the target failed (I/O, mount down).
+	"checking whether rebase target",
+	// 400 from the auth middleware: the request body was cut off in transit.
+	"failed to read request body",
+}
+
+// fatalBodyHints are server messages that name an explicit, permanent
+// refusal arriving with a status that is otherwise transient.
+var fatalBodyHints = []string{
+	// 403 from handleAgentRebase's ownership check: this device's key did
+	// not create the node, and retrying with the same key never will.
+	"node was not created by this device",
 }
 
 // HTTPError is returned by client methods for any non-2xx response.
@@ -128,8 +133,8 @@ func ClassifyError(msg string) Classification {
 // Body is always the raw response body, never assumed to be a parsed error
 // struct.
 //
-// Body is preserved as a field so HTTPError.Classification() can apply
-// the fatalSubstrings/transientSubstrings rule, but Error() deliberately
+// Body is preserved as a field so HTTPError.Classification() can read the
+// server's error code and message, but Error() deliberately
 // does NOT echo the body verbatim (audit S-7): a server that reflects
 // the request payload back, or names the X-API-Key in its debug output,
 // would otherwise be re-leaked into slog/crash-dump paths. The body is
@@ -155,34 +160,89 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("branchdam: server returned HTTP %d", e.StatusCode)
 }
 
-// Retryable reports whether the HTTP status code alone suggests a retry is
-// worthwhile: request timeouts, 429, and 5xx. A 401/403/503 auth failure is
-// NOT retryable by a fixed backoff -- 401/403 mean the key itself is wrong,
-// and 503 means the server's key is misconfigured (under 32 chars); no
-// amount of retrying fixes either without an operator change. 4xx other
-// than 429 is a client-side bug (bad payload shape), also not retryable.
-func (e *HTTPError) Retryable() bool {
-	switch {
-	case e.StatusCode == 401 || e.StatusCode == 403 || e.StatusCode == 503:
-		return false
-	case e.StatusCode == 429:
-		return true
-	case e.StatusCode >= 500:
-		return true
-	default:
-		return false
-	}
+// problemDoc is the subset of an RFC 9457 problem+json body (Huma v2's
+// error model) this package reads.
+type problemDoc struct {
+	Code   string `json:"code"`
+	Title  string `json:"title"`
+	Detail string `json:"detail"`
+	Status int    `json:"status"`
 }
 
-// Classification derives a Classification from the HTTP status and body,
-// applying ClassifyError to the body text as a best-effort refinement over
-// the coarse Retryable() signal above.
-func (e *HTTPError) Classification() Classification {
-	if c := ClassifyError(e.Body); c != ClassificationUnknown {
-		return c
+// problem parses Body as a problem document. ok is false for a plain-text
+// body (the auth middleware, Go's mux, a reverse proxy) or a JSON body with
+// none of the problem fields.
+func (e *HTTPError) problem() (problemDoc, bool) {
+	var p problemDoc
+	if err := json.Unmarshal([]byte(e.Body), &p); err != nil {
+		return problemDoc{}, false
 	}
-	if e.Retryable() {
+	return p, p.Code != "" || p.Title != "" || p.Detail != "" || p.Status != 0
+}
+
+// Code returns the machine-readable error code from a problem+json body, or
+// "" when the server sent none (every server before the uniform error
+// envelope, and every plain-text body).
+func (e *HTTPError) Code() string {
+	p, _ := e.problem()
+	return p.Code
+}
+
+// Retryable reports whether resending the request later can succeed --
+// i.e. Classification() is not ClassificationFatal.
+func (e *HTTPError) Retryable() bool {
+	return e.Classification() != ClassificationFatal
+}
+
+// Classification decides, in order:
+//
+//  1. a recognized `code` in a problem+json body (fatalCodes /
+//     transientCodes);
+//  2. transientBodyHints, then fatalBodyHints, against the raw body;
+//  3. the status. Only 400, 404, 409, 410, 413 and 422 are fatal, and only
+//     when the body is a problem document -- i.e. the route's own handler
+//     refused the request (Huma renders every handler error as one). For
+//     POST /api/v1/agent/rebase (branchDAM's handleAgentRebase) those are:
+//     400 for a malformed nodeUuid/fullHash/targetPath, a target no storage
+//     location covers, or a read-only non-Tier-3 target; 404 "asset not
+//     found" for an ARCHIVED node (rebasing would resurrect a superseded
+//     version); 409 for a fullHash that differs from the server's; 422 for
+//     a schema violation. The same statuses in plain text come from the
+//     auth middleware, Go's mux (a route an older server lacks) or a proxy,
+//     and say nothing permanent about the request.
+//
+// Everything else is transient: 401/403 (key rejected or not yet accepted
+// -- fixed by re-pairing or a config change, after which the queued rows
+// must still go through), 408, 429, every 5xx including 503 "agent
+// authentication is not configured", and any status this list does not
+// name.
+func (e *HTTPError) Classification() Classification {
+	p, isProblem := e.problem()
+	if fatalCodes[p.Code] {
+		return ClassificationFatal
+	}
+	if transientCodes[p.Code] {
 		return ClassificationTransient
 	}
-	return ClassificationFatal
+
+	lower := strings.ToLower(e.Body)
+	for _, h := range transientBodyHints {
+		if strings.Contains(lower, h) {
+			return ClassificationTransient
+		}
+	}
+	for _, h := range fatalBodyHints {
+		if strings.Contains(lower, h) {
+			return ClassificationFatal
+		}
+	}
+
+	switch e.StatusCode {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict,
+		http.StatusGone, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		if isProblem {
+			return ClassificationFatal
+		}
+	}
+	return ClassificationTransient
 }
