@@ -1351,8 +1351,8 @@ func TestIngestFileOfflineDedupTimeout(t *testing.T) {
 // for the "reformatted card reads as already queued" data-loss bug: a
 // camera restarts its file counter after a format, so a second card
 // mounted at the same path yields the same source paths with different
-// content. queue.db rows are never deleted, so a source-path-only match
-// used to report every such file as AlreadyQueued without copying it --
+// content. queue.db rows are kept for months (queue.GCRetention), so a
+// source-path-only match used to report every such file as AlreadyQueued without copying it --
 // the summary read as success, auto-eject fired, and the photos were only
 // ever on the card. A path match must count as a resume only when the
 // stored size and mtime also match.

@@ -144,10 +144,13 @@ own `offline.drainIntervalSecs` timer, issue #32) into backoff rather than a tig
 itself (network down, NAS unmounted). `archive_copy` turns terminal `FAILED` only for the cases
 retrying can't fix -- a different file at the archive path, a local copy that no longer matches its
 queued hash (edited in place before or during the copy: the copy hashes the bytes as it reads them,
-so the edited bytes never reach the archive name), or a placed copy that reads back from the
-archive with the wrong hash on two attempts in a row (once is retried: a flaky mount can do that;
-twice means the archive isn't storing the bytes it is given) -- and all show up in the queue's
-failed count with the reason in `archive_copy_last_error`. `rebase` also has a terminal `FAILED`
+so the edited bytes never reach the archive name), or an archive copy that reads back with the
+wrong hash on two attempts in a row (once is retried: a flaky mount can do that; twice means the
+archive isn't storing the bytes it is given) -- and all show up in the queue's failed count with
+the reason in `archive_copy_last_error`. A file already at the archive path with exactly the local
+copy's size counts as a read-back mismatch, not a conflict: it is typically the agent's own copy,
+left in place when an earlier attempt's post-rename read-back errored. Unlike a copy the attempt
+just placed, it is never removed, since the agent can't prove it wrote it. `rebase` also has a terminal `FAILED`
 state, reached only when the server's rebase handler itself refused the request for a reason that
 won't change on its own (`internal/branchdam.HTTPError`'s `Classification()`: a problem+json
 400/404/409/410/413/422 such as an `ARCHIVED` node, a `fullHash` conflict or a read-only non-Tier-3
@@ -162,9 +165,10 @@ What the operator does depends on which step failed:
 - **`rebase` FAILED** -- read `rebase_last_error`, fix the server-side cause (e.g. un-archive the
   node, or correct the storage location), then run `queue-drain -retry-failed`.
 - **`archive_copy` FAILED** -- read `archive_copy_last_error`. For a conflict, move or rename the
-  file already at the archive path (it is never overwritten); for a local-copy mismatch, restore the
-  local edit copy to the bytes that were ingested (or re-ingest from the card). Then run
-  `queue-drain -retry-failed`.
+  file already at the archive path (it is never overwritten); for a read-back mismatch, check the
+  archive mount and move or rename any file the error says was left in place; for a local-copy
+  mismatch, restore the local edit copy to the bytes that were ingested (or re-ingest from the
+  card). Then run `queue-drain -retry-failed`.
 
 `queue-drain -retry-failed` puts every failed archive copy and rebase back to `PENDING`
 (`queue.Store.ResetFailed`) and drains.

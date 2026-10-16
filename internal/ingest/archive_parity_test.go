@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,6 +132,119 @@ func TestDrainFailsRowOnRepeatedArchiveReadBackMismatch(t *testing.T) {
 	}
 	if pending, _ := store.Pending(context.Background()); len(pending) != 0 {
 		t.Errorf("Pending() = %d rows, want the failed row out of the work list", len(pending))
+	}
+}
+
+// TestDrainRetriesLeftoverArchiveCopyOnceBeforeFailing: a post-rename
+// read-back that ERRORS leaves the placed copy in place on purpose. When a
+// later pass's existing-file check then reads that leftover back wrong, it
+// is (most likely) the agent's own copy, not "a different file": the row
+// gets the same one grace retry as a fresh copy that reads back wrong, and
+// fails on the second bad read. The leftover is never removed or changed
+// by the existing-file check, since it cannot be proven to be the agent's.
+func TestDrainRetriesLeftoverArchiveCopyOnceBeforeFailing(t *testing.T) {
+	dir := t.TempDir()
+	store := openStoreT(t)
+	content := []byte("as-ingested")
+	seedMediaRow(t, store, dir, "uuid-leftover", content)
+	archive := filepath.Join(dir, "archive", "uuid-leftover.bin")
+	ctx := context.Background()
+
+	orig := archiveVerifyFn
+	t.Cleanup(func() { archiveVerifyFn = orig })
+	readErr := func(string, string, ...WriteOption) (VerifyResult, error) {
+		return VerifyResult{}, errors.New("simulated NAS read failure")
+	}
+	badRead := func(path, _ string, _ ...WriteOption) (VerifyResult, error) {
+		return VerifyResult{Path: path, Method: VerifyMethodUnbuffered, Hash: "garbled", Verified: false}, nil
+	}
+	leftoverIntact := func(pass int) {
+		t.Helper()
+		if got, err := os.ReadFile(archive); err != nil || string(got) != string(content) {
+			t.Fatalf("pass %d: leftover archive copy removed or changed: %q, %v", pass, got, err)
+		}
+	}
+
+	// Pass 1: the copy is placed, its read-back errors -- left in place,
+	// transient.
+	archiveVerifyFn = readErr
+	t0 := time.Unix(1_800_000_000, 0)
+	stats, err := Drain(ctx, &fakeDrainClient{}, store, "agent-1", fixedNow(t0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ := store.ByNodeUUID(ctx, "uuid-leftover")
+	if stats.ArchiveCopiesFailed != 0 || rec.ArchiveCopyStatus != queue.StatusPending {
+		t.Fatalf("pass 1: failed=%d status=%s, want PENDING after a read error", stats.ArchiveCopiesFailed, rec.ArchiveCopyStatus)
+	}
+	leftoverIntact(1)
+
+	// Pass 2: the existing-file check reads the leftover back wrong once:
+	// a read-back mismatch (retried), not a conflict (terminal at once).
+	archiveVerifyFn = badRead
+	stats, err = Drain(ctx, &fakeDrainClient{}, store, "agent-1", fixedNow(t0.Add(backoffCap)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ = store.ByNodeUUID(ctx, "uuid-leftover")
+	if stats.ArchiveCopiesFailed != 0 || rec.ArchiveCopyStatus != queue.StatusPending {
+		t.Fatalf("pass 2: failed=%d status=%s (%q), want PENDING after one bad read of the leftover", stats.ArchiveCopiesFailed, rec.ArchiveCopyStatus, rec.ArchiveCopyLastError)
+	}
+	if !strings.Contains(rec.ArchiveCopyLastError, ErrArchiveVerifyMismatch.Error()) || strings.Contains(rec.ArchiveCopyLastError, ErrArchiveConflict.Error()) {
+		t.Errorf("pass 2: last error %q, want a read-back mismatch, not a conflict", rec.ArchiveCopyLastError)
+	}
+	leftoverIntact(2)
+
+	// Pass 3: a second bad read in a row fails the row.
+	stats, err = Drain(ctx, &fakeDrainClient{}, store, "agent-1", fixedNow(t0.Add(2*backoffCap)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ = store.ByNodeUUID(ctx, "uuid-leftover")
+	if stats.ArchiveCopiesFailed != 1 || rec.ArchiveCopyStatus != queue.StatusFailed {
+		t.Fatalf("pass 3: failed=%d status=%s, want FAILED after a second bad read", stats.ArchiveCopiesFailed, rec.ArchiveCopyStatus)
+	}
+	leftoverIntact(3)
+}
+
+// TestCopyToArchiveExistingFileClassifiedBySize: a non-matching file at the
+// archive path is a read-back mismatch only when it has exactly the local
+// copy's size (the shape of the agent's own leftover); any other size is a
+// conflict, as before. Neither case touches the existing file.
+func TestCopyToArchiveExistingFileClassifiedBySize(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing string
+		want     error
+	}{
+		{"same size", "XXXXXXXXXXXXX", ErrArchiveVerifyMismatch},
+		{"different size", "someone else's verified master", ErrArchiveConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			localPath := filepath.Join(dir, "local.bin")
+			if err := os.WriteFile(localPath, []byte("payload-bytes"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			archivePath := filepath.Join(dir, "archive", "final.bin")
+			if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(archivePath, []byte(tc.existing), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			err := CopyToArchive(localPath, archivePath, blake3Hex(t, localPath))
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if got, rerr := os.ReadFile(archivePath); rerr != nil || string(got) != tc.existing {
+				t.Errorf("existing archive file removed or changed: %q, %v", got, rerr)
+			}
+			if _, serr := os.Stat(tempArchiveName(archivePath)); !os.IsNotExist(serr) {
+				t.Errorf("archive temp file created for an occupied destination: %v", serr)
+			}
+		})
 	}
 }
 

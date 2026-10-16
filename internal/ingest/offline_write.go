@@ -94,13 +94,23 @@ var ErrArchiveConflict = errors.New("archive destination exists with different c
 // ErrArchiveConflict this cannot heal by retrying, so Drain fails the row.
 var ErrLocalCopyMismatch = errors.New("local copy no longer matches the queued hash")
 
-// ErrArchiveVerifyMismatch is returned (wrapped) by CopyToArchive when the
-// copy it just placed reads back from the archive with the wrong hash,
-// although the bytes it wrote hashed correctly on the way in. The placed
-// copy (the agent's own) is removed. Once is worth a retry -- a flaky
-// mount or a cache can produce it -- but a second in a row means the
-// archive is not storing these bytes faithfully, and Drain fails the row
-// instead of copying the same file to the NAS every few minutes forever.
+// ErrArchiveVerifyMismatch is returned (wrapped) by CopyToArchive when an
+// archive copy that is (or may be) the agent's own reads back with the
+// wrong hash:
+//
+//   - The copy it just placed reads back wrong, although the bytes it
+//     wrote hashed correctly on the way in. That copy is provably the
+//     agent's own (renameNoClobber refused any other), so it is removed.
+//   - The existing-file check finds a file of the local copy's size that
+//     reads back wrong. That is most likely the agent's own copy from an
+//     earlier attempt whose post-rename read-back errored (it is left in
+//     place on purpose), but it cannot be proven, so it is left alone.
+//
+// Once is worth a retry -- a flaky mount or a cache can produce it -- but
+// a second in a row means the archive is not storing these bytes
+// faithfully (or the file is not the agent's after all), and Drain fails
+// the row instead of copying the same file to the NAS every few minutes
+// forever.
 var ErrArchiveVerifyMismatch = errors.New("archive copy did not read back with the queued hash")
 
 // archiveVerifyFn is the Verify CopyToArchive runs against the archive
@@ -173,11 +183,16 @@ func renameNoClobber(tmpPath, finalPath string) error {
 //     copy already completed on an earlier call (the process was killed
 //     after the copy but before the caller recorded that fact), or an
 //     identical file was already there -- return success without copying.
-//   - If archivePath exists but does NOT verify, it is not ours: this
-//     function only ever renames a complete, hash-checked temp file into
-//     place, so a non-matching file at the final name is someone else's --
-//     possibly another card's verified master with the same rendered name.
-//     Leave it alone and return ErrArchiveConflict.
+//   - If archivePath exists but does NOT verify, it is left alone either
+//     way. This function only ever renames a complete, hash-checked temp
+//     file into place, so a non-matching file at the final name is
+//     usually someone else's -- possibly another card's verified master
+//     with the same rendered name: ErrArchiveConflict. The exception is a
+//     regular file of exactly the local copy's size: that is what an
+//     earlier attempt leaves when its post-rename read-back errored (see
+//     below), and a bad read of it is reported as ErrArchiveVerifyMismatch,
+//     so Drain gives it one more read before failing the row, instead of
+//     blaming a "different file" for the agent's own copy at once.
 //   - The copy itself never writes directly to archivePath: it writes to a
 //     deterministically-named temp file in the same directory (so the
 //     rename is same-filesystem-atomic), hashes the bytes as they stream,
@@ -213,6 +228,15 @@ func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOpt
 			}
 			if vr.Verified {
 				return nil
+			}
+			// Same size as the local copy: most likely this agent's own
+			// copy, left in place by an earlier attempt whose post-rename
+			// read-back errored, now reading back wrong. Not provably ours,
+			// so never removed here -- reported as a read-back mismatch so
+			// Drain re-reads it once more before failing the row.
+			if local, lerr := os.Stat(localPath); lerr == nil && local.Size() == existing.Size() {
+				return fmt.Errorf("%w: %s already exists with the local copy's size but read back as %s, want %s -- left in place (possibly this agent's own earlier copy); if this persists, move or rename the existing file, then retry this queue row",
+					ErrArchiveVerifyMismatch, archivePath, vr.Hash, wantFullHash)
 			}
 		}
 		return fmt.Errorf("%w: %s already exists and does not match the queued hash (BLAKE3 %s); nothing was overwritten -- move or rename the existing file, then retry this queue row",
@@ -280,7 +304,8 @@ func CopyToArchive(localPath, archivePath, wantFullHash string, opts ...WriteOpt
 		// nothing about the bytes, which were hash-checked on the way in.
 		// Leave the placed file alone and report a transient error -- the
 		// next attempt's existing-file check re-verifies it and either
-		// finds it done or reports a conflict, never deletes it.
+		// finds it done or, on a bad read, reports ErrArchiveVerifyMismatch
+		// (same size as the local copy), never deletes it.
 		return fmt.Errorf("ingest: verify archive copy %s (left in place, will re-check): %w", archivePath, err)
 	}
 	if !vr.Verified {
