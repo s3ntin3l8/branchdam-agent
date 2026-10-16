@@ -266,8 +266,8 @@ the tray at startup and on settings reload, `ingest`, `queue-drain`):
    upload refused this way is not replayed (its body is a stream) but the next request goes out on
    the old key. Until some request on the old key is accepted, `config.yaml` still holds the refused
    key: an agent that exits in that window (say, right after a refused upload) starts on the refused
-   key and gets `401`s, so let it make one more server request first, or put the old key back by
-   hand. If both keys are refused, `config.yaml` keeps the new key and memory the old one,
+   key and gets `401`s, so let it make one more server request first; failing that, re-pair it with
+   `branchdam-agent pair <branchdam-url>`. If both keys are refused, `config.yaml` keeps the new key and memory the old one,
    and the device has to be re-paired.
 
 Commands that never handshake (`prune`, `luminar-sync`, `preflight`) build plain clients and pick
