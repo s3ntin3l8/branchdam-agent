@@ -35,6 +35,60 @@ func (q *queueCountsReader) Counts(ctx context.Context) (tray.QueueCounts, error
 	}, nil
 }
 
+// FailedRows implements tray.QueueFailureManager over queue.Store's own
+// FailedRows, for the window's failed-rows list.
+func (q *queueCountsReader) FailedRows(ctx context.Context, limit int) ([]tray.FailedQueueRow, error) {
+	recs, err := q.store.FailedRows(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]tray.FailedQueueRow, 0, len(recs))
+	for _, rec := range recs {
+		row := tray.FailedQueueRow{
+			NodeUUID:    rec.NodeUUID,
+			FileName:    rec.FileName,
+			SourcePath:  rec.SourcePath,
+			LocalPath:   rec.LocalPath,
+			ArchivePath: rec.ArchivePath,
+			SizeBytes:   rec.SizeBytes,
+			CreatedAt:   rec.CreatedAtUnix,
+		}
+		// An archive-copy failure ends the row before rebase ever runs
+		// (queue.Record.Done), so it is the step to report when both
+		// columns somehow read FAILED.
+		if rec.ArchiveCopyStatus == queue.StatusFailed {
+			row.Step = tray.FailedStepArchiveCopy
+			row.LastError = rec.ArchiveCopyLastError
+			row.Attempts = rec.ArchiveCopyAttempts
+		} else {
+			row.Step = tray.FailedStepRebase
+			row.LastError = rec.RebaseLastError
+			row.Attempts = rec.RebaseAttempts
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+// RetryFailed implements tray.QueueFailureManager: the same reset
+// `queue-drain -retry-failed` runs (queue.Store.ResetFailed) for every row
+// when nodeUUID is "", or queue.Store.ResetFailedNode for one.
+func (q *queueCountsReader) RetryFailed(ctx context.Context, nodeUUID string) (tray.QueueRetryCounts, error) {
+	var (
+		c   queue.ResetCounts
+		err error
+	)
+	if nodeUUID == "" {
+		c, err = q.store.ResetFailed(ctx)
+	} else {
+		c, err = q.store.ResetFailedNode(ctx, nodeUUID)
+	}
+	if err != nil {
+		return tray.QueueRetryCounts{}, err
+	}
+	return tray.QueueRetryCounts{ArchiveCopies: c.ArchiveCopies, Rebases: c.Rebases}, nil
+}
+
 // queueDrainer implements tray.Drainer over internal/ingest.Drain -- the
 // same function `queue-drain`'s own runDrainPass calls, so the tray's
 // timer-driven and menu-driven drain passes behave identically to the

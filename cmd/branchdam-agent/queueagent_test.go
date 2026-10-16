@@ -11,6 +11,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
+	"github.com/s3ntin3l8/branchdam-agent/internal/tray"
 )
 
 func TestQueueCountsReaderMirrorsStoreCounts(t *testing.T) {
@@ -166,5 +167,60 @@ func TestStartPeriodicDisabledForNonPositiveInterval(t *testing.T) {
 	}
 	if called {
 		t.Error("expected fn never to be called when interval<=0")
+	}
+}
+
+// TestQueueCountsReaderFailedRowsAndRetry: the tray's failed-rows list maps
+// each FAILED step to its reason, and RetryFailed resets one row or all of
+// them through the queue store's own reset.
+func TestQueueCountsReaderFailedRowsAndRetry(t *testing.T) {
+	ctx := context.Background()
+	store := openTestQueueStore(t)
+	for _, u := range []string{"copy", "rebase", "other"} {
+		if err := store.InsertPending(ctx, queue.NewRecord{
+			NodeUUID: u, Kind: queue.KindMedia, SourcePath: "/card/" + u, LocalPath: "/local/" + u,
+			ArchivePath: "/archive/" + u, FileName: u, FileExt: ".jpg",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.MarkArchiveCopyFailed(ctx, "copy", "archive conflict"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkArchiveCopyDone(ctx, "rebase"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkRebaseFailed(ctx, "rebase", "node is archived"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkArchiveCopyFailed(ctx, "other", "edited local copy"); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &queueCountsReader{store: store}
+	rows, err := reader.FailedRows(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("FailedRows = %d rows, want 3", len(rows))
+	}
+	if rows[0].Step != tray.FailedStepArchiveCopy || rows[0].LastError != "archive conflict" || rows[0].SourcePath != "/card/copy" {
+		t.Errorf("row 0 = %+v, want the archive-copy failure", rows[0])
+	}
+	if rows[1].Step != tray.FailedStepRebase || rows[1].LastError != "node is archived" {
+		t.Errorf("row 1 = %+v, want the rebase failure", rows[1])
+	}
+
+	c, err := reader.RetryFailed(ctx, "rebase")
+	if err != nil || c != (tray.QueueRetryCounts{Rebases: 1}) {
+		t.Fatalf("RetryFailed(rebase) = %+v, %v", c, err)
+	}
+	c, err = reader.RetryFailed(ctx, "")
+	if err != nil || c != (tray.QueueRetryCounts{ArchiveCopies: 2}) {
+		t.Fatalf("RetryFailed(all) = %+v, %v; want the two remaining archive copies", c, err)
+	}
+	if rows, _ := reader.FailedRows(ctx, 0); len(rows) != 0 {
+		t.Errorf("rows still failed after retrying all: %+v", rows)
 	}
 }

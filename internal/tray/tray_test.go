@@ -1401,34 +1401,27 @@ func TestScratchUsageSnapshotDoesNotLeakThePreviousPath(t *testing.T) {
 // guard on a single shared bool rather than the directory itself, which
 // let precisely this happen (review finding on this PR).
 func TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir(t *testing.T) {
-	orig := diskUsageFunc
+	orig := loadDiskUsageFunc()
 	hangRelease := make(chan struct{})
-	// hungCallStarted closes the instant the hung goroutine has actually
-	// dereferenced diskUsageFunc and entered this closure -- waiting on it
-	// below (before this test function can return into its own Cleanup,
-	// which reassigns diskUsageFunc) gives -race a real happens-before
-	// edge for that read. Without it, the read (in the still-blocked
-	// goroutine) and Cleanup's write race by Go's memory model even
-	// though the read always completes first in practice -- confirmed:
-	// an earlier version of this test without hungCallStarted reliably
-	// triggered `go test -race`.
+	// hungCallStarted closes the instant the hung goroutine has entered
+	// the stub below, so the refresh is known to be in flight (and
+	// blocked) before the healthy dir is asked for.
 	hungCallStarted := make(chan struct{})
-	t.Cleanup(func() { diskUsageFunc = orig })
 	t.Cleanup(func() { close(hangRelease) }) // let the hung goroutine finish (and get discarded) before the test exits
 
 	const hungDir = "/hung-dir-simulating-an-unmounted-network-share"
-	diskUsageFunc = func(dir string) (uint64, uint64, error) {
+	t.Cleanup(setDiskUsageFunc(func(dir string) (uint64, uint64, error) {
 		if dir == hungDir {
 			close(hungCallStarted)
 			<-hangRelease // blocks here until this test's cleanup releases it
 			return 0, 0, errors.New("late arrival after abandonment -- must never be written")
 		}
 		return orig(dir)
-	}
+	}))
 
 	r := NewRunner(&fakeIngester{}, nil, "")
 
-	// Kick a refresh for the "hung" dir -- it blocks inside diskUsageFunc
+	// Kick a refresh for the "hung" dir -- it blocks inside the stub
 	// until hangRelease closes.
 	first := r.scratchUsageSnapshot(hungDir)
 	if !first.Configured {
@@ -1457,23 +1450,22 @@ func TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir(t *testing.T) {
 // already had for a Reconfigure to a NEW path didn't extend to the
 // "Reconfigure to no path at all" case).
 func TestScratchUsageClearingScratchDirDoesNotResurrectStalePath(t *testing.T) {
-	orig := diskUsageFunc
+	orig := loadDiskUsageFunc()
 	hangRelease := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(hangRelease) }) }
 	hungCallStarted := make(chan struct{})
-	t.Cleanup(func() { diskUsageFunc = orig })
 	t.Cleanup(release) // let the hung goroutine finish (and get discarded) even if the test fails before its own explicit release() below
 
 	const hungDir = "/hung-dir-simulating-an-unmounted-network-share"
-	diskUsageFunc = func(dir string) (uint64, uint64, error) {
+	t.Cleanup(setDiskUsageFunc(func(dir string) (uint64, uint64, error) {
 		if dir == hungDir {
 			close(hungCallStarted)
 			<-hangRelease
 			return 123, 456, nil // a fabricated reading that must never be written
 		}
 		return orig(dir)
-	}
+	}))
 
 	r := NewRunner(&fakeIngester{}, nil, "")
 
@@ -1978,6 +1970,143 @@ func TestReconfigurePollIntervalWaitsForIngest(t *testing.T) {
 	t.Fatalf("running interval after the ingest = %v, want 30ms", got)
 }
 
+// ctxBlockingIngester blocks its first IngestCard until release closes or
+// the ingest's ctx is cancelled, and reports which on canceled.
+type ctxBlockingIngester struct {
+	started  chan struct{}
+	release  chan struct{}
+	canceled chan error
+	once     sync.Once
+}
+
+func (b *ctxBlockingIngester) IngestCard(ctx context.Context, _ string) (ingest.CardResult, error) {
+	var err error
+	b.once.Do(func() {
+		close(b.started)
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			err = ctx.Err()
+			b.canceled <- err
+		}
+	})
+	return ingest.CardResult{}, err
+}
+
+func (b *ctxBlockingIngester) IngestCardOffline(_ context.Context, _ string) (ingest.OfflineCardResult, error) {
+	return ingest.OfflineCardResult{}, nil
+}
+
+// TestRequireDCIMChangeWaitsForDetectedIngest: a detection-triggered
+// ingest runs on the detector's own context, so restarting the detector
+// cancels it. A settings reload that toggles ingest.requireDCIM during
+// that ingest must leave it running and restart the detector only once
+// the gate frees -- the same deferred path a pollIntervalSecs change takes.
+func TestRequireDCIMChangeWaitsForDetectedIngest(t *testing.T) {
+	root := t.TempDir()
+	card := filepath.Join(root, "CARD1")
+	if err := os.MkdirAll(filepath.Join(card, "DCIM"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fi := &ctxBlockingIngester{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		canceled: make(chan error, 1),
+	}
+	r := NewRunner(fi, []string{root}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.ReconfigureDetector(ctx, []string{root})
+	defer r.StopDetector()
+	_, firstDone := detectorRunningIntervalFor(r)
+
+	select {
+	case <-fi.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the detector never started an ingest of the inserted card")
+	}
+
+	// What settings.go's reload does: set the detector options, then
+	// Reconfigure with the (unchanged) roots.
+	r.SetDetectorRequireDCIM(true)
+	select {
+	case err := <-fi.canceled:
+		t.Fatalf("toggling requireDCIM cancelled the detection-triggered ingest: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if r.Reconfigure(fi, []string{root}, "") {
+		t.Fatal("Reconfigure reported applied while an ingest held the gate")
+	}
+	if _, done := detectorRunningIntervalFor(r); done != firstDone {
+		t.Error("detector restarted while the detection-triggered ingest held the gate")
+	}
+
+	close(fi.release)
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the detector was not restarted once the ingest finished")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if dcim, done := detectorRunningRequireDCIMFor(r); dcim && done != nil && done != firstDone {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no detector requiring DCIM started after the deferred restart")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// detectorRunningRequireDCIMFor returns whether the running detector
+// requires DCIM/, and its done channel (nil when no detector runs).
+func detectorRunningRequireDCIMFor(r *Runner) (bool, chan struct{}) {
+	r.detectorMu.Lock()
+	defer r.detectorMu.Unlock()
+	return r.detectorRunningRequireDCIM, r.detectorDone
+}
+
+// TestReconfigureAppliesRequireDCIMChange: with no ingest running, a
+// reload that changes only ingest.requireDCIM restarts the detector as
+// soon as its Reconfigure applies; one that leaves it alone keeps the
+// running detector.
+func TestReconfigureAppliesRequireDCIMChange(t *testing.T) {
+	fi := &fakeIngester{}
+	dir := t.TempDir()
+	r := NewRunner(fi, []string{dir}, "")
+	r.SetDetectorInterval(10 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.ReconfigureDetector(ctx, []string{dir})
+	defer r.StopDetector()
+	_, firstDone := detectorRunningRequireDCIMFor(r)
+
+	r.SetDetectorRequireDCIM(false)
+	r.Reconfigure(fi, []string{dir}, "")
+	if _, done := detectorRunningRequireDCIMFor(r); done != firstDone {
+		t.Error("Reconfigure with an unchanged requireDCIM and roots restarted the detector")
+	}
+
+	r.SetDetectorRequireDCIM(true)
+	if _, done := detectorRunningRequireDCIMFor(r); done != firstDone {
+		t.Error("SetDetectorRequireDCIM restarted the detector itself, outside Reconfigure")
+	}
+	if !r.Reconfigure(fi, []string{dir}, "") {
+		t.Fatal("Reconfigure on an idle runner did not apply")
+	}
+	dcim, done := detectorRunningRequireDCIMFor(r)
+	if !dcim || done == firstDone || done == nil {
+		t.Errorf("after a requireDCIM change: running requireDCIM = %v, restarted = %v; want true and a new detector", dcim, done != firstDone)
+	}
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("the detector built without requireDCIM did not exit")
+	}
+}
+
 // closeCountingIngester counts IngestCard and Close calls.
 type closeCountingIngester struct {
 	mu     sync.Mutex
@@ -2306,8 +2435,15 @@ func TestWindowApplyRestartOutcome(t *testing.T) {
 	if !ok {
 		t.Fatal("ok = false, want true for a completed window apply")
 	}
-	if !got.RestartRequested || got.AppliedVersion != status.Applied {
-		t.Fatalf("outcome = %+v, want restart for %q", got, status.Applied)
+	if !got.RestartRequested || got.AppliedVersion != status.Applied || got.RolledBack {
+		t.Fatalf("outcome = %+v, want a forward-update restart for %q", got, status.Applied)
+	}
+
+	// A window-started rollback reports itself as one, so the restart is
+	// logged "rolled back to" rather than "updated to".
+	rb, ok := windowApplyRestartOutcome(UpdateStatus{Phase: UpdatePhaseRestarting, Applied: "1.14.0", RolledBack: true}, false, false)
+	if !ok || !rb.RolledBack || rb.AppliedVersion != "1.14.0" {
+		t.Fatalf("rollback outcome = %+v, %v; want RolledBack restart to 1.14.0", rb, ok)
 	}
 
 	for _, tc := range []struct {
@@ -2327,7 +2463,7 @@ func TestWindowApplyRestartOutcome(t *testing.T) {
 }
 
 func TestUpdatePhaseOwnsBinary(t *testing.T) {
-	for _, phase := range []string{UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting} {
+	for _, phase := range []string{UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting, UpdatePhaseRollingBack} {
 		if !updatePhaseOwnsBinary(phase) {
 			t.Errorf("updatePhaseOwnsBinary(%q) = false, want true", phase)
 		}

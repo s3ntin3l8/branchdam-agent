@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 )
@@ -142,6 +143,11 @@ func TestAPIRoutesRequireToken(t *testing.T) {
 		{http.MethodPost, "/api/actions/test-connection"},
 		{http.MethodPost, "/api/actions/check-update"},
 		{http.MethodPost, "/api/actions/apply-update"},
+		{http.MethodPost, "/api/actions/ingest-start"},
+		{http.MethodPost, "/api/actions/cancel-ingest"},
+		{http.MethodGet, "/api/queue/failed"},
+		{http.MethodPost, "/api/actions/queue-retry"},
+		{http.MethodPost, "/api/actions/rollback-update"},
 		{http.MethodPost, "/api/actions/pair"},
 	}
 	for _, rt := range routes {
@@ -189,6 +195,22 @@ type spyActions struct {
 	revealErr     error
 	paused        bool
 
+	// ingest-start / cancel / failed-row state (window actions).
+	busy             bool
+	gateHeld         bool
+	configIncomplete bool
+	nowVolumes       []string
+	watchDirs        []string
+	cancelResult     bool
+	cancelCalls      int
+	ingested         chan string // receives every TriggerIngest cardPath when non-nil
+	failedRows       []FailedQueueRow
+	failedErr        error
+	failedLimit      int
+	retryCounts      QueueRetryCounts
+	retryErr         error
+	retryNodeUUID    *string
+
 	lastCardPath string
 	lastSyncID   IntegrationID
 	lastHookID   HookID
@@ -197,7 +219,27 @@ type spyActions struct {
 
 func (a *spyActions) TriggerIngest(_ context.Context, cardPath string) IngestSummary {
 	a.lastCardPath = cardPath
+	if a.ingested != nil {
+		a.ingested <- cardPath
+	}
 	return a.ingestSummary
+}
+func (a *spyActions) CancelIngest() bool {
+	a.cancelCalls++
+	return a.cancelResult
+}
+func (a *spyActions) Busy() (string, time.Time, bool) { return "", time.Time{}, a.busy }
+func (a *spyActions) GateHeld() bool                  { return a.gateHeld }
+func (a *spyActions) ConfigIncomplete() bool          { return a.configIncomplete }
+func (a *spyActions) IngestNowVolumes() []string      { return a.nowVolumes }
+func (a *spyActions) WatchDirs() []string             { return a.watchDirs }
+func (a *spyActions) FailedQueueRows(_ context.Context, limit int) ([]FailedQueueRow, error) {
+	a.failedLimit = limit
+	return a.failedRows, a.failedErr
+}
+func (a *spyActions) RetryFailedQueueRows(_ context.Context, nodeUUID string) (QueueRetryCounts, error) {
+	a.retryNodeUUID = &nodeUUID
+	return a.retryCounts, a.retryErr
 }
 func (a *spyActions) TriggerDrain(_ context.Context) (DrainSummary, bool) {
 	return a.drainSummary, a.drainRan

@@ -75,6 +75,12 @@ type IngestSummary struct {
 	Deferred int   `json:"deferred"`
 	Err      error `json:"-"`
 	Offline  bool  `json:"offline"`
+	// Canceled is true when the operator stopped this ingest
+	// (Runner.CancelIngest) before it walked the whole card. The counts
+	// above cover the files handled before the stop; Err wraps
+	// ingest.ErrCanceled, so OK() is false and the card is never
+	// auto-ejected. Re-running the ingest picks up where it stopped.
+	Canceled bool `json:"canceled,omitempty"`
 }
 
 // MarshalJSON renders Err as its message string rather than encoding the
@@ -181,6 +187,15 @@ type UpdateStatus struct {
 	// Applied is set to the version string once ApplyLatest has
 	// succeeded this session.
 	Applied string
+	// RolledBack is set together with Applied (and Phase restarting) when
+	// the swap that just completed was a rollback to the previous
+	// version rather than a forward update, so the restart is logged as
+	// "rolled back to" (Outcome.RolledBack).
+	RolledBack bool
+	// RollbackVersion is the version a rollback would restore, or "" when
+	// no previous version is on disk -- filled from
+	// SelfUpdater.RollbackAvailable for the window's "Roll back" button.
+	RollbackVersion string
 }
 
 // Update lifecycle phase values shared by the tray menu, status API, and the
@@ -195,6 +210,10 @@ const (
 	UpdatePhaseVerifying   = "verifying"
 	UpdatePhaseRestarting  = "restarting"
 	UpdatePhaseFailed      = "failed"
+	// UpdatePhaseRollingBack covers a window-started rollback restoring
+	// the previous version's files (the tray menu's own rollback tracks
+	// this in its select loop instead).
+	UpdatePhaseRollingBack = "rolling-back"
 )
 
 // MarshalJSON renders Err as a string -- see IngestSummary.MarshalJSON's
@@ -262,6 +281,9 @@ type Status struct {
 	// IngestProgress is the most recent progress sample from an in-flight
 	// ingest (DualWrite/WriteLocal/Verify), or nil when idle.
 	IngestProgress *ingest.ProgressEvent `json:"ingestProgress,omitempty"`
+	// IngestCancelRequested is true once Runner.CancelIngest has asked the
+	// in-flight ingest to stop; it is still finishing its current file.
+	IngestCancelRequested bool `json:"ingestCancelRequested,omitempty"`
 	// HandshakeOK surfaces the most recent DrainSummary.HandshakeOK to the
 	// status page -- the operator's most basic "is the server reachable?"
 	// signal, which DrainSummary already computes but never exposed. False
@@ -450,6 +472,12 @@ type Runner struct {
 	busyCard      string
 	busySince     time.Time
 	onPauseChange func(paused bool)
+	// ingestStop asks the in-flight ingest to stop at the next file
+	// boundary (ingest.WithFileBoundaryCancel); nil while no ingest holds
+	// gate. ingestStopRequested records that CancelIngest called it, for
+	// Status().IngestCancelRequested ("stopping after the current file").
+	ingestStop          context.CancelFunc
+	ingestStopRequested bool
 
 	// lastProgress records the most recent progress sample from an in-flight
 	// IngestCard call (DualWrite/WriteLocal/Verify). Cleared when idle.
@@ -563,13 +591,18 @@ type Runner struct {
 	detectorDone     chan struct{}
 	detectorBaseCtx  context.Context
 	detectorInterval time.Duration
-	// detectorRunningInterval is the poll interval the running detector
-	// was built with (guarded by detectorMu; meaningful only while
-	// detectorCancel != nil). A reload that changes only
-	// ingest.pollIntervalSecs restarts the detector when its Reconfigure
-	// is applied -- see detectorIntervalStale.
-	detectorRunningInterval time.Duration
+	// detectorRunningInterval and detectorRunningRequireDCIM are the poll
+	// interval and DCIM requirement the running detector was built with
+	// (guarded by detectorMu; meaningful only while detectorCancel !=
+	// nil). A reload that changes only ingest.pollIntervalSecs or
+	// ingest.requireDCIM restarts the detector when its Reconfigure is
+	// applied, never while an ingest holds the gate -- see detectorStale.
+	detectorRunningInterval    time.Duration
+	detectorRunningRequireDCIM bool
 
+	// detectorRequireDCIM is the latest SetDetectorRequireDCIM value
+	// (guarded by detectorMu). "Ingest now" and the resume offer read it
+	// at once; a running detector picks it up on its deferred restart.
 	detectorRequireDCIM  bool
 	onCardIngested       func()
 	detectorErrHandler   func(err error)
@@ -955,51 +988,69 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 		r.setBusy(false, "")
 	}()
 
+	// The ingest runs under a stop signal CancelIngest can fire. It only
+	// ever takes effect between files (ingest.WithFileBoundaryCancel), so
+	// a stop never tears down a DualWrite mid-stream or leaves a copy
+	// without its registration -- the same guarantee every action
+	// handler's context.WithoutCancel keeps for a disconnected client.
+	ingestCtx, stop := ingest.WithFileBoundaryCancel(ctx)
 	r.mu.Lock()
 	ingester := r.ingester
+	r.ingestStop = stop
+	r.ingestStopRequested = false
 	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.ingestStop = nil
+		r.ingestStopRequested = false
+		r.mu.Unlock()
+		stop()
+	}()
 	r.wireProgress(ingester)
 
+	// A stopped walk returns its partial result alongside the error, so
+	// the files are counted whether or not err is set (every other error
+	// comes back with an empty result).
 	if reachable {
-		result, err := ingester.IngestCard(ctx, cardPath)
+		result, err := ingester.IngestCard(ingestCtx, cardPath)
 		summary.Elapsed = time.Since(summary.StartedAt)
 		if err != nil {
 			summary.Err = err
-		} else {
-			for _, f := range result.Files {
-				switch {
-				case f.Err != nil:
-					summary.Failed++
-				case f.Deferred:
-					summary.Deferred++
-				case f.Skipped:
-					summary.Skipped++
-				default:
-					summary.Submitted++
-				}
+			summary.Canceled = errors.Is(err, ingest.ErrCanceled)
+		}
+		for _, f := range result.Files {
+			switch {
+			case f.Err != nil:
+				summary.Failed++
+			case f.Deferred:
+				summary.Deferred++
+			case f.Skipped:
+				summary.Skipped++
+			default:
+				summary.Submitted++
 			}
 		}
 	} else {
-		result, err := ingester.IngestCardOffline(ctx, cardPath)
+		result, err := ingester.IngestCardOffline(ingestCtx, cardPath)
 		summary.Elapsed = time.Since(summary.StartedAt)
 		if err != nil {
 			summary.Err = err
-		} else {
-			// No Deferred arm: offline ingest never uploads (the archive
-			// copy and registration wait in queue.db for the drain), so a
-			// metered connection cannot hold anything back here and
-			// OfflineFileResult has no Deferred flag.
-			for _, f := range result.Files {
-				switch f.Outcome() {
-				case ingest.OfflineOutcomeFailed:
-					summary.Failed++
-				case ingest.OfflineOutcomeResumed:
-					summary.Resumed++
-				case ingest.OfflineOutcomeSkipped:
-					summary.Skipped++
-				case ingest.OfflineOutcomeQueued:
-					summary.Submitted++
-				}
+			summary.Canceled = errors.Is(err, ingest.ErrCanceled)
+		}
+		// No Deferred arm: offline ingest never uploads (the archive copy
+		// and registration wait in queue.db for the drain), so a metered
+		// connection cannot hold anything back here and OfflineFileResult
+		// has no Deferred flag.
+		for _, f := range result.Files {
+			switch f.Outcome() {
+			case ingest.OfflineOutcomeFailed:
+				summary.Failed++
+			case ingest.OfflineOutcomeResumed:
+				summary.Resumed++
+			case ingest.OfflineOutcomeSkipped:
+				summary.Skipped++
+			case ingest.OfflineOutcomeQueued:
+				summary.Submitted++
 			}
 		}
 	}
@@ -1048,6 +1099,25 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 	}
 
 	return summary
+}
+
+// CancelIngest asks the in-flight ingest, if any, to stop before its next
+// file and reports whether there was one to stop. The file being copied
+// finishes -- copy, verify and registration or queue row -- so nothing is
+// left half-done; the summary then reports Canceled, the card is not
+// auto-ejected, and a later ingest of the same card resumes where this one
+// stopped (already-ingested files are skipped). Deliberately not a pause
+// gate: it never touches Paused(), and it does not take gate, so it can
+// never block behind (or deadlock with) the ingest it is stopping.
+func (r *Runner) CancelIngest() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ingestStop == nil {
+		return false
+	}
+	r.ingestStop()
+	r.ingestStopRequested = true
+	return true
 }
 
 func (r *Runner) setBusy(busy bool, cardPath string) {
@@ -1773,21 +1843,17 @@ func (r *Runner) SetDetectorInterval(d time.Duration) {
 	r.detectorInterval = d
 }
 
-// SetDetectorRequireDCIM sets whether the card detector requires a DCIM/
-// subdirectory to detect a volume.
+// SetDetectorRequireDCIM sets whether a volume needs a DCIM/ subdirectory
+// to count as a card. IngestNowVolumes and the resume offer use the new
+// value at once. Like SetDetectorInterval, it does not touch a running
+// detector itself: the next Reconfigure that is applied restarts the
+// detector when its DCIM requirement differs (a settings reload sets it
+// and then calls Reconfigure). Restarting it here would cancel a
+// detection-triggered ingest, which runs on the detector's context.
 func (r *Runner) SetDetectorRequireDCIM(v bool) {
 	r.detectorMu.Lock()
-	changed := r.detectorRequireDCIM != v
+	defer r.detectorMu.Unlock()
 	r.detectorRequireDCIM = v
-	running := r.detectorCancel != nil
-	r.detectorMu.Unlock()
-
-	if changed && running {
-		r.mu.Lock()
-		roots := append([]string(nil), r.watchDirs...)
-		r.mu.Unlock()
-		r.ReconfigureDetector(r.BaseContext(), roots)
-	}
 }
 
 // SetDetectorErrorHandler registers a handler for non-cancellation errors
@@ -1837,15 +1903,16 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 		return
 	}
 
-	dctx, cancel := context.WithCancel(baseCtx)
-	r.detectorCancel = cancel
-	r.detectorRunningInterval = interval
-	done := make(chan struct{})
-	r.detectorDone = done
-
 	// Same volume selection as IngestNowVolumes: a disk holding the archive
 	// or local edit root is never offered as a card, whichever path asks.
 	requireDCIM := r.detectorRequireDCIM
+
+	dctx, cancel := context.WithCancel(baseCtx)
+	r.detectorCancel = cancel
+	r.detectorRunningInterval = interval
+	r.detectorRunningRequireDCIM = requireDCIM
+	done := make(chan struct{})
+	r.detectorDone = done
 	detectorRoots := append([]string(nil), roots...)
 	r.mu.Lock()
 	known := make([]string, 0, len(r.detectedVolumes))
@@ -1895,16 +1962,18 @@ func (r *Runner) ReconfigureDetector(ctx context.Context, roots []string) {
 	}()
 }
 
-// detectorIntervalStale reports whether a detector is running with a poll
-// interval other than the one SetDetectorInterval last set.
-func (r *Runner) detectorIntervalStale() bool {
+// detectorStale reports whether a detector is running with a poll
+// interval or DCIM requirement other than the one SetDetectorInterval /
+// SetDetectorRequireDCIM last set.
+func (r *Runner) detectorStale() bool {
 	r.detectorMu.Lock()
 	defer r.detectorMu.Unlock()
 	want := r.detectorInterval
 	if want <= 0 {
 		want = ingest.DefaultPollInterval
 	}
-	return r.detectorCancel != nil && r.detectorRunningInterval != want
+	return r.detectorCancel != nil &&
+		(r.detectorRunningInterval != want || r.detectorRunningRequireDCIM != r.detectorRequireDCIM)
 }
 
 // StopDetector cancels any running Detector.Watch goroutine and waits for it
@@ -1960,11 +2029,15 @@ type ingesterCloser interface{ Close() }
 // doesn't outlive it -- no ingest can be using it at that point.
 //
 // When watchDirs differs from the current roots, or the running detector
-// polls at an interval other than SetDetectorInterval's latest (a reload
-// that changed ingest.pollIntervalSecs), the detector is restarted
-// (ReconfigureDetector, issue #78) AFTER releasing gate, so waiting on the
-// previous detector goroutine to exit cannot deadlock against an
-// in-flight TriggerIngest call.
+// polls at an interval or DCIM requirement other than SetDetectorInterval's
+// / SetDetectorRequireDCIM's latest (a reload that changed
+// ingest.pollIntervalSecs or ingest.requireDCIM), the detector is
+// restarted (ReconfigureDetector, issue #78) AFTER releasing gate, so
+// waiting on the previous detector goroutine to exit cannot deadlock
+// against an in-flight TriggerIngest call. Because the restart rides the
+// applied Reconfigure, it never happens while an ingest holds the gate:
+// restarting cancels the detector's context, which a detection-triggered
+// ingest runs on.
 //
 // One field is deliberately NOT reconfigurable this way and is the
 // caller's responsibility to treat as restart-required instead:
@@ -2046,7 +2119,7 @@ func (r *Runner) applyPendingReconfigAndUnlock() {
 	}
 	r.unlockGate()
 
-	if rootsChanged || r.detectorIntervalStale() {
+	if rootsChanged || r.detectorStale() {
 		r.ReconfigureDetector(r.BaseContext(), p.watchDirs)
 	}
 }
@@ -2114,13 +2187,32 @@ const statusQueueReadTimeout = 5 * time.Second
 // Reconfigure, independent of this TTL).
 const scratchUsageTTL = 30 * time.Second
 
-// diskUsageFunc is a test seam for diskUsage (the real per-OS syscall,
-// see diskusage_{linux,darwin,windows}.go) -- mirrors
-// cmd/branchdam-agent/settings.go's enableStartOnLoginFunc pattern for the
-// same reason: a real statfs/GetDiskFreeSpaceEx call can't be made to hang
-// or fail on demand from a test, and TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir
-// needs exactly that to exercise refreshScratchUsage's abandoned-dir guard.
-var diskUsageFunc = diskUsage
+// diskUsageFn is a test seam for diskUsage (the real per-OS syscall, see
+// diskusage_{linux,darwin,windows}.go): a real statfs/GetDiskFreeSpaceEx
+// call can't be made to hang or fail on demand from a test, and
+// TestScratchUsageHangOnAbandonedDirDoesNotBlockNewDir needs exactly that
+// to exercise refreshScratchUsage's abandoned-dir guard. Atomic rather
+// than a plain var because refreshScratchUsage reads it on a goroutine of
+// its own, which can outlive the test that started it: a later test's
+// stub swap must not race that read. nil means diskUsage. Read it with
+// loadDiskUsageFunc and swap it only with setDiskUsageFunc.
+var diskUsageFn atomic.Pointer[func(dir string) (free, total uint64, err error)]
+
+// loadDiskUsageFunc returns the current disk-usage implementation.
+func loadDiskUsageFunc() func(dir string) (free, total uint64, err error) {
+	if fn := diskUsageFn.Load(); fn != nil {
+		return *fn
+	}
+	return diskUsage
+}
+
+// setDiskUsageFunc installs fn as the disk-usage implementation and
+// returns a func that restores the previous one -- for tests, as
+// t.Cleanup(setDiskUsageFunc(stub)).
+func setDiskUsageFunc(fn func(dir string) (free, total uint64, err error)) (restore func()) {
+	prev := diskUsageFn.Swap(&fn)
+	return func() { diskUsageFn.Store(prev) }
+}
 
 // ScratchUsage reports free/total disk space for the volume backing
 // ingest.localEditRoot (issue #274 -- replaces the old ScratchNote
@@ -2215,7 +2307,7 @@ func (r *Runner) scratchUsageSnapshot(dir string) ScratchUsage {
 // NEW dir's own refresh already wrote -- see the scratchUsageInFlightDir
 // check below.
 func (r *Runner) refreshScratchUsage(dir string) {
-	free, total, err := diskUsageFunc(dir)
+	free, total, err := loadDiskUsageFunc()(dir)
 	usage := ScratchUsage{Configured: true}
 	if err != nil {
 		usage.Err = err.Error()
@@ -2266,6 +2358,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 	lastProbe := r.lastProbe
 	inFlightProbe := r.inFlightProbe
 	pauseUploadOnMetered := r.pauseUploadOnMetered
+	cancelRequested := r.ingestStopRequested
 
 	// Built entirely under r.mu, not after unlocking: r.syncers/r.lastSync
 	// are read map entries here, not copied whole-map references, so a
@@ -2355,6 +2448,7 @@ func (r *Runner) Status(selfUpdate UpdateStatus) Status {
 		ServerProbe:      lastProbe,
 		InFlightProbe:    inFlightProbe,
 
-		UploadPausedMetered: r.meteredUploadPaused(pauseUploadOnMetered),
+		UploadPausedMetered:   r.meteredUploadPaused(pauseUploadOnMetered),
+		IngestCancelRequested: busy && cancelRequested,
 	}
 }

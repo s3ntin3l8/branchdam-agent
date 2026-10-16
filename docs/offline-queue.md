@@ -172,7 +172,11 @@ What the operator does depends on which step failed:
   card). Then run `queue-drain -retry-failed`.
 
 `queue-drain -retry-failed` puts every failed archive copy and rebase back to `PENDING`
-(`queue.Store.ResetFailed`) and drains.
+(`queue.Store.ResetFailed`) and drains. With the tray running, the branchDAM window's
+Storage & ingest page does the same without a terminal: its Queue section lists every failed row
+with the step that failed and its last error, and offers "Retry" per row
+(`queue.Store.ResetFailedNode`) or "Retry all" (`ResetFailed`). A retried row is back to
+`PENDING` and goes out on the next drain pass (the timer's, or "Drain now").
 
 One `archive_copy` failure mode does NOT self-clear, and there's no terminal state to catch it: if
 the local edit copy is deleted (by the user, by disk cleanup, by anything) before `archive_copy`
@@ -349,8 +353,9 @@ bytes (full BLAKE3) and nothing is at the server's path yet. A sidecar's copy is
 card's name as well as under its master's new stem. When the server's path is already taken, the
 verified copy stays where it is, the fresh one is placed at the server's path, and a WARN names
 both (one WARN per verified copy found). Each candidate name is also swept through the collision
-suffixes a deferred copy takes when its name was taken (`_2`, `_3`, ...), stopping at the first
-suffix that is absent, so a suffixed deferred copy is found too. The lookup compares only a
+suffixes a deferred copy takes when its name was taken (`_2`, `_3`, ...), so a suffixed deferred
+copy is found too; a single absent suffix does not end the sweep (a hand-deleted `_2` must not
+strand a live `_3`), a run of absent suffixes ends the sweep. The lookup compares only a
 regular file of the uploaded size against the hash already computed, so the card is not read
 again.
 

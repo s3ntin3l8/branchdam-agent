@@ -129,7 +129,9 @@ func (f OfflineFileResult) Outcome() OfflineOutcome {
 // mid-walk error leaves already-queued rows durable and a re-run
 // is always safe (BySourcePath at the top of each per-file path
 // short-circuits the re-run when the queued row's size and mtime still
-// match the source file, no work redone).
+// match the source file, no work redone). A stop ends the walk between
+// files and returns the partial result with the stop error, exactly as
+// IngestCard does.
 func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (OfflineCardResult, error) {
 	if e.Queue == nil {
 		return OfflineCardResult{}, fmt.Errorf("ingest: IngestCardOffline requires a non-nil Engine.Queue")
@@ -150,6 +152,12 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 	stemSuffix := make(map[string]string)
 	var result OfflineCardResult
 	err := filepath.WalkDir(cardRoot, func(path string, d os.DirEntry, err error) error {
+		// Checked before every entry, so an operator stop
+		// (WithFileBoundaryCancel) or a shutdown ends the walk between
+		// files rather than failing every remaining one.
+		if stop := stopRequested(ctx); stop != nil {
+			return stop
+		}
 		if err != nil {
 			entryErr, fatal := walkEntryError(cardRoot, path, err)
 			if entryErr != nil {
@@ -187,8 +195,8 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 		return nil
 	})
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
-			return result, fmt.Errorf("ingest: card %s: stopped before the remaining files: %w", cardRoot, err)
+		if stopped := walkStopped(ctx, cardRoot, err); stopped != nil {
+			return result, stopped
 		}
 		return OfflineCardResult{}, fmt.Errorf("ingest: walk card root %s: %w", cardRoot, err)
 	}
@@ -646,7 +654,7 @@ func (e *Engine) resolveOfflineDestination(ctx context.Context, vars TemplateVar
 		return res, nil
 	}
 
-	for counter := 1; counter <= 10000; counter++ {
+	for counter := 1; counter <= maxCollisionSuffix; counter++ {
 		suffix := ""
 		if counter > 1 {
 			suffix = fmt.Sprintf("_%d", counter)
@@ -670,7 +678,7 @@ func (e *Engine) resolveOfflineDestination(ctx context.Context, vars TemplateVar
 			return cand, nil
 		}
 	}
-	return DestinationResolution{}, fmt.Errorf("no free destination name for %s after 10000 suffixes", srcPath)
+	return DestinationResolution{}, fmt.Errorf("no free destination name for %s after %d suffixes", srcPath, maxCollisionSuffix)
 }
 
 // offlineSlotUsable vets one ResolveDestination answer for the offline path:

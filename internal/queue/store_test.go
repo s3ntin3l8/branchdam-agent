@@ -407,6 +407,63 @@ func TestResetFailed(t *testing.T) {
 	}
 }
 
+// TestFailedRowsAndResetFailedNode: FailedRows lists exactly the rows
+// with a FAILED step, oldest first and capped by limit, and
+// ResetFailedNode re-queues only the row it names -- the window's per-row
+// "Retry" must never reset its neighbours.
+func TestFailedRowsAndResetFailedNode(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	for _, u := range []string{"rebase-failed", "copy-failed", "pending"} {
+		if err := s.InsertPending(ctx, sampleRecord(u, u+".jpg")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.MarkArchiveCopyDone(ctx, "rebase-failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkRebaseFailed(ctx, "rebase-failed", "node is archived"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkArchiveCopyFailed(ctx, "copy-failed", "archive conflict"); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := s.FailedRows(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].NodeUUID != "rebase-failed" || rows[1].NodeUUID != "copy-failed" {
+		t.Fatalf("FailedRows = %+v, want [rebase-failed copy-failed]", rows)
+	}
+	if rows[0].RebaseLastError != "node is archived" || rows[1].ArchiveCopyLastError != "archive conflict" {
+		t.Errorf("FailedRows lost the failure reasons: %+v", rows)
+	}
+	if capped, err := s.FailedRows(ctx, 1); err != nil || len(capped) != 1 {
+		t.Errorf("FailedRows(limit 1) = %d rows, %v; want 1", len(capped), err)
+	}
+
+	got, err := s.ResetFailedNode(ctx, "copy-failed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (ResetCounts{ArchiveCopies: 1}) {
+		t.Errorf("ResetFailedNode = %+v, want exactly 1 archive copy", got)
+	}
+	if r, _, _ := s.ByNodeUUID(ctx, "copy-failed"); r.ArchiveCopyStatus != StatusPending {
+		t.Errorf("copy-failed status = %q, want PENDING", r.ArchiveCopyStatus)
+	}
+	if r, _, _ := s.ByNodeUUID(ctx, "rebase-failed"); r.RebaseStatus != StatusFailed {
+		t.Errorf("rebase-failed status = %q, want it left FAILED", r.RebaseStatus)
+	}
+	if again, err := s.ResetFailedNode(ctx, "pending"); err != nil || again != (ResetCounts{}) {
+		t.Errorf("ResetFailedNode on a non-failed row = %+v, %v; want zero counts, nil", again, err)
+	}
+	if _, err := s.ResetFailedNode(ctx, ""); err == nil {
+		t.Error("ResetFailedNode(\"\") succeeded; an empty node UUID must not mean \"every row\"")
+	}
+}
+
 func TestBySourcePathResume(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

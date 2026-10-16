@@ -6,7 +6,7 @@ package tray
 // while GitHub metadata is being queried.
 func updatePhaseOwnsBinary(phase string) bool {
 	switch phase {
-	case UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting:
+	case UpdatePhaseDownloading, UpdatePhaseVerifying, UpdatePhaseRestarting, UpdatePhaseRollingBack:
 		return true
 	default:
 		return false
@@ -17,13 +17,14 @@ func trayQuitBlocked(status UpdateStatus, trayApplying, rollingBack, gateHeld bo
 	return trayApplying || rollingBack || gateHeld || updatePhaseOwnsBinary(status.Phase)
 }
 
-// windowApplyRestartOutcome converts a completed native-window apply into
-// the same restart request the tray menu's apply handler returns. Kept pure so
+// windowApplyRestartOutcome converts a completed native-window apply or
+// rollback into the same restart request the tray menu's apply and
+// rollback handlers return. Kept pure so
 // the platform-tagged systray loop can use it without making the decision
 // depend on detector callback goroutines or desktop APIs.
 func windowApplyRestartOutcome(status UpdateStatus, trayApplying, rollingBack bool) (Outcome, bool) {
 	if status.Phase != UpdatePhaseRestarting || trayApplying || rollingBack {
 		return Outcome{}, false
 	}
-	return Outcome{RestartRequested: true, AppliedVersion: status.Applied}, true
+	return Outcome{RestartRequested: true, AppliedVersion: status.Applied, RolledBack: status.RolledBack}, true
 }

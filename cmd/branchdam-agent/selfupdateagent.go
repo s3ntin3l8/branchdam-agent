@@ -43,6 +43,84 @@ type selfUpdateAgent struct {
 type trayUpdateApplier struct {
 	runner  *tray.Runner
 	updater *selfUpdateAgent
+
+	// rollbackAvailable/rollback default to updater.RollbackAvailable/
+	// updater.Rollback; tests replace them, since both resolve the real
+	// os.Executable() and can't be pointed at a fabricated install.
+	rollbackAvailable func() (string, bool)
+	rollback          func(ctx context.Context) (string, error)
+}
+
+// StartRollback implements tray.UpdateRollbacker: the window's "Roll back"
+// button. It takes the same two locks in the same order as StartApply
+// (Runner.gate via TryLockIdle, then applyMu) -- the gate is what the tray
+// menu's own rollback holds, so a rollback never swaps binaries under an
+// in-flight ingest (AGENTS.md invariant 9), and applyMu keeps an update
+// check or apply from overwriting the phase mid-swap. It returns once both
+// are reserved; the swap runs in the background and ends in Phase
+// restarting with RolledBack set (the tray's ticker then restarts, the same
+// path a window apply takes) or Phase failed with Err.
+func (a *trayUpdateApplier) StartRollback() (tray.UpdateStatus, bool) {
+	available := a.rollbackAvailable
+	if available == nil {
+		available = a.updater.RollbackAvailable
+	}
+	doRollback := a.rollback
+	if doRollback == nil {
+		doRollback = a.updater.Rollback
+	}
+
+	status := a.updater.Status()
+	rbVersion, ok := available()
+	status.RollbackVersion = rbVersion
+	if !ok {
+		status.Err = errors.New("self-update: no previous version to roll back to")
+		return status, false
+	}
+	switch status.Phase {
+	case updatePhaseChecking, updatePhaseDownloading, updatePhaseVerifying, updatePhaseRestarting, tray.UpdatePhaseRollingBack:
+		status.Err = fmt.Errorf("self-update: check/apply is already %s", status.Phase)
+		return status, false
+	}
+	release, ok := a.runner.TryLockIdle()
+	if !ok {
+		status.Err = errors.New("self-update: an ingest or update is already in progress")
+		return status, false
+	}
+	if !a.updater.applyMu.TryLock() {
+		release()
+		status.Err = errors.New("self-update: an update or check is already in progress")
+		return status, false
+	}
+	a.updater.mu.Lock()
+	a.updater.st.Phase = tray.UpdatePhaseRollingBack
+	a.updater.st.StartedAt = time.Now()
+	a.updater.st.Err = nil
+	started := a.updater.st
+	a.updater.mu.Unlock()
+	started.RollbackVersion = rbVersion
+	go func() {
+		defer release()
+		defer a.updater.applyMu.Unlock()
+		// Detached from any request, like StartApply's worker: a closed
+		// window must not interrupt a sibling-pair swap half way.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		version, err := doRollback(ctx)
+		a.updater.mu.Lock()
+		defer a.updater.mu.Unlock()
+		if err != nil {
+			a.updater.st.Phase = updatePhaseFailed
+			a.updater.st.Err = fmt.Errorf("self-update: roll back: %w", err)
+			slog.Error("self-update rollback failed", "err", err)
+			return
+		}
+		a.updater.st.Applied = version
+		a.updater.st.RolledBack = true
+		a.updater.st.Phase = updatePhaseRestarting
+		a.updater.st.Err = nil
+	}()
+	return started, true
 }
 
 func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
@@ -52,7 +130,7 @@ func (a *trayUpdateApplier) StartApply() (tray.UpdateStatus, bool) {
 		return status, false
 	}
 	switch status.Phase {
-	case updatePhaseChecking, updatePhaseDownloading, updatePhaseVerifying, updatePhaseRestarting:
+	case updatePhaseChecking, updatePhaseDownloading, updatePhaseVerifying, updatePhaseRestarting, tray.UpdatePhaseRollingBack:
 		status.Err = fmt.Errorf("self-update: check/apply is already %s", status.Phase)
 		return status, false
 	}
@@ -129,6 +207,18 @@ func (a *selfUpdateAgent) Status() tray.UpdateStatus {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.st
+}
+
+// StatusWithRollback is Status plus RollbackVersion, for the status API
+// the window polls: its "Roll back" button needs to know whether (and to
+// which version) a rollback is possible. A cheap local stat and sidecar
+// read (RollbackAvailable's own doc comment), which is why the tray
+// menu's refresh, which asks RollbackAvailable separately, keeps calling
+// plain Status.
+func (a *selfUpdateAgent) StatusWithRollback() tray.UpdateStatus {
+	st := a.Status()
+	st.RollbackVersion, _ = a.RollbackAvailable()
+	return st
 }
 
 // Run performs the initial check and, unless CheckIntervalHours disables

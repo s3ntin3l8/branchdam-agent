@@ -25,11 +25,12 @@ func (f *fakeTelemetrySender) SendTelemetry(_ context.Context, in branchdam.Agen
 	return &branchdam.AgentTelemetryOutput{OK: true}, nil
 }
 
+// withDiskUsage stubs the disk-usage seam for the rest of t. The swap is
+// atomic (setDiskUsageFunc), so a background refresh still running from
+// this or an earlier test never races it.
 func withDiskUsage(t *testing.T, fn func(string) (uint64, uint64, error)) {
 	t.Helper()
-	orig := diskUsageFunc
-	diskUsageFunc = fn
-	t.Cleanup(func() { diskUsageFunc = orig })
+	t.Cleanup(setDiskUsageFunc(fn))
 }
 
 // warmScratchUsage waits for the cached disk-usage reading telemetry
@@ -115,8 +116,8 @@ func TestTriggerTelemetryRespectsGates(t *testing.T) {
 		r := NewRunner(&fakeIngester{}, nil, dir)
 		boom := errors.New("server down")
 		r.SetTelemetry(&fakeTelemetrySender{err: boom}, "a", "v")
-		// Let the background refresh finish before withDiskUsage's
-		// cleanup restores diskUsageFunc.
+		// Let the background refresh this Runner starts finish within
+		// the subtest.
 		warmScratchUsage(t, r, dir)
 		if ran, err := r.TriggerTelemetry(context.Background()); !ran || !errors.Is(err, boom) {
 			t.Errorf("TriggerTelemetry = (%v, %v), want (true, %v)", ran, err, boom)
@@ -130,9 +131,9 @@ func TestTriggerTelemetryRespectsGates(t *testing.T) {
 // pass sends zero capacity, which the server treats as no verdict.
 func TestTriggerTelemetryDoesNotBlockOnHungStatfs(t *testing.T) {
 	release := make(chan struct{})
-	// started closes once the background refresh has read diskUsageFunc
-	// and entered the stub; waiting on it before returning orders that
-	// read before withDiskUsage's cleanup reassigns the variable.
+	// started closes once the background refresh has entered the stub;
+	// waiting on it before returning confirms the hung call really was in
+	// flight while TriggerTelemetry returned.
 	started := make(chan struct{})
 	var once sync.Once
 	defer close(release)
@@ -198,4 +199,42 @@ func TestPruneDurationReachesTelemetryAndJSON(t *testing.T) {
 	if !strings.Contains(string(b), `"durationMs":`) || strings.Contains(string(b), `"Duration"`) {
 		t.Errorf("PruneSummary JSON = %s, want durationMs and no raw Duration", b)
 	}
+}
+
+// TestWaitScratchUsage: the wait returns as soon as the first reading
+// lands, is bounded when statfs hangs (it must never stall the startup
+// telemetry pass), and returns at once with no localEditRoot.
+func TestWaitScratchUsage(t *testing.T) {
+	t.Run("reading lands", func(t *testing.T) {
+		withDiskUsage(t, func(string) (uint64, uint64, error) { return 300, 1000, nil })
+		r := NewRunner(&fakeIngester{}, nil, t.TempDir())
+		if !r.WaitScratchUsage(context.Background(), 5*time.Second) {
+			t.Fatal("WaitScratchUsage = false, want the reading")
+		}
+		if u := r.scratchUsageSnapshot(r.scratchDir); u.TotalBytes != 1000 {
+			t.Errorf("cached reading = %+v, want TotalBytes 1000", u)
+		}
+	})
+	t.Run("hung statfs is bounded", func(t *testing.T) {
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		withDiskUsage(t, func(string) (uint64, uint64, error) {
+			<-release
+			return 1, 2, nil
+		})
+		r := NewRunner(&fakeIngester{}, nil, t.TempDir())
+		start := time.Now()
+		if r.WaitScratchUsage(context.Background(), 100*time.Millisecond) {
+			t.Fatal("WaitScratchUsage = true while statfs hangs")
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Errorf("WaitScratchUsage took %v with a 100ms bound", elapsed)
+		}
+	})
+	t.Run("no localEditRoot", func(t *testing.T) {
+		r := NewRunner(&fakeIngester{}, nil, "")
+		if r.WaitScratchUsage(context.Background(), time.Hour) {
+			t.Error("WaitScratchUsage = true with no localEditRoot")
+		}
+	})
 }

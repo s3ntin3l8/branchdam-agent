@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
@@ -497,15 +498,20 @@ func (e *Engine) streamUpload(ctx context.Context, fr FileResult, it uploadItem)
 // taken. The sweep Lstats each render and stops after a run of
 // maxDeferredSuffixGap absent suffixes (a hand-deleted _2 doesn't hide a
 // live _3); only a regular file of the uploaded size is compared, against
-// the hash already in hand, so the card is not read again.
+// the hash already in hand, so the card is not read again. Each comparison
+// is a full BLAKE3 of the local file, so the sweep is bounded by
+// deferredSweepHashBudget bytes across all candidates: the first is always
+// checked (one large video may exceed the budget on its own), and once a
+// further check would overrun the budget the sweep stops with a WARN.
 func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath, wantHash string, wantSize int64) bool {
 	names := []string{it.vars.OriginalName}
 	if it.uploadName != "" && it.uploadName != it.vars.OriginalName {
 		names = append(names, it.uploadName)
 	}
+	var hashed int64
 	for _, name := range names {
 		misses := 0
-		for counter := 1; counter <= maxDeferredSuffix; counter++ {
+		for counter := 1; counter <= maxCollisionSuffix; counter++ {
 			if ctx.Err() != nil {
 				return false
 			}
@@ -537,6 +543,12 @@ func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath,
 			if !info.Mode().IsRegular() || info.Size() != wantSize {
 				continue
 			}
+			if budget := deferredSweepHashBudget.Load(); hashed > 0 && hashed+wantSize > budget {
+				slog.Warn("upload: stopped looking for an earlier deferred copy: hash budget spent; any copy not yet checked stays at its own name",
+					"local", localPath, "hashedBytes", hashed, "budgetBytes", budget, "next", prior)
+				return false
+			}
+			hashed += wantSize
 			if vr, err := Verify(prior, wantHash, WithContext(ctx)); err != nil || !vr.Verified {
 				slog.Debug("upload: the file at the deferred name does not verify against the uploaded BLAKE3; leaving it in place",
 					"path", prior, "err", err)
@@ -567,9 +579,21 @@ func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath,
 	return false
 }
 
-// maxDeferredSuffix bounds moveDeferredCopy's suffix sweep at the same
-// counter ResolveDestination's own collision loop stops at.
-const maxDeferredSuffix = 10000
+// deferredSweepHashBudget caps the bytes moveDeferredCopy hashes (full
+// BLAKE3 of each same-size candidate) for one file -- the same 2 GiB
+// ResolveDestination allows its own collision sweep (hashBudget). Atomic,
+// like the tray's diskUsageFunc seam, so a test's swap can never race a
+// read on another goroutine; tests shrink it with setDeferredSweepHashBudget.
+var deferredSweepHashBudget atomic.Int64
+
+func init() { deferredSweepHashBudget.Store(hashBudget) }
+
+// setDeferredSweepHashBudget swaps the budget and returns a func that
+// restores the previous one, for t.Cleanup.
+func setDeferredSweepHashBudget(n int64) (restore func()) {
+	prev := deferredSweepHashBudget.Swap(n)
+	return func() { deferredSweepHashBudget.Store(prev) }
+}
 
 // maxDeferredSuffixGap is how many consecutive absent suffixes end
 // moveDeferredCopy's sweep of one name.

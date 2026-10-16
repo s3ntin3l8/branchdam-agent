@@ -10,6 +10,9 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +28,16 @@ import (
 // TriggerSync/TriggerHookInstall/RevealHook/Paused/SetPaused are all
 // already safe to call concurrently from an HTTP handler goroutine (see
 // each method's own doc comment for its serialization mechanism).
+//
+// The window's ingest controls (POST /api/actions/ingest-start and
+// /api/actions/cancel-ingest) and its failed-rows list
+// (GET /api/queue/failed, POST /api/actions/queue-retry) go through the
+// same Runner: IngestNowVolumes/WatchDirs pick what "Ingest now" and
+// "Import from folder…" ingest exactly as the tray menu does, every
+// ingest still runs through TriggerIngest (and so behind Runner.gate,
+// AGENTS.md invariant 9), CancelIngest stops it at a file boundary, and
+// the failed-row methods wrap the queue store's own FailedRows/
+// ResetFailedNode/ResetFailed. This file never reimplements any of them.
 type ActionRunner interface {
 	TriggerIngest(ctx context.Context, cardPath string) IngestSummary
 	TriggerDrain(ctx context.Context) (DrainSummary, bool)
@@ -35,6 +48,14 @@ type ActionRunner interface {
 	RevealHook(id HookID) error
 	Paused() bool
 	SetPaused(v bool)
+	CancelIngest() bool
+	Busy() (cardPath string, since time.Time, busy bool)
+	GateHeld() bool
+	ConfigIncomplete() bool
+	IngestNowVolumes() []string
+	WatchDirs() []string
+	FailedQueueRows(ctx context.Context, limit int) ([]FailedQueueRow, error)
+	RetryFailedQueueRows(ctx context.Context, nodeUUID string) (QueueRetryCounts, error)
 }
 
 // UpdateChecker is the one-method subset of the self-update subsystem the
@@ -59,6 +80,28 @@ type UpdateChecker interface {
 type UpdateApplier interface {
 	StartApply() (status UpdateStatus, started bool)
 }
+
+// UpdateRollbacker is UpdateApplier's counterpart for restoring the
+// previous version from the window. StartRollback returns immediately
+// after acquiring the same idle gate (Runner.TryLockIdle) the tray menu's
+// "Roll back" holds, so a rollback can never swap binaries under an
+// in-flight ingest; the swap and the restart that follows it are observed
+// through UpdateStatus polling (Phase rolling-back, then restarting with
+// RolledBack set).
+type UpdateRollbacker interface {
+	StartRollback() (status UpdateStatus, started bool)
+}
+
+// drainPruneClickTimeout bounds an on-demand drain or prune pass, whether
+// a tray menu click or a window button started it -- the tray's own
+// background timer path (cmd/branchdam-agent/queueagent.go's
+// periodicPassTimeout) already bounds every automatic pass to the same
+// duration; a manual click went unbounded until a Hermes review finding
+// caught the inconsistency. The status API applies it too: its handlers
+// detach from the request context (context.WithoutCancel), so without a
+// deadline a wedged pass would hold drainMu (or Runner.gate, for prune)
+// indefinitely.
+const drainPruneClickTimeout = 2 * time.Minute
 
 // isLoopbackHost reports whether addr's host resolves to the loopback
 // interface. Used once, at route-registration time in Serve, to decide
@@ -172,6 +215,11 @@ func (s *StatusServer) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/actions/check-update", s.withAPIAuth(s.handleActionCheckUpdate))
 	mux.HandleFunc("POST /api/actions/apply-update", s.withAPIAuth(s.handleActionApplyUpdate))
 	mux.HandleFunc("POST /api/actions/pair", s.withAPIAuth(s.handleActionPair))
+	mux.HandleFunc("POST /api/actions/ingest-start", s.withAPIAuth(s.handleActionIngestStart))
+	mux.HandleFunc("POST /api/actions/cancel-ingest", s.withAPIAuth(s.handleActionCancelIngest))
+	mux.HandleFunc("GET /api/queue/failed", s.withAPIAuth(s.handleQueueFailed))
+	mux.HandleFunc("POST /api/actions/queue-retry", s.withAPIAuth(s.handleActionQueueRetry))
+	mux.HandleFunc("POST /api/actions/rollback-update", s.withAPIAuth(s.handleActionRollbackUpdate))
 }
 
 func (s *StatusServer) writeJSON(w http.ResponseWriter, status int, v any) {
@@ -473,7 +521,9 @@ func (s *StatusServer) handleActionDrain(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
 		return
 	}
-	summary, ran := s.Actions.TriggerDrain(context.WithoutCancel(r.Context()))
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), drainPruneClickTimeout)
+	defer cancel()
+	summary, ran := s.Actions.TriggerDrain(ctx)
 	s.writeJSON(w, http.StatusOK, newDrainActionResult(summary, ran))
 }
 
@@ -601,7 +651,9 @@ func (s *StatusServer) handleActionPrune(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
 		return
 	}
-	summary, ran := s.Actions.TriggerPrune(context.WithoutCancel(r.Context()))
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), drainPruneClickTimeout)
+	defer cancel()
+	summary, ran := s.Actions.TriggerPrune(ctx)
 	s.writeJSON(w, http.StatusOK, newPruneActionResult(summary, ran))
 }
 
@@ -838,4 +890,255 @@ func (s *StatusServer) handleActionPair(w http.ResponseWriter, r *http.Request) 
 		Server:  parsed.Server,
 		AgentID: parsed.Agent,
 	})
+}
+
+// ingestStartRequest is POST /api/actions/ingest-start's body. An empty
+// CardPath means "Ingest now": every card volume IngestNowVolumes finds,
+// exactly the tray menu item's selection. A non-empty CardPath is "Import
+// from folder…": that one folder, picked in the window.
+type ingestStartRequest struct {
+	CardPath string `json:"cardPath"`
+}
+
+// ingestStartResult reports whether a batch was started. Started=false is
+// not an HTTP error: paused, config incomplete, an ingest already running,
+// nothing to ingest, and a rejected folder all come back as 200 with Err
+// saying which, so the window can show it next to the button.
+type ingestStartResult struct {
+	Started   bool     `json:"started"`
+	CardPaths []string `json:"cardPaths,omitempty"`
+	Err       string   `json:"err,omitempty"`
+}
+
+// errIngestAlreadyRunning is ingest-start's refusal while an ingest (from
+// any path: detector, menu, or an earlier window click) is in flight.
+var errIngestAlreadyRunning = errors.New("an ingest is already running -- wait for it to finish or cancel it")
+
+// errGateHeld is ingest-start's refusal while something other than an
+// ingest -- a self-update download, apply or roll back -- holds the gate.
+var errGateHeld = errors.New("an update is in progress -- try again when it finishes")
+
+// errFolderPath is ingest-start's refusal for a folder path that is not
+// absolute or contains "..": the window's folder picker always returns a
+// clean absolute path, so anything else did not come from it.
+var errFolderPath = errors.New("pick the folder with Import from folder... (the path must be absolute, without \"..\")")
+
+// handleActionIngestStart starts an ingest batch and returns at once
+// (202): unlike POST /api/actions/ingest (synchronous, kept for scripted
+// callers), a card ingest runs for minutes and the window must stay
+// responsive -- it follows progress through GET /api/status, as it
+// already does for detector-started ingests. Every volume goes through
+// Runner.TriggerIngest, so the batch is serialized behind Runner.gate with
+// every other ingest and self-update (invariant 9) and honours the pause
+// gate; a manual ingest bypasses the IngestGate dialog and never
+// auto-ejects, the same as the tray menu's "Ingest now" and "Import from
+// folder…". A batch stops early when a volume's ingest reports Canceled
+// (POST /api/actions/cancel-ingest), so one cancel stops the batch.
+func (s *StatusServer) handleActionIngestStart(w http.ResponseWriter, r *http.Request) {
+	if s.Actions == nil {
+		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req ingestStartRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	refuse := func(err error) {
+		s.writeJSON(w, http.StatusOK, ingestStartResult{Err: err.Error()})
+	}
+	if s.Actions.Paused() {
+		refuse(errors.New("ingest is paused -- resume it first"))
+		return
+	}
+	if s.Actions.ConfigIncomplete() {
+		refuse(ErrConfigIncomplete)
+		return
+	}
+	if _, _, busy := s.Actions.Busy(); busy || s.ingestBatch.Load() {
+		refuse(errIngestAlreadyRunning)
+		return
+	}
+	// Busy covers only an ingest; a self-update holds the same gate
+	// (TryLockIdle) for its whole download-and-apply window. Accepting a
+	// batch then would block it on the gate behind the update, whose
+	// restart drops it -- so refuse up front, like the update path does.
+	if s.Actions.GateHeld() {
+		refuse(errGateHeld)
+		return
+	}
+
+	var paths []string
+	if req.CardPath == "" {
+		paths = s.Actions.IngestNowVolumes()
+		if len(paths) == 0 {
+			refuse(errors.New(ingestNowEmptyMessage(s.Actions.WatchDirs())))
+			return
+		}
+	} else {
+		// The path comes from the request: accept only what the window's
+		// native folder picker produces -- an absolute path with no ".."
+		// -- before it reaches the filesystem.
+		if !filepath.IsAbs(req.CardPath) || strings.Contains(req.CardPath, "..") {
+			refuse(errFolderPath)
+			return
+		}
+		cardPath := filepath.Clean(req.CardPath)
+		// Same refusal as the tray menu's "Import from folder…"
+		// (handleImportFolder): a watched cardRoots parent holds every
+		// mounted disk, the NAS and the edit SSD included.
+		for _, dir := range s.Actions.WatchDirs() {
+			if samePath(dir, cardPath) {
+				refuse(errors.New("already ingesting this path -- pick a card or folder inside it"))
+				return
+			}
+		}
+		info, err := os.Stat(cardPath)
+		if err != nil || !info.IsDir() {
+			refuse(fmt.Errorf("%s is not a folder that can be read", cardPath))
+			return
+		}
+		paths = []string{cardPath}
+	}
+
+	if !s.ingestBatch.CompareAndSwap(false, true) {
+		refuse(errIngestAlreadyRunning)
+		return
+	}
+	// Detached from the request like every other action handler (a closed
+	// window must not stop a card mid-copy); the operator's way to stop it
+	// is CancelIngest.
+	ctx := context.WithoutCancel(r.Context())
+	go func() {
+		defer s.ingestBatch.Store(false)
+		for _, p := range paths {
+			if s.Actions.TriggerIngest(ctx, p).Canceled {
+				return
+			}
+		}
+	}()
+	s.writeJSON(w, http.StatusAccepted, ingestStartResult{Started: true, CardPaths: paths})
+}
+
+type cancelIngestActionResult struct {
+	// Canceled is false when no ingest was in flight to stop.
+	Canceled bool `json:"canceled"`
+}
+
+// handleActionCancelIngest asks the in-flight ingest to stop after its
+// current file (Runner.CancelIngest). It takes no gate and returns at
+// once; the stop shows up in GET /api/status as ingestCancelRequested and
+// then as lastIngest.canceled.
+func (s *StatusServer) handleActionCancelIngest(w http.ResponseWriter, _ *http.Request) {
+	if s.Actions == nil {
+		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, cancelIngestActionResult{Canceled: s.Actions.CancelIngest()})
+}
+
+// failedRowsDefaultLimit caps GET /api/queue/failed when the caller names
+// no limit: a list the window renders in full, while Counts().Failed (in
+// GET /api/status) still reports the true total.
+const failedRowsDefaultLimit = 200
+
+type queueFailedResult struct {
+	// Configured is false when no offline queue is wired; Rows is then
+	// empty, which is not an error.
+	Configured bool             `json:"configured"`
+	Rows       []FailedQueueRow `json:"rows"`
+}
+
+// handleQueueFailed lists FAILED queue rows for the window's failed-rows
+// list -- read-only, but behind the same origin and token checks as
+// every other /api/* route, since a row carries local file paths.
+// ?limit=N overrides failedRowsDefaultLimit.
+func (s *StatusServer) handleQueueFailed(w http.ResponseWriter, r *http.Request) {
+	if s.Actions == nil {
+		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
+		return
+	}
+	limit := failedRowsDefaultLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			http.Error(w, "limit must be a positive whole number", http.StatusBadRequest)
+			return
+		}
+		limit = n
+	}
+	rows, err := s.Actions.FailedQueueRows(r.Context(), limit)
+	switch {
+	case errors.Is(err, ErrQueueNotConfigured):
+		s.writeJSON(w, http.StatusOK, queueFailedResult{Rows: []FailedQueueRow{}})
+		return
+	case errors.Is(err, ErrQueueRetryUnsupported):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	case err != nil:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if rows == nil {
+		rows = []FailedQueueRow{}
+	}
+	s.writeJSON(w, http.StatusOK, queueFailedResult{Configured: true, Rows: rows})
+}
+
+// queueRetryRequest is POST /api/actions/queue-retry's body: exactly one
+// of NodeUUID (retry that row) or All (retry every FAILED row, what
+// `queue-drain -retry-failed` does). An empty body is rejected rather
+// than read as "all", so a malformed per-row click can never re-queue
+// every failed row.
+type queueRetryRequest struct {
+	NodeUUID string `json:"nodeUuid"`
+	All      bool   `json:"all"`
+}
+
+// handleActionQueueRetry re-queues FAILED rows through
+// Runner.RetryFailedQueueRows (queue.Store.ResetFailedNode/ResetFailed).
+// It does not start a drain: the next timer pass, or the window's "Drain
+// now", retries them -- under the pause and metered-connection gates
+// TriggerDrain already applies.
+func (s *StatusServer) handleActionQueueRetry(w http.ResponseWriter, r *http.Request) {
+	if s.Actions == nil {
+		http.Error(w, "actions not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req queueRetryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if (req.NodeUUID == "") == !req.All {
+		http.Error(w, "exactly one of nodeUuid or all is required", http.StatusBadRequest)
+		return
+	}
+	counts, err := s.Actions.RetryFailedQueueRows(r.Context(), req.NodeUUID)
+	switch {
+	case errors.Is(err, ErrQueueNotConfigured), errors.Is(err, ErrQueueRetryUnsupported):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	case err != nil:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, counts)
+}
+
+type rollbackUpdateActionResult struct {
+	Started bool         `json:"started"`
+	Status  UpdateStatus `json:"status"`
+}
+
+// handleActionRollbackUpdate starts a rollback in the background, the
+// same shape as handleActionApplyUpdate: the window polls /api/status for
+// the rolling-back and restarting phases (or Err).
+func (s *StatusServer) handleActionRollbackUpdate(w http.ResponseWriter, _ *http.Request) {
+	if s.UpdateRollback == nil {
+		http.Error(w, "self-update rollback not configured", http.StatusServiceUnavailable)
+		return
+	}
+	status, started := s.UpdateRollback.StartRollback()
+	s.writeJSON(w, http.StatusOK, rollbackUpdateActionResult{Started: started, Status: status})
 }

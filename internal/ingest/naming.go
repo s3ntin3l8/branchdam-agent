@@ -175,6 +175,11 @@ const collisionSampleSize = 256 * 1024
 // 4 MiB files.
 var hashBudget int64 = 2 * 1024 * 1024 * 1024
 
+// maxCollisionSuffix is the highest collision counter any destination
+// sweep tries (_2 .. _10000): ResolveDestination, findNextFreeSuffix, the
+// offline resolver and upload mode's deferred-copy sweep all stop there.
+const maxCollisionSuffix = 10000
+
 // fastHashFile opens p and calculates its FastHash with size using the
 // canonical 2MiB per-region sample. Used for the final-destination match
 // (the operator-visible dedupe decision in ResolveDestination).
@@ -366,7 +371,7 @@ func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath s
 	)
 	hashesDone := int64(0)
 
-	for counter := 1; counter <= 10000; counter++ {
+	for counter := 1; counter <= maxCollisionSuffix; counter++ {
 		suffix := ""
 		if counter > 1 {
 			suffix = fmt.Sprintf("_%d", counter)
@@ -437,7 +442,7 @@ func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath s
 	}
 
 	// Fallback path: either the loop ran out of counters (counter >
-	// 10000) or the FastHash budget was exhausted mid-sweep. In both
+	// maxCollisionSuffix) or the FastHash budget was exhausted mid-sweep. In both
 	// cases the budget is no longer protecting us from taking an
 	// already-occupied suffix, so use an Lstat-only walk to find the
 	// next free slot. Returning a RelPath that already exists on disk
@@ -451,11 +456,11 @@ func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath s
 // FastHash) starting at counter=1 and returns the first slot whose
 // destination does not exist in any root. Bypassed under normal
 // operation by the FastHash loop above; reached only when hashBudget
-// has been exhausted or the 10000-iteration cap is hit. AlreadyIngested
+// has been exhausted or the maxCollisionSuffix cap is hit. AlreadyIngested
 // is always false here -- the budget was spent without confirming
 // byte-identity, so we cannot claim a duplicate-match.
 func findNextFreeSuffix(roots []string, tpl string, vars TemplateVars) DestinationResolution {
-	for counter := 1; counter <= 10000; counter++ {
+	for counter := 1; counter <= maxCollisionSuffix; counter++ {
 		suffix := ""
 		if counter > 1 {
 			suffix = fmt.Sprintf("_%d", counter)
@@ -477,7 +482,7 @@ func findNextFreeSuffix(roots []string, tpl string, vars TemplateVars) Destinati
 			return DestinationResolution{RelPath: rel, Suffix: suffix, AlreadyIngested: false}
 		}
 	}
-	// Worst case: every counter 1..10000 is occupied. Return the
+	// Worst case: every counter 1..maxCollisionSuffix is occupied. Return the
 	// unsuffixed render so the caller surfaces a clear downstream
 	// failure rather than silently picking something arbitrary.
 	rel := RenderPath(tpl, vars)

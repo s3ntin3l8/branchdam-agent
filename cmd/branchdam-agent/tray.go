@@ -412,13 +412,11 @@ func runTrayCmd(args []string) int {
 	// own timer goroutine, never the menu loop. One pass shortly after
 	// startup (startPeriodic has no leading tick) so the server's Storage
 	// Health card is populated without waiting a full interval; that first
-	// pass is skipped like any other while paused or not configured.
+	// pass is skipped like any other while paused or not configured, and
+	// waits (bounded) for the first disk-usage reading -- see
+	// runStartupTelemetryPass.
 	registerTelemetry(runner, client, cfg)
-	go func() {
-		tctx, cancel := context.WithTimeout(ctx, telemetryTimeout)
-		defer cancel()
-		runTelemetryPass(tctx, runner)
-	}()
+	go runStartupTelemetryPass(ctx, runner, startupUsageWait)
 	go startPeriodic(ctx, telemetryInterval, telemetryTimeout, func(pctx context.Context) {
 		runTelemetryPass(pctx, runner)
 	})
@@ -559,12 +557,14 @@ func runTrayCmd(args []string) int {
 	updater := newSelfUpdateAgent(cfg, version)
 
 	statusSrv := tray.NewStatusServer(cfg.Tray.StatusAddrOrDefault(), func() tray.Status {
-		return runner.Status(updater.Status())
+		return runner.Status(updater.StatusWithRollback())
 	}, settings.Snapshot, version)
 	statusSrv.Actions = runner
 	statusSrv.Settings = settings
 	statusSrv.Updates = updater
-	statusSrv.UpdateApply = &trayUpdateApplier{runner: runner, updater: updater}
+	updateApplier := &trayUpdateApplier{runner: runner, updater: updater}
+	statusSrv.UpdateApply = updateApplier
+	statusSrv.UpdateRollback = updateApplier
 	statusSrv.PairConfirm = trayConfirm(dialog)
 	statusSrv.PairNotify = trayNotifyOS(dialog)
 

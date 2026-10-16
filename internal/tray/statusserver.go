@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -72,6 +73,9 @@ type StatusServer struct {
 	// nil-tolerant like Updates so older/test-only StatusServers still serve
 	// the rest of the API unchanged.
 	UpdateApply UpdateApplier
+	// UpdateRollback starts a rollback to the previous version
+	// asynchronously -- UpdateApply's counterpart, equally nil-tolerant.
+	UpdateRollback UpdateRollbacker
 	// PairConfirm shows the operator confirmation dialog for deep-link
 	// pair requests (POST /api/actions/pair with source "deeplink"). Nil
 	// refuses such requests (fail closed).
@@ -85,6 +89,12 @@ type StatusServer struct {
 	Token string
 
 	srv *http.Server
+
+	// ingestBatch is set while a window-started ingest batch
+	// (POST /api/actions/ingest-start) is running, so a second click
+	// reports "already running" instead of queuing another batch behind
+	// Runner.gate.
+	ingestBatch atomic.Bool
 }
 
 // NewStatusServer builds a StatusServer bound to addr (or its loopback-only
@@ -190,8 +200,13 @@ func loopbackHostHeader(hostHeader, port string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// statusServerShutdownTimeout bounds Serve's graceful shutdown once ctx is
+// cancelled: in-flight requests get this long to finish before Serve
+// returns Shutdown's deadline error.
+const statusServerShutdownTimeout = 5 * time.Second
+
 // Serve runs the status server on ln and blocks until ctx is cancelled,
-// then shuts down gracefully. Returns nil on a clean ctx-triggered
+// then shuts down gracefully (bounded by statusServerShutdownTimeout). Returns nil on a clean ctx-triggered
 // shutdown, matching net/http.Server.Shutdown's own contract.
 func (s *StatusServer) Serve(ctx context.Context, ln net.Listener) error {
 	_, port, err := net.SplitHostPort(ln.Addr().String())
@@ -210,7 +225,7 @@ func (s *StatusServer) Serve(ctx context.Context, ln net.Listener) error {
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), statusServerShutdownTimeout)
 		defer cancel()
 		if err := s.srv.Shutdown(shutdownCtx); err != nil {
 			return err

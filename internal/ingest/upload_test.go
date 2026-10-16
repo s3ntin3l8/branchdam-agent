@@ -650,6 +650,73 @@ func TestUploadStreamReinsertMovesADeferredCopyPastAGap(t *testing.T) {
 	noAgentTemps(t, localRoot)
 }
 
+// TestUploadStreamDeferredSweepStopsWhenHashBudgetSpent: every same-size
+// candidate costs a full BLAKE3, so the sweep stops with a WARN once
+// deferredSweepHashBudget would be overrun, leaving later copies where
+// they are; with the default budget the same layout finds and moves the
+// copy.
+func TestUploadStreamDeferredSweepStopsWhenHashBudgetSpent(t *testing.T) {
+	const content = "card bytes"
+	const decoy = "0123456789" // same size as content, different bytes
+	run := func(t *testing.T) (deferred, server string, logs *bytes.Buffer) {
+		t.Helper()
+		dir := t.TempDir()
+		cardRoot := filepath.Join(dir, "card")
+		localRoot := filepath.Join(dir, "local")
+		writeUploadCardFile(t, cardRoot, "IMG_0001.JPG", content, time.Time{})
+		day := filepath.Join(localRoot, "2026")
+		if err := os.MkdirAll(day, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"IMG_0001.JPG", "IMG_0001_2.JPG", "IMG_0001_3.JPG"} {
+			if err := os.WriteFile(filepath.Join(day, name), []byte(decoy), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		deferred = filepath.Join(day, "IMG_0001_4.JPG")
+		if err := os.WriteFile(deferred, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		logs = captureSlog(t)
+		u := &recordingUploader{relPath: func(branchdam.UploadOptions) string { return "2026/IMG_0001_7.JPG" }}
+		res, err := newUploadEngine(u, localRoot).IngestCard(context.Background(), cardRoot)
+		if err != nil {
+			t.Fatalf("IngestCard: %v", err)
+		}
+		if fr := res.Files[0]; fr.Err != nil {
+			t.Fatalf("file error: %v", fr.Err)
+		}
+		server = filepath.Join(day, "IMG_0001_7.JPG")
+		if b, err := os.ReadFile(server); err != nil || string(b) != content {
+			t.Errorf("copy at the server's path = %q, %v; want %q", b, err, content)
+		}
+		noAgentTemps(t, localRoot)
+		return deferred, server, logs
+	}
+
+	t.Run("budget spent", func(t *testing.T) {
+		t.Cleanup(setDeferredSweepHashBudget(2 * int64(len(content)))) // two candidates' worth
+
+		deferred, _, logs := run(t)
+		if b, err := os.ReadFile(deferred); err != nil || string(b) != content {
+			t.Errorf("deferred copy past the budget = %q, %v; want it left in place", b, err)
+		}
+		if !strings.Contains(logs.String(), `"level":"WARN"`) || !strings.Contains(logs.String(), "hash budget spent") {
+			t.Errorf("no budget WARN logged; logs:\n%s", logs.String())
+		}
+	})
+
+	t.Run("default budget", func(t *testing.T) {
+		deferred, _, logs := run(t)
+		if _, err := os.Stat(deferred); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("deferred copy still in place (err %v); want it moved", err)
+		}
+		if strings.Contains(logs.String(), "hash budget spent") {
+			t.Errorf("budget WARN logged with the default budget; logs:\n%s", logs.String())
+		}
+	})
+}
+
 // TestUploadStreamReinsertWarnsForEveryDeferredCopyLeftBehind: when the
 // server's path is already taken, no deferred copy can move there; each
 // verified copy found is named in its own WARN rather than the sweep

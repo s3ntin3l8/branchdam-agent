@@ -59,7 +59,8 @@ func (r *Runner) SetTelemetry(sender TelemetrySender, agentID, clientVersion str
 // (scratchUsageSnapshot): statfs on an unreachable share can hang with no
 // context to bound it, and a hung call here would stall every later tick.
 // Before the first background reading lands the snapshot reports zero
-// capacity, which the server treats as "no verdict", not "disk full".
+// capacity, which the server treats as "no verdict", not "disk full";
+// the startup pass waits for that reading first (WaitScratchUsage).
 //
 // The mirror/render-cache/proxy/prunable breakdown fields stay zero: the
 // agent does not walk localEditRoot to size them, and a made-up number
@@ -119,6 +120,52 @@ func (r *Runner) TriggerTelemetry(ctx context.Context) (ran bool, err error) {
 		return true, err
 	}
 	return true, nil
+}
+
+// scratchUsagePollInterval is how often WaitScratchUsage looks for the
+// background reading.
+const scratchUsagePollInterval = 25 * time.Millisecond
+
+// WaitScratchUsage kicks the background disk-usage refresh for the current
+// localEditRoot and waits until a reading for that path has landed (a
+// statfs answer, or its error), for at most timeout or until ctx is done.
+// It reports whether a reading landed. The wait is always bounded: statfs
+// on an unreachable share can hang with no context to cancel it, and the
+// hung call is left to finish on its own goroutine. With no localEditRoot
+// there is nothing to read and it returns false at once.
+//
+// The tray's startup telemetry pass calls it first, so the server (which
+// keeps only the latest snapshot) gets capacity from the first pass
+// rather than the cold cache's zeros whenever statfs answers promptly.
+func (r *Runner) WaitScratchUsage(ctx context.Context, timeout time.Duration) bool {
+	r.mu.Lock()
+	dir := r.scratchDir
+	r.mu.Unlock()
+	if dir == "" {
+		return false
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(scratchUsagePollInterval)
+	defer tick.Stop()
+	for {
+		// scratchUsageSnapshot starts a refresh when none is in flight
+		// for dir and the cached reading is missing or stale.
+		r.scratchUsageSnapshot(dir)
+		r.scratchUsageMu.Lock()
+		landed := r.scratchUsageDir == dir && !r.scratchUsageAt.IsZero()
+		r.scratchUsageMu.Unlock()
+		if landed {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-tick.C:
+		}
+	}
 }
 
 func clampInt64(v uint64) int64 {

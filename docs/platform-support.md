@@ -221,7 +221,9 @@ additive and display-only (the tooltip reads it); the drain gate never does.
 (`internal/tray/statusapi.go`), built for the native app UI (Track 3 of the distribution/UX plan):
 `GET /api/status`, `GET`/`POST /api/settings`, `POST /api/settings/integration-path`,
 `POST /api/settings/integration-rewrites`, `POST /api/settings/path-mappings`, and
-`POST /api/actions/{ingest,drain,prune,sync,hook-install,hook-reveal,pause,test-connection,check-update,apply-update}`.
+`POST /api/actions/{ingest,drain,prune,sync,hook-install,hook-reveal,pause,test-connection,check-update,apply-update}`,
+plus the window-action routes `POST /api/actions/{ingest-start,cancel-ingest,queue-retry,rollback-update}`
+and `GET /api/queue/failed` (see the window actions note below).
 `POST /api/settings`'s value
 selects the setter by JSON type -- boolean, number, string, or array of strings -- so a free-text
 field (server URL, agent ID, the two ingest roots, ...) is reachable non-interactively via
@@ -983,11 +985,26 @@ A live-refresh via TUF is the proper long-term answer but is out of scope here.
   `cmd/branchdam-agent-ui`. It now exercises `GET /api/status`, `GET`/`POST /api/settings`,
   `POST /api/settings/integration-{path,rewrites}` (the Settings section, Track 3d), and
   `POST /api/actions/{sync,hook-install,hook-reveal,test-connection,check-update,apply-update}`
-  (the Integrations/hooks, server, and self-update buttons, Track 3e); `POST
-  /api/actions/{ingest,drain,prune,pause}` remain unexercised by any real UI -- those four stay
-  tray-only, with no equivalent button in this window. None of it has run on real
-  Windows/macOS hardware yet -- see the hardware checklist. Known limitations, by design rather
-  than oversight: `POST
+  (the Integrations/hooks, server, and self-update buttons, Track 3e). The window also carries
+  every tray-menu action (audit item A12): **Storage & ingest** has "Ingest now" and "Import from
+  folder…" (`POST /api/actions/ingest-start`, which returns 202 at once and runs each volume
+  through `Runner.TriggerIngest` -- behind `Runner.gate`, honouring the pause gate, never
+  auto-ejecting), "Cancel ingest" (`POST /api/actions/cancel-ingest` -> `Runner.CancelIngest`,
+  which stops the walk before the next file: the file in flight still finishes its copy, verify
+  and registration, the card is not ejected, and one cancel ends a multi-card batch), and
+  Pause/Resume (`POST /api/actions/pause`); the Queue section has "Drain now"/"Prune now" (`POST
+  /api/actions/{drain,prune}`, now bounded server-side by the same 2-minute
+  `drainPruneClickTimeout` the tray menu uses) and a failed-rows list (`GET /api/queue/failed`)
+  with a per-row "Retry" and "Retry all" (`POST /api/actions/queue-retry`, `queue.Store`'s
+  `ResetFailedNode`/`ResetFailed` -- the same reset `queue-drain -retry-failed` runs; the rows
+  drain on the next pass); the Self-update section has "Roll back to vX" (`POST
+  /api/actions/rollback-update`, taking the same idle gate as the tray menu's rollback and
+  restarting through the same `restarting` phase as a window apply, with `RolledBack` set).
+  Drain, prune and roll back ask for confirmation through a native dialog (`App.ConfirmAction`)
+  whenever `tray.confirmDestructive` is on, like their tray menu items. `POST
+  /api/actions/ingest` itself is unused by the window and kept for scripted callers. None of it
+  has run on real Windows/macOS hardware yet -- see the hardware checklist. Known limitations,
+  by design rather than oversight: `POST
   /api/actions/ingest` runs synchronously to completion with no server-side timeout (a real card
   ingest can take minutes; the caller should not assume a fast response); there is no rate limiting
   beyond the token check itself; and the only way to revoke a leaked token is a tray restart (no
@@ -1225,7 +1242,8 @@ appropriate:
     bypasses the dialog.
 12. **Settings — M5 checkboxes (#81, #83, #84, #87), now in the Wails window:** open the native
     window and toggle "Require DCIM folder" (insert a USB stick with no DCIM folder -- confirm not
-    detected), "Auto-eject after successful ingest" (insert a card -- confirm a successful ingest
+    detected; toggle it while a detected card is still ingesting -- confirm that ingest runs to the
+    end and the field says it applies when the ingest finishes), "Auto-eject after successful ingest" (insert a card -- confirm a successful ingest
     unmounts/ejects the volume and surfaces an OS notification; induce an ingest error -- confirm
     the card is NOT ejected on partial ingest), and "Pause upload on metered connection" (toggle
     on, then on a real hotspot/iPhone-tethered network confirm queue drain is skipped and the local
@@ -1233,7 +1251,8 @@ appropriate:
     tray restart (all three already flow through `Runner.Reconfigure`'s existing hot-reload path,
     unaffected by issue #211's `confirmDestructive`-specific fix). "Pause ingest" is unrelated and
     unmoved -- it's a session-only, top-level tray item (never in the Advanced submenu, not
-    persisted, no window equivalent by design): toggle it on, insert a card -- confirm no ingest
+    persisted; the window's Storage & ingest "Pause"/"Resume" button drives the same session-only
+    gate, see item 16): toggle it on, insert a card -- confirm no ingest
     starts AND no dialog appears; toggle off, confirm the card inserted while paused (still
     mounted) is now offered through the same dialog / allow-list, without a re-insert, and that
     a card already handled before the pause is not offered again).
@@ -1277,6 +1296,20 @@ appropriate:
     `/proc/mounts` -- no direct udev interaction), visible in
     `%XDG_STATE_HOME%/branchdam-agent/agent.log`, and the card's mount point
     is gone from `mount`.
+16. **Window actions (audit A12):** in the window's Storage & ingest page, with a card mounted:
+    "Ingest now" starts the ingest (the busy line and progress appear within one poll) and
+    "Ingest now" / "Import from folder…" are disabled while it runs; "Cancel ingest" shows
+    "stopping after the current file", the ingest ends with the last file fully copied and
+    registered (check the server), the summary reads "Canceled", and the card is NOT ejected even
+    with `autoEject: true`; ingesting the card again skips what was already done and finishes it.
+    "Pause" greys out "Ingest now" and holds card insertions instead of ingesting them; "Resume"
+    restores "Ingest now" and offers any card inserted while paused that is still mounted (item 12),
+    and the tray menu's own pause item tracks the window. With `offline.queueDbPath` set and a row forced to
+    FAILED (e.g. a conflicting file at its archive path), the Queue section lists it with its
+    error; fix the cause, click "Retry", then "Drain now" -- the row clears. With
+    `tray.confirmDestructive` on, "Drain now", "Prune now" and "Roll back to vX" each ask first.
+    After an update, "Roll back to vX" (disabled while an ingest runs) restores the previous
+    version and the tray restarts on it; the log says "rolled back to", not "updated to".
 
 All M5 items above are also pinned by tests that run on Linux CI --
 `internal/ingest/offline_test.go::TestIngestFileOfflineDedupTimeout` for
