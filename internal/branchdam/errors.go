@@ -103,11 +103,12 @@ var transientCodes = map[string]bool{
 	"RATE_LIMITED":                 true,
 }
 
-// transientBodyHints are server messages (handleAgentRebase in branchDAM's
-// internal/httpapi/routes.go, plus its async drainer's node-not-found
-// wording) that arrive with a status this package would otherwise call
-// fatal but describe a condition that clears by itself. Matched
-// case-insensitively against the raw body, before the status rules.
+// transientBodyHints are messages from handleAgentRebase (branchDAM's
+// internal/httpapi/routes.go) and the auth middleware that arrive as 400
+// but describe a condition that clears by itself. Matched
+// case-insensitively against the raw body, before the status rules, so
+// each entry must be specific to its 400 source: a generic phrase here
+// would override a genuine fatal refusal that happened to contain it.
 var transientBodyHints = []string{
 	// 400: Tier-3 target the server cannot see yet (archive mount lag).
 	"no file exists there yet",
@@ -116,7 +117,6 @@ var transientBodyHints = []string{
 	"checking whether rebase target",
 	// 400 from the auth middleware: the request body was cut off in transit.
 	"failed to read request body",
-	"media node not found",
 }
 
 // fatalBodyHints are server messages that name an explicit, permanent

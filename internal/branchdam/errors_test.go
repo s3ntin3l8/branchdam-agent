@@ -219,3 +219,17 @@ func TestHTTPErrorCode(t *testing.T) {
 		}
 	}
 }
+
+// TestHTTPErrorClassificationNoGenericTransientHint: a genuine fatal
+// refusal (a problem+json 404 from handleAgentRebase) stays fatal even when
+// its detail happens to contain "not found" wording -- only the specific,
+// 400-sourced phrases in transientBodyHints may override the status.
+func TestHTTPErrorClassificationNoGenericTransientHint(t *testing.T) {
+	e := &HTTPError{
+		StatusCode: 404,
+		Body:       `{"title":"Not Found","status":404,"detail":"media node not found"}`,
+	}
+	if got := e.Classification(); got != ClassificationFatal {
+		t.Fatalf("Classification() = %v, want ClassificationFatal", got)
+	}
+}
