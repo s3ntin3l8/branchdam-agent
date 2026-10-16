@@ -44,7 +44,8 @@ tracked as their own node" behavior.
 ### Online ingest rows (`origin = ONLINE`)
 
 When `offline.queueDbPath` is set, online ingest (`IngestCard`, the tray's normal path and plain
-`ingest`) also writes one row per media file, with `origin = ONLINE`. By then both copies are
+`ingest`) also writes one row per media file, with `origin = ONLINE` -- in dual-write mode; upload
+mode (`-upload`) writes none, see "Upload mode on a metered connection" below. By then both copies are
 written and verified and `EVENT_NODE_CREATED` already targets the Tier-3 archive path, so the row
 starts with `archive_copy = DONE` and `rebase = SKIPPED`; only `node_created` is left. The row is
 inserted before the POST (ordering invariant 1 below applies to online ingest too). If the POST is
@@ -304,8 +305,53 @@ Workstations connected over LAN or VPN can bypass local NAS storage mounts (`Arc
 branchdam-agent ingest -config config.yaml -card /media/$USER/UNTITLED -upload
 ```
 
-- **Online HTTP Streaming (`-upload`)**: Streams raw octets directly to `POST /api/v1/agent/upload`. The server persists the file into `TIER3_MASTER_ARCHIVE`, creates `media_nodes`, extracts metadata, and returns the canonical `relativePath` and BLAKE3 hash. The agent writes the local NVMe edit copy at `LocalEditRoot/relativePath` and cryptographically verifies the BLAKE3 checksum.
+- **Online HTTP Streaming (`-upload`)**: Per file, the agent reads the card **once** into a
+  temp file under `LocalEditRoot` (`.<name>.branchdam-agent-tmp`), computing BLAKE3 and FastHash
+  as the bytes pass, and cache-defeating-verifies that copy. It then uploads the verified local
+  copy -- never a second read of the card -- to `POST /api/v1/agent/upload` with `X-Blake3-Hash`
+  and `Content-Length` set. The server checks the stored bytes against that hash (400
+  `CHECKSUM_MISMATCH` otherwise) and answers a file it already has with `200 DEDUPLICATED`
+  without receiving it. The agent refuses a returned `relativePath` that is empty, absolute,
+  contains a backslash or has any `..` element, then renames the temp copy to
+  `LocalEditRoot/relativePath`. An identical file already at that name (an earlier pass) is
+  kept; a different one is never overwritten -- the file fails with an error naming it.
+  - **No total timeout.** Uploads use their own HTTP client: connect and TLS handshake are
+    bounded at 30s, the wait for the response after the body is sent at 5 minutes, and the body
+    itself by an idle watchdog (`branchdam.DefaultUploadIdleTimeout`, 2 minutes without the
+    transport taking a byte). The JSON calls keep their 30s `DefaultTimeout`.
+  - **Signing.** A body up to 16 MiB (`branchdam.UploadSignMaxBytes`) carries
+    `X-Timestamp`/`X-Nonce`/`X-Signature` like every other agent request. A larger one is sent
+    with the API key only: the signature covers the whole body, which would have to be held in
+    memory, and the server buffers a signed body the same way and refuses one over
+    `agent.signedMaxBodyBytes` (16 MiB by default) -- which is why its default
+    `agent.skipSignaturePaths` exempts `/api/v1/agent/upload`.
+  - **Sidecars** (`.xmp`, `.srt`) are uploaded after every other file of the card, carrying their
+    master's camera model, capture time and final (possibly server-suffixed) stem, so the server's
+    naming template puts them next to the master under the master's name -- the server pairs
+    XMP and DJI telemetry sidecars only within one directory and stem. The server accepts every
+    extension on this endpoint; sent with its own metadata, a sidecar used to land in an
+    `unknown_camera` folder, detached. A sidecar whose master failed in the same pass is held
+    back with an error; one with no master on the card is uploaded on its own.
+
 - **Offline Field Ingest (`-offline`)**: Used when disconnected from the server. Writes the local NVMe copy immediately and persists queue state to `queue.db`. On reconnect, `queue-drain` submits `EVENT_NODE_CREATED`, copies files to the archive, and rebases paths.
+
+### Upload mode on a metered connection
+
+With `ingest.pauseUploadOnMetered: true` and a metered (or unprobeable) link, the upload and its
+sidecars are skipped: the verified local copy is placed under the agent's own `pathTemplate`
+(collision-suffixed like dual-write mode) and the file is reported **Deferred**, so the summary
+is not OK and the card is not ejected. Re-inserting the card -- still metered or not -- finds that
+copy (identical bytes at the planned name) and reuses it rather than failing on the existing
+file; on an unmetered link it then uploads.
+
+Deferred uploads are **not** written to `queue.db`, so nothing retries them until the card is
+re-inserted. Upload mode writes no queue rows at all: the server registers the node in the
+upload request itself, so there is no `EVENT_NODE_CREATED` to persist, and the `origin = ONLINE`
+rows above belong to dual-write online ingest only. Queueing a deferred upload needs a new queue
+stage -- an upload-pending row (a third `origin`) that the drain uploads from the local copy, with
+the server-assigned node UUID filled in afterwards -- and the schema has no such stage: every row
+needs its `node_uuid` at insert time, and `Drain` has no upload phase. Until then, the tray
+notification and the `ingest` summary say to re-insert the card.
 
 ## Soft-Delete Trash Buffer Lifecycle
 

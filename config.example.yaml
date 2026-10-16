@@ -64,7 +64,9 @@ ingest:
   # to disable the check entirely.
   # preflightTimeoutSecs: 5
   # Defer upload-stream bytes and queue drain HTTP calls when on a metered
-  # or hotspot connection (e.g. cellular, tethered). Default false.
+  # or hotspot connection (e.g. cellular, tethered). A deferred upload keeps
+  # its verified local copy but is not queued: re-insert the card on an
+  # unmetered connection to upload it. Default false.
   # pauseUploadOnMetered: false
   # Automatically unmount and eject the camera card volume after a successful
   # verified ingest. Only a card volume directly under one of cardRoots that

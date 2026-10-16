@@ -15,6 +15,9 @@ type ProgressPhase string
 const (
 	ProgressPhaseCopying   ProgressPhase = "copying"
 	ProgressPhaseVerifying ProgressPhase = "verifying"
+	// ProgressPhaseUploading is uploadStream mode's third pass: the
+	// verified local edit copy streaming to the server.
+	ProgressPhaseUploading ProgressPhase = "uploading"
 )
 
 // ProgressEvent is one byte-progress sample from a file's copy or verify
