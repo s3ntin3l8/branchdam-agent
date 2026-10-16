@@ -119,8 +119,8 @@ interval to make this astronomically unlikely without depending on anything the 
 **5. A re-run resumes a file only when its queue row still describes it.** `ingestFileOffline`
 looks up the newest row for the file's source path and treats it as a resume (no copy, no new
 `NodeUUID`, reported as *resumed* rather than *queued*) only when the row's `size_bytes` and
-`mtime_unix` match the file on the card. Rows are never deleted and cameras restart their file
-counters after a format, so a second card mounted at the same path presents the same source paths
+`mtime_unix` match the file on the card. Finished rows are kept for months (see "Row garbage
+collection") and cameras restart their file counters after a format, so a second card mounted at the same path presents the same source paths
 with different files; those are ingested as new work under their own suffixed destination. The
 size and mtime come from the stat the ingest already does -- the card is still read once, by the
 copy (invariant 1). A file that ends up neither copied, resumed nor deliberately skipped counts as
@@ -135,14 +135,21 @@ next-attempt timestamps that turn repeated calls (`queue-drain -watch`, a cron j
 own `offline.drainIntervalSecs` timer, issue #32) into backoff rather than a tight retry loop.
 
 `node_created` retries indefinitely, and so does `archive_copy` for every failure that can clear by
-itself (network down, NAS unmounted). `archive_copy` turns terminal `FAILED` only for the two cases
-retrying can never fix -- a different file at the archive path, or a local copy that no longer
-matches its queued hash -- and both show up in the queue's failed count with the reason in
-`archive_copy_last_error`. `rebase` also has a terminal `FAILED` state, reached only when the
-server's rebase handler itself refused the request for a reason that won't change on its own
-(`internal/branchdam.HTTPError`'s `Classification()`: a problem+json 400/404/409/410/413/422 such
-as an `ARCHIVED` node, a `fullHash` conflict or a read-only non-Tier-3 target, or a recognised fatal
-`code`); 401/403/408/429, every 5xx and transport errors stay `PENDING` with backoff.
+itself (network down, NAS unmounted). `archive_copy` turns terminal `FAILED` only for the cases
+retrying can't fix -- a different file at the archive path, a local copy that no longer matches its
+queued hash (edited in place before or during the copy: the copy hashes the bytes as it reads them,
+so the edited bytes never reach the archive name), or a placed copy that reads back from the
+archive with the wrong hash on two attempts in a row (once is retried: a flaky mount can do that;
+twice means the archive isn't storing the bytes it is given) -- and all show up in the queue's
+failed count with the reason in `archive_copy_last_error`. `rebase` also has a terminal `FAILED`
+state, reached only when the server's rebase handler itself refused the request for a reason that
+won't change on its own (`internal/branchdam.HTTPError`'s `Classification()`: a problem+json
+400/404/409/410/413/422 such as an `ARCHIVED` node, a `fullHash` conflict or a read-only non-Tier-3
+target, or a recognised fatal `code`); 401/403/408/429, every 5xx and transport errors stay
+`PENDING` with backoff. `node_created` has no terminal state: even a registration the server
+rejects permanently (a 4xx it will never accept) stays `PENDING` and is retried with backoff, so
+such a row is found by its growing `node_created_attempts` and the server's reason in
+`node_created_last_error`.
 
 What the operator does depends on which step failed:
 
@@ -162,6 +169,32 @@ completes, `CopyToArchive`'s `open local copy` fails every single pass forever, 
 5-minute cap and staying there indefinitely. `local_path` in `queue.db` is the thing to check if a
 row's `archive_copy_attempts` climbs without bound. If the card still holds the file, ingesting it
 again restores the local copy (see ordering invariant #2's resume note).
+
+## Archive-copy parity with online ingest
+
+The archive copy `Drain` places is held to the same standard as an online `DualWrite` master: it
+gets the local copy's mtime (which ingest set to the card file's own) before the rename, so the
+Tier-3 file carries the capture-side mtime rather than the moment the NAS came back, and the
+archive directory is fsynced after the rename so the new name survives a power cut. The offline
+local copy's rename into place gets the same directory fsync. A failed `Chtimes` or directory fsync
+is logged at WARN and does not fail the step: the bytes are in place and verified.
+
+## Row garbage collection
+
+`Drain` sweeps `queue.db` for rows nothing needs any more, at most once a day per process
+(`queue.GCInterval`; the sweep stats each candidate's local copy, which is fine daily and wasteful
+on every 5-second tick). A row is deleted only when it **finished successfully** (terminal and not
+`FAILED`), was **created more than 90 days ago** (`queue.GCRetention`), and its **local edit copy is
+gone**. So:
+
+- pending rows (Drain's work list) and `FAILED` rows (waiting for an operator or `queue-drain
+  -retry-failed`) are never collected, however old;
+- a row whose local copy still exists is kept: it is what `prune` checks before deleting that copy,
+  and what marks the name as the agent's own for later offline ingests. With `prune` disabled,
+  rows are therefore collected only after the operator deletes the local copies themselves --
+  deliberately conservative;
+- the 90 days protect resume detection: a card ingested offline and re-inserted within that window
+  is still recognised as a resume even if its local copies were pruned.
 
 ## A note on the archive-copy temp file and concurrent scans
 

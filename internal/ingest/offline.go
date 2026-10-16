@@ -221,8 +221,8 @@ func (e *Engine) IngestCardOffline(ctx context.Context, cardRoot string) (Offlin
 //     restart resuming a previously-interrupted run over the same card. If
 //     found, trust it (the row only exists because step 5 below already
 //     completed on the earlier run) and return without touching the
-//     filesystem again. Queue rows are never deleted and cameras restart
-//     their file counters after a format, so a path match alone is not
+//     filesystem again. Finished queue rows are kept for months
+//     (queue.GCRetention) and cameras restart their file counters after a format, so a path match alone is not
 //     evidence of a resume: a row whose size or mtime differs belongs to a
 //     different file that used to live at this path, and the current file
 //     is ingested as new work (it gets its own row, NodeUUID and, via
