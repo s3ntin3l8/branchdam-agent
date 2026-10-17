@@ -120,10 +120,14 @@ func TestLuminarSyncerLiveEmitsToRealServer(t *testing.T) {
 	mux.HandleFunc("/api/v1/agent/events", func(w http.ResponseWriter, r *http.Request) {
 		var env branchdam.EventEnvelope
 		if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
-			t.Fatalf("decode envelope: %v", err)
+			t.Errorf("decode envelope: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		if err := json.Unmarshal([]byte(env.Payload), &gotPayload); err != nil {
-			t.Fatalf("unmarshal payload: %v", err)
+			t.Errorf("unmarshal payload: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)

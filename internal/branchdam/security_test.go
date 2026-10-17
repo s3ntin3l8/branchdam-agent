@@ -145,7 +145,9 @@ func TestClientReplaySignatureIncludesBody(t *testing.T) {
 		var err error
 		gotBody, err = io.ReadAll(r.Body)
 		if err != nil {
-			t.Fatalf("read body: %v", err)
+			t.Errorf("read body: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"eventId":"evt-1"}`))

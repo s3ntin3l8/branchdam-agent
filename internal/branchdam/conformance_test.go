@@ -134,7 +134,9 @@ func TestRequestDTOsOmitUnsetOptionalFields(t *testing.T) {
 			TimelineID: "timeline-1", MediaFilePath: `D:\Videos\unresolved.mov`,
 		}, []string{"mediaFilePath", "timelineId"}},
 		// A timeline has no optional field: every key is sent even when its
-		// value is zero.
+		// value is zero -- a zero evidenceJson encodes as `null`, but the key
+		// is still present. internal/resolve/snapshot.go always populates all
+		// five fields, so this zero case only pins the encoding.
 		{"ResolveSnapshotTimeline", ResolveSnapshotTimeline{},
 			[]string{"displayName", "evidenceJson", "filePath", "nodeUuid", "timelineId"}},
 		{"NodeStatusRequest", NodeStatusRequest{NodeUUIDs: []string{"u"}}, []string{"nodeUuids"}},
