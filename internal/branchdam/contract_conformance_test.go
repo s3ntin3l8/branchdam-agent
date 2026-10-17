@@ -256,9 +256,8 @@ func TestContractSourceMatchesContractVersion(t *testing.T) {
 	if len(fields) < 2 || fields[0] != "branchdam" {
 		t.Fatalf("SOURCE = %q, want \"branchdam <sha> <subject>\"", b)
 	}
-	pin := strings.TrimPrefix(ContractVersion, "branchdam@")
-	if pin == ContractVersion || len(pin) < 7 || !strings.HasPrefix(fields[1], pin) {
-		t.Errorf("ContractVersion = %q but SOURCE records branchdam %s; run make contract-sync", ContractVersion, fields[1])
+	if want := "branchdam@" + fields[1]; ContractVersion != want {
+		t.Errorf("ContractVersion = %q, want %q (SOURCE's commit); run make contract-sync", ContractVersion, want)
 	}
 }
 
