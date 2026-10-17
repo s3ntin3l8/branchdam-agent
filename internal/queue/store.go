@@ -887,6 +887,7 @@ func (s *Store) CollectGarbageIfDue(ctx context.Context, now time.Time) (int, er
 //     Drain's work list, and FAILED rows wait for an operator (or
 //     `queue-drain -retry-failed`) -- neither is ever collected;
 //   - it was created more than retention before now;
+//   - no sidecar row still waiting on its upload links to it as its master;
 //   - its local edit copy is gone (Lstat says it does not exist). While the
 //     copy exists the row is what prune checks before deleting it, and what
 //     marks the name as the agent's own; a stat error other than "not
@@ -897,7 +898,11 @@ func (s *Store) CollectGarbageIfDue(ctx context.Context, now time.Time) (int, er
 // finished-and-old predicate, so a row changed in between is kept.
 func (s *Store) CollectGarbage(ctx context.Context, now time.Time, retention time.Duration) (int, error) {
 	cutoff := now.Add(-retention).Unix()
-	finishedOld := `(` + terminalSQL + `) AND NOT ` + failedSQL + ` AND created_at_unix < ?`
+	// A finished master is also kept while a sidecar row still waiting on its
+	// upload links to it: Drain names that sidecar after the master's
+	// server-assigned name, which only the master's row remembers.
+	finishedOld := `(` + terminalSQL + `) AND NOT ` + failedSQL + ` AND created_at_unix < ?` +
+		` AND node_uuid NOT IN (SELECT master_node_uuid FROM queue_nodes WHERE master_node_uuid <> '' AND upload_status = 'PENDING')`
 
 	rows, err := s.db.QueryContext(ctx, `SELECT id, local_path FROM queue_nodes WHERE `+finishedOld+` ORDER BY id ASC`, cutoff)
 	if err != nil {

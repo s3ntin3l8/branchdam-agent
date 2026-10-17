@@ -306,3 +306,39 @@ func TestInsertPendingRejectsAnUnknownOrigin(t *testing.T) {
 		t.Fatal("InsertPending accepted an unknown origin")
 	}
 }
+
+// TestCollectGarbageKeepsAMasterWhileASidecarStillWaitsOnIt: Drain names the
+// sidecar after the master's server-assigned path, which only the master's
+// (finished, old) row remembers.
+func TestCollectGarbageKeepsAMasterWhileASidecarStillWaitsOnIt(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	master := uploadRecord("master", "a.jpg")
+	master.LocalPath = filepath.Join(t.TempDir(), "gone.jpg") // never created
+	if err := s.InsertPending(ctx, master); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MarkUploadDone(ctx, "master", "srv", "2026/a.jpg", master.LocalPath); err != nil {
+		t.Fatal(err)
+	}
+	side := uploadRecord("side", "a.xmp")
+	side.Kind = KindSidecar
+	side.MasterNodeUUID = "master"
+	side.LocalPath = filepath.Join(t.TempDir(), "gone.xmp")
+	if err := s.InsertPending(ctx, side); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE queue_nodes SET created_at_unix = ?`, time.Now().Add(-400*24*time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+
+	if n, err := s.CollectGarbage(ctx, time.Now(), GCRetention); err != nil || n != 0 {
+		t.Fatalf("CollectGarbage = %d, err = %v, want the master kept for its pending sidecar", n, err)
+	}
+	if _, err := s.MarkUploadDone(ctx, "side", "srv-2", "2026/a.xmp", side.LocalPath); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.CollectGarbage(ctx, time.Now(), GCRetention); err != nil || n != 2 {
+		t.Fatalf("CollectGarbage after the sidecar finished = %d, err = %v, want both collected", n, err)
+	}
+}

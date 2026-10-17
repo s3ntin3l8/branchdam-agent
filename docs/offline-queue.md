@@ -446,7 +446,9 @@ one step, `upload_status` (`PENDING` → `DONE` \| `FAILED`); `node_created`, `a
 - **Prune and GC.** `prune` only considers `OFFLINE` rows (an allowlist, `upload-ingest=` in its
   report counts the skips): an `UPLOAD` row's local copy is the only copy off the card until the
   upload is confirmed, and afterwards still not an offline ingest's to delete. A row with a
-  `PENDING` upload is not terminal, so the daily GC never collects it, however old.
+  `PENDING` upload is not terminal, so the daily GC never collects it, however old -- and a finished
+  master row is kept while a sidecar row still waiting on its upload links to it, since only that
+  row remembers the server-assigned name the sidecar is uploaded under.
 - **Counts.** A `PENDING` upload counts as "waiting to upload" (`AwaitingUpload`, `PendingBytes`); a
   `FAILED` one counts in `Failed` and appears in the tray's failed-rows list with step `upload`.
 
