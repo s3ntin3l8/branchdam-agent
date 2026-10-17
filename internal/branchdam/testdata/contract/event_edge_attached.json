@@ -1,14 +1,13 @@
 {
   "sourceNodeUuid": "11111111-1111-4111-8111-111111111111",
   "targetNodeUuid": "22222222-2222-4222-8222-222222222222",
-  "sourceNodeId": 10,
-  "targetNodeId": 11,
   "relationshipType": "PROXY_OF",
   "confidence": 0.95,
   "tier": 2,
-  "resolver": "stem-match",
+  "resolver": "filename_stem",
   "evidenceJson": {
-    "stem": "A001_C002"
-  },
-  "reviewState": "(rejected when an agent sends it)"
+    "filename_stem": "a001_c002",
+    "same_capture_day": true,
+    "same_camera_model": "FX3"
+  }
 }
