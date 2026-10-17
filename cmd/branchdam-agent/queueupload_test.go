@@ -56,16 +56,20 @@ func uploadQueueFixture(t *testing.T, store *queue.Store, content string) (node,
 // uploadServer is a stub branchDAM: handshake plus /upload, which echoes the
 // body's BLAKE3 and places the node under 2026/2026-08-29/.
 func uploadServer(t *testing.T, uploads *[]http.Header) *httptest.Server {
-	return slowUploadServer(t, uploads, 0)
+	return slowUploadServer(t, uploads, 0, nil)
 }
 
-// slowUploadServer is uploadServer whose /upload takes delay to answer.
-func slowUploadServer(t *testing.T, uploads *[]http.Header, delay time.Duration) *httptest.Server {
+// slowUploadServer is uploadServer whose /upload calls onUpload (if set) as
+// soon as the request arrives and then takes delay to answer.
+func slowUploadServer(t *testing.T, uploads *[]http.Header, delay time.Duration, onUpload func()) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/v1/agent/upload":
+			if onUpload != nil {
+				onUpload()
+			}
 			body, _ := io.ReadAll(r.Body)
 			time.Sleep(delay)
 			*uploads = append(*uploads, r.Header.Clone())
@@ -86,19 +90,20 @@ func slowUploadServer(t *testing.T, uploads *[]http.Header, delay time.Duration)
 // TestQueueDrainerUploadsAQueuedDeferral: the tray's drainer (the real
 // client, a stub server) uploads a queued deferral with no card in sight,
 // carries the counts into the DrainSummary, and is not cut off when the pass
-// context's deadline expires mid-upload -- nor does the closing bookkeeping
-// trip over that spent deadline.
+// context ends mid-upload -- nor does the closing bookkeeping trip over that
+// spent context.
 func TestQueueDrainerUploadsAQueuedDeferral(t *testing.T) {
 	store := openTestQueueStore(t)
 	node, local, hash := uploadQueueFixture(t, store, "queued bytes")
 	var uploads []http.Header
-	// The upload takes longer than the pass context's deadline: the quick
-	// phases finish inside it, then it expires while the upload streams.
-	srv := slowUploadServer(t, &uploads, 400*time.Millisecond)
+	// The pass context ends the moment the upload request arrives (not on a
+	// timer, so the quick phases before it cannot race a deadline): the
+	// upload must carry on, and the closing bookkeeping must not use it.
+	pass, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := slowUploadServer(t, &uploads, 100*time.Millisecond, cancel)
 
 	d := &queueDrainer{client: branchdam.New(srv.URL, "test-key"), store: store, agentID: "agent-01", uploadCtx: context.Background()}
-	pass, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
 
 	summary, err := d.Drain(pass)
 	if err != nil {

@@ -242,11 +242,11 @@ func TestPendingUploadLookups(t *testing.T) {
 	if _, ok, _ := s.PendingUploadByLocalPath(ctx, "/local/missing"); ok {
 		t.Error("PendingUploadByLocalPath matched a missing path")
 	}
-	if r, ok, err := s.PendingUploadBySource(ctx, "card/IMG_1.CR3", strings.ToUpper(rec.FullHash)); err != nil || !ok || r.NodeUUID != "up-1" {
-		t.Errorf("PendingUploadBySource (hash case-insensitive) = %+v ok=%v err=%v", r, ok, err)
+	if r, ok, err := s.UnfinishedUploadBySource(ctx, "card/IMG_1.CR3", strings.ToUpper(rec.FullHash)); err != nil || !ok || r.NodeUUID != "up-1" {
+		t.Errorf("UnfinishedUploadBySource (hash case-insensitive) = %+v ok=%v err=%v", r, ok, err)
 	}
-	if _, ok, _ := s.PendingUploadBySource(ctx, "card/IMG_1.CR3", "different"); ok {
-		t.Error("PendingUploadBySource matched a different hash")
+	if _, ok, _ := s.UnfinishedUploadBySource(ctx, "card/IMG_1.CR3", "different"); ok {
+		t.Error("UnfinishedUploadBySource matched a different hash")
 	}
 
 	if _, err := s.MarkUploadDone(ctx, "up-1", "srv", "2026/x", "/local/2026/IMG_1.CR3"); err != nil {
@@ -255,7 +255,7 @@ func TestPendingUploadLookups(t *testing.T) {
 	if _, ok, _ := s.PendingUploadByLocalPath(ctx, "/local/2026/IMG_1.CR3"); ok {
 		t.Error("a finished upload still reads as pending (by local path)")
 	}
-	if _, ok, _ := s.PendingUploadBySource(ctx, "card/IMG_1.CR3", rec.FullHash); ok {
+	if _, ok, _ := s.UnfinishedUploadBySource(ctx, "card/IMG_1.CR3", rec.FullHash); ok {
 		t.Error("a finished upload still reads as pending (by source)")
 	}
 }
@@ -340,5 +340,43 @@ func TestCollectGarbageKeepsAMasterWhileASidecarStillWaitsOnIt(t *testing.T) {
 	}
 	if n, err := s.CollectGarbage(ctx, time.Now(), GCRetention); err != nil || n != 2 {
 		t.Fatalf("CollectGarbage after the sidecar finished = %d, err = %v, want both collected", n, err)
+	}
+}
+
+// TestUnfinishedUploadLookupsAndDoneIncludeAFailedRow: a row Drain gave up on
+// (FAILED) is still resolved by a card re-insert that uploads the file
+// itself -- found by path or by source+hash, and closable -- while ingest's
+// own "already queued" check still only sees pending rows.
+func TestUnfinishedUploadLookupsAndDoneIncludeAFailedRow(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	rec := uploadRecord("up-1", "card/IMG_1.CR3")
+	rec.LocalPath = "/local/2026/IMG_1.CR3"
+	if err := s.InsertPending(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkUploadFailed(ctx, "up-1", "local copy unavailable"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok, _ := s.PendingUploadByLocalPath(ctx, rec.LocalPath); ok {
+		t.Error("PendingUploadByLocalPath matched a FAILED row")
+	}
+	if r, ok, err := s.UnfinishedUploadByLocalPath(ctx, rec.LocalPath); err != nil || !ok || r.NodeUUID != "up-1" {
+		t.Errorf("UnfinishedUploadByLocalPath = %+v ok=%v err=%v, want the FAILED row", r, ok, err)
+	}
+	if r, ok, err := s.UnfinishedUploadBySource(ctx, "card/IMG_1.CR3", rec.FullHash); err != nil || !ok || r.NodeUUID != "up-1" {
+		t.Errorf("UnfinishedUploadBySource = %+v ok=%v err=%v, want the FAILED row", r, ok, err)
+	}
+
+	if ok, err := s.MarkUploadDone(ctx, "up-1", "srv", "2026/x", "/local/2026/IMG_1.CR3"); err != nil || !ok {
+		t.Fatalf("MarkUploadDone on a FAILED row: ok=%v err=%v", ok, err)
+	}
+	r, _, _ := s.ByNodeUUID(ctx, "up-1")
+	if r.UploadStatus != StatusDone || r.Failed() || r.UploadLastError != "" {
+		t.Errorf("row = %+v, want DONE and no longer failed", r)
+	}
+	if _, ok, _ := s.UnfinishedUploadBySource(ctx, "card/IMG_1.CR3", rec.FullHash); ok {
+		t.Error("a DONE row still reads as unfinished")
 	}
 }

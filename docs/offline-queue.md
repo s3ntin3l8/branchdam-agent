@@ -441,7 +441,8 @@ one step, `upload_status` (`PENDING` → `DONE` \| `FAILED`); `node_created`, `a
 - **Re-insert races.** A card re-insert can upload the same file while Drain streams it (Drain holds
   no ingest gate, so a long upload never blocks a card). Closing a row is a compare-and-set on
   `upload_status = PENDING` (`MarkUploadDone`): whichever finishes second leaves the local copy
-  alone, and Drain re-reads the row before moving anything. The server deduplicates by hash, so a
+  alone, and Drain re-reads the row before moving anything. A re-insert that uploads the file also
+  closes a row Drain had given up on (`FAILED`), so it does not stay in the failed list. The server deduplicates by hash, so a
   double upload cannot corrupt bytes.
 - **Prune and GC.** `prune` only considers `OFFLINE` rows (an allowlist, `upload-ingest=` in its
   report counts the skips): an `UPLOAD` row's local copy is the only copy off the card until the

@@ -690,15 +690,16 @@ func (s *Store) MarkUploadFailed(ctx context.Context, nodeUUID, errMsg string) e
 // MarkUploadDone records a confirmed upload: the server's node UUID and
 // relative path, and the path the local copy actually ended up at
 // (localPath: the moved path, or the unchanged one when the move did not
-// happen). It is a compare-and-set on upload_status = PENDING and reports
-// whether it applied: Drain and a card re-insert's reconcile can both finish
-// the same row, and only the first may record it (the second must leave the
-// local copy alone).
+// happen). It is a compare-and-set on an unfinished upload (PENDING, or
+// FAILED: a card re-insert that uploads the file itself also resolves a row
+// Drain gave up on) and reports whether it applied: Drain and a re-insert's
+// reconcile can both finish the same row, and only the first may record it
+// (the second must leave the local copy alone).
 func (s *Store) MarkUploadDone(ctx context.Context, nodeUUID, serverNodeUUID, serverRelativePath, localPath string) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE queue_nodes SET upload_status = ?, server_node_uuid = ?, server_relative_path = ?, local_path = ?, upload_last_error = ''
-WHERE node_uuid = ? AND upload_status = ?`,
-		StatusDone, serverNodeUUID, serverRelativePath, localPath, nodeUUID, StatusPending)
+WHERE node_uuid = ? AND upload_status IN (?, ?)`,
+		StatusDone, serverNodeUUID, serverRelativePath, localPath, nodeUUID, StatusPending, StatusFailed)
 	if err != nil {
 		return false, fmt.Errorf("queue: mark upload done for %s: %w", nodeUUID, err)
 	}
@@ -709,6 +710,50 @@ WHERE node_uuid = ? AND upload_status = ?`,
 	return n > 0, nil
 }
 
+// uploadRowBy returns the newest OriginUpload row matching where (a clause
+// over local_path/source_path/full_hash) whose upload_status is one of
+// statuses.
+func (s *Store) uploadRowBy(ctx context.Context, what, where string, args []any, statuses ...string) (Record, bool, error) {
+	in := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
+	args = append(args, OriginUpload)
+	for _, st := range statuses {
+		args = append(args, st)
+	}
+	row := s.db.QueryRowContext(ctx,
+		selectCols+" WHERE "+where+" AND origin = ? AND upload_status IN ("+in+") ORDER BY id DESC LIMIT 1", args...)
+	rec, err := scanRecord(row)
+	if err == sql.ErrNoRows { //nolint:errorlint // database/sql sentinel, never wrapped
+		return Record{}, false, nil
+	}
+	if err != nil {
+		return Record{}, false, fmt.Errorf("queue: lookup upload by %s: %w", what, err)
+	}
+	return rec, true, nil
+}
+
+// PendingUploadByLocalPath returns the OriginUpload row still waiting on its
+// upload whose local copy is at localPath, or ok=false. Ingest uses it to
+// recognise a deferral it already queued.
+func (s *Store) PendingUploadByLocalPath(ctx context.Context, localPath string) (Record, bool, error) {
+	return s.uploadRowBy(ctx, "local_path "+localPath, "local_path = ?", []any{localPath}, StatusPending)
+}
+
+// UnfinishedUploadByLocalPath is PendingUploadByLocalPath that also matches a
+// FAILED row: a card re-insert that uploads the file itself closes either.
+func (s *Store) UnfinishedUploadByLocalPath(ctx context.Context, localPath string) (Record, bool, error) {
+	return s.uploadRowBy(ctx, "local_path "+localPath, "local_path = ?", []any{localPath}, StatusPending, StatusFailed)
+}
+
+// UnfinishedUploadBySource returns the OriginUpload row, PENDING or FAILED,
+// that was queued for the card file at sourcePath with content fullHash
+// (BLAKE3, case-insensitive), or ok=false. A card re-insert that uploads the
+// file itself uses it to find the row it just made redundant, whether or not
+// it moved the deferred copy -- and a FAILED row too, which otherwise would
+// stay in the failed list forever, its copy uploaded but nothing to dismiss.
+func (s *Store) UnfinishedUploadBySource(ctx context.Context, sourcePath, fullHash string) (Record, bool, error) {
+	return s.uploadRowBy(ctx, "source_path "+sourcePath, "source_path = ? AND full_hash = ? COLLATE NOCASE", []any{sourcePath, fullHash}, StatusPending, StatusFailed)
+}
+
 // SetUploadLocalPath corrects the local_path of an UPLOAD row after a move
 // that was recorded ahead of the rename did not happen.
 func (s *Store) SetUploadLocalPath(ctx context.Context, nodeUUID, localPath string) error {
@@ -717,42 +762,6 @@ func (s *Store) SetUploadLocalPath(ctx context.Context, nodeUUID, localPath stri
 		return fmt.Errorf("queue: set upload local_path for %s: %w", nodeUUID, err)
 	}
 	return nil
-}
-
-// PendingUploadByLocalPath returns the OriginUpload row still waiting on its
-// upload whose local copy is at localPath, or ok=false. A card re-insert uses
-// it to find the row its own upload (or a duplicate deferral) concerns.
-func (s *Store) PendingUploadByLocalPath(ctx context.Context, localPath string) (Record, bool, error) {
-	row := s.db.QueryRowContext(ctx,
-		selectCols+" WHERE local_path = ? AND origin = ? AND upload_status = ? ORDER BY id DESC LIMIT 1",
-		localPath, OriginUpload, StatusPending)
-	rec, err := scanRecord(row)
-	if err == sql.ErrNoRows { //nolint:errorlint // database/sql sentinel, never wrapped
-		return Record{}, false, nil
-	}
-	if err != nil {
-		return Record{}, false, fmt.Errorf("queue: lookup pending upload by local_path %s: %w", localPath, err)
-	}
-	return rec, true, nil
-}
-
-// PendingUploadBySource returns the OriginUpload row still waiting on its
-// upload that was queued for the card file at sourcePath with content
-// fullHash (BLAKE3, case-insensitive), or ok=false. A card re-insert that
-// uploads the file itself uses it to find the row it just made redundant,
-// whether or not it moved the deferred copy.
-func (s *Store) PendingUploadBySource(ctx context.Context, sourcePath, fullHash string) (Record, bool, error) {
-	row := s.db.QueryRowContext(ctx,
-		selectCols+" WHERE source_path = ? AND full_hash = ? COLLATE NOCASE AND origin = ? AND upload_status = ? ORDER BY id DESC LIMIT 1",
-		sourcePath, fullHash, OriginUpload, StatusPending)
-	rec, err := scanRecord(row)
-	if err == sql.ErrNoRows { //nolint:errorlint // database/sql sentinel, never wrapped
-		return Record{}, false, nil
-	}
-	if err != nil {
-		return Record{}, false, fmt.Errorf("queue: lookup pending upload by source_path %s: %w", sourcePath, err)
-	}
-	return rec, true, nil
 }
 
 // ResetCounts reports how many FAILED steps ResetFailed put back to

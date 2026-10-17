@@ -444,9 +444,11 @@ func TestDrainUploadGateHoldsUploadsOnAMeteredLink(t *testing.T) {
 	}
 }
 
-// TestDrainUploadIsNotCutOffByTheShortPassDeadline: the pass context's
-// deadline (the tray's is two minutes) must not cancel a long upload when an
-// upload context is supplied -- and does without one.
+// TestDrainUploadIsNotCutOffByTheShortPassDeadline: the pass context ending
+// (the tray's deadline is two minutes) must not cancel a long upload when an
+// upload context is supplied -- and does without one. The pass context is
+// cancelled at the moment the upload starts, not by a timer, so the quick
+// phases before it can never race the deadline on a loaded machine.
 func TestDrainUploadIsNotCutOffByTheShortPassDeadline(t *testing.T) {
 	setup := func(t *testing.T) (*queue.Store, string) {
 		dir := t.TempDir()
@@ -458,9 +460,9 @@ func TestDrainUploadIsNotCutOffByTheShortPassDeadline(t *testing.T) {
 
 	t.Run("with an upload context", func(t *testing.T) {
 		store, node := setup(t)
-		pass, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		pass, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		client := &drainUploadClient{slow: 200 * time.Millisecond}
+		client := &drainUploadClient{slow: 100 * time.Millisecond, beforeRead: func(branchdam.UploadOptions) { cancel() }}
 		stats, err := Drain(pass, client, store, "agent-1", nil, WithUploadContext(context.Background()))
 		if err != nil {
 			t.Fatalf("Drain: %v (the closing bookkeeping must not use the spent pass context)", err)
@@ -471,9 +473,9 @@ func TestDrainUploadIsNotCutOffByTheShortPassDeadline(t *testing.T) {
 	})
 	t.Run("without one the pass deadline applies", func(t *testing.T) {
 		store, node := setup(t)
-		pass, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		pass, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		client := &drainUploadClient{slow: 200 * time.Millisecond}
+		client := &drainUploadClient{slow: 100 * time.Millisecond, beforeRead: func(branchdam.UploadOptions) { cancel() }}
 		_, _ = Drain(pass, client, store, "agent-1", nil)
 		r := rowByNode(t, store, node)
 		if r.UploadStatus != queue.StatusPending || r.UploadAttempts != 0 {
@@ -739,5 +741,34 @@ func TestMeteredDeferralOfACopyAnotherRowOwnsStaysDeferred(t *testing.T) {
 	}
 	if n := len(allRows(t, store)); n != 1 {
 		t.Errorf("rows = %d, want only the owner's", n)
+	}
+}
+
+// TestReinsertUploadClosesAFailedRow: a row Drain gave up on (the local copy
+// was edited, so the baseline no longer matched) is resolved when a card
+// re-insert uploads the file itself, instead of staying in the failed list
+// with nothing to dismiss it.
+func TestReinsertUploadClosesAFailedRow(t *testing.T) {
+	dir := t.TempDir()
+	card, localRoot := filepath.Join(dir, "card"), filepath.Join(dir, "local")
+	writeUploadCardFile(t, card, "IMG_0001.JPG", "queued bytes", time.Time{})
+	store, _ := openUploadQueue(t)
+	e := meteredQueueEngine(t, localRoot, store)
+	node := ingestOne(t, e, card)[0].UploadQueueID
+	if err := store.MarkUploadFailed(context.Background(), node, "local copy changed since it was queued"); err != nil {
+		t.Fatal(err)
+	}
+
+	e.Uploader = &recordingUploader{}
+	e.IsMetered = func() (bool, error) { return false, nil }
+	if fr := ingestOne(t, e, card)[0]; fr.Err != nil || fr.Queued || fr.Deferred {
+		t.Fatalf("re-insert result = %+v, want a plain upload", fr)
+	}
+	r := rowByNode(t, store, node)
+	if r.UploadStatus != queue.StatusDone || r.Failed() || r.ServerNodeUUID != "node-1" {
+		t.Fatalf("row = %+v, want the FAILED row closed by the re-insert's upload", r)
+	}
+	if failed, _ := store.FailedRows(context.Background(), 0); len(failed) != 0 {
+		t.Errorf("failed list = %+v, want it empty", failed)
 	}
 }

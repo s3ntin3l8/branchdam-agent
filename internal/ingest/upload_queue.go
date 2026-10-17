@@ -47,9 +47,13 @@ func (e *Engine) queueDeferredUpload(ctx context.Context, fr FileResult, it uplo
 		return markUploadQueued(fr, rec.NodeUUID)
 	}
 
-	if other, found, err := e.Queue.ByLocalPath(durable, fr.LocalPath); err == nil && found && other.Origin != queue.OriginUpload {
-		// Another row (an offline or online ingest) owns this copy; a drained
-		// upload would move it out from under that row.
+	// Another row (an offline or online ingest) may own this copy, and a
+	// drained upload would move it out from under that row. Fail closed: a
+	// lookup error leaves the file deferred, like the lookup above.
+	if other, found, err := e.Queue.ByLocalPath(durable, fr.LocalPath); err != nil {
+		slog.Warn("upload: could not check whether another queue row owns the local copy; leaving the file deferred", "path", fr.LocalPath, "err", err)
+		return fr
+	} else if found && other.Origin != queue.OriginUpload {
 		slog.Warn("upload: the local copy belongs to another queue row; leaving the file deferred", "path", fr.LocalPath, "node", other.NodeUUID)
 		return fr
 	}
@@ -147,10 +151,10 @@ func (e *Engine) reconcileQueuedUpload(ctx context.Context, it uploadItem, w Wri
 		err   error
 	)
 	if movedFrom != "" {
-		rec, found, err = e.Queue.PendingUploadByLocalPath(durable, movedFrom)
+		rec, found, err = e.Queue.UnfinishedUploadByLocalPath(durable, movedFrom)
 	}
 	if err == nil && !found {
-		rec, found, err = e.Queue.PendingUploadBySource(durable, it.srcPath, w.FullHash)
+		rec, found, err = e.Queue.UnfinishedUploadBySource(durable, it.srcPath, w.FullHash)
 	}
 	if err != nil {
 		slog.Warn("upload: could not look up the queued upload this re-insert finished", "path", it.srcPath, "err", err)
@@ -246,6 +250,10 @@ func drainUploadOne(uctx context.Context, up uploadDrainer, store *queue.Store, 
 		}
 	}
 
+	// The baseline is the size and mtime recorded at enqueue, in whole
+	// seconds: a cheap tripwire for an edited or replaced copy, not the
+	// integrity guarantee. A same-size rewrite inside one second slips past
+	// it and is caught by the server's check of the BLAKE3 the upload sends.
 	info, err := os.Stat(r.LocalPath)
 	if err != nil {
 		fail(fmt.Sprintf("local copy unavailable: %v", err))
