@@ -1,9 +1,11 @@
 package ingest
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -286,40 +288,83 @@ func itoa(n int) string {
 // hashBudget cap), not in unbounded O(N^2) I/O. File size 4 MiB matches
 // the issue's quoted worst case ("10000 × 2 reads × 4 MiB = 80 TB"),
 // ensuring FastHash's 6 MiB read window is fully exercised on each
-// call. With 500 such collisions the unoptimized implementation reads
-// ~6 GiB and takes many seconds; the budget-bounded implementation
-// reads at most ~768 KiB × 500 = ~375 MiB and completes in ~1s. The
-// 8s allowance accounts for race-detector overhead (the test runs with
-// `-race` via `make test`) and CI SSD variability; the *budget* is the
-// hashBudget constant in naming.go, the time figure is a soft target.
+// call.
+//
+// The assertion is on bytes read, counted through the hashReader seam
+// in naming.go -- the quantity hashBudget actually bounds -- not on
+// wall-clock time, which flaked on slow Windows CI runners (issue #328).
+// Two passes over the same fixture:
+//   - default hashBudget: the sweep completes inside the budget and
+//     must read no more than one full-sample comparison plus one
+//     collision-sample comparison per suffixed counter (~750 MiB for
+//     500 collisions; the unoptimized loop read ~4 GiB);
+//   - shrunken hashBudget (exhausted ~100 counters in): the loop must
+//     stop hashing at the cap and still hand back the next free slot
+//     via the Lstat-only fallback.
 func TestResolveDestinationCollisionLoopBudget(t *testing.T) {
 	dir := t.TempDir()
 	archive := filepath.Join(dir, "archive")
 	const (
 		n         = 500
 		sizeBytes = 4 * 1024 * 1024
+		// Mirror ResolveDestination's per-comparison accounting.
+		fullBytesPerIter      = int64(hashing.FastHashSampleSize) * 3 * 2
+		collisionBytesPerIter = int64(collisionSampleSize) * 3 * 2
 	)
 	src := populateCollidingFixture(t, archive, n, sizeBytes)
+
+	var bytesRead atomic.Int64
+	origReader := hashReader
+	hashReader = func(f *os.File) io.ReaderAt { return countingReaderAt{f, &bytesRead} }
+	t.Cleanup(func() { hashReader = origReader })
 
 	vars := TemplateVars{
 		CapturedAt:   time.Now(),
 		CameraModel:  "ILCE-7M4",
 		OriginalName: "DSC_0001.JPG",
 	}
-	start := time.Now()
-	res := ResolveDestination([]string{archive}, "{original_name}", vars, src, "")
-	elapsed := time.Since(start)
-
-	if res.AlreadyIngested {
-		t.Fatalf("expected a fresh collision slot, got AlreadyIngested (suffix=%q)", res.Suffix)
-	}
 	wantSuffix := suffixForCounter(n + 1)
-	if res.Suffix != wantSuffix {
-		t.Errorf("suffix = %q, want %q (counter=%d)", res.Suffix, wantSuffix, n+1)
+	resolve := func(t *testing.T) {
+		t.Helper()
+		bytesRead.Store(0)
+		res := ResolveDestination([]string{archive}, "{original_name}", vars, src, "")
+		if res.AlreadyIngested {
+			t.Fatalf("expected a fresh collision slot, got AlreadyIngested (suffix=%q)", res.Suffix)
+		}
+		if res.Suffix != wantSuffix {
+			t.Errorf("suffix = %q, want %q (counter=%d)", res.Suffix, wantSuffix, n+1)
+		}
+		if got := bytesRead.Load(); got > hashBudget {
+			t.Errorf("collision loop read %d bytes for %d prior collisions, over hashBudget %d (issue #105)", got, n, hashBudget)
+		}
 	}
-	if elapsed > 8*time.Second {
-		t.Fatalf("collision loop took %v for %d prior collisions; budget is hashBudget in naming.go (issue #105)", elapsed, n)
-	}
+
+	t.Run("default budget", func(t *testing.T) {
+		resolve(t)
+		if got, limit := bytesRead.Load(), fullBytesPerIter+int64(n)*collisionBytesPerIter; got > limit {
+			t.Errorf("collision loop read %d bytes, want <= %d (one full-sample + %d collision-sample comparisons)", got, limit, n)
+		}
+	})
+
+	t.Run("exhausted budget", func(t *testing.T) {
+		origBudget := hashBudget
+		hashBudget = fullBytesPerIter + 100*collisionBytesPerIter
+		t.Cleanup(func() { hashBudget = origBudget })
+		resolve(t)
+	})
+}
+
+// countingReaderAt adds every byte ReadAt returns to n. Installed via the
+// hashReader seam by TestResolveDestinationCollisionLoopBudget.
+type countingReaderAt struct {
+	r io.ReaderAt
+	n *atomic.Int64
+}
+
+func (c countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	read, err := c.r.ReadAt(p, off)
+	c.n.Add(int64(read))
+	return read, err
 }
 
 // TestCollisionFilesMatchLstatShortCircuit exercises the Lstat short-
