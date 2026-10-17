@@ -285,6 +285,10 @@ func drainUploadOne(uctx context.Context, up uploadDrainer, store *queue.Store, 
 		SourcePathHash:   r.SourcePathHash,
 		SizeBytes:        r.SizeBytes,
 	})
+	// Closed before anything below can rename the file: Windows refuses to
+	// rename a file that is still open. (The deferred Close above stays as
+	// the safety net for the early returns; a second Close is harmless.)
+	_ = f.Close()
 	if err != nil {
 		if uctx.Err() != nil {
 			return // shutting down: not a failed attempt
