@@ -43,6 +43,10 @@ type Stats struct {
 	FreedBytes          int64
 	SkippedSidecar      int
 	SkippedOnlineIngest int
+	// SkippedUploadIngest counts queued upload-mode rows (queue.OriginUpload):
+	// their local copy is waiting for -- or just went through -- Drain's
+	// upload and was never an offline ingest's to prune.
+	SkippedUploadIngest int
 	SkippedAlreadyGone  int
 	SkippedTooYoung     int
 	SkippedNotVerified  int
@@ -120,6 +124,14 @@ func Pass(ctx context.Context, w io.Writer, client *branchdam.Client, store *que
 	var candidates []candidate
 
 	for _, r := range rows {
+		// Only OFFLINE rows are ever prunable (an allowlist, so a future
+		// origin is kept until someone decides otherwise). An UPLOAD row's
+		// local copy is the only copy off the card until its upload is
+		// confirmed, and it is never an offline ingest's to delete after.
+		if r.Origin == queue.OriginUpload {
+			stats.SkippedUploadIngest++
+			continue
+		}
 		// Done() is also true for a row whose archive copy FAILED
 		// terminally -- that local file may be the only copy outside the
 		// card, so only a row whose archive copy actually completed is
@@ -136,8 +148,10 @@ func Pass(ctx context.Context, w io.Writer, client *branchdam.Client, store *que
 			stats.SkippedSidecar++
 			continue
 		}
-		if r.Origin == queue.OriginOnline {
-			stats.SkippedOnlineIngest++
+		if r.Origin != queue.OriginOffline {
+			if r.Origin == queue.OriginOnline {
+				stats.SkippedOnlineIngest++
+			}
 			continue
 		}
 		stats.Evaluated++
@@ -304,8 +318,8 @@ func PrintReport(w io.Writer, s Stats, dryRun bool) {
 		_, _ = fmt.Fprintln(w, "branchdam-agent prune")
 	}
 	_, _ = fmt.Fprintf(w, "  evaluated: %d, pruned: %d, freed: %d bytes\n", s.Evaluated, s.Pruned, s.FreedBytes)
-	_, _ = fmt.Fprintf(w, "  skipped: sidecar=%d online-ingest=%d already-gone=%d too-young=%d not-verified=%d no-server-hash=%d hash-mismatch=%d no-local-hash=%d file-changed=%d outside-root=%d unexpected-symlink=%d\n",
-		s.SkippedSidecar, s.SkippedOnlineIngest, s.SkippedAlreadyGone, s.SkippedTooYoung, s.SkippedNotVerified, s.SkippedNoServerHash, s.SkippedHashMismatch, s.SkippedNoLocalHash, s.SkippedFileChanged, s.SkippedOutsideRoot, s.SkippedUnexpectedSymlink)
+	_, _ = fmt.Fprintf(w, "  skipped: sidecar=%d online-ingest=%d upload-ingest=%d already-gone=%d too-young=%d not-verified=%d no-server-hash=%d hash-mismatch=%d no-local-hash=%d file-changed=%d outside-root=%d unexpected-symlink=%d\n",
+		s.SkippedSidecar, s.SkippedOnlineIngest, s.SkippedUploadIngest, s.SkippedAlreadyGone, s.SkippedTooYoung, s.SkippedNotVerified, s.SkippedNoServerHash, s.SkippedHashMismatch, s.SkippedNoLocalHash, s.SkippedFileChanged, s.SkippedOutsideRoot, s.SkippedUnexpectedSymlink)
 	if s.SkippedNoServerHash > 0 {
 		_, _ = fmt.Fprintln(w, "  note: the server did not return fullHash in node-status, so nothing it reported could be hash-checked; upgrade branchDAM to prune these files")
 	}

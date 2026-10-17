@@ -56,11 +56,16 @@ func (q *queueCountsReader) FailedRows(ctx context.Context, limit int) ([]tray.F
 		// An archive-copy failure ends the row before rebase ever runs
 		// (queue.Record.Done), so it is the step to report when both
 		// columns somehow read FAILED.
-		if rec.ArchiveCopyStatus == queue.StatusFailed {
+		switch {
+		case rec.ArchiveCopyStatus == queue.StatusFailed:
 			row.Step = tray.FailedStepArchiveCopy
 			row.LastError = rec.ArchiveCopyLastError
 			row.Attempts = rec.ArchiveCopyAttempts
-		} else {
+		case rec.UploadStatus == queue.StatusFailed:
+			row.Step = tray.FailedStepUpload
+			row.LastError = rec.UploadLastError
+			row.Attempts = rec.UploadAttempts
+		default:
 			row.Step = tray.FailedStepRebase
 			row.LastError = rec.RebaseLastError
 			row.Attempts = rec.RebaseAttempts
@@ -86,7 +91,7 @@ func (q *queueCountsReader) RetryFailed(ctx context.Context, nodeUUID string) (t
 	if err != nil {
 		return tray.QueueRetryCounts{}, err
 	}
-	return tray.QueueRetryCounts{ArchiveCopies: c.ArchiveCopies, Rebases: c.Rebases}, nil
+	return tray.QueueRetryCounts{ArchiveCopies: c.ArchiveCopies, Rebases: c.Rebases, Uploads: c.Uploads}, nil
 }
 
 // queueDrainer implements tray.Drainer over internal/ingest.Drain -- the
@@ -97,10 +102,19 @@ type queueDrainer struct {
 	client  *branchdam.Client
 	store   *queue.Store
 	agentID string
+	// uploadCtx is the tray's own lifetime, which bounds queued uploads
+	// instead of the 2-minute pass deadline (ingest.WithUploadContext). Nil
+	// -- a test, or a caller that never set it -- falls back to the pass's
+	// context.
+	uploadCtx context.Context //nolint:containedctx // the runner's lifetime, handed to Drain as an option
 }
 
 func (d *queueDrainer) Drain(ctx context.Context) (tray.DrainSummary, error) {
-	stats, err := ingest.Drain(ctx, d.client, d.store, d.agentID, nil)
+	var opts []ingest.DrainOption
+	if d.uploadCtx != nil {
+		opts = append(opts, ingest.WithUploadContext(d.uploadCtx))
+	}
+	stats, err := ingest.Drain(ctx, d.client, d.store, d.agentID, nil, opts...)
 	var lastHandshakeAt time.Time
 	if stats.HandshakeOK {
 		lastHandshakeAt = time.Now()
@@ -113,6 +127,8 @@ func (d *queueDrainer) Drain(ctx context.Context) (tray.DrainSummary, error) {
 		ArchiveCopiesFailed: stats.ArchiveCopiesFailed,
 		RebasesDone:         stats.RebasesDone,
 		RebasesFailed:       stats.RebasesFailed,
+		UploadsDone:         stats.UploadsDone,
+		UploadsFailed:       stats.UploadsFailed,
 		Remaining:           stats.Remaining,
 	}, err
 }

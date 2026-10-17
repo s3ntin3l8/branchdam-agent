@@ -434,6 +434,7 @@ func runTrayCmd(args []string) int {
 	wireRuntimeStatePersistence(runner)
 
 	settings := newConfigSettings(resolvedPath, cfg, runner)
+	settings.lifetime = ctx
 
 	// Integration syncers (issue #57): started unconditionally, unlike the
 	// conditional prune timer below -- an integration can be enabled from
@@ -500,7 +501,7 @@ func runTrayCmd(args []string) int {
 			engine.Tier0ContainerRoot = cfg.Offline.Tier0ContainerRoot
 			settings.SetQueueStore(queueStore)
 
-			var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: cfg.AgentID}
+			var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: cfg.AgentID, uploadCtx: ctx}
 			var pruner tray.Pruner
 			if cfg.Prune.Enabled {
 				pruner = &queuePruner{client: client, store: queueStore, cfg: cfg}

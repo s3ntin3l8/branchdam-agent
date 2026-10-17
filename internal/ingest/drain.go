@@ -82,7 +82,13 @@ type DrainStats struct {
 	ArchiveCopiesFailed int
 	RebasesDone         int
 	RebasesFailed       int
-	Remaining           int // rows still not Done() after this pass
+	// UploadsDone counts queued metered-deferred uploads (OriginUpload rows)
+	// the server accepted this pass; UploadsFailed those marked permanently
+	// FAILED (a local copy that changed or vanished, a refused hash, a fatal
+	// server answer).
+	UploadsDone   int
+	UploadsFailed int
+	Remaining     int // rows still not Done() after this pass
 	// RowsCollected counts finished rows deleted by this pass's queue GC
 	// sweep (queue.Store.CollectGarbageIfDue) -- 0 on most passes.
 	RowsCollected int
@@ -91,7 +97,10 @@ type DrainStats struct {
 // Drain runs exactly one pass over store's pending rows: an opportunistic
 // handshake (log-only -- see HandshakeErr, never fatal to the rest of the
 // pass), then node_created submission, then archive-copy attempts, then
-// rebase attempts gated by MinRebaseDwell. A caller wanting continuous
+// rebase attempts gated by MinRebaseDwell, and last the upload phase for
+// queued metered-deferred uploads (see drainUploads) -- last, so a
+// multi-minute upload never holds back the quick phases or runs them on a
+// spent context. A caller wanting continuous
 // draining (the tray, or `queue-drain -watch`) calls Drain repeatedly; the
 // per-row next-attempt timestamps Store persists are what makes repeated
 // calls implement backoff rather than a tight retry loop -- Drain itself is
@@ -261,7 +270,33 @@ func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID 
 		stats.RebasesDone++
 	}
 
-	final, err := store.Pending(ctx)
+	// Phase 4: queued uploads. Only a client that can upload has this phase
+	// (the real *branchdam.Client does); rows are re-read so a row phases
+	// 1-3 just touched is current.
+	bookkeeping := ctx
+	if up, ok := client.(uploadDrainer); ok {
+		// With a separate upload context the pass deadline may already be
+		// spent by a slow phase 1-3; listing the rows must not be what stops
+		// the uploads it exists to allow.
+		listCtx := ctx
+		if drainOpts.uploadCtx != nil {
+			var cancelList context.CancelFunc
+			listCtx, cancelList = context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancelList()
+		}
+		rows, err = store.Pending(listCtx)
+		if err != nil {
+			return stats, fmt.Errorf("ingest: drain: re-list pending before upload phase: %w", err)
+		}
+		drainUploads(ctx, up, store, rows, nowT, drainOpts, &stats)
+		// The upload phase may have outlived the pass's deadline, which is
+		// then spent: the closing bookkeeping gets a fresh, bounded one.
+		var cancel context.CancelFunc
+		bookkeeping, cancel = context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+	}
+
+	final, err := store.Pending(bookkeeping)
 	if err != nil {
 		return stats, fmt.Errorf("ingest: drain: final pending count: %w", err)
 	}
@@ -270,7 +305,7 @@ func Drain(ctx context.Context, client drainClient, store *queue.Store, agentID 
 	// Row GC piggybacks on the drain timer, throttled inside the store to
 	// one sweep per queue.GCInterval. Best-effort: a failure never fails
 	// the pass.
-	if n, gcErr := store.CollectGarbageIfDue(ctx, nowT); gcErr != nil {
+	if n, gcErr := store.CollectGarbageIfDue(bookkeeping, nowT); gcErr != nil {
 		slog.Warn("ingest: drain: queue row GC failed", "err", gcErr)
 	} else {
 		stats.RowsCollected = n

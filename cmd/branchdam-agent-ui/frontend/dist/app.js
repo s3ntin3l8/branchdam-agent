@@ -505,6 +505,7 @@ async function refreshFailedRows() {
 const FAILED_STEP_LABELS = {
   archive_copy: "archive copy",
   rebase: "archive confirmation",
+  upload: "upload",
 };
 
 // renderFailedRows lists the queue's FAILED rows, each with its reason and

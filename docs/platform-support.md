@@ -1317,7 +1317,9 @@ appropriate:
     verified ingest completes and an OS notification appears. Only a
     detected card volume is ever ejected: "Ingest now", "Import from
     folder…" and `POST /api/actions/ingest` never eject, and neither does
-    an ingest that deferred an upload on a metered connection. On Windows
+    an ingest that deferred an upload on a metered connection without queueing it (no
+    `offline.queueDbPath`, or the queue insert failed -- a queued deferral is reported as queued
+    and may eject, see docs/offline-queue.md). On Windows
     specifically, with no `cardRoots` configured, insert an SD card --
     confirm it is detected as its drive letter (`E:\`); confirm a USB SSD
     or a mapped NAS drive is never detected; confirm the eject runs lock,

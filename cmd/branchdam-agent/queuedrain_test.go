@@ -281,7 +281,7 @@ func TestResetFailedReportsCounts(t *testing.T) {
 	if code := resetFailed(&buf, store, 5*time.Second); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if !strings.Contains(buf.String(), "reset 0 failed archive copies and 0 failed rebases to pending") {
+	if !strings.Contains(buf.String(), "reset 0 failed archive copies, 0 failed rebases and 0 failed uploads to pending") {
 		t.Errorf("output = %q", buf.String())
 	}
 	_ = store.Close()

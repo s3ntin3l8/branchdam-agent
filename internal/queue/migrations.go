@@ -9,10 +9,12 @@ import (
 // version." Migrations run in order; a v0 queue.db migrates through every
 // entry. A v1 queue.db (user_version >= 1) runs no migrations at all.
 //
-// Forward-only: there is no rollback path. If a migration fails partway,
-// the pragma is not bumped and the next Open() retries it (the DDL uses
-// IF NOT EXISTS / CREATE INDEX IF NOT EXISTS, so partial application is
-// safe to retry).
+// Forward-only: there is no rollback path. Each entry runs together with its
+// user_version bump in one transaction (SQLite DDL and the user_version
+// pragma are both transactional), so a migration that fails partway leaves
+// the database at the old version, untouched, and the next Open() retries it
+// from the start -- which an ALTER TABLE ... ADD COLUMN could not survive if
+// the column had been added and the pragma not yet bumped.
 var migrations = []struct {
 	fromVersion int
 	sql         string
@@ -89,13 +91,40 @@ UPDATE queue_nodes SET node_created_event_uuid = node_uuid WHERE node_created_ev
 ALTER TABLE queue_nodes ADD COLUMN origin TEXT NOT NULL DEFAULT 'OFFLINE';
 `,
 	},
+	{
+		// Upload stage: a metered-deferred upload-mode file (OriginUpload)
+		// is queued with the upload request's inputs and a fourth step,
+		// upload_status, that Drain runs. Every earlier row is not an
+		// upload row, so SKIPPED (no upload step) is exact for them. The
+		// sidecar link (master_node_uuid, sidecar_tail, sidecar_by_name)
+		// lets Drain name a sidecar after its master's server-assigned
+		// name; server_node_uuid / server_relative_path record the
+		// upload's answer. node_uuid stays the row's client-minted key --
+		// an UPLOAD row's is never sent to the server.
+		fromVersion: 3,
+		sql: `
+ALTER TABLE queue_nodes ADD COLUMN upload_status TEXT NOT NULL DEFAULT 'SKIPPED';
+ALTER TABLE queue_nodes ADD COLUMN upload_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE queue_nodes ADD COLUMN upload_next_attempt_unix INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE queue_nodes ADD COLUMN upload_last_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE queue_nodes ADD COLUMN upload_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE queue_nodes ADD COLUMN camera_model TEXT NOT NULL DEFAULT '';
+ALTER TABLE queue_nodes ADD COLUMN capture_timestamp INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE queue_nodes ADD COLUMN source_path_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE queue_nodes ADD COLUMN master_node_uuid TEXT NOT NULL DEFAULT '';
+ALTER TABLE queue_nodes ADD COLUMN sidecar_tail TEXT NOT NULL DEFAULT '';
+ALTER TABLE queue_nodes ADD COLUMN sidecar_by_name INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE queue_nodes ADD COLUMN local_edit_root TEXT NOT NULL DEFAULT '';
+ALTER TABLE queue_nodes ADD COLUMN server_node_uuid TEXT NOT NULL DEFAULT '';
+ALTER TABLE queue_nodes ADD COLUMN server_relative_path TEXT NOT NULL DEFAULT '';
+`,
+	},
 }
 
 // migrate reads PRAGMA user_version and applies every pending migration to
-// bring the database up to currentSchemaVersion. The DDL in each migration
-// uses IF NOT EXISTS / CREATE INDEX IF NOT EXISTS, so re-running a migration
-// that was partially applied (e.g. the process crashed after CREATE TABLE
-// succeeded but before the index was created) is safe.
+// bring the database up to currentSchemaVersion. Each migration and its
+// user_version bump commit together, so a crash mid-migration re-runs it
+// whole against the old schema.
 func (s *Store) migrate() error {
 	var version int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
@@ -106,17 +135,34 @@ func (s *Store) migrate() error {
 		if version != m.fromVersion {
 			continue
 		}
-		if _, err := s.db.Exec(m.sql); err != nil {
-			return fmt.Errorf("queue: migrate v%d→%d: %w", m.fromVersion, m.fromVersion+1, err)
-		}
-		if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", m.fromVersion+1)); err != nil {
-			return fmt.Errorf("queue: set user_version to %d: %w", m.fromVersion+1, err)
+		if err := s.applyMigration(m.fromVersion, m.sql); err != nil {
+			return err
 		}
 		version = m.fromVersion + 1
 	}
 
 	if version < currentSchemaVersion {
 		return fmt.Errorf("queue: unknown schema version %d (expected %d)", version, currentSchemaVersion)
+	}
+	return nil
+}
+
+// applyMigration runs one migration's sql and the user_version bump in a
+// single transaction.
+func (s *Store) applyMigration(fromVersion int, sqlText string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("queue: migrate v%d→%d: begin: %w", fromVersion, fromVersion+1, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(sqlText); err != nil {
+		return fmt.Errorf("queue: migrate v%d→%d: %w", fromVersion, fromVersion+1, err)
+	}
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", fromVersion+1)); err != nil {
+		return fmt.Errorf("queue: set user_version to %d: %w", fromVersion+1, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("queue: migrate v%d→%d: commit: %w", fromVersion, fromVersion+1, err)
 	}
 	return nil
 }

@@ -34,7 +34,7 @@ import (
 // currentSchemaVersion is the latest schema version Open/migrate must bring
 // a queue.db to. Bump this and add a migration entry to the migrations
 // slice whenever the schema changes in a backward-incompatible way.
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 // Status values for the three independent per-step columns.
 const (
@@ -98,6 +98,19 @@ const (
 	// always kept its edit copies, and pruning them is an offline-only
 	// feature (see internal/config.PruneConfig).
 	OriginOnline = "ONLINE"
+	// OriginUpload is an upload-mode ingest's metered-deferred file: the
+	// verified local copy exists, but the upload (which also registers the
+	// node server-side) has not happened. The row carries the upload
+	// request's inputs and Drain's upload phase streams the local copy once
+	// the link allows it. node_created, archive_copy and rebase are SKIPPED:
+	// the upload request registers the node and the server writes the
+	// archive copy, so the only step is upload_status. The row's node_uuid
+	// is a client-minted key that is never sent to the server (the server
+	// mints its own, recorded as ServerNodeUUID). Prune never touches an
+	// UPLOAD row (an allowlist: only OFFLINE rows are prunable), and the row
+	// is not terminal -- so never garbage-collected -- until its upload is
+	// DONE or FAILED.
+	OriginUpload = "UPLOAD"
 )
 
 // Record is one queue_nodes row.
@@ -133,7 +146,35 @@ type Record struct {
 	RebaseNextAttemptUnix      int64
 	RebaseLastError            string
 	CreatedAtUnix              int64
-	Origin                     string // OriginOffline or OriginOnline
+	Origin                     string // OriginOffline, OriginOnline or OriginUpload
+
+	// Upload step (OriginUpload rows; UploadStatus is SKIPPED on every
+	// other row).
+	UploadStatus          string
+	UploadAttempts        int
+	UploadNextAttemptUnix int64
+	UploadLastError       string
+	// UploadName is the X-Filename the upload sends; CameraModel and
+	// CaptureTimestamp its X-Camera-Model / X-Capture-Timestamp;
+	// SourcePathHash its X-Source-Path-Hash. For a sidecar linked to a
+	// master (MasterNodeUUID set) UploadName is only the fallback: Drain
+	// derives the name from the master's server-assigned path once the
+	// master's upload is DONE (SidecarTail + SidecarByName).
+	UploadName       string
+	CameraModel      string
+	CaptureTimestamp int64
+	SourcePathHash   string
+	MasterNodeUUID   string
+	SidecarTail      string
+	SidecarByName    bool
+	// LocalEditRoot is the root a drained upload moves the local copy under
+	// (LocalEditRoot/<server relativePath>), recorded at enqueue because
+	// Drain has no engine config.
+	LocalEditRoot string
+	// ServerNodeUUID and ServerRelativePath are the upload response's
+	// nodeUuid and relativePath, set when the upload is DONE.
+	ServerNodeUUID     string
+	ServerRelativePath string
 }
 
 // Done reports whether every step this record needs has reached a terminal
@@ -147,18 +188,22 @@ func (r Record) Done() bool {
 	if r.Origin == OriginOnline && r.NodeCreatedStatus == StatusPending {
 		return false
 	}
+	// An UPLOAD row is waiting on its upload, whatever its other steps say.
+	if r.UploadStatus == StatusPending {
+		return false
+	}
 	if r.ArchiveCopyStatus == StatusFailed {
 		return true
 	}
-	archiveDone := r.ArchiveCopyStatus == StatusDone
+	archiveDone := r.ArchiveCopyStatus == StatusDone || r.ArchiveCopyStatus == StatusSkipped
 	rebaseDone := r.RebaseStatus == StatusDone || r.RebaseStatus == StatusSkipped || r.RebaseStatus == StatusFailed
 	return archiveDone && rebaseDone
 }
 
-// Failed reports whether the row ended in a terminal failure on either
-// its archive copy or its rebase.
+// Failed reports whether the row ended in a terminal failure on its archive
+// copy, its rebase or its upload.
 func (r Record) Failed() bool {
-	return r.ArchiveCopyStatus == StatusFailed || r.RebaseStatus == StatusFailed
+	return r.ArchiveCopyStatus == StatusFailed || r.RebaseStatus == StatusFailed || r.UploadStatus == StatusFailed
 }
 
 // Store wraps queue.db. A single *sql.DB with SetMaxOpenConns(1): one
@@ -272,8 +317,19 @@ type NewRecord struct {
 	FastHash               string
 	NodeCreatedPayloadJSON string
 	NodeCreatedEventUUID   string
-	// Origin is OriginOffline (the default when empty) or OriginOnline.
+	// Origin is OriginOffline (the default when empty), OriginOnline or
+	// OriginUpload.
 	Origin string
+
+	// The upload request's inputs, for an OriginUpload row (see Record).
+	UploadName       string
+	CameraModel      string
+	CaptureTimestamp int64
+	SourcePathHash   string
+	MasterNodeUUID   string
+	SidecarTail      string
+	SidecarByName    bool
+	LocalEditRoot    string
 }
 
 // InsertPending inserts rec as a fresh row with every step status at its
@@ -292,6 +348,7 @@ func (s *Store) InsertPending(ctx context.Context, rec NewRecord) error {
 	nodeCreatedStatus := StatusPending
 	archiveCopyStatus := StatusPending
 	rebaseStatus := StatusPending
+	uploadStatus := StatusSkipped
 	if rec.Kind == KindSidecar {
 		nodeCreatedStatus = StatusSkipped
 		rebaseStatus = StatusSkipped
@@ -304,12 +361,17 @@ func (s *Store) InsertPending(ctx context.Context, rec NewRecord) error {
 	case OriginOnline:
 		archiveCopyStatus = StatusDone
 		rebaseStatus = StatusSkipped
+	case OriginUpload:
+		nodeCreatedStatus = StatusSkipped
+		archiveCopyStatus = StatusSkipped
+		rebaseStatus = StatusSkipped
+		uploadStatus = StatusPending
 	default:
 		return fmt.Errorf("queue: insert pending row for %s: unknown origin %q", rec.SourcePath, rec.Origin)
 	}
 
 	eventUUID := rec.NodeCreatedEventUUID
-	if eventUUID == "" && rec.Kind == KindMedia {
+	if eventUUID == "" && rec.Kind == KindMedia && origin != OriginUpload {
 		u, err := uuid.NewV7()
 		if err != nil {
 			eventUUID = uuid.New().String()
@@ -323,12 +385,14 @@ INSERT INTO queue_nodes (
 	node_uuid, kind, source_path, local_path, archive_path, archive_container_path,
 	tier0_container_path, file_name, file_ext, size_bytes, mtime_unix, full_hash, fast_hash,
 	node_created_payload_json, node_created_event_uuid, node_created_status, archive_copy_status, rebase_status, created_at_unix,
-	origin
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	origin, upload_status, upload_name, camera_model, capture_timestamp, source_path_hash,
+	master_node_uuid, sidecar_tail, sidecar_by_name, local_edit_root
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.NodeUUID, rec.Kind, rec.SourcePath, rec.LocalPath, rec.ArchivePath, rec.ArchiveContainerPath,
 		rec.Tier0ContainerPath, rec.FileName, rec.FileExt, rec.SizeBytes, rec.MtimeUnix, rec.FullHash, rec.FastHash,
 		rec.NodeCreatedPayloadJSON, eventUUID, nodeCreatedStatus, archiveCopyStatus, rebaseStatus, time.Now().Unix(),
-		origin,
+		origin, uploadStatus, rec.UploadName, rec.CameraModel, rec.CaptureTimestamp, rec.SourcePathHash,
+		rec.MasterNodeUUID, rec.SidecarTail, rec.SidecarByName, rec.LocalEditRoot,
 	)
 	if err != nil {
 		return fmt.Errorf("queue: insert pending row for %s: %w", rec.SourcePath, err)
@@ -388,10 +452,12 @@ func (s *Store) ByLocalPath(ctx context.Context, localPath string) (Record, bool
 // previously-inline SQL already had (a real duplication found while
 // building Counts). An ONLINE row whose EVENT_NODE_CREATED is still
 // PENDING is never terminal (see Record.Done).
-const terminalSQL = `((archive_copy_status = 'DONE' AND rebase_status IN ('DONE', 'SKIPPED', 'FAILED')) OR archive_copy_status = 'FAILED') AND NOT (origin = 'ONLINE' AND node_created_status = 'PENDING')`
+// An UPLOAD row is never terminal while its upload is PENDING (its other
+// steps are SKIPPED from insert, so without this it would read as finished).
+const terminalSQL = `((archive_copy_status IN ('DONE', 'SKIPPED') AND rebase_status IN ('DONE', 'SKIPPED', 'FAILED')) OR archive_copy_status = 'FAILED') AND NOT (origin = 'ONLINE' AND node_created_status = 'PENDING') AND upload_status <> 'PENDING'`
 
 // failedSQL is the row-level predicate matching Record.Failed().
-const failedSQL = `(archive_copy_status = 'FAILED' OR rebase_status = 'FAILED')`
+const failedSQL = `(archive_copy_status = 'FAILED' OR rebase_status = 'FAILED' OR upload_status = 'FAILED')`
 
 // Pending returns every row not yet Done(), oldest first -- the set Drain
 // works through on each pass.
@@ -451,7 +517,8 @@ func (s *Store) All(ctx context.Context) ([]Record, error) {
 // the row.
 type Counts struct {
 	// AwaitingUpload counts rows whose archive copy hasn't started
-	// (archive_copy_status = PENDING) -- MEDIA and SIDECAR rows alike.
+	// (archive_copy_status = PENDING) -- MEDIA and SIDECAR rows alike -- and
+	// UPLOAD rows whose upload hasn't happened (upload_status = PENDING).
 	AwaitingUpload int
 	// AwaitingRebase counts MEDIA rows whose archive copy is done but
 	// whose server-side confirmation hasn't happened yet: the rebase of an
@@ -484,11 +551,11 @@ func (c Counts) Pending() int {
 func (s *Store) Counts(ctx context.Context) (Counts, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT
-	COALESCE(SUM(CASE WHEN archive_copy_status = 'PENDING' THEN 1 ELSE 0 END), 0),
+	COALESCE(SUM(CASE WHEN archive_copy_status = 'PENDING' OR upload_status = 'PENDING' THEN 1 ELSE 0 END), 0),
 	COALESCE(SUM(CASE WHEN archive_copy_status = 'DONE' AND NOT (`+terminalSQL+`) THEN 1 ELSE 0 END), 0),
 	COALESCE(SUM(CASE WHEN `+failedSQL+` THEN 1 ELSE 0 END), 0),
 	COALESCE(SUM(CASE WHEN (`+terminalSQL+`) AND NOT `+failedSQL+` THEN 1 ELSE 0 END), 0),
-	COALESCE(SUM(CASE WHEN archive_copy_status = 'PENDING' THEN size_bytes ELSE 0 END), 0)
+	COALESCE(SUM(CASE WHEN archive_copy_status = 'PENDING' OR upload_status = 'PENDING' THEN size_bytes ELSE 0 END), 0)
 FROM queue_nodes`)
 
 	var c Counts
@@ -595,11 +662,105 @@ func (s *Store) MarkRebaseFailed(ctx context.Context, nodeUUID, errMsg string) e
 	return nil
 }
 
+// MarkUploadAttempt records a transient upload failure (retry later). The
+// row stays PENDING.
+func (s *Store) MarkUploadAttempt(ctx context.Context, nodeUUID, errMsg string, nextAttempt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE queue_nodes SET upload_attempts = upload_attempts + 1, upload_last_error = ?, upload_next_attempt_unix = ? WHERE node_uuid = ? AND upload_status = ?`,
+		errMsg, nextAttempt.Unix(), nodeUUID, StatusPending)
+	if err != nil {
+		return fmt.Errorf("queue: record upload attempt for %s: %w", nodeUUID, err)
+	}
+	return nil
+}
+
+// MarkUploadFailed records a terminal upload failure -- one retrying cannot
+// fix (a local copy that changed or vanished, a hash the server refused).
+// Drain never reattempts it; ResetFailed re-queues it.
+func (s *Store) MarkUploadFailed(ctx context.Context, nodeUUID, errMsg string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE queue_nodes SET upload_status = ?, upload_last_error = ? WHERE node_uuid = ? AND upload_status = ?`,
+		StatusFailed, errMsg, nodeUUID, StatusPending)
+	if err != nil {
+		return fmt.Errorf("queue: mark upload failed for %s: %w", nodeUUID, err)
+	}
+	return nil
+}
+
+// MarkUploadDone records a confirmed upload: the server's node UUID and
+// relative path, and the path the local copy actually ended up at
+// (localPath: the moved path, or the unchanged one when the move did not
+// happen). It is a compare-and-set on upload_status = PENDING and reports
+// whether it applied: Drain and a card re-insert's reconcile can both finish
+// the same row, and only the first may record it (the second must leave the
+// local copy alone).
+func (s *Store) MarkUploadDone(ctx context.Context, nodeUUID, serverNodeUUID, serverRelativePath, localPath string) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE queue_nodes SET upload_status = ?, server_node_uuid = ?, server_relative_path = ?, local_path = ?, upload_last_error = ''
+WHERE node_uuid = ? AND upload_status = ?`,
+		StatusDone, serverNodeUUID, serverRelativePath, localPath, nodeUUID, StatusPending)
+	if err != nil {
+		return false, fmt.Errorf("queue: mark upload done for %s: %w", nodeUUID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: mark upload done for %s: rows affected: %w", nodeUUID, err)
+	}
+	return n > 0, nil
+}
+
+// SetUploadLocalPath corrects the local_path of an UPLOAD row after a move
+// that was recorded ahead of the rename did not happen.
+func (s *Store) SetUploadLocalPath(ctx context.Context, nodeUUID, localPath string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE queue_nodes SET local_path = ? WHERE node_uuid = ? AND origin = ?`, localPath, nodeUUID, OriginUpload)
+	if err != nil {
+		return fmt.Errorf("queue: set upload local_path for %s: %w", nodeUUID, err)
+	}
+	return nil
+}
+
+// PendingUploadByLocalPath returns the OriginUpload row still waiting on its
+// upload whose local copy is at localPath, or ok=false. A card re-insert uses
+// it to find the row its own upload (or a duplicate deferral) concerns.
+func (s *Store) PendingUploadByLocalPath(ctx context.Context, localPath string) (Record, bool, error) {
+	row := s.db.QueryRowContext(ctx,
+		selectCols+" WHERE local_path = ? AND origin = ? AND upload_status = ? ORDER BY id DESC LIMIT 1",
+		localPath, OriginUpload, StatusPending)
+	rec, err := scanRecord(row)
+	if err == sql.ErrNoRows { //nolint:errorlint // database/sql sentinel, never wrapped
+		return Record{}, false, nil
+	}
+	if err != nil {
+		return Record{}, false, fmt.Errorf("queue: lookup pending upload by local_path %s: %w", localPath, err)
+	}
+	return rec, true, nil
+}
+
+// PendingUploadBySource returns the OriginUpload row still waiting on its
+// upload that was queued for the card file at sourcePath with content
+// fullHash (BLAKE3, case-insensitive), or ok=false. A card re-insert that
+// uploads the file itself uses it to find the row it just made redundant,
+// whether or not it moved the deferred copy.
+func (s *Store) PendingUploadBySource(ctx context.Context, sourcePath, fullHash string) (Record, bool, error) {
+	row := s.db.QueryRowContext(ctx,
+		selectCols+" WHERE source_path = ? AND full_hash = ? COLLATE NOCASE AND origin = ? AND upload_status = ? ORDER BY id DESC LIMIT 1",
+		sourcePath, fullHash, OriginUpload, StatusPending)
+	rec, err := scanRecord(row)
+	if err == sql.ErrNoRows { //nolint:errorlint // database/sql sentinel, never wrapped
+		return Record{}, false, nil
+	}
+	if err != nil {
+		return Record{}, false, fmt.Errorf("queue: lookup pending upload by source_path %s: %w", sourcePath, err)
+	}
+	return rec, true, nil
+}
+
 // ResetCounts reports how many FAILED steps ResetFailed put back to
 // PENDING.
 type ResetCounts struct {
 	ArchiveCopies int64
 	Rebases       int64
+	Uploads       int64
 }
 
 // ResetFailed puts every FAILED archive_copy and every FAILED rebase back
@@ -663,6 +824,17 @@ WHERE rebase_status = ?`+nodeFilter,
 	}
 	if c.Rebases, err = res.RowsAffected(); err != nil {
 		return c, fmt.Errorf("queue: reset failed rebases: rows affected: %w", err)
+	}
+
+	res, err = tx.ExecContext(ctx,
+		`UPDATE queue_nodes SET upload_status = ?, upload_attempts = 0, upload_next_attempt_unix = 0
+WHERE upload_status = ?`+nodeFilter,
+		StatusPending, StatusFailed, nodeUUID, nodeUUID)
+	if err != nil {
+		return c, fmt.Errorf("queue: reset failed uploads: %w", err)
+	}
+	if c.Uploads, err = res.RowsAffected(); err != nil {
+		return c, fmt.Errorf("queue: reset failed uploads: rows affected: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -803,7 +975,11 @@ const selectCols = `SELECT
 	node_created_submitted_at_unix, node_created_attempts, node_created_next_attempt_unix, node_created_last_error,
 	archive_copy_status, archive_copy_attempts, archive_copy_next_attempt_unix, archive_copy_last_error,
 	rebase_status, rebase_attempts, rebase_next_attempt_unix, rebase_last_error,
-	created_at_unix, origin
+	created_at_unix, origin,
+	upload_status, upload_attempts, upload_next_attempt_unix, upload_last_error,
+	upload_name, camera_model, capture_timestamp, source_path_hash,
+	master_node_uuid, sidecar_tail, sidecar_by_name, local_edit_root,
+	server_node_uuid, server_relative_path
 FROM queue_nodes`
 
 // rowScanner is the subset of *sql.Row / *sql.Rows this package needs, so
@@ -830,6 +1006,10 @@ func scan(s rowScanner) (Record, error) {
 		&r.ArchiveCopyStatus, &r.ArchiveCopyAttempts, &r.ArchiveCopyNextAttemptUnix, &r.ArchiveCopyLastError,
 		&r.RebaseStatus, &r.RebaseAttempts, &r.RebaseNextAttemptUnix, &r.RebaseLastError,
 		&r.CreatedAtUnix, &r.Origin,
+		&r.UploadStatus, &r.UploadAttempts, &r.UploadNextAttemptUnix, &r.UploadLastError,
+		&r.UploadName, &r.CameraModel, &r.CaptureTimestamp, &r.SourcePathHash,
+		&r.MasterNodeUUID, &r.SidecarTail, &r.SidecarByName, &r.LocalEditRoot,
+		&r.ServerNodeUUID, &r.ServerRelativePath,
 	)
 	return r, err
 }

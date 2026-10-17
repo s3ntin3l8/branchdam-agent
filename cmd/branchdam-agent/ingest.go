@@ -288,6 +288,14 @@ func printIngestReport(w io.Writer, cardPath string, result ingest.CardResult, e
 			if f.GPSSource != "" {
 				gps = fmt.Sprintf(", gps=%s", f.GPSSource)
 			}
+			if f.UploadQueueID != "" {
+				// A metered-deferred upload recorded in queue.db: nothing
+				// reached the server yet, so there is no archive path or
+				// event -- the local copy is what waits for queue-drain.
+				_, _ = fmt.Fprintf(w, "[OK]   %s -> %s (upload queued for queue-drain, localVerify=%s%s)\n",
+					f.SourcePath, f.LocalPath, f.LocalVerify.Method, gps)
+				continue
+			}
 			eventID := f.EventID
 			if f.Queued {
 				eventID = "pending (queued for queue-drain)"
