@@ -307,9 +307,6 @@ func TestResolveDestinationCollisionLoopBudget(t *testing.T) {
 	const (
 		n         = 500
 		sizeBytes = 4 * 1024 * 1024
-		// Mirror ResolveDestination's per-comparison accounting.
-		fullBytesPerIter      = int64(hashing.FastHashSampleSize) * 3 * 2
-		collisionBytesPerIter = int64(collisionSampleSize) * 3 * 2
 	)
 	src := populateCollidingFixture(t, archive, n, sizeBytes)
 
@@ -351,6 +348,12 @@ func TestResolveDestinationCollisionLoopBudget(t *testing.T) {
 		hashBudget = fullBytesPerIter + 100*collisionBytesPerIter
 		t.Cleanup(func() { hashBudget = origBudget })
 		resolve(t)
+		// resolve already checked <= hashBudget; also require the loop
+		// to have hashed up to near the cap, so the test proves the cap
+		// is what stopped it (not an early exit that happened to fit).
+		if got := bytesRead.Load(); got <= hashBudget/2 {
+			t.Errorf("collision loop read %d bytes, want > hashBudget/2 = %d (the cap should bind near its limit)", got, hashBudget/2)
+		}
 	})
 }
 
@@ -473,7 +476,7 @@ func TestResolveDestinationBudgetExhaustionFallsBackToLstatWalk(t *testing.T) {
 	// comparison: a budget of fullBytesPerIter accommodates counter=1
 	// but not counter=2.
 	origBudget := hashBudget
-	hashBudget = int64(hashing.FastHashSampleSize) * 3 * 2 // one full-sample comparison
+	hashBudget = fullBytesPerIter // one full-sample comparison
 	t.Cleanup(func() { hashBudget = origBudget })
 
 	vars := TemplateVars{
