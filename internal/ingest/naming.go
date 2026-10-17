@@ -176,6 +176,17 @@ const collisionSampleSize = 256 * 1024
 // 4 MiB files.
 var hashBudget int64 = 2 * 1024 * 1024 * 1024
 
+// Bytes one comparison against one destination costs in
+// ResolveDestination's budget accounting: src+dst = 2 FastHash calls, each
+// sampling 3 regions of the sample size. fullBytesPerIter is the counter==1
+// final-destination match (canonical sample), collisionBytesPerIter each
+// suffixed counter in the auto-suffix sweep. Shared with naming_test.go so
+// the budget tests never hand-mirror the loop's arithmetic.
+const (
+	fullBytesPerIter      = int64(hashing.FastHashSampleSize) * 3 * 2
+	collisionBytesPerIter = int64(collisionSampleSize) * 3 * 2
+)
+
 // maxCollisionSuffix is the highest collision counter any destination
 // sweep tries (_2 .. _10000): ResolveDestination, findNextFreeSuffix, the
 // offline resolver and upload mode's deferred-copy sweep all stop there.
@@ -185,7 +196,10 @@ const maxCollisionSuffix = 10000
 // collisionFastHashFile. Identity in production; a test seam so
 // TestResolveDestinationCollisionLoopBudget can count the bytes the
 // collision loop actually reads and assert them against hashBudget
-// (issue #328) instead of a wall-clock bound.
+// (issue #328) instead of a wall-clock bound. The seam is a package-level
+// var, so any test in internal/ingest that swaps it (or that runs a
+// FastHash path while another test has it swapped) must not call
+// t.Parallel.
 var hashReader = func(f *os.File) io.ReaderAt { return f }
 
 // fastHashFile opens p and calculates its FastHash with size using the
@@ -370,13 +384,6 @@ func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath s
 		}
 	}
 
-	// Bytes a single comparison against one destination costs, per
-	// FastHash call. src+dst = 2; one FastHash samples 3 regions of
-	// sampleSize bytes each. Used by the budget guard below.
-	const (
-		fullBytesPerIter     = int64(hashing.FastHashSampleSize) * 3 * 2
-		collisionBytesPerItr = int64(collisionSampleSize) * 3 * 2
-	)
 	hashesDone := int64(0)
 
 	for counter := 1; counter <= maxCollisionSuffix; counter++ {
@@ -413,11 +420,11 @@ func ResolveDestination(roots []string, tpl string, vars TemplateVars, srcPath s
 				hashesDone += fullBytesPerIter
 			}
 		} else {
-			if hashesDone+collisionBytesPerItr > hashBudget {
+			if hashesDone+collisionBytesPerIter > hashBudget {
 				budgetExhausted = true
 			} else {
 				allExist, allMatch = checkCollisionRoots(roots, rel, srcPath)
-				hashesDone += collisionBytesPerItr
+				hashesDone += collisionBytesPerIter
 			}
 		}
 
