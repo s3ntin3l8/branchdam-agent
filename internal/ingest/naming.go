@@ -9,6 +9,7 @@ package ingest
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,6 +181,13 @@ var hashBudget int64 = 2 * 1024 * 1024 * 1024
 // offline resolver and upload mode's deferred-copy sweep all stop there.
 const maxCollisionSuffix = 10000
 
+// hashReader wraps the file handed to FastHash by fastHashFile and
+// collisionFastHashFile. Identity in production; a test seam so
+// TestResolveDestinationCollisionLoopBudget can count the bytes the
+// collision loop actually reads and assert them against hashBudget
+// (issue #328) instead of a wall-clock bound.
+var hashReader = func(f *os.File) io.ReaderAt { return f }
+
 // fastHashFile opens p and calculates its FastHash with size using the
 // canonical 2MiB per-region sample. Used for the final-destination match
 // (the operator-visible dedupe decision in ResolveDestination).
@@ -189,7 +197,7 @@ func fastHashFile(p string, size int64) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
-	return hashing.FastHash(f, size)
+	return hashing.FastHash(hashReader(f), size)
 }
 
 // collisionFastHashFile opens p and calculates its FastHash with size using
@@ -203,7 +211,7 @@ func collisionFastHashFile(p string, size int64) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
-	return hashing.FastHashWithSampleSize(f, size, collisionSampleSize)
+	return hashing.FastHashWithSampleSize(hashReader(f), size, collisionSampleSize)
 }
 
 // filesMatch reports whether dstPath exists, has the same size, and has
