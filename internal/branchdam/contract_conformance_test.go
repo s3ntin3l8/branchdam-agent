@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -255,6 +256,9 @@ func TestContractSourceMatchesContractVersion(t *testing.T) {
 	fields := strings.Fields(string(b))
 	if len(fields) < 2 || fields[0] != "branchdam" {
 		t.Fatalf("SOURCE = %q, want \"branchdam <sha> <subject>\"", b)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(fields[1]) {
+		t.Errorf("SOURCE records %q, want a full 40-hex commit SHA; run make contract-sync", fields[1])
 	}
 	if want := "branchdam@" + fields[1]; ContractVersion != want {
 		t.Errorf("ContractVersion = %q, want %q (SOURCE's commit); run make contract-sync", ContractVersion, want)

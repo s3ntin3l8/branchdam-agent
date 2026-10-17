@@ -140,6 +140,7 @@ contract-sync: ## Refresh internal/branchdam/testdata/contract from $(BRANCHDAM)
 	git -C "$(BRANCHDAM)" log -1 --format='branchdam %H %s' -- docs/contract/fixtures > internal/branchdam/testdata/contract/SOURCE
 	pin="branchdam@$$(git -C "$(BRANCHDAM)" log -1 --format=%H -- docs/contract/fixtures)" && \
 		PIN="$$pin" perl -pi -e 's|^const ContractVersion = ".*"|const ContractVersion = "$$ENV{PIN}"|' internal/branchdam/types.go && \
+		{ grep -qF "const ContractVersion = \"$$pin\"" internal/branchdam/types.go || { echo "ContractVersion not rewritten in internal/branchdam/types.go"; exit 1; }; } && \
 		printf '%s\n' "$$pin" > internal/branchdam/testdata/contract_version.golden.txt
 	go test ./internal/branchdam/ -run 'Contract' -count=1
 
