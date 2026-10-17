@@ -1,0 +1,29 @@
+{
+  "agentId": "workstation-01",
+  "scopeId": "4444444444444444444444444444444444444444444444444444444444444444",
+  "timelines": [
+    {
+      "timelineId": "tl-0001",
+      "nodeUuid": "22222222-2222-4222-8222-222222222222",
+      "filePath": "/virtual/resolve/workstation-01/Edit-a2bb3478",
+      "displayName": "Edit v3",
+      "evidenceJson": {
+        "project": "Edit"
+      }
+    }
+  ],
+  "memberships": [
+    {
+      "timelineId": "tl-0001",
+      "mediaFilePath": "/data/archive/2025/2025-10-16/A001_C002.MOV",
+      "sourceNodeUuid": "11111111-1111-4111-8111-111111111111",
+      "evidenceJson": {
+        "clip": "A001_C002"
+      }
+    }
+  ],
+  "legacyTimelineNodeUuids": [
+    "11111111-1111-4111-8111-111111111111"
+  ],
+  "retireScopeId": "5555555555555555555555555555555555555555555555555555555555555555"
+}

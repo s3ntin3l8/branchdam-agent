@@ -16,11 +16,12 @@ import "encoding/json"
 
 // ContractVersion pins the specific branchdam commit this client's DTOs were
 // built against, per issue #62's AC ("pin the specific contract version").
-// Bump this deliberately -- alongside the structs below -- whenever
-// branchdam's internal/agent/types.go or internal/httpapi/routes.go's agent
-// DTOs change; conformance_test.go asserts it matches the committed golden
-// fixture.
-const ContractVersion = "branchdam@fcc7e2d"
+// `make contract-sync` sets it to the branchdam commit of the vendored
+// contract fixtures (testdata/contract/SOURCE), alongside any struct changes
+// the fixtures call for; TestContractSourceMatchesContractVersion fails if
+// the two disagree, and conformance_test.go asserts it matches the committed
+// golden fixture.
+const ContractVersion = "branchdam@6be34c1"
 
 // Event type constants, matching the event_queue.event_type CHECK
 // constraint (internal/agent/types.go in branchdam).
