@@ -2,7 +2,9 @@
 // vendored server fixtures (testdata/contract/, checked by
 // contract_conformance_test.go) cannot express. Those fixtures set every
 // field the server reads or writes, so their strict round-trip already pins
-// every DTO's field names and types; what they cannot show is what this
+// every DTO's field names, and the type of every field a fixture sets (a
+// decode-only response field the fixture leaves at its zero value is
+// pinned by name only); what they cannot show is what this
 // client leaves OFF the wire when an optional field is unset, or a request
 // shape the server has no fixture for. Only those live here -- a golden that
 // merely re-pins a fixture's full shape is a second copy that rots on the
@@ -131,6 +133,10 @@ func TestRequestDTOsOmitUnsetOptionalFields(t *testing.T) {
 		{"ResolveSnapshotMembership", ResolveSnapshotMembership{
 			TimelineID: "timeline-1", MediaFilePath: `D:\Videos\unresolved.mov`,
 		}, []string{"mediaFilePath", "timelineId"}},
+		// A timeline has no optional field: every key is sent even when its
+		// value is zero.
+		{"ResolveSnapshotTimeline", ResolveSnapshotTimeline{},
+			[]string{"displayName", "evidenceJson", "filePath", "nodeUuid", "timelineId"}},
 		{"NodeStatusRequest", NodeStatusRequest{NodeUUIDs: []string{"u"}}, []string{"nodeUuids"}},
 	}
 	for _, tc := range cases {
@@ -176,11 +182,14 @@ func TestContractEdgeAttachedEventDoubleEncoding(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Read every fixture on the test goroutine: the handler runs on the
+	// server's goroutine, where t.Fatal must not be called.
+	eventsResponse := readContractFixture(t, "events_response")
 	var body []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write(readContractFixture(t, "events_response"))
+		_, _ = w.Write(eventsResponse)
 	}))
 	defer srv.Close()
 	if _, err := New(srv.URL, "test-key").PostEdgeAttached(context.Background(), "workstation-01", edge); err != nil {

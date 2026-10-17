@@ -272,11 +272,13 @@ func TestContractUploadHeaders(t *testing.T) {
 	if err := json.Unmarshal(readContractFixture(t, "upload_request_headers"), &fx); err != nil {
 		t.Fatal(err)
 	}
+	// Read on the test goroutine: t.Fatal must not run in the handler.
+	uploadResponse := readContractFixture(t, "upload_response")
 	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Clone()
 		_, _ = io.Copy(io.Discard, r.Body)
-		_, _ = w.Write(readContractFixture(t, "upload_response"))
+		_, _ = w.Write(uploadResponse)
 	}))
 	defer srv.Close()
 
