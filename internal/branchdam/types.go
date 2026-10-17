@@ -21,7 +21,7 @@ import "encoding/json"
 // the fixtures call for; TestContractSourceMatchesContractVersion fails if
 // the two disagree, and conformance_test.go asserts it matches the committed
 // golden fixture.
-const ContractVersion = "branchdam@6be34c1"
+const ContractVersion = "branchdam@6db0cfaf2f8daa493ebe177c11170bd6fe2715a1"
 
 // Event type constants, matching the event_queue.event_type CHECK
 // constraint (internal/agent/types.go in branchdam).
