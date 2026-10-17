@@ -126,14 +126,18 @@ func TestRunLuminarSyncAgainstRealHTTPServer(t *testing.T) {
 			t.Errorf("X-API-Key = %q, want the configured key", got)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&gotEnvelope); err != nil {
-			t.Fatalf("decode envelope: %v", err)
+			t.Errorf("decode envelope: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		if gotEnvelope.EventType != branchdam.EventEdgeAttached {
 			t.Errorf("eventType = %q, want %q", gotEnvelope.EventType, branchdam.EventEdgeAttached)
 		}
 		// Payload must be a JSON *string* (double-encoded), not an object.
 		if err := json.Unmarshal([]byte(gotEnvelope.Payload), &gotPayload); err != nil {
-			t.Fatalf("unmarshal double-encoded payload: %v", err)
+			t.Errorf("unmarshal double-encoded payload: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
@@ -327,10 +331,14 @@ SELECT '11', '/override', 'dir', 'OVERRIDE_upscale.jpg', 0, '', 0
 	mux.HandleFunc("/api/v1/agent/events", func(w http.ResponseWriter, r *http.Request) {
 		var env branchdam.EventEnvelope
 		if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
-			t.Fatalf("decode envelope: %v", err)
+			t.Errorf("decode envelope: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		if err := json.Unmarshal([]byte(env.Payload), &gotPayload); err != nil {
-			t.Fatalf("unmarshal payload: %v", err)
+			t.Errorf("unmarshal payload: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)

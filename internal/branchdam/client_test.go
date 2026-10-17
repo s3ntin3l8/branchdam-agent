@@ -189,7 +189,9 @@ func TestClientPostEventDoubleEncodesPayload(t *testing.T) {
 	var gotEnvelope EventEnvelope
 	srv, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotEnvelope); err != nil {
-			t.Fatalf("decode envelope: %v", err)
+			t.Errorf("decode envelope: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"eventId":"evt-1"}`))
@@ -239,7 +241,9 @@ func TestClientPostEventFallbackAndCustomUUID(t *testing.T) {
 	var gotEnvelope EventEnvelope
 	srv, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotEnvelope); err != nil {
-			t.Fatalf("decode envelope: %v", err)
+			t.Errorf("decode envelope: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"eventId":"evt-2"}`))

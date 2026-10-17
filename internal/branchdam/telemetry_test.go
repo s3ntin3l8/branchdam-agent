@@ -21,10 +21,14 @@ func TestClientSendTelemetry(t *testing.T) {
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			t.Fatalf("read body: %v", err)
+			t.Errorf("read body: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		if err := json.Unmarshal(body, &gotBody); err != nil {
-			t.Fatalf("unmarshal telemetry input: %v", err)
+			t.Errorf("unmarshal telemetry input: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
