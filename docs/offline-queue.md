@@ -442,14 +442,17 @@ one step, `upload_status` (`PENDING` → `DONE` \| `FAILED`); `node_created`, `a
   no ingest gate, so a long upload never blocks a card). Closing a row is a compare-and-set on
   `upload_status = PENDING` (`MarkUploadDone`): whichever finishes second leaves the local copy
   alone, and Drain re-reads the row before moving anything. A re-insert that uploads the file also
-  closes a row Drain had given up on (`FAILED`), so it does not stay in the failed list. The server deduplicates by hash, so a
+  closes a row Drain had given up on (`FAILED`), so it does not stay in the failed list. A *metered*
+  re-insert over such a row re-queues it instead of adding a second row for the same copy -- but only
+  while the copy still has the size and mtime recorded for it; if it changed, the file stays
+  `Deferred` and the card remains the other copy. The server deduplicates by hash, so a
   double upload cannot corrupt bytes.
 - **Prune and GC.** `prune` only considers `OFFLINE` rows (an allowlist, `upload-ingest=` in its
   report counts the skips): an `UPLOAD` row's local copy is the only copy off the card until the
   upload is confirmed, and afterwards still not an offline ingest's to delete. A row with a
   `PENDING` upload is not terminal, so the daily GC never collects it, however old -- and a finished
-  master row is kept while a sidecar row still waiting on its upload links to it, since only that
-  row remembers the server-assigned name the sidecar is uploaded under.
+  master row is kept while an unfinished (`PENDING` or `FAILED`) sidecar row links to it, since only
+  that row remembers the server-assigned name the sidecar is uploaded under.
 - **Counts.** A `PENDING` upload counts as "waiting to upload" (`AwaitingUpload`, `PendingBytes`); a
   `FAILED` one counts in `Failed` and appears in the tray's failed-rows list with step `upload`.
 

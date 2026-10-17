@@ -63,6 +63,29 @@ func (e *Engine) queueDeferredUpload(ctx context.Context, fr FileResult, it uplo
 		slog.Warn("upload: could not stat the local copy to queue its upload; leaving the file deferred", "path", fr.LocalPath, "err", err)
 		return fr
 	}
+
+	// A row Drain gave up on (FAILED) already owns this copy: queueing a
+	// second row on the same path would leave the stale one in the failed
+	// list for good, and once the new row's upload moves the copy the old
+	// one's Retry could only fail again. Reuse it -- but only while the copy
+	// still matches the size and mtime recorded for it, so the recorded
+	// BLAKE3 still describes these bytes; otherwise the file stays Deferred.
+	if failed, found, err := e.Queue.UnfinishedUploadByLocalPath(durable, fr.LocalPath); err != nil {
+		slog.Warn("upload: could not look up a failed upload for this copy; leaving the file deferred", "path", fr.LocalPath, "err", err)
+		return fr
+	} else if found { // PENDING returned above, so this one is FAILED
+		if info.Size() != failed.SizeBytes || info.ModTime().Unix() != failed.MtimeUnix {
+			slog.Warn("upload: a failed upload row owns this copy but its size or mtime no longer matches; leaving the file deferred", "path", fr.LocalPath, "node", failed.NodeUUID)
+			return fr
+		}
+		if _, err := e.Queue.ResetFailedNode(durable, failed.NodeUUID); err != nil {
+			slog.Warn("upload: could not re-queue the failed upload for this copy; leaving the file deferred", "path", fr.LocalPath, "node", failed.NodeUUID, "err", err)
+			return fr
+		}
+		slog.Info("upload: re-queued the failed upload for this copy", "path", fr.LocalPath, "node", failed.NodeUUID)
+		return markUploadQueued(fr, failed.NodeUUID)
+	}
+
 	fullHash, fastHash := fr.Write.FullHash, fr.Write.FastHash
 	if fullHash == "" {
 		// The copy was already in place, so nothing was staged and read

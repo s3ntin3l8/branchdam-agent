@@ -772,3 +772,53 @@ func TestReinsertUploadClosesAFailedRow(t *testing.T) {
 		t.Errorf("failed list = %+v, want it empty", failed)
 	}
 }
+
+// TestMeteredReinsertReusesAFailedRow: re-ingesting a card while still
+// metered over a row Drain gave up on must not stack a second row on the same
+// copy. The failed row is reset and reused when the copy still matches its
+// recorded size/mtime; if the copy changed, the file stays Deferred.
+func TestMeteredReinsertReusesAFailedRow(t *testing.T) {
+	setup := func(t *testing.T) (*Engine, *queue.Store, string, string, string) {
+		dir := t.TempDir()
+		card, localRoot := filepath.Join(dir, "card"), filepath.Join(dir, "local")
+		writeUploadCardFile(t, card, "IMG_0001.JPG", "queued bytes", time.Time{})
+		store, _ := openUploadQueue(t)
+		e := meteredQueueEngine(t, localRoot, store)
+		node := ingestOne(t, e, card)[0].UploadQueueID
+		if err := store.MarkUploadFailed(context.Background(), node, "fatal server answer"); err != nil {
+			t.Fatal(err)
+		}
+		return e, store, card, node, filepath.Join(localRoot, "2026", "IMG_0001.JPG")
+	}
+
+	t.Run("copy unchanged: the row is reset and reused", func(t *testing.T) {
+		e, store, card, node, _ := setup(t)
+		fr := ingestOne(t, e, card)[0]
+		if !fr.Queued || fr.UploadQueueID != node || fr.Deferred {
+			t.Fatalf("result = %+v, want Queued against the same row", fr)
+		}
+		rows := allRows(t, store)
+		if len(rows) != 1 || rows[0].UploadStatus != queue.StatusPending || rows[0].UploadAttempts != 0 {
+			t.Fatalf("rows = %+v, want the one failed row reset to PENDING", rows)
+		}
+		if failed, _ := store.FailedRows(context.Background(), 0); len(failed) != 0 {
+			t.Errorf("failed list = %+v, want it empty", failed)
+		}
+	})
+
+	t.Run("copy changed: stays deferred, no second row", func(t *testing.T) {
+		e, store, card, _, local := setup(t)
+		later := time.Now().Add(time.Hour)
+		if err := os.Chtimes(local, later, later); err != nil {
+			t.Fatal(err)
+		}
+		fr := ingestOne(t, e, card)[0]
+		if !fr.Deferred || fr.Queued || fr.UploadQueueID != "" {
+			t.Fatalf("result = %+v, want plain Deferred", fr)
+		}
+		rows := allRows(t, store)
+		if len(rows) != 1 || rows[0].UploadStatus != queue.StatusFailed {
+			t.Fatalf("rows = %+v, want the one failed row untouched", rows)
+		}
+	})
+}

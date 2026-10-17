@@ -335,6 +335,13 @@ func TestCollectGarbageKeepsAMasterWhileASidecarStillWaitsOnIt(t *testing.T) {
 	if n, err := s.CollectGarbage(ctx, time.Now(), GCRetention); err != nil || n != 0 {
 		t.Fatalf("CollectGarbage = %d, err = %v, want the master kept for its pending sidecar", n, err)
 	}
+	// A FAILED sidecar is one Retry from PENDING, so it holds its master too.
+	if err := s.MarkUploadFailed(ctx, "side", "boom"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.CollectGarbage(ctx, time.Now(), GCRetention); err != nil || n != 0 {
+		t.Fatalf("CollectGarbage = %d, err = %v, want the master kept for its failed sidecar", n, err)
+	}
 	if _, err := s.MarkUploadDone(ctx, "side", "srv-2", "2026/a.xmp", side.LocalPath); err != nil {
 		t.Fatal(err)
 	}
