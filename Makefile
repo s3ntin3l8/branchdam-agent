@@ -127,12 +127,21 @@ vulncheck: ## Check for known vulnerabilities (allowlist via VULNCHECK_IGNORE, d
 
 # BRANCHDAM points at a branchDAM checkout (default: a sibling directory).
 BRANCHDAM ?= ../branchdam
+# contract-sync copies the fixtures of a clean branchDAM checkout, records
+# its commit in SOURCE and ContractVersion, and runs the conformance tests.
+# If `make lint` then flags a fixture value as a secret (detect-secrets),
+# refresh the baseline: detect-secrets scan --baseline .secrets.baseline
 contract-sync: ## Refresh internal/branchdam/testdata/contract from $(BRANCHDAM)/docs/contract/fixtures
 	@test -d "$(BRANCHDAM)/docs/contract/fixtures" || { echo "no $(BRANCHDAM)/docs/contract/fixtures -- set BRANCHDAM=<branchdam checkout>"; exit 1; }
+	@test -z "$$(git -C "$(BRANCHDAM)" status --porcelain -- docs/contract/fixtures)" || { echo "$(BRANCHDAM)/docs/contract/fixtures has uncommitted changes; SOURCE would name a commit without them -- commit first"; exit 1; }
 	rm -f internal/branchdam/testdata/contract/*.json
 	cp "$(BRANCHDAM)"/docs/contract/fixtures/*.json internal/branchdam/testdata/contract/
 	git -C "$(BRANCHDAM)" log -1 --format='branchdam %H %s' -- docs/contract/fixtures > internal/branchdam/testdata/contract/SOURCE
-	go test ./internal/branchdam/ -run Contract -count=1
+	pin="branchdam@$$(git -C "$(BRANCHDAM)" log -1 --format=%h --abbrev=7 -- docs/contract/fixtures)" && \
+		sed -i.bak "s|^const ContractVersion = \".*\"|const ContractVersion = \"$$pin\"|" internal/branchdam/types.go && \
+		rm -f internal/branchdam/types.go.bak && \
+		printf '%s\n' "$$pin" > internal/branchdam/testdata/contract_version.golden.txt
+	go test ./internal/branchdam/ -run 'Contract' -count=1
 
 build: ## Build all packages
 	go build ./...

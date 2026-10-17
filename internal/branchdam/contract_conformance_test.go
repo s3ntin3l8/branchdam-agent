@@ -187,40 +187,78 @@ func TestContractFixturesAllAccountedFor(t *testing.T) {
 }
 
 // TestContractCheckContentQuery: the query parameters CheckContent sends
-// are exactly the server fixture's names.
+// are exactly the server fixture's names, for each request shape the
+// ingest engine makes: the full lookup, the fast pre-screen (no fullHash)
+// and a lookup with no known size (sizeBytes omitted, not sent as 0).
 func TestContractCheckContentQuery(t *testing.T) {
 	var fx map[string]any
 	if err := json.Unmarshal(readContractFixture(t, "check_content_query"), &fx); err != nil {
 		t.Fatal(err)
 	}
-	var gotQuery map[string][]string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.Query()
-		_, _ = w.Write([]byte(`{"found":false,"possibleMatch":false}`))
-	}))
-	defer srv.Close()
-
-	q := ContentCheckQuery{
-		FastHash:  fx["fastHash"].(string),
-		FullHash:  fx["fullHash"].(string),
-		SizeBytes: int64(fx["sizeBytes"].(float64)),
+	fastHash, _ := fx["fastHash"].(string)
+	fullHash, _ := fx["fullHash"].(string)
+	sizeBytes, _ := fx["sizeBytes"].(float64)
+	if fastHash == "" || fullHash == "" || sizeBytes <= 0 {
+		t.Fatalf("check_content_query fixture lacks fastHash, fullHash or sizeBytes: %v", fx)
 	}
-	if _, err := New(srv.URL, "test-key").CheckContent(context.Background(), q); err != nil {
+
+	cases := []struct {
+		name string
+		q    ContentCheckQuery
+		want []string
+	}{
+		{"full", ContentCheckQuery{FastHash: fastHash, FullHash: fullHash, SizeBytes: int64(sizeBytes)}, []string{"fastHash", "fullHash", "sizeBytes"}},
+		{"pre-screen", ContentCheckQuery{FastHash: fastHash, SizeBytes: int64(sizeBytes)}, []string{"fastHash", "sizeBytes"}},
+		{"unknown size", ContentCheckQuery{FastHash: fastHash, FullHash: fullHash}, []string{"fastHash", "fullHash"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotQuery map[string][]string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotQuery = r.URL.Query()
+				_, _ = w.Write([]byte(`{"found":false,"possibleMatch":false}`))
+			}))
+			defer srv.Close()
+
+			if _, err := New(srv.URL, "test-key").CheckContent(context.Background(), tc.q); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range tc.want {
+				want := fx[name]
+				if f, ok := want.(float64); ok {
+					want = strconv.FormatInt(int64(f), 10)
+				}
+				if got := gotQuery[name]; len(got) != 1 || got[0] != want {
+					t.Errorf("query %s = %v, want [%v]", name, got, want)
+				}
+			}
+			for name := range gotQuery {
+				if _, ok := fx[name]; !ok {
+					t.Errorf("CheckContent sends query %s, which the server fixture does not have", name)
+				}
+			}
+			if len(gotQuery) != len(tc.want) {
+				t.Errorf("CheckContent sent %v, want exactly %v", gotQuery, tc.want)
+			}
+		})
+	}
+}
+
+// TestContractSourceMatchesContractVersion: ContractVersion names the same
+// branchDAM commit testdata/contract/SOURCE records, so the client never
+// advertises one server commit while its fixtures prove another.
+func TestContractSourceMatchesContractVersion(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(contractDir, "SOURCE"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	for name, v := range fx {
-		want := v
-		if f, ok := v.(float64); ok {
-			want = strconv.FormatInt(int64(f), 10)
-		}
-		if got := gotQuery[name]; len(got) != 1 || got[0] != want {
-			t.Errorf("query %s = %v, want [%v]", name, got, want)
-		}
+	fields := strings.Fields(string(b))
+	if len(fields) < 2 || fields[0] != "branchdam" {
+		t.Fatalf("SOURCE = %q, want \"branchdam <sha> <subject>\"", b)
 	}
-	for name := range gotQuery {
-		if _, ok := fx[name]; !ok {
-			t.Errorf("CheckContent sends query %s, which the server fixture does not have", name)
-		}
+	pin := strings.TrimPrefix(ContractVersion, "branchdam@")
+	if pin == ContractVersion || len(pin) < 7 || !strings.HasPrefix(fields[1], pin) {
+		t.Errorf("ContractVersion = %q but SOURCE records branchdam %s; run make contract-sync", ContractVersion, fields[1])
 	}
 }
 
