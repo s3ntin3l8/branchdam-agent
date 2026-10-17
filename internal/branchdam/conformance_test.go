@@ -1,23 +1,35 @@
-// conformance_test.go golden-file tests. These assert every payload struct's
-// marshalled JSON matches a committed fixture in testdata/ byte-for-byte, so
-// an accidental field rename, a dropped omitempty, or a wrong JSON tag fails
-// loudly here instead of silently at the branchDAM server (422, or worse, a
-// silently-ignored field). Fixtures are regenerated with:
+// conformance_test.go holds the client-authored wire checks that the
+// vendored server fixtures (testdata/contract/, checked by
+// contract_conformance_test.go) cannot express. Those fixtures set every
+// field the server reads or writes, so their strict round-trip already pins
+// every DTO's field names and types; what they cannot show is what this
+// client leaves OFF the wire when an optional field is unset, or a request
+// shape the server has no fixture for. Only those live here -- a golden that
+// merely re-pins a fixture's full shape is a second copy that rots on the
+// next DTO change (issue #331).
 //
-//	go test ./internal/branchdam/... -run TestConformance -update
+// The remaining golden fixtures are regenerated with:
 //
-// which writes internal/branchdam/testdata/*.golden.json to match the
-// structs' current marshalled output -- review the diff before committing a
+//	go test ./internal/branchdam/... -run 'TestConformance|TestContractVersionSnapshot' -update
+//
+// which writes internal/branchdam/testdata/*.golden.* to match the structs'
+// current marshalled output -- review the diff before committing a
 // regenerated fixture; an unreviewed -update run defeats the point of this
 // test.
 package branchdam
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -57,178 +69,8 @@ func marshalIndent(t *testing.T, v any) []byte {
 	return b
 }
 
-// strPtr/int64Ptr/float64Ptr build pointer values inline, since every
-// optional NodeCreatedPayload field beyond the first few is *T.
-func strPtr(s string) *string       { return &s }
-func int64Ptr(n int64) *int64       { return &n }
-func float64Ptr(f float64) *float64 { return &f }
-
-// TestConformanceNodeCreatedFull pins the full 19-field payload shape the
-// plan's conformance contract calls out (internal/agent/types.go:51-84 in
-// branchdam) -- StorageLocationID deliberately excluded, since it's
-// deprecated/ignored server-side and the plan's own "Send:" field list omits
-// it.
-func TestConformanceNodeCreatedFull(t *testing.T) {
-	p := NodeCreatedPayload{
-		NodeUUID:           "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
-		FilePath:           "/storage/archive/2026/2026-07-15_ILCE-7M4/DSC01234.ARW",
-		FileName:           "DSC01234.ARW",
-		FileExt:            ".ARW",
-		SizeBytes:          52428800,
-		MtimeUnix:          1752591000,
-		FastHash:           strPtr("a17463135ce85764"),
-		FullHash:           strPtr("d1b2c3a4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff"),
-		SourcePathHash:     strPtr("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"),
-		Phash:              int64Ptr(-4611686018427387903),
-		CameraModel:        strPtr("ILCE-7M4"),
-		CameraSerial:       strPtr("1234567"),
-		LensModel:          strPtr("FE 24-70mm F2.8 GM"),
-		CapturedAtUnix:     int64Ptr(1752591000),
-		OriginalDocumentID: strPtr("xmp.did:0190f1a2-orig"),
-		DocumentID:         strPtr("xmp.did:0190f1a2-doc"),
-		DerivedFromID:      strPtr("xmp.did:0190f1a2-parent"),
-		FilenameStem:       strPtr("dsc01234"),
-		GPSLatitude:        float64Ptr(-33.9151),
-		GPSLongitude:       float64Ptr(18.4115),
-	}
-	checkGolden(t, "node_created_full.golden.json", marshalIndent(t, p))
-}
-
-// TestConformanceNodeCreatedRequiredOnly proves the omitempty asymmetry: the
-// two always-on-the-wire fields (NodeUUID, FilePath) appear even at zero
-// value, the four non-pointer omitempty fields (FileName, FileExt,
-// SizeBytes, MtimeUnix) vanish entirely at zero value rather than
-// serializing as "" / 0, and every pointer field stays nil -> absent.
-func TestConformanceNodeCreatedRequiredOnly(t *testing.T) {
-	p := NodeCreatedPayload{
-		NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
-		FilePath: "/storage/staging/agent-01/incoming/DSC01235.ARW",
-	}
-	checkGolden(t, "node_created_required_only.golden.json", marshalIndent(t, p))
-}
-
-// TestConformanceEdgeAttachedPayload pins EdgeAttachedPayload's own shape,
-// with EvidenceJSON as a bare JSON *object* -- the opposite encoding from
-// EventEnvelope.Payload (a JSON *string*), which
-// TestConformanceEventEnvelopeDoubleEncoding below exercises in the same
-// request so the two can never be confused by a future refactor.
-func TestConformanceEdgeAttachedPayload(t *testing.T) {
-	p := EdgeAttachedPayload{
-		SourceNodeUUID:   "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
-		TargetNodeUUID:   "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f61",
-		RelationshipType: RelationshipDerivedFrom,
-		Confidence:       0.89,
-		Tier:             2,
-		Resolver:         "luminar_catalog",
-		EvidenceJSON:     json.RawMessage(`{"catalogPath":"/Volumes/Edit/catalog.db","editId":42}`),
-	}
-	checkGolden(t, "edge_attached_payload.golden.json", marshalIndent(t, p))
-}
-
-// TestConformanceVirtualNodeCreated pins the VirtualNodeCreated payload
-// shape for EVENT_VIRTUAL_NODE_CREATED -- the integration-project node
-// emitter (Resolve timelines, Premiere sequences, FCPXML bundles). The
-// FilePath uses the conventional agent-scoped virtual prefix with a
-// per-raw-name hash suffix (see resolve.uniqueTimelineSegment in the
-// branchdam-agent repo). EvidenceJSON is an inline JSON object, mirroring
-// EdgeAttachedPayload's encoding.
-func TestConformanceVirtualNodeCreated(t *testing.T) {
-	p := VirtualNodeCreated{
-		NodeUUID:    "018f3a9b-8d76-7890-a123-456789abcdef",
-		FilePath:    "/virtual/resolve/workstation-01/My%20Documentary-a2bb3478",
-		DisplayName: "Resolve: My Documentary",
-		ProjectType: "resolve_project",
-		EvidenceJSON: json.RawMessage(
-			`{"schemaMapping":"resolve-projectdb-1","databaseUrl":"postgresql://localhost/projectdb","timelineName":"My Documentary"}`,
-		),
-	}
-	checkGolden(t, "virtual_node_created_payload.golden.json", marshalIndent(t, p))
-}
-
-// TestConformanceEventEnvelopeDoubleEncoding pins the full request body for
-// POST /api/v1/agent/events when sending an EVENT_EDGE_ATTACHED: the
-// envelope's own "payload" field is a JSON *string* containing the
-// escaped, double-encoded EdgeAttachedPayload -- sending payload as a bare
-// object is a 422 (AgentEventInput.Body.Payload is a Go string
-// server-side). This is the single most confusable pair in the whole
-// contract (per the plan): evidenceJson is an object one level in, payload
-// is a string one level out.
-func TestConformanceEventEnvelopeDoubleEncoding(t *testing.T) {
-	edge := EdgeAttachedPayload{
-		SourceNodeUUID:   "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
-		TargetNodeUUID:   "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f61",
-		RelationshipType: RelationshipDerivedFrom,
-		Confidence:       0.89,
-		Tier:             2,
-		Resolver:         "luminar_catalog",
-		EvidenceJSON:     json.RawMessage(`{"catalogPath":"/Volumes/Edit/catalog.db","editId":42}`),
-	}
-	payloadJSON, err := json.Marshal(edge)
-	if err != nil {
-		t.Fatalf("marshal edge payload: %v", err)
-	}
-	env := EventEnvelope{
-		AgentID:   "workstation-01",
-		EventType: EventEdgeAttached,
-		Payload:   string(payloadJSON),
-	}
-	checkGolden(t, "event_envelope_edge_attached.golden.json", marshalIndent(t, env))
-}
-
-func TestConformanceNodeMovedPayload(t *testing.T) {
-	p := NodeMovedPayload{
-		NodeUUID:    "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
-		NewFilePath: "/storage/archive/2026/2026-07-15_ILCE-7M4/DSC01234-renamed.ARW",
-		NewFileName: "DSC01234-renamed.ARW",
-		MtimeUnix:   1752591100,
-	}
-	checkGolden(t, "node_moved_payload.golden.json", marshalIndent(t, p))
-}
-
-func TestConformanceNodeDeletedPayload(t *testing.T) {
-	p := NodeDeletedPayload{NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60"}
-	checkGolden(t, "node_deleted_payload.golden.json", marshalIndent(t, p))
-}
-
-func TestConformancePathRebasedPayload(t *testing.T) {
-	p := PathRebasedPayload{
-		NodeUUID:       "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
-		TargetFilePath: "/storage/archive/2026/2026-07-15_ILCE-7M4/DSC01234.ARW",
-		TargetFileName: "DSC01234.ARW",
-		MtimeUnix:      1752591000,
-		FastHash:       strPtr("a17463135ce85764"),
-		FullHash:       strPtr("d1b2c3a4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff"),
-		SizeBytes:      52428800,
-	}
-	checkGolden(t, "path_rebased_payload.golden.json", marshalIndent(t, p))
-}
-
-func TestConformanceHelloResponse(t *testing.T) {
-	p := HelloResponse{OK: true, Version: "0.42.0"}
-	checkGolden(t, "hello_response.golden.json", marshalIndent(t, p))
-}
-
-func TestConformanceHandshakeRequestResponse(t *testing.T) {
-	req := HandshakeRequest{AgentID: "workstation-01"}
-	checkGolden(t, "handshake_request.golden.json", marshalIndent(t, req))
-
-	resp := HandshakeResponse{
-		OK:                    true,
-		ServerVersion:         "0.42.0",
-		ServerTimeUnix:        1752591200,
-		AcknowledgedEventUUID: "0190f1a2-9999-7000-8000-000000000000",
-		PendingEventsCount:    3,
-		CurrentKeyID:          6,
-		// APIKey is always "" on the wire (the new key is only ever sent
-		// sealed).
-		PendingRotation: &PendingRotationHint{
-			KeyID:                    7,
-			SealedAPIKey:             "v1:c2VhbGVk", // shape only; OpenRotatedKey is tested in keyrotation_test.go
-			PreviousKeyExpiresAtUnix: 1752677600,
-		},
-	}
-	checkGolden(t, "handshake_response.golden.json", marshalIndent(t, resp))
-}
+// int64Ptr builds a pointer value inline for the optional *int64 fields.
+func int64Ptr(n int64) *int64 { return &n }
 
 // TestConformanceHandshakeRequestWithCurrentKeyID pins the wire shape of a
 // handshake request with CurrentKeyID present, as a separate fixture from
@@ -240,79 +82,145 @@ func TestConformanceHandshakeRequestWithCurrentKeyID(t *testing.T) {
 	checkGolden(t, "handshake_request_with_key.golden.json", marshalIndent(t, req))
 }
 
-func TestConformanceRebaseRequestResponse(t *testing.T) {
-	req := RebaseRequest{
-		NodeUUID:   "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
-		TargetPath: "/storage/archive/2026/2026-07-15_ILCE-7M4/DSC01234.ARW",
-		FileName:   "DSC01234.ARW",
-		FileExt:    ".ARW",
-		SizeBytes:  52428800,
-		MtimeUnix:  1752591000,
-		FastHash:   strPtr("a17463135ce85764"),
+// TestRequestDTOsOmitUnsetOptionalFields pins, for every DTO this client
+// encodes, exactly which keys go on the wire when only the required fields
+// are set. The contract fixtures set every field, so their round-trip cannot
+// see an omitempty that was dropped (a deprecated storageLocationId sent as
+// 0, an unresolved Resolve membership sent with sourceNodeUuid "") or one
+// that was wrongly added to a required field (a missing key is a 422). This
+// replaces the per-DTO minimal-shape goldens (node_created_required_only,
+// handshake_request, and the unset-optional halves of the other request
+// goldens).
+func TestRequestDTOsOmitUnsetOptionalFields(t *testing.T) {
+	cases := []struct {
+		name string
+		v    any
+		want []string
+	}{
+		// The two always-on-the-wire fields appear; the four non-pointer
+		// omitempty fields (fileName, fileExt, sizeBytes, mtimeUnix) and the
+		// deprecated storageLocationId vanish at zero value rather than
+		// serializing as "" / 0, and every pointer field stays nil -> absent.
+		{"NodeCreatedPayload", NodeCreatedPayload{
+			NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
+			FilePath: "/storage/staging/agent-01/incoming/DSC01235.ARW",
+		}, []string{"filePath", "nodeUuid"}},
+		// sourceNodeId/targetNodeId and the deprecated reviewState must never
+		// be sent unset (a reviewState of "" is harmless, CONFIRMED is fatal).
+		{"EdgeAttachedPayload", EdgeAttachedPayload{
+			SourceNodeUUID: "a", TargetNodeUUID: "b", RelationshipType: RelationshipDerivedFrom,
+		}, []string{"relationshipType", "sourceNodeUuid", "targetNodeUuid"}},
+		{"NodeMovedPayload", NodeMovedPayload{NodeUUID: "u", NewFilePath: "/x"}, []string{"newFilePath", "nodeUuid"}},
+		{"NodeDeletedPayload", NodeDeletedPayload{NodeUUID: "u"}, []string{"nodeUuid"}},
+		{"PathRebasedPayload", PathRebasedPayload{NodeUUID: "u", TargetFilePath: "/y"}, []string{"nodeUuid", "targetFilePath"}},
+		{"VirtualNodeCreated", VirtualNodeCreated{
+			NodeUUID: "u", FilePath: "/virtual/resolve/w/x", DisplayName: "d", ProjectType: "resolve_project",
+		}, []string{"displayName", "filePath", "nodeUuid", "projectType"}},
+		{"EventEnvelope", EventEnvelope{AgentID: "w", EventType: EventNodeDeleted, Payload: "{}"}, []string{"agentId", "eventType", "payload"}},
+		// clientVersion, lastProcessedEventUuid and currentKeyId are all
+		// absent when unset; handshake_request_with_key.golden.json pins the
+		// currentKeyId-present case.
+		{"HandshakeRequest", HandshakeRequest{AgentID: "workstation-01"}, []string{"agentId"}},
+		// fullHash and the deprecated storageLocationId are absent when unset.
+		{"RebaseRequest", RebaseRequest{NodeUUID: "u", TargetPath: "/t"}, []string{"nodeUuid", "targetPath"}},
+		{"ResolveSnapshot", ResolveSnapshot{
+			AgentID: "w", ScopeID: "s", Timelines: []ResolveSnapshotTimeline{}, Memberships: []ResolveSnapshotMembership{},
+		}, []string{"agentId", "memberships", "scopeId", "timelines"}},
+		// An unresolved membership (media the agent has no node for) carries
+		// no sourceNodeUuid and no evidenceJson at all.
+		{"ResolveSnapshotMembership", ResolveSnapshotMembership{
+			TimelineID: "timeline-1", MediaFilePath: `D:\Videos\unresolved.mov`,
+		}, []string{"mediaFilePath", "timelineId"}},
+		{"NodeStatusRequest", NodeStatusRequest{NodeUUIDs: []string{"u"}}, []string{"nodeUuids"}},
 	}
-	checkGolden(t, "rebase_request.golden.json", marshalIndent(t, req))
-
-	resp := RebaseResponse{
-		ID:                42,
-		NodeUUID:          "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
-		StorageLocationID: 3,
-		FilePath:          "/storage/archive/2026/2026-07-15_ILCE-7M4/DSC01234.ARW",
-		Status:            "REBASED",
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(b, &obj); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]string, 0, len(obj))
+			for k := range obj {
+				got = append(got, k)
+			}
+			sort.Strings(got)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("%s with only required fields set encodes keys %v, want %v (%s)", tc.name, got, tc.want, b)
+			}
+		})
 	}
-	checkGolden(t, "rebase_response.golden.json", marshalIndent(t, resp))
 }
 
-func TestConformanceResolveSnapshotRequestResponse(t *testing.T) {
-	req := ResolveSnapshot{
-		AgentID: "workstation-01", ScopeID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Timelines: []ResolveSnapshotTimeline{{
-			TimelineID: "timeline-1", NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f61",
-			FilePath: "/virtual/resolve/0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f61", DisplayName: "Resolve: Master",
-			EvidenceJSON: json.RawMessage(`{"timelineName":"Master"}`),
-		}},
-		Memberships: []ResolveSnapshotMembership{
-			{
-				TimelineID: "timeline-1", MediaFilePath: `D:\Videos\clip.mov`,
-				SourceNodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60",
-				EvidenceJSON:   json.RawMessage(`{"timelineId":"timeline-1","mediaFilePath":"D:\\Videos\\clip.mov"}`),
-			},
-			{TimelineID: "timeline-1", MediaFilePath: `D:\Videos\unresolved.mov`},
-		},
-		LegacyTimelineNodeUUIDs: []string{"0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f62"},
-		RetireScopeID:           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+// TestContractEdgeAttachedEventDoubleEncoding sends the server's
+// event_edge_attached fixture through PostEdgeAttached and checks the
+// request body against the server's events_request envelope: the
+// envelope's "payload" is a JSON *string* (a bare object is a 422 --
+// AgentEventInput.Body.Payload is a Go string server-side), and inside that
+// string evidenceJson is still a JSON *object*. This is the single most
+// confusable pair in the contract -- evidenceJson is an object one level
+// in, payload is a string one level out -- and the round-trip test only
+// sees each half separately. TestClientPostEventDoubleEncodesPayload covers
+// the same for EVENT_NODE_CREATED.
+func TestContractEdgeAttachedEventDoubleEncoding(t *testing.T) {
+	fixture := readContractFixture(t, "event_edge_attached")
+	var edge EdgeAttachedPayload
+	if err := json.Unmarshal(fixture, &edge); err != nil {
+		t.Fatal(err)
 	}
-	checkGolden(t, "resolve_snapshot_request.golden.json", marshalIndent(t, req))
-
-	resp := ResolveSnapshotResponse{Created: 1, Refreshed: 2, Removed: 3, Unchanged: 4, Unresolved: 5, ReviewedConflicts: 6}
-	checkGolden(t, "resolve_snapshot_response.golden.json", marshalIndent(t, resp))
-}
-
-// TestConformanceContentCheckResult pins the check-content response field
-// names (branchdam's AgentCheckContentResult), including the pre-screen's
-// possibleMatch and the optional indexingStatus.
-func TestConformanceContentCheckResult(t *testing.T) {
-	res := ContentCheckResult{
-		Found: true, PossibleMatch: true,
-		NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60", FilePath: "/mnt/archive/2024/IMG_0001.CR3",
-		LifecycleState: "ACTIVE", IndexingStatus: "INDEXED_FULL",
+	var envFixture map[string]any
+	if err := json.Unmarshal(readContractFixture(t, "events_request"), &envFixture); err != nil {
+		t.Fatal(err)
 	}
-	checkGolden(t, "check_content_result.golden.json", marshalIndent(t, res))
-}
 
-// TestConformanceNodeStatusRequestResponse pins the node-status field
-// names (branchdam's AgentNodeStatusInput/Output), including fullHash.
-func TestConformanceNodeStatusRequestResponse(t *testing.T) {
-	req := NodeStatusRequest{NodeUUIDs: []string{"0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60"}}
-	checkGolden(t, "node_status_request.golden.json", marshalIndent(t, req))
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write(readContractFixture(t, "events_response"))
+	}))
+	defer srv.Close()
+	if _, err := New(srv.URL, "test-key").PostEdgeAttached(context.Background(), "workstation-01", edge); err != nil {
+		t.Fatal(err)
+	}
 
-	resp := NodeStatusResponse{Statuses: []NodeStatusEntry{
-		{
-			NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f60", Found: true, LifecycleState: "ACTIVE", Tier: "TIER3_MASTER_ARCHIVE",
-			Verified: true, FullHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		},
-		{NodeUUID: "0190f1a2-3b4c-7d5e-8f6a-1b2c3d4e5f61"},
-	}}
-	checkGolden(t, "node_status_response.golden.json", marshalIndent(t, resp))
+	var env map[string]any
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("request body is not JSON: %v\n%s", err, body)
+	}
+	for k := range envFixture {
+		if _, ok := env[k]; !ok {
+			t.Errorf("envelope lacks %q, which the server's events_request fixture has", k)
+		}
+	}
+	for k := range env {
+		if _, ok := envFixture[k]; !ok {
+			t.Errorf("envelope sends %q, which the server's events_request fixture does not have", k)
+		}
+	}
+	if env["eventType"] != EventEdgeAttached {
+		t.Errorf("eventType = %v, want %s", env["eventType"], EventEdgeAttached)
+	}
+	payload, ok := env["payload"].(string)
+	if !ok {
+		t.Fatalf("payload is %T, want a JSON string (double-encoded): %s", env["payload"], body)
+	}
+	var inner, want map[string]any
+	if err := json.Unmarshal([]byte(payload), &inner); err != nil {
+		t.Fatalf("payload string is not JSON: %v", err)
+	}
+	if err := json.Unmarshal(fixture, &want); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := inner["evidenceJson"].(map[string]any); !ok {
+		t.Errorf("inner evidenceJson is %T, want a JSON object", inner["evidenceJson"])
+	}
+	if !reflect.DeepEqual(inner, want) {
+		t.Errorf("double-encoded payload differs from the server fixture:\n got  %s\n want %s", payload, fixture)
+	}
 }
 
 // TestHelloVsHandshakeFieldNamesDiffer is the regression test for the
