@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.17.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.16.2...v1.17.0) (2026-10-17)
+
+
+### Features
+
+* **branchdam:** adopt rotated API keys from the handshake ([#323](https://github.com/s3ntin3l8/branchdam-agent/issues/323)) ([3bbe442](https://github.com/s3ntin3l8/branchdam-agent/commit/3bbe44206eaf53c1680f9390a4a3adef2c3a718a))
+
+
+### Bug Fixes
+
+* **branchdam:** classify errors by status and code; let failed rows be retried ([#296](https://github.com/s3ntin3l8/branchdam-agent/issues/296)) ([8624822](https://github.com/s3ntin3l8/branchdam-agent/commit/8624822152adcde0b8d78682dd0570c85256777d))
+* **branchdam:** send telemetry and complete payload fields ([#317](https://github.com/s3ntin3l8/branchdam-agent/issues/317)) ([a406d4c](https://github.com/s3ntin3l8/branchdam-agent/commit/a406d4cf35422767730faca7a099b0647d8289b3))
+* **config:** decide the placeholder on the read the rotation patch rewrites ([#325](https://github.com/s3ntin3l8/branchdam-agent/issues/325)) ([268056d](https://github.com/s3ntin3l8/branchdam-agent/commit/268056de8c0bc82004f3b2c4ebb42405c6885148))
+* **config:** serialise settings saves and apply after ingest ([#311](https://github.com/s3ntin3l8/branchdam-agent/issues/311)) ([4f91b95](https://github.com/s3ntin3l8/branchdam-agent/commit/4f91b954ba6cb62b8f7c8a8b6561507477d20208))
+* **deps:** bump Go toolchain to 1.26.9 and x/net to 0.60.0 ([#286](https://github.com/s3ntin3l8/branchdam-agent/issues/286)) ([b84bed1](https://github.com/s3ntin3l8/branchdam-agent/commit/b84bed1cdc052477dd26eaf9337491c838a6fb40))
+* **ingest:** detect offline resume by content, not source path ([#292](https://github.com/s3ntin3l8/branchdam-agent/issues/292)) ([50d2b7d](https://github.com/s3ntin3l8/branchdam-agent/commit/50d2b7d71bc892f0515e9f3937e8b73387a82498))
+* **ingest:** make online ingest durable and cancellable ([#300](https://github.com/s3ntin3l8/branchdam-agent/issues/300)) ([1a54942](https://github.com/s3ntin3l8/branchdam-agent/commit/1a5494207200a4767a9d0293c630e75d2b7ae1b2))
+* **ingest:** never delete a file at a final destination name ([#293](https://github.com/s3ntin3l8/branchdam-agent/issues/293)) ([0b4bc22](https://github.com/s3ntin3l8/branchdam-agent/commit/0b4bc22ba6755b3e5d755656c44375f6ca376de1))
+* **ingest:** skip OS metadata directories and keep partial results on walk errors ([#298](https://github.com/s3ntin3l8/branchdam-agent/issues/298)) ([fc65d12](https://github.com/s3ntin3l8/branchdam-agent/commit/fc65d12a31d7f9a8e36629ca4e846be49dbb3085))
+* **ingest:** use the fast-hash pre-screen and stop re-reading the card ([#304](https://github.com/s3ntin3l8/branchdam-agent/issues/304)) ([efbac14](https://github.com/s3ntin3l8/branchdam-agent/commit/efbac14614b63d3e58bd8d1549a00ee5c0df0822))
+* **prune:** require server hash to equal the local hash ([#306](https://github.com/s3ntin3l8/branchdam-agent/issues/306)) ([9d6f2fd](https://github.com/s3ntin3l8/branchdam-agent/commit/9d6f2fdba76abd7afa7f3e1a4ac9907cad47a128))
+* **queue:** archive-copy parity, terminal states and row GC ([#302](https://github.com/s3ntin3l8/branchdam-agent/issues/302)) ([8a4df4c](https://github.com/s3ntin3l8/branchdam-agent/commit/8a4df4cff79bdf8d7ccbb707a2b6112de1252b05))
+* **selfupdate:** all-or-nothing multi-target apply with a rollback label that always matches ([#313](https://github.com/s3ntin3l8/branchdam-agent/issues/313)) ([3e0fbb0](https://github.com/s3ntin3l8/branchdam-agent/commit/3e0fbb06c062c36eb68fa7f79f328b9fb2aa6ef4))
+* **tray:** scope Ingest now and auto-eject to detected card volumes ([#294](https://github.com/s3ntin3l8/branchdam-agent/issues/294)) ([f1a846c](https://github.com/s3ntin3l8/branchdam-agent/commit/f1a846c6c57eeedadd793a5ae112f3bee9fee358))
+* **tray:** status-server Host check, live tooltip, off-loop metered probe, resume offers present cards ([#315](https://github.com/s3ntin3l8/branchdam-agent/issues/315)) ([44143bb](https://github.com/s3ntin3l8/branchdam-agent/commit/44143bb49c48cd2b9a169365b1ed5d5940356fa7))
+* **upload:** stream the card once, send its hash, drop the 30s request cap ([#309](https://github.com/s3ntin3l8/branchdam-agent/issues/309)) ([18407cc](https://github.com/s3ntin3l8/branchdam-agent/commit/18407cc35ff63cf3835f178d3510370af3fab41c))
+* **windows:** detect removable drives, eject safely, verify unbuffered ([#321](https://github.com/s3ntin3l8/branchdam-agent/issues/321)) ([e9d0ad1](https://github.com/s3ntin3l8/branchdam-agent/commit/e9d0ad1e884f83a99c565d6303d7756b787d0181))
+
 ## [1.16.2](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.16.1...v1.16.2) (2026-09-28)
 
 
