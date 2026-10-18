@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestSummarizeReturnsNotConfigured(t *testing.T) {
@@ -27,6 +29,17 @@ func TestSummarizeReturnsNotConfigured(t *testing.T) {
 				t.Errorf("summarize() = %q, want %q", got, "not configured")
 			}
 		})
+	}
+}
+
+func TestSummarizeShowsQueuedUploads(t *testing.T) {
+	st := Status{LastIngest: &IngestSummary{StartedAt: time.Now(), Submitted: 3, Queued: 2}}
+	if got := summarize(st); !strings.Contains(got, "3 ok, 2 queued, 0 skipped") {
+		t.Errorf("summarize() = %q, want it to show \"3 ok, 2 queued\"", got)
+	}
+	st.LastIngest.Queued = 0
+	if got := summarize(st); strings.Contains(got, "queued") {
+		t.Errorf("summarize() = %q, want no queued part when none are queued", got)
 	}
 }
 

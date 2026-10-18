@@ -435,6 +435,7 @@ type ingestActionResult struct {
 	Skipped   int       `json:"skipped"`
 	Failed    int       `json:"failed"`
 	Deferred  int       `json:"deferred"`
+	Queued    int       `json:"queued"`
 	Offline   bool      `json:"offline"`
 	Err       string    `json:"err,omitempty"`
 }
@@ -449,6 +450,7 @@ func newIngestActionResult(sum IngestSummary) ingestActionResult {
 		Skipped:   sum.Skipped,
 		Failed:    sum.Failed,
 		Deferred:  sum.Deferred,
+		Queued:    sum.Queued,
 		Offline:   sum.Offline,
 		Err:       errString(sum.Err),
 	}

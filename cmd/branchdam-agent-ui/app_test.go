@@ -1443,3 +1443,20 @@ func TestWindowWiresTrayActions(t *testing.T) {
 		}
 	}
 }
+
+// TestIngestRendersQueuedCount guards frontend/dist/app.js showing the
+// queued-for-upload count (IngestSummary.Queued, json "queued") in both the
+// ingest panel and the dashboard tile -- app.js is a committed artifact with
+// no JS test harness, so this is the mechanical check.
+func TestIngestRendersQueuedCount(t *testing.T) {
+	src, err := os.ReadFile("frontend/dist/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	for _, want := range []string{"last.queued", "li.queued", "queued for upload"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("frontend/dist/app.js no longer renders %q", want)
+		}
+	}
+}

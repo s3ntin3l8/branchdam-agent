@@ -349,7 +349,7 @@ func newAuthedRequest(method, path string, body []byte) *http.Request {
 }
 
 func TestHandleActionIngest(t *testing.T) {
-	actions := &spyActions{ingestSummary: IngestSummary{CardPath: "/mnt/card", Submitted: 3}}
+	actions := &spyActions{ingestSummary: IngestSummary{CardPath: "/mnt/card", Submitted: 3, Queued: 2}}
 	s := &StatusServer{Addr: "127.0.0.1:38080", Token: "tok", Actions: actions}
 	mux := http.NewServeMux()
 	s.registerAPIRoutes(mux)
@@ -370,6 +370,9 @@ func TestHandleActionIngest(t *testing.T) {
 	}
 	if got.Submitted != 3 {
 		t.Errorf("Submitted = %d, want 3", got.Submitted)
+	}
+	if got.Queued != 2 {
+		t.Errorf("Queued = %d, want 2", got.Queued)
 	}
 }
 

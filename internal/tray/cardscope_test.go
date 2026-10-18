@@ -190,12 +190,13 @@ func TestTriggerIngestEjectScope(t *testing.T) {
 		wantEject  bool
 		wantOK     bool
 		wantDeferr int
+		wantQueued int
 	}{
-		{"detected card", clean, true, "/media/CARD", true, true, 0},
-		{"manual ingest of a card volume", clean, false, "/media/CARD", false, true, 0},
-		{"manual folder import", clean, false, "/home/me/import", false, true, 0},
-		{"detected card with metered deferral", deferred, true, "/media/CARD", false, false, 1},
-		{"detected card with a queued metered deferral", queuedUpload, true, "/media/CARD", true, true, 0},
+		{"detected card", clean, true, "/media/CARD", true, true, 0, 0},
+		{"manual ingest of a card volume", clean, false, "/media/CARD", false, true, 0, 0},
+		{"manual folder import", clean, false, "/home/me/import", false, true, 0, 0},
+		{"detected card with metered deferral", deferred, true, "/media/CARD", false, false, 1, 0},
+		{"detected card with a queued metered deferral", queuedUpload, true, "/media/CARD", true, true, 0, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,6 +218,21 @@ func TestTriggerIngestEjectScope(t *testing.T) {
 			}
 			if sum.Deferred != tc.wantDeferr {
 				t.Errorf("Deferred = %d, want %d", sum.Deferred, tc.wantDeferr)
+			}
+			if sum.Queued != tc.wantQueued {
+				t.Errorf("Queued = %d, want %d", sum.Queued, tc.wantQueued)
+			}
+			if tc.wantQueued > 0 && sum.Submitted != 1 {
+				t.Errorf("Submitted = %d, want 1 (the queued upload is counted apart)", sum.Submitted)
+			}
+			if tc.wantEject && tc.wantQueued > 0 {
+				found := false
+				for _, n := range notes {
+					found = found || strings.Contains(n, "queued for upload")
+				}
+				if !found {
+					t.Errorf("eject notifications %q do not mention the queued uploads", notes)
+				}
 			}
 			if got := len(ejected) > 0; got != tc.wantEject {
 				t.Errorf("ejected %v, want eject=%v", ejected, tc.wantEject)

@@ -104,7 +104,7 @@ func TestJSONErrFieldOmittedWhenNil(t *testing.T) {
 // (or vice versa) -- see this repo's own review history for why that
 // pairing keeps being the actual failure mode.
 func TestIngestSummaryJSONKeysAreCamelCase(t *testing.T) {
-	data, err := json.Marshal(IngestSummary{CardPath: "/mnt/card", Submitted: 3})
+	data, err := json.Marshal(IngestSummary{CardPath: "/mnt/card", Submitted: 3, Queued: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,12 +112,12 @@ func TestIngestSummaryJSONKeysAreCamelCase(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"cardPath", "submitted"} {
+	for _, key := range []string{"cardPath", "submitted", "queued"} {
 		if _, ok := decoded[key]; !ok {
 			t.Errorf("expected camelCase key %q in %s", key, data)
 		}
 	}
-	for _, key := range []string{"CardPath", "Submitted"} {
+	for _, key := range []string{"CardPath", "Submitted", "Queued"} {
 		if _, ok := decoded[key]; ok {
 			t.Errorf("unexpected leftover PascalCase key %q in %s", key, data)
 		}
