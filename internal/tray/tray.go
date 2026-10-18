@@ -1367,14 +1367,21 @@ func (r *Runner) SetIsMeteredFunc(fn func() (bool, error)) {
 	r.isMeteredFn = fn
 }
 
-// UploadGate reports whether queued uploads must be held back right now: the
-// live pauseUploadOnMetered setting and the runner's metered probe (the
-// isMeteredFn override, else netgate.IsMetered), read at call time. With the
-// pause off it returns (false, nil) without probing. A probe error is
-// returned as is; callers treat it as metered (fail-closed). TriggerDrain
-// asks it once per pass and the queue drainer hands it to Drain
-// (ingest.WithUploadGate) so it is asked again before each upload.
+// UploadGate reports whether queued uploads must be held back right now. It
+// holds (true, nil) while the tray is paused, so a Pause during a running
+// drain pass stops further queued uploads (the one in flight still
+// finishes). Otherwise it reads the live pauseUploadOnMetered setting and
+// the runner's metered probe (the isMeteredFn override, else
+// netgate.IsMetered) at call time: with the setting off it returns
+// (false, nil) without probing. A probe error fails closed -- it is returned
+// together with metered = true, so the result is safe to act on without
+// checking err. TriggerDrain asks it once per pass and the queue drainer
+// hands it to Drain (ingest.WithUploadGate) so it is asked again before
+// each upload.
 func (r *Runner) UploadGate() (metered bool, err error) {
+	if r.paused.Load() {
+		return true, nil
+	}
 	r.mu.Lock()
 	pauseMetered := r.pauseUploadOnMetered
 	isMetered := r.isMeteredFn
@@ -1385,7 +1392,11 @@ func (r *Runner) UploadGate() (metered bool, err error) {
 	if isMetered == nil {
 		isMetered = netgate.IsMetered
 	}
-	return isMetered()
+	metered, err = isMetered()
+	if err != nil {
+		return true, err
+	}
+	return metered, nil
 }
 
 // TriggerDrain runs one internal/ingest.Drain pass via the configured
@@ -1424,7 +1435,7 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 		return DrainSummary{}, false
 	}
 
-	if metered, mErr := r.UploadGate(); metered || mErr != nil {
+	if metered, mErr := r.UploadGate(); metered {
 		if mErr != nil {
 			slog.Debug("metered probe failed, treating as metered (fail-closed)", "err", mErr)
 		}

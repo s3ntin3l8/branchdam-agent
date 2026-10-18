@@ -439,7 +439,9 @@ one step, `upload_status` (`PENDING` → `DONE` \| `FAILED`); `node_created`, `a
   `Runner.UploadGate`) that holds queued uploads back while the link is metered or the probe fails,
   checked before each upload. A pass that starts unmetered therefore stops sending as soon as the
   link turns metered: the upload in flight finishes, the rest stay `PENDING` with no attempt
-  counted. Both apply the gate only with `ingest.pauseUploadOnMetered` set.
+  counted. Both apply the metered check only with `ingest.pauseUploadOnMetered` set. The tray's
+  gate also holds while the tray is paused: Pause never cancels the upload in flight, but a pass
+  already running sends no further queued uploads.
 - **Re-insert races.** A card re-insert can upload the same file while Drain streams it (Drain holds
   no ingest gate, so a long upload never blocks a card). Closing a row is a compare-and-set on
   `upload_status = PENDING` (`MarkUploadDone`): whichever finishes second leaves the local copy

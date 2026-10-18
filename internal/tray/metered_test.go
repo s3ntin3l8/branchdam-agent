@@ -166,6 +166,21 @@ func TestStalledMeteredProbeIsAbandoned(t *testing.T) {
 	}
 }
 
+// TestUploadGateHoldsWhilePaused: a Pause held during a running drain pass
+// holds the next queued upload, without probing.
+func TestUploadGateHoldsWhilePaused(t *testing.T) {
+	r := NewRunner(nil, nil, t.TempDir())
+	probed := false
+	r.SetIsMeteredFunc(func() (bool, error) { probed = true; return false, nil })
+	if held, err := r.UploadGate(); held || err != nil {
+		t.Fatalf("unpaused UploadGate() = %v, %v; want false, nil", held, err)
+	}
+	r.paused.Store(true)
+	if held, err := r.UploadGate(); !held || err != nil || probed {
+		t.Errorf("paused UploadGate() = %v, %v (probed %v); want true, nil, no probe", held, err, probed)
+	}
+}
+
 // TestUploadGate: pause off never probes; pause on reports the probe's
 // answer, and its error is returned for the caller to fail closed.
 func TestUploadGate(t *testing.T) {
@@ -182,7 +197,7 @@ func TestUploadGate(t *testing.T) {
 		{name: "pause off", pause: false, metered: true},
 		{name: "unmetered", pause: true, wantProbed: true},
 		{name: "metered", pause: true, metered: true, want: true, wantProbed: true},
-		{name: "probe error", pause: true, err: probeErr, wantErr: probeErr, wantProbed: true},
+		{name: "probe error", pause: true, err: probeErr, want: true, wantErr: probeErr, wantProbed: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
