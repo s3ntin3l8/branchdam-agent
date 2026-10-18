@@ -404,8 +404,8 @@ function renderIngest(status) {
       ];
       if (last.resumed) rows.push(["Resumed from earlier run", `${last.resumed ?? 0}`]);
       if (last.deferred) rows.push(["Waiting for unmetered connection", raw(pill(`${last.deferred} on card -- not ejected`, "warn"))]);
-      if (last.queued) rows.push(["Queued for upload", raw(pill(`${last.queued} waiting for an unmetered connection`, "neutral"))]);
-      if (last.offline) rows.push(["Mode", raw(pill("offline queue", "neutral"))]);
+      if (last.queued) rows.push(["Queued for upload", `${last.queued} waiting for an unmetered connection`]);
+      if (last.offline) rows.push(["Mode", "Offline queue"]);
       if (last.canceled) {
         rows.push(["Canceled", raw(pill("stopped before the end of the card -- not ejected; ingest it again to finish", "warn"))]);
       } else if (last.err) {
@@ -597,7 +597,7 @@ function renderQueue(status, settings) {
   const c = q.Counts ?? {};
   const rows = [
     ["Waiting to upload", c.AwaitingUpload ?? 0],
-    ["Uploaded, confirming archive", c.AwaitingRebase ?? 0],
+    ["Confirming archive", c.AwaitingRebase ?? 0],
     ["Failed", c.Failed ?? 0],
     ["Done", c.Done ?? 0],
     ["Still to upload", fmtBytes(c.PendingBytes)],

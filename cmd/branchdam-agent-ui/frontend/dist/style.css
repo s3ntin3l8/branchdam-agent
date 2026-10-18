@@ -73,7 +73,13 @@ h1 { font-size: 18px; font-weight: 700; margin: 0 0 2px; }
    leaving a dead band above it (the section box itself supplies spacing
    from its neighbors via margin-bottom below). */
 h2 { font-size: 16px; font-weight: 600; color: var(--fg); margin: 0 0 6px; }
-h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
+/* One sub-heading style for every h3 (integration names, Behavior groups,
+   "Failed files"): breathing room above, none when it opens its card. */
+h3 { font-size: 13px; font-weight: 600; color: var(--fg); margin: 18px 0 6px; }
+h3:first-child { margin-top: 0; }
+/* The failed-files list is its own holder, so its h3 is always :first-child;
+   the gap above it belongs to the holder. */
+#queue-failed { margin-top: 18px; }
 
 /* .section-intro is one static sentence of standing copy under a card's
    <h2>, saying what the card is for -- distinct from a field's own
@@ -201,7 +207,7 @@ section {
 }
 
 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-td { padding: 4px 8px 4px 0; vertical-align: top; overflow-wrap: anywhere; }
+td { padding: 6px 8px 6px 0; vertical-align: top; overflow-wrap: anywhere; }
 /* Same fixed width as a settings row's own label column, so a status
    table's labels line up with the form above it in the same panel instead
    of each table sizing its label column independently. */
@@ -437,7 +443,7 @@ ul { margin: 4px 0; padding-left: 18px; }
   grid-template-columns: var(--field-control-offset) minmax(0, 1fr);
   margin: 6px 0 14px;
 }
-.settings-group > h3 { margin: 8px 0 0; font-weight: 400; color: var(--muted); }
+.settings-group > h3 { margin: 8px 0 0; }
 .settings-group-fields .field-row.checkbox-row { margin-left: 0; }
 .settings-group-fields .field-note.checkbox-note { margin-left: 24px; }
 
@@ -593,7 +599,7 @@ ul { margin: 4px 0; padding-left: 18px; }
    it exactly when one integration block immediately follows ANOTHER one,
    which is true regardless of what (if anything) precedes the first. */
 .integration-block + .integration-block { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
-.integration-block h3 { font-size: 13px; margin: 0 0 6px; }
+.integration-block h3 { margin: 4px 0 6px; }
 
 /* --- Overview panel -------------------------------------------------- */
 
@@ -720,6 +726,14 @@ ul { margin: 4px 0; padding-left: 18px; }
 /* At the window's 640px minimum, a horizontal category strip gives the
    forms and status tables the full width they need. */
 @media (max-width: 760px) {
+  /* Card-level button groups wrap as an even 2-column grid rather than
+     leaving one button alone on a second line. */
+  .action-row.action-row-unlabeled > .row-actions {
+    flex: 1 1 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .action-row.action-row-unlabeled > .row-actions > button { text-align: center; }
   #layout { flex-direction: column; gap: 8px; padding: 10px 16px 16px; }
   #nav {
     flex: 0 0 auto;
