@@ -312,15 +312,15 @@ two separate top-level groups:
 
 | Category | Settings | Live status |
 |---|---|---|
-| Server | Server & identity | Server connection |
-| Storage & ingest | Storage & naming | Ingest, Queue, Watch directories |
-| Integrations | Integration settings | Integrations, Hooks |
+| Server | Server & identity | Connection status |
+| Storage & ingest | Storage & naming | Ingest, Offline queue, Watch directories |
+| Integrations | App integrations | Sync status, Render hooks |
 | Behavior | Behavior | *(none)* |
-| Self-update | Self-update settings | Self-update |
+| Self-update | Update settings | Update status |
 
 Two groupings worth explaining: the offline queue has no form field anywhere (config-file only),
 and its backlog counts are ingest-pipeline state, not server reachability, so it joins Storage &
-ingest rather than Server. Hooks folds into the Integrations panel but keeps its own `<h2>Hooks</h2>`
+ingest rather than Server. Hooks folds into the Integrations panel but keeps its own `<h2>Render hooks</h2>`
 heading rather than merging into one list -- `internal/tray/registry_test.go`'s own doc comment
 explains that `Integrations()` and `HookDescriptors()` legitimately both title an entry "DaVinci
 Resolve," safe only because each renders under its own separately-headed section; merging them here
@@ -377,7 +377,7 @@ this is a personal test environment, not a production rollout.
 
 The "Integration settings" section's `renderIntegrationBlock` (Track 3d, above) covers
 *configuring* an integration; it has no way to run one. This adds the missing action surface, in
-the read-only live-status "Integrations"/"Hooks" sections rather than the settings form -- these
+the read-only live-status "Sync status"/"Render hooks" sections rather than the settings form -- these
 are Runner actions with a live result to show (a `SyncSummary`/`HookState`), not a config value to
 persist, matching how `internal/tray/integrationsmenu.go`'s own "Sync now" is a menu action wired
 straight into `run_supported.go`'s select loop rather than a `Settings` mutation.
@@ -1163,7 +1163,7 @@ to say "verified."
     already running" and leaves that message on screen (rather than the row silently reverting to
     the pre-click summary on the next 5s poll -- the skip/error branches deliberately do NOT call
     `poll()`, since a skipped pass never updates `LastSync` and a rebuilt row would otherwise show
-    nothing changed). In the Hooks section, click "Install" and
+    nothing changed). In the Render hooks section, click "Install" and
     confirm the row transitions to "up to date" without a tray restart, then click "Reveal" and
     confirm Explorer opens the correct Scripts folder -- confirm Reveal does NOT change the row's
     install-state pill (it never mutates `HookState`).

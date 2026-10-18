@@ -1377,13 +1377,20 @@ function renderOverview(status, settings) {
 
   // Updates tile: the sixth tile, so the grid divides evenly into 3, 2 or 1
   // columns. Reads status.selfUpdate only.
+  // Same phase -> unavailable -> update ladder as renderSelfUpdate's Status
+  // row, and the same bare version spelling, so the tile never contradicts
+  // the card.
   const upd = status.selfUpdate;
   if (!upd || !upd.Enabled) {
-    tiles.push({ title: "Updates", main: dot("Checks off", "neutral"), sub: upd?.CurrentVersion ? `v${upd.CurrentVersion}` : "" });
+    tiles.push({ title: "Updates", main: dot("Checks off", "neutral"), sub: upd?.CurrentVersion || "" });
+  } else if (upd.Phase && !["idle", "available"].includes(upd.Phase)) {
+    tiles.push({ title: "Updates", main: dot(upd.Phase, upd.Phase === "failed" ? "bad" : "neutral"), sub: upd.CurrentVersion });
+  } else if (upd.Unavailable) {
+    tiles.push({ title: "Updates", main: dot("Unavailable", "neutral"), sub: "non-release build" });
   } else if (upd.UpdateFound) {
-    tiles.push({ title: "Updates", main: dot("Update available", "warn"), sub: `v${upd.LatestVersion} is ready · v${upd.CurrentVersion} installed` });
+    tiles.push({ title: "Updates", main: dot("Update available", "warn"), sub: `${upd.LatestVersion} is ready · ${upd.CurrentVersion} installed` });
   } else {
-    tiles.push({ title: "Updates", main: upd.Checked ? dot("Up to date", "ok") : dot("Not checked yet", "neutral"), sub: `v${upd.CurrentVersion}` });
+    tiles.push({ title: "Updates", main: upd.Checked ? dot("Up to date", "ok") : dot("Not checked yet", "neutral"), sub: upd.CurrentVersion });
   }
 
   const grid = document.createElement("div");
