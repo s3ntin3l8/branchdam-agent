@@ -157,12 +157,18 @@ func TestParityAgentIngestVsServerScan(t *testing.T) {
 	runAgentIngest(t, agentBin, agentCfgPath, cardDir)
 
 	// --- Trigger the normal server-side scan over the identical bytes. ---
-	triggerServerScan(t, serverScanBaseURL, serverScanLocID)
+	scanJobID := triggerServerScan(t, serverScanBaseURL, serverScanLocID)
 
 	// --- Wait for both sides to finish indexing (async on both: the scan
 	// pipeline batches commits, the agent's events drain on a 2s ticker). ---
+	//
+	// Server side: wait for the scan job itself, not a row count. The scan
+	// dir holds four files (the server indexes clip.srt as its own row), so
+	// a ">= 3 rows" wait can return before clip.mp4 -- which has the extra
+	// ffprobe step -- is committed. The agent side never sends the .srt, so
+	// its exact count of 3 is correct.
 	wantFiles := []string{"photo.jpg", "photo.arw", "clip.mp4"}
-	waitForMediaNodeCount(t, serverScanDBPath, serverScanLocID, len(wantFiles), 20*time.Second)
+	waitForScanJob(t, serverScanDBPath, scanJobID, 20*time.Second)
 	waitForMediaNodeCount(t, agentArchiveDBPath, agentArchiveLocID, len(wantFiles), 20*time.Second)
 
 	// --- The actual diff. ---
@@ -679,7 +685,9 @@ func runAgentIngest(t *testing.T, agentBin, cfgPath, cardDir string) {
 	t.Logf("branchdam-agent ingest output:\n%s", out)
 }
 
-func triggerServerScan(t *testing.T, baseURL string, locationID int64) {
+// triggerServerScan starts a scan of locationID and returns the scan job id
+// from the {"jobId":N} response.
+func triggerServerScan(t *testing.T, baseURL string, locationID int64) int64 {
 	t.Helper()
 	body := fmt.Sprintf(`{"storageLocationId":%d}`, locationID)
 	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/scan", strings.NewReader(body))
@@ -702,6 +710,53 @@ func triggerServerScan(t *testing.T, baseURL string, locationID int64) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		t.Fatalf("POST /api/v1/scan: status %d", resp.StatusCode)
 	}
+	var out struct {
+		JobID int64 `json:"jobId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("POST /api/v1/scan: decode response: %v", err)
+	}
+	if out.JobID <= 0 {
+		t.Fatalf("POST /api/v1/scan: response carried no jobId")
+	}
+	return out.JobID
+}
+
+// waitForScanJob polls scan_jobs until the job leaves RUNNING, and fails the
+// test unless it ended COMPLETED.
+func waitForScanJob(t *testing.T, dbPath string, jobID int64, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	state, lastErr, queryErr := "", "", error(nil)
+	for time.Now().Before(deadline) {
+		var rows []struct {
+			State       string  `json:"state"`
+			FilesFailed int64   `json:"files_failed"`
+			LastError   *string `json:"last_error"`
+		}
+		q := fmt.Sprintf(`SELECT state, files_failed, last_error FROM scan_jobs WHERE id = %d`, jobID)
+		err := sqlJSON(t, dbPath, q, &rows)
+		if err != nil {
+			queryErr = err
+		} else if len(rows) == 1 {
+			state, lastErr = rows[0].State, ""
+			if rows[0].LastError != nil {
+				lastErr = *rows[0].LastError
+			}
+			switch state {
+			case "COMPLETED":
+				// A job can finish COMPLETED with per-file failures.
+				if rows[0].FilesFailed > 0 {
+					t.Fatalf("scan job %d COMPLETED with files_failed=%d: %s", jobID, rows[0].FilesFailed, lastErr)
+				}
+				return
+			case "FAILED", "CANCELLED":
+				t.Fatalf("scan job %d ended %s: %s", jobID, state, lastErr)
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("scan job %d not COMPLETED within %s (state %q, last_error %q, last query error: %v)", jobID, timeout, state, lastErr, queryErr)
 }
 
 // createAgentPairing provisions the temporary agent identity used by the
