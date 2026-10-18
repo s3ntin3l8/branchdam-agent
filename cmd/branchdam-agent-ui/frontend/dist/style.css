@@ -80,6 +80,9 @@ h3:first-child { margin-top: 0; }
 /* The failed-files list is its own holder, so its h3 is always :first-child;
    the gap above it belongs to the holder. */
 #queue-failed { margin-top: 18px; }
+/* Empty in the normal state; its margin would otherwise collapse through
+   and add a dead band under the action row. */
+#queue-failed:empty { display: none; }
 
 /* .section-intro is one static sentence of standing copy under a card's
    <h2>, saying what the card is for -- distinct from a field's own
@@ -726,8 +729,8 @@ ul { margin: 4px 0; padding-left: 18px; }
 /* At the window's 640px minimum, a horizontal category strip gives the
    forms and status tables the full width they need. */
 @media (max-width: 760px) {
-  /* Card-level button groups wrap as an even 2-column grid rather than
-     leaving one button alone on a second line. */
+  /* Card-level button groups wrap as an even 2-column grid (equal widths,
+     filling the row) rather than natural-width, right-aligned wrapping. */
   .action-row.action-row-unlabeled > .row-actions {
     flex: 1 1 100%;
     display: grid;

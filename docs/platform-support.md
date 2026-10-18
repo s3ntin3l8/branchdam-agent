@@ -375,7 +375,7 @@ this is a personal test environment, not a production rollout.
 
 ### Integrations/hooks actions (Track 3e)
 
-The "Integration settings" section's `renderIntegrationBlock` (Track 3d, above) covers
+The "App integrations" section's `renderIntegrationBlock` (Track 3d, above) covers
 *configuring* an integration; it has no way to run one. This adds the missing action surface, in
 the read-only live-status "Sync status"/"Render hooks" sections rather than the settings form -- these
 are Runner actions with a live result to show (a `SyncSummary`/`HookState`), not a config value to
