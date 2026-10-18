@@ -61,6 +61,13 @@ function fmtTime(iso) {
 // (an error message, a status word, a version string), never pre-built
 // HTML, so this is the one place that needs to get escaping right for
 // all of them.
+// dot renders a tile's main value as plain text led by a status dot, so every
+// health tile's main line is the same weight (a pill in some and bold text in
+// others made the grid look uneven).
+function dot(text, kind) {
+  return raw(`<span class="dot ${kind}"></span>${escapeHtml(text)}`);
+}
+
 function pill(text, kind) {
   return `<span class="pill ${kind}">${escapeHtml(text)}</span>`;
 }
@@ -190,6 +197,7 @@ function renderServer(status) {
     actionButtonRow("Server actions", "", [
       {
         label: "Test connection",
+        primary: true,
         busyText: "Checking…",
         busy: inFlightActions.has("testConnection"),
         run: async (statusEl) => {
@@ -427,6 +435,7 @@ function renderIngest(status) {
     actionButtonRow("Ingest actions", "", [
       {
         label: "Ingest now",
+        primary: true,
         busyText: "Starting…",
         disabled: blocked,
         busy: inFlightActions.has("ingestStart"),
@@ -602,6 +611,7 @@ function renderQueue(status, settings) {
   const buttons = [
     {
       label: "Drain now",
+      primary: true,
       busyText: "Draining…",
       disabled: !!status.paused || !!status.inFlightDrain,
       busy: inFlightActions.has("drain"),
@@ -750,14 +760,16 @@ function actionButtonRow(id, detailHtml, buttons, hideLabel) {
   // grid cell -- renderHooks passes TWO buttons (Install, Reveal) into
   // one call here, and a grid can't place multiple same-tag siblings into
   // one named column without a common wrapper. .row-actions also gives
-  // the first button (the row's main action) the primary/brand styling
-  // in style.css, with no styling logic needed here.
+  // a button descriptor's `primary: true` the filled brand styling in
+  // style.css (the card's one main forward action); every other button is
+  // outline.
   const actions = document.createElement("span");
   actions.className = "row-actions";
   for (const b of buttons) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.textContent = b.label;
+    if (b.primary) btn.className = "primary";
     if (b.disabled || b.busy) btn.disabled = true;
     btn.addEventListener("click", async () => {
       btn.disabled = true;
@@ -942,16 +954,18 @@ function renderSelfUpdate(status, settings) {
     // Rolling back needs no update check (it restores the copy a past
     // update left on disk), so it stays available with checks turned off,
     // matching the tray menu's "Roll back" item.
-    appendRollbackRow(container, status, su, settings);
+    const rb = rollbackButton(status, su, settings);
+    if (rb) container.appendChild(actionButtonRow("Update actions", "", [rb], true));
     return;
   }
   const rows = [["Current version", su.CurrentVersion]];
+  if (su.RollbackVersion) rows.push(["Previous version", su.RollbackVersion]);
   if (su.Phase && !["idle", "available"].includes(su.Phase)) {
     rows.push(["Status", raw(pill(su.Phase, su.Phase === "failed" ? "bad" : "neutral"))]);
   } else if (su.Unavailable) {
     rows.push(["Status", raw(pill("unavailable (non-release build)", "neutral"))]);
   } else if (su.UpdateFound) {
-    rows.push(["Status", raw(pill(`update available: ${su.LatestVersion}`, "bad"))]);
+    rows.push(["Status", raw(pill(`update available: ${su.LatestVersion}`, "warn"))]);
   } else if (su.Checked) {
     rows.push(["Status", raw(pill("up to date", "ok"))]);
   }
@@ -962,8 +976,7 @@ function renderSelfUpdate(status, settings) {
   // Unknown non-terminal phases fail closed too, so a newly added Go phase
   // cannot accidentally re-enable the destructive button in an older UI.
   const applyInFlight = !!su.Phase && !["idle", "available", "failed"].includes(su.Phase);
-  container.appendChild(
-    actionButtonRow("Update check", "", [
+  const updateButtons = [
       {
         label: "Check now",
         busyText: "Checking…",
@@ -1040,22 +1053,27 @@ function renderSelfUpdate(status, settings) {
           await poll();
         },
       },
-    ], true),
-  );
-  appendRollbackRow(container, status, su, settings);
+  ];
+  // One action group: Install (only when an update was found, and then the
+  // card's one filled button), Check now (filled otherwise), Roll back.
+  const [checkBtn, installBtn] = updateButtons;
+  installBtn.primary = true;
+  checkBtn.primary = !su.UpdateFound;
+  const ordered = su.UpdateFound ? [installBtn, checkBtn] : [checkBtn];
+  const rb = rollbackButton(status, su, settings);
+  if (rb) ordered.push(rb);
+  container.appendChild(actionButtonRow("Update actions", "", ordered, true));
 }
 
-// appendRollbackRow adds "Roll back to <version>" when the agent reports a
+// rollbackButton returns the "Roll back to <version>" button descriptor when the agent reports a
 // previous version on disk (selfUpdate.RollbackVersion). Disabled while an
 // ingest runs or an update/rollback owns the binary -- the agent refuses
 // both anyway (it takes the same idle gate as the tray menu's rollback),
 // this only keeps the button honest. Confirmed like the tray menu item.
-function appendRollbackRow(container, status, su, settings) {
-  if (!su.RollbackVersion) return;
+function rollbackButton(status, su, settings) {
+  if (!su.RollbackVersion) return null;
   const ownsBinary = !!su.Phase && !["idle", "available", "failed", "checking"].includes(su.Phase);
-  container.appendChild(
-    actionButtonRow("Roll back", "", [
-      {
+  return {
         label: `Roll back to ${su.RollbackVersion}`,
         busyText: "Rolling back…",
         disabled: !!status.busy || ownsBinary,
@@ -1077,9 +1095,7 @@ function appendRollbackRow(container, status, su, settings) {
           setFieldStatus(statusEl, "Rolling back — the tray restarts when done", "saved");
           await poll();
         },
-      },
-    ], true),
-  );
+  };
 }
 
 function table(rows) {
@@ -1288,14 +1304,14 @@ function renderOverview(status, settings) {
   if (lastHandshake) serverSub.push(`last handshake ${lastHandshake}`);
   tiles.push({
     title: "Server",
-    main: !probe ? raw(pill("not checked", "neutral")) : probe.ok ? raw(pill("reachable", "ok")) : raw(pill("unreachable", "bad")),
+    main: !probe ? dot("Not checked", "neutral") : probe.ok ? dot("Reachable", "ok") : dot("Unreachable", "bad"),
     sub: serverSub.join(" · "),
   });
 
   const watchDirs = status.watchDirs ?? [];
   tiles.push({
     title: "Card detection",
-    main: watchDirs.length ? `${watchDirs.length} folder${watchDirs.length === 1 ? "" : "s"} watched` : raw(pill("off", "neutral")),
+    main: watchDirs.length ? `${watchDirs.length} folder${watchDirs.length === 1 ? "" : "s"} watched` : dot("Off", "neutral"),
   });
 
   // Working copy folder disk usage (issue #274 -- replaces the old
@@ -1306,21 +1322,21 @@ function renderOverview(status, settings) {
   // the former is actually alarming, so only it gets the "bad" pill.
   const su = status.scratchUsage;
   if (!su?.Configured) {
-    tiles.push({ title: "Working copy", main: raw(pill("not configured", "neutral")) });
+    tiles.push({ title: "Working copy", main: dot("Not configured", "neutral") });
   } else if (su.Err) {
-    tiles.push({ title: "Working copy", main: raw(pill("usage unavailable", "bad")), sub: su.Err });
+    tiles.push({ title: "Working copy", main: dot("Usage unavailable", "bad"), sub: su.Err });
   } else if (su.TotalBytes === 0 && su.FreeBytes === 0) {
     // Configured=true with zero/zero and no Err is the transient
     // "probe in flight, first read for this path" state
     // scratchUsageSnapshot returns immediately after a Reconfigure --
     // not an error, just not settled yet.
-    tiles.push({ title: "Working copy", main: raw(pill("checking…", "neutral")) });
+    tiles.push({ title: "Working copy", main: dot("Checking…", "neutral") });
   } else {
     const pctFree = su.TotalBytes ? su.FreeBytes / su.TotalBytes : 0;
     const low = pctFree < 0.1;
     tiles.push({
       title: "Working copy",
-      main: low ? raw(pill(`${fmtBytes(su.FreeBytes)} free — low`, "bad")) : `${fmtBytes(su.FreeBytes)} free`,
+      main: low ? dot(`${fmtBytes(su.FreeBytes)} free — low`, "bad") : `${fmtBytes(su.FreeBytes)} free`,
       sub: `of ${fmtBytes(su.TotalBytes)}`,
     });
   }
@@ -1343,7 +1359,7 @@ function renderOverview(status, settings) {
         .join(" · "),
     });
   } else {
-    tiles.push({ title: "Ingest", main: raw(pill("no ingest yet", "neutral")) });
+    tiles.push({ title: "Ingest", main: dot("No ingest yet", "neutral") });
   }
 
   const q = status.queueStatus;
@@ -1356,7 +1372,18 @@ function renderOverview(status, settings) {
       sub: c.Failed ? raw(pill(`${c.Failed} failed`, "bad")) : "",
     });
   } else {
-    tiles.push({ title: "Offline queue", main: raw(pill("off", "neutral")) });
+    tiles.push({ title: "Offline queue", main: dot("Off", "neutral") });
+  }
+
+  // Updates tile: the sixth tile, so the grid divides evenly into 3, 2 or 1
+  // columns. Reads status.selfUpdate only.
+  const upd = status.selfUpdate;
+  if (!upd || !upd.Enabled) {
+    tiles.push({ title: "Updates", main: dot("Checks off", "neutral"), sub: upd?.CurrentVersion ? `v${upd.CurrentVersion}` : "" });
+  } else if (upd.UpdateFound) {
+    tiles.push({ title: "Updates", main: dot("Update available", "warn"), sub: `v${upd.LatestVersion} is ready · v${upd.CurrentVersion} installed` });
+  } else {
+    tiles.push({ title: "Updates", main: upd.Checked ? dot("Up to date", "ok") : dot("Not checked yet", "neutral"), sub: `v${upd.CurrentVersion}` });
   }
 
   const grid = document.createElement("div");
@@ -2598,10 +2625,18 @@ function renderSettingsForm(sv) {
   const behaviorContainer = byId("settings-behavior-config");
   behaviorContainer.innerHTML = "";
   for (const group of BEHAVIOR_GROUPS) {
+    // Group title in the label column, toggles stacked in the control
+    // column -- the same two-column system as every other form.
+    const wrap = document.createElement("div");
+    wrap.className = "settings-group";
     const h3 = document.createElement("h3");
     h3.textContent = group.title;
-    behaviorContainer.appendChild(h3);
-    for (const f of group.fields) behaviorContainer.appendChild(renderCheckboxField(f, sv));
+    wrap.appendChild(h3);
+    const fields = document.createElement("div");
+    fields.className = "settings-group-fields";
+    for (const f of group.fields) fields.appendChild(renderCheckboxField(f, sv));
+    wrap.appendChild(fields);
+    behaviorContainer.appendChild(wrap);
   }
 
   const selfUpdateContainer = byId("settings-selfupdate-config");

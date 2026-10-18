@@ -62,6 +62,7 @@
 
         <section id="sec-overview-health">
           <h2>At a glance</h2>
+          <p class="section-intro">Whether the agent is working right now.</p>
           <div id="overview-health"></div>
         </section>
       </div>
@@ -74,7 +75,8 @@
         </section>
 
         <section id="sec-server">
-          <h2>Server connection</h2>
+          <h2>Connection status</h2>
+          <p class="section-intro">Whether the server answers, and when it last did.</p>
           <div id="server-body"></div>
         </section>
       </div>
@@ -88,24 +90,27 @@
 
         <section id="sec-ingest">
           <h2>Ingest</h2>
+          <p class="section-intro">The running or most recent card import, and the controls for it.</p>
           <div id="ingest-body"></div>
         </section>
 
         <section id="sec-queue">
-          <h2>Queue</h2>
+          <h2>Offline queue</h2>
+          <p class="section-intro">Files waiting to reach the server, and any that need a retry.</p>
           <div id="queue-body"></div>
         </section>
       </div>
 
       <div class="panel" id="panel-integrations">
         <section id="sec-settings-integrations">
-          <h2>Integration settings</h2>
+          <h2>App integrations</h2>
           <p class="section-intro">Syncs edits made in other apps (Luminar Neo, DaVinci Resolve) into branchDAM.</p>
           <div id="settings-integrations-config"></div>
         </section>
 
         <section id="sec-integrations">
-          <h2>Integrations</h2>
+          <h2>Sync status</h2>
+          <p class="section-intro">The latest sync for each enabled integration.</p>
           <div id="integrations-body"></div>
         </section>
 
@@ -117,7 +122,7 @@
              here would reconstruct the exact unheaded-siblings bug (#187)
              this repo already fixed once. -->
         <section id="sec-hooks">
-          <h2>Hooks</h2>
+          <h2>Render hooks</h2>
           <p class="section-intro">Installs a small script into an editing app so it records which source clips went into each render.</p>
           <div id="hooks-body"></div>
         </section>
@@ -133,12 +138,14 @@
 
       <div class="panel" id="panel-selfupdate">
         <section id="sec-settings-selfupdate">
-          <h2>Self-update settings</h2>
+          <h2>Update settings</h2>
+          <p class="section-intro">Whether and how often the agent looks for new releases.</p>
           <div id="settings-selfupdate-config"></div>
         </section>
 
         <section id="sec-selfupdate">
-          <h2>Self-update</h2>
+          <h2>Update status</h2>
+          <p class="section-intro">The installed version, and whether a newer one is ready.</p>
           <div id="selfupdate-body"></div>
         </section>
       </div>
