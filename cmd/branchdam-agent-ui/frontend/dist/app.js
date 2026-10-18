@@ -726,7 +726,7 @@ function refreshEnabledByID(sv) {
 // starts disabled and shows its own busyText immediately, rather than
 // only reacting to a click on this particular DOM instance.
 // hideLabel (4th arg): true for a row whose `id` exists only to give the
-// row an aria-label (e.g. "Server actions", "Update check" -- filler text
+// row an aria-label (e.g. "Server actions", "Update actions" -- filler text
 // that isn't a proper row title the way an integration/hook's own Title
 // is), so the visible <label> collapses to .sr-only instead of taking a
 // full 160px+ indent for nothing. The row itself still carries the same
