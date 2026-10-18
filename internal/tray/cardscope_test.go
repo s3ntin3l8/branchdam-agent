@@ -225,6 +225,15 @@ func TestTriggerIngestEjectScope(t *testing.T) {
 			if tc.wantQueued > 0 && sum.Submitted != 1 {
 				t.Errorf("Submitted = %d, want 1 (the queued upload is counted apart)", sum.Submitted)
 			}
+			if tc.wantEject && tc.wantQueued > 0 {
+				found := false
+				for _, n := range notes {
+					found = found || strings.Contains(n, "queued for upload")
+				}
+				if !found {
+					t.Errorf("eject notifications %q do not mention the queued uploads", notes)
+				}
+			}
 			if got := len(ejected) > 0; got != tc.wantEject {
 				t.Errorf("ejected %v, want eject=%v", ejected, tc.wantEject)
 			}

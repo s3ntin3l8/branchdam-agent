@@ -76,7 +76,8 @@ type IngestSummary struct {
 	// connection and recorded in queue.db (ingest.FileResult.UploadQueueID):
 	// their bytes have not reached the server yet, but Drain sends them
 	// from the verified local copy, so the card may eject. Kept apart from
-	// Submitted, which means "reached the server". A file whose event POST
+	// Submitted, which means "reached the archive, not necessarily the
+	// server". A file whose event POST
 	// merely wasn't accepted (Queued without an UploadQueueID) stays in
 	// Submitted -- its archive copy is in place. Always 0 for offline.
 	Queued  int   `json:"queued"`
@@ -1063,7 +1064,7 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 			switch {
 			case f.Err != nil:
 				summary.Failed++
-			case f.UploadQueueID != "":
+			case f.UploadQueueID != "" && !f.Deferred:
 				summary.Queued++
 			case f.Deferred:
 				summary.Deferred++
@@ -1124,7 +1125,11 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 			}
 		} else {
 			if notifier != nil {
-				notifier("branchDAM Agent", fmt.Sprintf("%s ejected — safe to remove", volName))
+				msg := fmt.Sprintf("%s ejected — safe to remove", volName)
+				if summary.Queued > 0 {
+					msg += "; " + queuedClause(summary.Queued)
+				}
+				notifier("branchDAM Agent", msg)
 			}
 		}
 	} else if notifier != nil && summary.OK() && summary.Submitted+summary.Queued > 0 {
@@ -1133,16 +1138,16 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 			action = "queued offline"
 		}
 		var msg string
-		switch {
-		case summary.Submitted == 0:
+		switch summary.Submitted {
+		case 0:
 			// Only queued uploads: nothing has reached the server yet.
-		case summary.Submitted == 1:
+		case 1:
 			msg = fmt.Sprintf("1 photo %s from %s", action, volName)
 		default:
 			msg = fmt.Sprintf("%d photos %s from %s", summary.Submitted, action, volName)
 		}
 		if summary.Queued > 0 {
-			q := fmt.Sprintf("%d queued for upload on an unmetered connection", summary.Queued)
+			q := queuedClause(summary.Queued)
 			if msg == "" {
 				msg = fmt.Sprintf("%s from %s", q, volName)
 			} else {
@@ -1153,6 +1158,12 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 	}
 
 	return summary
+}
+
+// queuedClause is the notification wording for uploads recorded in queue.db
+// that Drain sends once the connection is unmetered.
+func queuedClause(n int) string {
+	return fmt.Sprintf("%d queued for upload on an unmetered connection", n)
 }
 
 // CancelIngest asks the in-flight ingest, if any, to stop before its next
