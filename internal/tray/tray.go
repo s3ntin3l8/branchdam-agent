@@ -1399,6 +1399,38 @@ func (r *Runner) SetIsMeteredFunc(fn func() (bool, error)) {
 	r.isMeteredFn = fn
 }
 
+// UploadGate reports whether queued uploads must be held back right now. It
+// holds (true, nil) while the tray is paused, so a Pause during a running
+// drain pass stops further queued uploads (the one in flight still
+// finishes). Otherwise it reads the live pauseUploadOnMetered setting and
+// the runner's metered probe (the isMeteredFn override, else
+// netgate.IsMetered) at call time: with the setting off it returns
+// (false, nil) without probing. A probe error fails closed -- it is returned
+// together with metered = true, so the result is safe to act on without
+// checking err. TriggerDrain asks it once per pass and the queue drainer
+// hands it to Drain (ingest.WithUploadGate) so it is asked again before
+// each upload.
+func (r *Runner) UploadGate() (metered bool, err error) {
+	if r.paused.Load() {
+		return true, nil
+	}
+	r.mu.Lock()
+	pauseMetered := r.pauseUploadOnMetered
+	isMetered := r.isMeteredFn
+	r.mu.Unlock()
+	if !pauseMetered {
+		return false, nil
+	}
+	if isMetered == nil {
+		isMetered = netgate.IsMetered
+	}
+	metered, err = isMetered()
+	if err != nil {
+		return true, err
+	}
+	return metered, nil
+}
+
 // TriggerDrain runs one internal/ingest.Drain pass via the configured
 // Drainer, if one is wired and no other drain pass is currently running.
 // drainMu is a DEDICATED mutex, deliberately never Runner.gate: gate is
@@ -1429,25 +1461,18 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 
 	r.mu.Lock()
 	drainer := r.drainer
-	pauseMetered := r.pauseUploadOnMetered
-	isMetered := r.isMeteredFn
-	if isMetered == nil {
-		isMetered = netgate.IsMetered
-	}
 	r.mu.Unlock()
 
 	if drainer == nil {
 		return DrainSummary{}, false
 	}
 
-	if pauseMetered {
-		if metered, mErr := isMetered(); metered || mErr != nil {
-			if mErr != nil {
-				slog.Debug("metered probe failed, treating as metered (fail-closed)", "err", mErr)
-			}
-			slog.Info("upload skipped on metered connection")
-			return DrainSummary{}, false
+	if metered, mErr := r.UploadGate(); metered {
+		if mErr != nil {
+			slog.Debug("metered probe failed, treating as metered (fail-closed)", "err", mErr)
 		}
+		slog.Info("upload skipped on metered connection")
+		return DrainSummary{}, false
 	}
 
 	// Set inFlightDrain AFTER the nil-drainer guard. A periodic timer

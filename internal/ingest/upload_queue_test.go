@@ -444,6 +444,45 @@ func TestDrainUploadGateHoldsUploadsOnAMeteredLink(t *testing.T) {
 	}
 }
 
+// TestDrainUploadGateIsAskedBeforeEachUpload: a link that turns metered
+// after the first upload holds the rest of the phase; the held row stays
+// PENDING with no attempt counted.
+func TestDrainUploadGateIsAskedBeforeEachUpload(t *testing.T) {
+	dir := t.TempDir()
+	card, localRoot := filepath.Join(dir, "card"), filepath.Join(dir, "local")
+	writeUploadCardFile(t, card, "IMG_0001.JPG", "first bytes", time.Time{})
+	writeUploadCardFile(t, card, "IMG_0002.JPG", "second bytes", time.Time{})
+	store, _ := openUploadQueue(t)
+	files := ingestOne(t, meteredQueueEngine(t, localRoot, store), card)
+	if len(files) != 2 {
+		t.Fatalf("ingested %d files, want 2", len(files))
+	}
+	client := &drainUploadClient{}
+	var calls int
+	gate := func() (bool, error) { calls++; return calls > 1, nil }
+
+	stats, err := Drain(context.Background(), client, store, "agent-1", nil, WithUploadGate(gate))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.uploads) != 1 || stats.UploadsDone != 1 {
+		t.Fatalf("uploads = %d, stats = %+v, want 1", len(client.uploads), stats)
+	}
+	var pending int
+	for _, f := range files {
+		r := rowByNode(t, store, f.UploadQueueID)
+		if r.UploadStatus == queue.StatusPending {
+			pending++
+			if r.UploadAttempts != 0 {
+				t.Errorf("held row counted %d attempts", r.UploadAttempts)
+			}
+		}
+	}
+	if pending != 1 {
+		t.Errorf("pending rows = %d, want 1", pending)
+	}
+}
+
 // TestDrainUploadIsNotCutOffByTheShortPassDeadline: the pass context ending
 // (the tray's deadline is two minutes) must not cancel a long upload when an
 // upload context is supplied -- and does without one. The pass context is

@@ -107,12 +107,19 @@ type queueDrainer struct {
 	// -- a test, or a caller that never set it -- falls back to the pass's
 	// context.
 	uploadCtx context.Context //nolint:containedctx // the runner's lifetime, handed to Drain as an option
+	// uploadGate is asked before each queued upload (ingest.WithUploadGate)
+	// so a link that turns metered mid-pass holds the rest. The tray passes
+	// Runner.UploadGate. Nil sends every queued upload.
+	uploadGate func() (metered bool, err error)
 }
 
 func (d *queueDrainer) Drain(ctx context.Context) (tray.DrainSummary, error) {
 	var opts []ingest.DrainOption
 	if d.uploadCtx != nil {
 		opts = append(opts, ingest.WithUploadContext(d.uploadCtx))
+	}
+	if d.uploadGate != nil {
+		opts = append(opts, ingest.WithUploadGate(d.uploadGate))
 	}
 	stats, err := ingest.Drain(ctx, d.client, d.store, d.agentID, nil, opts...)
 	var lastHandshakeAt time.Time

@@ -153,9 +153,10 @@ func WithUploadContext(ctx context.Context) DrainOption {
 
 // WithUploadGate makes Drain hold queued uploads back while gate reports a
 // metered link. It fails closed: a gate error holds them too. It is asked
-// before each upload, not once per pass. The tray skips a whole pass on a
-// metered link before calling Drain; this is for callers without that gate
-// (the headless queue-drain).
+// before each upload, not once per pass. The headless queue-drain relies on
+// it alone; the tray also skips a whole pass on a metered link before
+// calling Drain, and passes this as the per-upload re-check so a link that
+// turns metered mid-pass holds the remaining uploads.
 func WithUploadGate(gate func() (metered bool, err error)) DrainOption {
 	return func(o *drainOptions) { o.uploadGate = gate }
 }

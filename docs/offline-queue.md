@@ -434,10 +434,14 @@ one step, `upload_status` (`PENDING` → `DONE` \| `FAILED`); `node_created`, `a
   lifetime instead (`ingest.WithUploadContext`) and, per upload, by the client's idle-stall and
   response-header timeouts; the closing bookkeeping runs on a fresh context so a spent pass deadline
   never loses a finished upload.
-- **Metered.** The tray already skips the whole drain pass on a metered link. Headless
-  `queue-drain` has no tray in front of it, so with `ingest.pauseUploadOnMetered` set it passes a
-  gate (`ingest.WithUploadGate`) that holds queued uploads back while the link is metered or the
-  probe fails, checked before each upload.
+- **Metered.** The tray skips the whole drain pass on a metered link, and both the tray and
+  headless `queue-drain` also pass a gate (`ingest.WithUploadGate`; the tray's is
+  `Runner.UploadGate`) that holds queued uploads back while the link is metered or the probe fails,
+  checked before each upload. A pass that starts unmetered therefore stops sending as soon as the
+  link turns metered: the upload in flight finishes, the rest stay `PENDING` with no attempt
+  counted. Both apply the metered check only with `ingest.pauseUploadOnMetered` set. The tray's
+  gate also holds while the tray is paused: Pause never cancels the upload in flight, but a pass
+  already running sends no further queued uploads.
 - **Re-insert races.** A card re-insert can upload the same file while Drain streams it (Drain holds
   no ingest gate, so a long upload never blocks a card). Closing a row is a compare-and-set on
   `upload_status = PENDING` (`MarkUploadDone`): whichever finishes second leaves the local copy
