@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.18.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.17.0...v1.18.0) (2026-10-18)
+
+
+### Features
+
+* **ingest:** queue metered-deferred uploads for Drain ([#340](https://github.com/s3ntin3l8/branchdam-agent/issues/340)) ([3205fb5](https://github.com/s3ntin3l8/branchdam-agent/commit/3205fb5ddf1834a8772e3638b8c5eb55bd9ef154))
+* **tray:** show queued uploads separately from submitted ([#345](https://github.com/s3ntin3l8/branchdam-agent/issues/345)) ([ce39b94](https://github.com/s3ntin3l8/branchdam-agent/commit/ce39b9403bcd2f3213d12313df40e16334a404d1))
+
+
+### Bug Fixes
+
+* **tray:** re-check the metered link before each queued upload ([#346](https://github.com/s3ntin3l8/branchdam-agent/issues/346)) ([d86366c](https://github.com/s3ntin3l8/branchdam-agent/commit/d86366cdfcdb453dfc9fc7b8ade80e7712bb1e00))
+
 ## [1.17.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.16.2...v1.17.0) (2026-10-17)
 
 
