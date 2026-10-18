@@ -727,20 +727,28 @@ func triggerServerScan(t *testing.T, baseURL string, locationID int64) int64 {
 func waitForScanJob(t *testing.T, dbPath string, jobID int64, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	state, lastErr := "", ""
+	state, lastErr, queryErr := "", "", error(nil)
 	for time.Now().Before(deadline) {
 		var rows []struct {
-			State     string  `json:"state"`
-			LastError *string `json:"last_error"`
+			State       string  `json:"state"`
+			FilesFailed int64   `json:"files_failed"`
+			LastError   *string `json:"last_error"`
 		}
-		q := fmt.Sprintf(`SELECT state, last_error FROM scan_jobs WHERE id = %d`, jobID)
-		if err := sqlJSON(t, dbPath, q, &rows); err == nil && len(rows) == 1 {
+		q := fmt.Sprintf(`SELECT state, files_failed, last_error FROM scan_jobs WHERE id = %d`, jobID)
+		err := sqlJSON(t, dbPath, q, &rows)
+		if err != nil {
+			queryErr = err
+		} else if len(rows) == 1 {
 			state, lastErr = rows[0].State, ""
 			if rows[0].LastError != nil {
 				lastErr = *rows[0].LastError
 			}
 			switch state {
 			case "COMPLETED":
+				// A job can finish COMPLETED with per-file failures.
+				if rows[0].FilesFailed > 0 {
+					t.Fatalf("scan job %d COMPLETED with files_failed=%d: %s", jobID, rows[0].FilesFailed, lastErr)
+				}
 				return
 			case "FAILED", "CANCELLED":
 				t.Fatalf("scan job %d ended %s: %s", jobID, state, lastErr)
@@ -748,7 +756,7 @@ func waitForScanJob(t *testing.T, dbPath string, jobID int64, timeout time.Durat
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("scan job %d not COMPLETED within %s (state %q, last_error %q)", jobID, timeout, state, lastErr)
+	t.Fatalf("scan job %d not COMPLETED within %s (state %q, last_error %q, last query error: %v)", jobID, timeout, state, lastErr, queryErr)
 }
 
 // createAgentPairing provisions the temporary agent identity used by the
