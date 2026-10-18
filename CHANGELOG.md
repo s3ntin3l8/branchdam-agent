@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.18.0...v1.18.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* **ui:** make the settings window layout coherent across panels ([#348](https://github.com/s3ntin3l8/branchdam-agent/issues/348)) ([113bba2](https://github.com/s3ntin3l8/branchdam-agent/commit/113bba2a0371fdcc263f49d99211dd2464a2145b))
+
 ## [1.18.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.17.0...v1.18.0) (2026-10-18)
 
 
