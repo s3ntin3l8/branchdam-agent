@@ -2728,6 +2728,54 @@ func TestTriggerIngestWithGate(t *testing.T) {
 	}
 }
 
+// TestTriggerIngestQueuedCounts: a metered-deferred upload recorded in
+// queue.db (UploadQueueID) counts as Queued, apart from Submitted; a file
+// whose event POST merely wasn't accepted (Queued, no UploadQueueID) stays
+// Submitted; a held-back upload on the card is Deferred.
+func TestTriggerIngestQueuedCounts(t *testing.T) {
+	fi := &fakeIngester{result: ingest.CardResult{Files: []ingest.FileResult{
+		{SourcePath: "/c/1.JPG"},
+		{SourcePath: "/c/2.JPG", Queued: true, UploadQueueID: "up-1"},
+		{SourcePath: "/c/3.JPG", Queued: true},
+		{SourcePath: "/c/4.JPG", Skipped: true, Deferred: true},
+	}}}
+	r := NewRunner(fi, nil, "")
+	sum := r.TriggerIngest(context.Background(), "/Volumes/CARD")
+	if sum.Submitted != 2 || sum.Queued != 1 || sum.Deferred != 1 {
+		t.Errorf("Submitted/Queued/Deferred = %d/%d/%d, want 2/1/1", sum.Submitted, sum.Queued, sum.Deferred)
+	}
+}
+
+// TestTriggerIngestNotificationQueued: the success notice names queued
+// uploads, and a card made up only of them still gets one.
+func TestTriggerIngestNotificationQueued(t *testing.T) {
+	fi := &fakeIngester{}
+	r := NewRunner(fi, nil, "")
+	var msgs []string
+	r.SetNotifier(func(_, m string) { msgs = append(msgs, m) })
+
+	fi.result = ingest.CardResult{Files: []ingest.FileResult{
+		{SourcePath: "/c/1.JPG"},
+		{SourcePath: "/c/2.JPG", Queued: true, UploadQueueID: "up-1"},
+	}}
+	r.TriggerIngest(context.Background(), "/Volumes/CARD")
+	want := "1 photo imported from CARD, 1 queued for upload on an unmetered connection"
+	if len(msgs) != 1 || msgs[0] != want {
+		t.Errorf("notifications = %q, want [%q]", msgs, want)
+	}
+
+	msgs = nil
+	fi.result = ingest.CardResult{Files: []ingest.FileResult{
+		{SourcePath: "/c/2.JPG", Queued: true, UploadQueueID: "up-1"},
+		{SourcePath: "/c/3.JPG", Queued: true, UploadQueueID: "up-2"},
+	}}
+	r.TriggerIngest(context.Background(), "/Volumes/CARD")
+	want = "2 queued for upload on an unmetered connection from CARD"
+	if len(msgs) != 1 || msgs[0] != want {
+		t.Errorf("notifications = %q, want [%q]", msgs, want)
+	}
+}
+
 func TestTriggerIngestNotification(t *testing.T) {
 	fi := &fakeIngester{}
 	r := NewRunner(fi, nil, "")

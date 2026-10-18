@@ -71,9 +71,17 @@ type IngestSummary struct {
 	// held back on a metered connection (ingest.FileResult.Deferred) --
 	// they still exist only on the card and the local edit SSD, so the
 	// card is not done and must not be ejected.
-	Deferred int   `json:"deferred"`
-	Err      error `json:"-"`
-	Offline  bool  `json:"offline"`
+	Deferred int `json:"deferred"`
+	// Queued counts online files whose upload was deferred on a metered
+	// connection and recorded in queue.db (ingest.FileResult.UploadQueueID):
+	// their bytes have not reached the server yet, but Drain sends them
+	// from the verified local copy, so the card may eject. Kept apart from
+	// Submitted, which means "reached the server". A file whose event POST
+	// merely wasn't accepted (Queued without an UploadQueueID) stays in
+	// Submitted -- its archive copy is in place. Always 0 for offline.
+	Queued  int   `json:"queued"`
+	Err     error `json:"-"`
+	Offline bool  `json:"offline"`
 	// Canceled is true when the operator stopped this ingest
 	// (Runner.CancelIngest) before it walked the whole card. The counts
 	// above cover the files handled before the stop; Err wraps
@@ -1055,6 +1063,8 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 			switch {
 			case f.Err != nil:
 				summary.Failed++
+			case f.UploadQueueID != "":
+				summary.Queued++
 			case f.Deferred:
 				summary.Deferred++
 			case f.Skipped:
@@ -1117,16 +1127,27 @@ func (r *Runner) triggerIngest(ctx context.Context, cardPath string, isDetection
 				notifier("branchDAM Agent", fmt.Sprintf("%s ejected — safe to remove", volName))
 			}
 		}
-	} else if notifier != nil && summary.OK() && summary.Submitted > 0 {
+	} else if notifier != nil && summary.OK() && summary.Submitted+summary.Queued > 0 {
 		action := "imported"
 		if summary.Offline {
 			action = "queued offline"
 		}
 		var msg string
-		if summary.Submitted == 1 {
+		switch {
+		case summary.Submitted == 0:
+			// Only queued uploads: nothing has reached the server yet.
+		case summary.Submitted == 1:
 			msg = fmt.Sprintf("1 photo %s from %s", action, volName)
-		} else {
+		default:
 			msg = fmt.Sprintf("%d photos %s from %s", summary.Submitted, action, volName)
+		}
+		if summary.Queued > 0 {
+			q := fmt.Sprintf("%d queued for upload on an unmetered connection", summary.Queued)
+			if msg == "" {
+				msg = fmt.Sprintf("%s from %s", q, volName)
+			} else {
+				msg += ", " + q
+			}
 		}
 		notifier("branchDAM Agent", msg)
 	}

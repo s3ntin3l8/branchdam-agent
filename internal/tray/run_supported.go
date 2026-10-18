@@ -808,8 +808,12 @@ func summarize(st Status) string {
 		return fmt.Sprintf("last ingest %s ago (offline): %d queued offline, %d skipped, %d failed",
 			time.Since(li.StartedAt).Round(time.Second), li.Submitted, li.Skipped, li.Failed)
 	}
-	return fmt.Sprintf("last ingest %s ago: %d ok, %d skipped, %d failed",
-		time.Since(li.StartedAt).Round(time.Second), li.Submitted, li.Skipped, li.Failed)
+	queued := ""
+	if li.Queued > 0 {
+		queued = fmt.Sprintf(", %d queued", li.Queued)
+	}
+	return fmt.Sprintf("last ingest %s ago: %d ok%s, %d skipped, %d failed",
+		time.Since(li.StartedAt).Round(time.Second), li.Submitted, queued, li.Skipped, li.Failed)
 }
 
 func plural(n int) string {
