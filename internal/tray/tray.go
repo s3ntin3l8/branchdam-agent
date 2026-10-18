@@ -1367,6 +1367,27 @@ func (r *Runner) SetIsMeteredFunc(fn func() (bool, error)) {
 	r.isMeteredFn = fn
 }
 
+// UploadGate reports whether queued uploads must be held back right now: the
+// live pauseUploadOnMetered setting and the runner's metered probe (the
+// isMeteredFn override, else netgate.IsMetered), read at call time. With the
+// pause off it returns (false, nil) without probing. A probe error is
+// returned as is; callers treat it as metered (fail-closed). TriggerDrain
+// asks it once per pass and the queue drainer hands it to Drain
+// (ingest.WithUploadGate) so it is asked again before each upload.
+func (r *Runner) UploadGate() (metered bool, err error) {
+	r.mu.Lock()
+	pauseMetered := r.pauseUploadOnMetered
+	isMetered := r.isMeteredFn
+	r.mu.Unlock()
+	if !pauseMetered {
+		return false, nil
+	}
+	if isMetered == nil {
+		isMetered = netgate.IsMetered
+	}
+	return isMetered()
+}
+
 // TriggerDrain runs one internal/ingest.Drain pass via the configured
 // Drainer, if one is wired and no other drain pass is currently running.
 // drainMu is a DEDICATED mutex, deliberately never Runner.gate: gate is
@@ -1397,25 +1418,18 @@ func (r *Runner) TriggerDrain(ctx context.Context) (summary DrainSummary, ran bo
 
 	r.mu.Lock()
 	drainer := r.drainer
-	pauseMetered := r.pauseUploadOnMetered
-	isMetered := r.isMeteredFn
-	if isMetered == nil {
-		isMetered = netgate.IsMetered
-	}
 	r.mu.Unlock()
 
 	if drainer == nil {
 		return DrainSummary{}, false
 	}
 
-	if pauseMetered {
-		if metered, mErr := isMetered(); metered || mErr != nil {
-			if mErr != nil {
-				slog.Debug("metered probe failed, treating as metered (fail-closed)", "err", mErr)
-			}
-			slog.Info("upload skipped on metered connection")
-			return DrainSummary{}, false
+	if metered, mErr := r.UploadGate(); metered || mErr != nil {
+		if mErr != nil {
+			slog.Debug("metered probe failed, treating as metered (fail-closed)", "err", mErr)
 		}
+		slog.Info("upload skipped on metered connection")
+		return DrainSummary{}, false
 	}
 
 	// Set inFlightDrain AFTER the nil-drainer guard. A periodic timer

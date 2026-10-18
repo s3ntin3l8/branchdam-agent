@@ -887,7 +887,7 @@ func (s *configSettings) reload() error {
 	}
 
 	if queueStore != nil {
-		var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: newCfg.AgentID, uploadCtx: s.lifetime}
+		var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: newCfg.AgentID, uploadCtx: s.lifetime, uploadGate: s.runner.UploadGate}
 		var pruner tray.Pruner
 		if newCfg.Prune.Enabled {
 			pruner = &queuePruner{client: client, store: queueStore, cfg: newCfg}

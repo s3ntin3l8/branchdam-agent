@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,8 +28,15 @@ import (
 // really exists, and returns the row's key, local path and content hash.
 func uploadQueueFixture(t *testing.T, store *queue.Store, content string) (node, local, hash string) {
 	t.Helper()
+	return uploadQueueRow(t, store, content, "up-queued-1", "IMG_0001.JPG")
+}
+
+// uploadQueueRow queues one more origin = UPLOAD row with its own node and
+// file name.
+func uploadQueueRow(t *testing.T, store *queue.Store, content, node, name string) (_, local, hash string) {
+	t.Helper()
 	root := t.TempDir()
-	local = filepath.Join(root, "2026", "IMG_0001.JPG")
+	local = filepath.Join(root, "2026", name)
 	if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -41,12 +50,11 @@ func uploadQueueFixture(t *testing.T, store *queue.Store, content string) (node,
 	h := blake3.New()
 	_, _ = h.Write([]byte(content))
 	hash = fmt.Sprintf("%x", h.Sum(nil))
-	node = "up-queued-1"
 	if err := store.InsertPending(context.Background(), queue.NewRecord{
 		NodeUUID: node, Kind: queue.KindMedia, Origin: queue.OriginUpload,
-		SourcePath: "/card/IMG_0001.JPG", LocalPath: local, FileName: "IMG_0001.JPG", FileExt: "jpg",
+		SourcePath: "/card/" + name, LocalPath: local, FileName: name, FileExt: "jpg",
 		SizeBytes: info.Size(), MtimeUnix: info.ModTime().Unix(), FullHash: hash, FastHash: "fast",
-		UploadName: "IMG_0001.JPG", CaptureTimestamp: 1700000000, SourcePathHash: strings.Repeat("ab", 32), LocalEditRoot: root,
+		UploadName: name, CaptureTimestamp: 1700000000, SourcePathHash: fmt.Sprintf("%x", sha256.Sum256([]byte(node))), LocalEditRoot: root,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -124,6 +132,59 @@ func TestQueueDrainerUploadsAQueuedDeferral(t *testing.T) {
 	}
 	if _, err := os.Stat(r.LocalPath); err != nil || !strings.HasSuffix(filepath.ToSlash(r.LocalPath), "2026/2026-08-29/IMG_0001.JPG") {
 		t.Errorf("moved copy missing: path=%q err=%v", r.LocalPath, err)
+	}
+}
+
+// TestQueueDrainerRechecksTheRunnerGateBeforeEachUpload: the tray's drainer
+// is handed Runner.UploadGate, so a link that turns metered after the first
+// upload holds the second (it stays PENDING, no attempt counted), and a
+// failing probe holds every upload (fail closed).
+func TestQueueDrainerRechecksTheRunnerGateBeforeEachUpload(t *testing.T) {
+	store := openTestQueueStore(t)
+	node1, _, _ := uploadQueueRow(t, store, "first bytes", "up-queued-1", "IMG_0001.JPG")
+	node2, _, _ := uploadQueueRow(t, store, "second bytes", "up-queued-2", "IMG_0002.JPG")
+	var uploads []http.Header
+	srv := uploadServer(t, &uploads)
+
+	runner := tray.NewRunner(nil, nil, t.TempDir())
+	runner.SetPauseUploadOnMetered(true)
+	d := &queueDrainer{client: branchdam.New(srv.URL, "test-key"), store: store, agentID: "agent-01", uploadGate: runner.UploadGate}
+
+	runner.SetIsMeteredFunc(func() (bool, error) { return false, errors.New("no network manager") })
+	if _, err := d.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(uploads) != 0 {
+		t.Fatalf("uploads with a failing probe = %d, want 0", len(uploads))
+	}
+
+	var calls int
+	runner.SetIsMeteredFunc(func() (bool, error) { calls++; return calls > 1, nil })
+	summary, err := d.Drain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uploads) != 1 || summary.UploadsDone != 1 || summary.Remaining != 1 {
+		t.Fatalf("uploads = %d, summary = %+v, want 1 sent and 1 left", len(uploads), summary)
+	}
+	done, pending := 0, 0
+	for _, n := range []string{node1, node2} {
+		r, ok, err := store.ByNodeUUID(context.Background(), n)
+		if err != nil || !ok {
+			t.Fatalf("ByNodeUUID(%s): ok=%v err=%v", n, ok, err)
+		}
+		switch r.UploadStatus {
+		case queue.StatusDone:
+			done++
+		case queue.StatusPending:
+			pending++
+			if r.UploadAttempts != 0 {
+				t.Errorf("held row counted %d attempts", r.UploadAttempts)
+			}
+		}
+	}
+	if done != 1 || pending != 1 {
+		t.Errorf("done = %d, pending = %d, want 1 and 1", done, pending)
 	}
 }
 
