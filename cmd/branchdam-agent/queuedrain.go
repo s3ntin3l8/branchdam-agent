@@ -13,6 +13,7 @@ import (
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
 	"github.com/s3ntin3l8/branchdam-agent/internal/ingest"
+	"github.com/s3ntin3l8/branchdam-agent/internal/netgate"
 	"github.com/s3ntin3l8/branchdam-agent/internal/queue"
 )
 
@@ -74,16 +75,24 @@ func runQueueDrainCmd(args []string) int {
 
 	client := newServerClient(cfg, resolvedPath)
 
-	if !*watch {
-		return runDrainPass(os.Stdout, client, store, cfg.AgentID, *timeout)
-	}
-
+	// Queued uploads are not bound by -timeout (an upload can outlast it);
+	// they stop when the process does. With pauseUploadOnMetered set they
+	// are also held back while the link is metered -- this command has no
+	// tray in front of it to skip the pass.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	passOpts := []ingest.DrainOption{ingest.WithUploadContext(ctx)}
+	if cfg.Ingest.PauseUploadOnMetered {
+		passOpts = append(passOpts, ingest.WithUploadGate(netgate.IsMetered))
+	}
+
+	if !*watch {
+		return runDrainPass(os.Stdout, client, store, cfg.AgentID, *timeout, passOpts...)
+	}
 
 	_, _ = fmt.Fprintf(os.Stdout, "branchdam-agent queue-drain -watch: polling every %s (Ctrl-C to stop)\n", *interval)
 	for {
-		runDrainPass(os.Stdout, client, store, cfg.AgentID, *timeout)
+		runDrainPass(os.Stdout, client, store, cfg.AgentID, *timeout, passOpts...)
 		select {
 		case <-ctx.Done():
 			return 0
@@ -102,15 +111,15 @@ func resetFailed(w io.Writer, store *queue.Store, timeout time.Duration) int {
 		_, _ = fmt.Fprintf(w, "[FAIL] reset failed rows: %v\n", err)
 		return 1
 	}
-	_, _ = fmt.Fprintf(w, "retry-failed: reset %d failed archive copies and %d failed rebases to pending\n", n.ArchiveCopies, n.Rebases)
+	_, _ = fmt.Fprintf(w, "retry-failed: reset %d failed archive copies, %d failed rebases and %d failed uploads to pending\n", n.ArchiveCopies, n.Rebases, n.Uploads)
 	return 0
 }
 
-func runDrainPass(w io.Writer, client *branchdam.Client, store *queue.Store, agentID string, timeout time.Duration) int {
+func runDrainPass(w io.Writer, client *branchdam.Client, store *queue.Store, agentID string, timeout time.Duration, opts ...ingest.DrainOption) int {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	stats, err := ingest.Drain(ctx, client, store, agentID, nil)
+	stats, err := ingest.Drain(ctx, client, store, agentID, nil, opts...)
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "[FAIL] drain pass: %v\n", err)
 		return 1
@@ -123,6 +132,12 @@ func runDrainPass(w io.Writer, client *branchdam.Client, store *queue.Store, age
 	}
 	_, _ = fmt.Fprintf(w, "node_created submitted: %d, archive copies done: %d, archive copies permanently failed: %d, rebases done: %d, rebases permanently failed: %d, still pending: %d\n",
 		stats.NodeCreatedSent, stats.ArchiveCopiesDone, stats.ArchiveCopiesFailed, stats.RebasesDone, stats.RebasesFailed, stats.Remaining)
+	if stats.UploadsDone > 0 || stats.UploadsFailed > 0 {
+		_, _ = fmt.Fprintf(w, "queued uploads done: %d, permanently failed: %d\n", stats.UploadsDone, stats.UploadsFailed)
+	}
+	if stats.UploadsFailed > 0 {
+		_, _ = fmt.Fprintln(w, "one or more queued uploads hit a permanent failure (a local copy changed or gone since it was queued, a refused hash, or a fatal server answer) -- see queue.db's upload_last_error column; fix the cause, then run queue-drain -retry-failed")
+	}
 	if stats.RowsCollected > 0 {
 		_, _ = fmt.Fprintf(w, "old finished rows collected: %d\n", stats.RowsCollected)
 	}

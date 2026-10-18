@@ -193,7 +193,14 @@ type FileResult struct {
 	// empty. Only possible when Engine.Queue is set; without a queue a
 	// failed submission is an Err.
 	Queued bool
-	Err    error
+	// UploadQueueID is set (with Queued) when uploadStream mode held an
+	// upload back on a metered connection and recorded it in queue.db as an
+	// OriginUpload row: the verified local copy waits for Drain's upload
+	// phase, which needs no card. It is the row's own key -- never a server
+	// node UUID (the server mints that during the upload) -- and Deferred
+	// is not set, since nothing now depends on the card.
+	UploadQueueID string
+	Err           error
 }
 
 // CardResult is one IngestCard call's full outcome.

@@ -619,3 +619,66 @@ func TestPassNeverPrunesOnlineIngestRows(t *testing.T) {
 		t.Errorf("online-ingested local copy was deleted: %v", err)
 	}
 }
+
+// TestPassNeverPrunesQueuedUploadRows: an upload-mode row's local copy is the
+// only copy off the card until its upload is confirmed, and afterwards it is
+// still not an offline ingest's to delete -- even when the server vouches for
+// a node with the same UUID.
+func TestPassNeverPrunesQueuedUploadRows(t *testing.T) {
+	for _, finished := range []bool{false, true} {
+		name := "pending upload"
+		if finished {
+			name = "finished upload"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg, store, root := pruneTestFixture(t)
+			cfg.Prune = config.PruneConfig{Enabled: true, MinAgeHours: 24}
+			uuid := "0190f1a2-0000-7000-8000-0000000000bb"
+			path := filepath.Join(root, "upload.jpg")
+			if err := os.WriteFile(path, []byte("upload-content"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			old := time.Now().Add(-48 * time.Hour)
+			if err := os.Chtimes(path, old, old); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if err := store.InsertPending(ctx, queue.NewRecord{
+				NodeUUID: uuid, Kind: queue.KindMedia, Origin: queue.OriginUpload,
+				SourcePath: "/Volumes/CARD/upload.jpg", LocalPath: path, FileName: "upload.jpg", FileExt: "jpg",
+				SizeBytes: info.Size(), MtimeUnix: info.ModTime().Unix(), FullHash: strings.Repeat("ab", 32), FastHash: "abc",
+				UploadName: "upload.jpg", LocalEditRoot: root,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if finished {
+				if _, err := store.MarkUploadDone(ctx, uuid, uuid, "2026/upload.jpg", path); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			srv, asked := nodeStatusServer(t, map[string]branchdam.NodeStatusEntry{uuid: verifiedEntry(uuid)})
+			client := branchdam.New(srv.URL, "test-key")
+			var buf bytes.Buffer
+			stats, err := Pass(ctx, &buf, client, store, cfg, time.Now(), false)
+			if err != nil {
+				t.Fatalf("Pass: %v", err)
+			}
+			if stats.SkippedUploadIngest != 1 || stats.Pruned != 0 || stats.Evaluated != 0 || len(*asked) != 0 {
+				t.Errorf("stats = %+v asked = %v, want the upload row skipped without a lookup", stats, *asked)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("an upload-mode local copy was deleted: %v", err)
+			}
+			var report bytes.Buffer
+			PrintReport(&report, stats, false)
+			if !strings.Contains(report.String(), "upload-ingest=1") {
+				t.Errorf("report does not count the skip: %q", report.String())
+			}
+		})
+	}
+}

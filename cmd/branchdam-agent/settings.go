@@ -31,6 +31,11 @@ type configSettings struct {
 	path   string
 	runner *tray.Runner
 
+	// lifetime is the tray process's own context (nil in tests): the drainer
+	// reload() builds bounds queued uploads with it, not with a pass
+	// deadline.
+	lifetime context.Context //nolint:containedctx // the process lifetime, handed to the drainer
+
 	// resolveInstaller is the DaVinci Resolve render-hook installer
 	// (issue #60) registered on Runner at startup. reload() calls
 	// SetScriptsDir on it when integrations.resolve.scriptsDir changes
@@ -882,7 +887,7 @@ func (s *configSettings) reload() error {
 	}
 
 	if queueStore != nil {
-		var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: newCfg.AgentID}
+		var drainer tray.Drainer = &queueDrainer{client: client, store: queueStore, agentID: newCfg.AgentID, uploadCtx: s.lifetime}
 		var pruner tray.Pruner
 		if newCfg.Prune.Enabled {
 			pruner = &queuePruner{client: client, store: queueStore, cfg: newCfg}

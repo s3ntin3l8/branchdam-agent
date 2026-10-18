@@ -45,7 +45,8 @@ tracked as their own node" behavior.
 
 When `offline.queueDbPath` is set, online ingest (`IngestCard`, the tray's normal path and plain
 `ingest`) also writes one row per media file, with `origin = ONLINE` -- in dual-write mode; upload
-mode (`-upload`) writes none, see "Upload mode on a metered connection" below. By then both copies are
+mode (`-upload`) writes a row only for a metered-deferred file (`origin = UPLOAD`), see "Upload mode
+on a metered connection" below. By then both copies are
 written and verified and `EVENT_NODE_CREATED` already targets the Tier-3 archive path, so the row
 starts with `archive_copy = DONE` and `rebase = SKIPPED`; only `node_created` is left. The row is
 inserted before the POST (ordering invariant 1 below applies to online ingest too). If the POST is
@@ -377,10 +378,15 @@ branchdam-agent ingest -config config.yaml -card /media/$USER/UNTITLED -upload
 
 With `ingest.pauseUploadOnMetered: true` and a metered (or unprobeable) link, the upload and its
 sidecars are skipped: the verified local copy is placed under the agent's own `pathTemplate`
-(collision-suffixed like dual-write mode) and the file is reported **Deferred**, so the summary
-is not OK and the card is not ejected. Re-inserting the card while still metered finds that copy
-(identical bytes at the planned name) and reuses it rather than failing on the existing file. On
-an unmetered link it then uploads, and the server's `relativePath` decides the final name: when
+(collision-suffixed like dual-write mode) and, with `offline.queueDbPath` set, recorded in
+`queue.db` as an `origin = UPLOAD` row (below). The file is then reported **Queued** -- success,
+the summary is OK and the card can auto-eject, as in offline mode -- because nothing depends on the
+card any more. Without a queue, or when the insert fails (logged at WARN), the file is reported
+**Deferred** as before: the summary is not OK, the card is not ejected, and re-inserting it is the
+only retry. Re-inserting the card while still metered finds the copy (identical bytes at the planned
+name) and reuses it rather than failing on the existing file -- and the pending row that claims
+it, rather than inserting a second. On an unmetered link a re-insert uploads from the card itself,
+and the server's `relativePath` decides the final name: when
 that differs from the deferred copy's (a server collision suffix, or a camera model the server
 probed itself), the deferred copy is moved there -- only if it still holds exactly the uploaded
 bytes (full BLAKE3) and nothing is at the server's path yet. A sidecar's copy is found under the
@@ -393,14 +399,62 @@ strand a live `_3`), a run of absent suffixes ends the sweep. The lookup compare
 regular file of the uploaded size against the hash already computed, so the card is not read
 again.
 
-Deferred uploads are **not** written to `queue.db`, so nothing retries them until the card is
-re-inserted. Upload mode writes no queue rows at all: the server registers the node in the
-upload request itself, so there is no `EVENT_NODE_CREATED` to persist, and the `origin = ONLINE`
-rows above belong to dual-write online ingest only. Queueing a deferred upload needs a new queue
-stage -- an upload-pending row (a third `origin`) that the drain uploads from the local copy, with
-the server-assigned node UUID filled in afterwards -- and the schema has no such stage: every row
-needs its `node_uuid` at insert time, and `Drain` has no upload phase. Until then, the tray
-notification and the `ingest` summary say to re-insert the card.
+#### Queued uploads (`origin = UPLOAD`, schema v4)
+
+Upload mode has no `EVENT_NODE_CREATED` to persist -- the server registers the node inside the
+upload request -- so an `UPLOAD` row has a different shape from the three-step rows above. It has
+one step, `upload_status` (`PENDING` → `DONE` \| `FAILED`); `node_created`, `archive_copy` and
+`rebase` are `SKIPPED` from insert (the server writes the archive copy during the upload).
+
+- **Key.** `node_uuid` stays `NOT NULL UNIQUE`: an `UPLOAD` row gets a client-minted UUID that is
+  never sent to the server. The server's own `nodeUuid` and `relativePath` are recorded in
+  `server_node_uuid` / `server_relative_path` once the upload is accepted.
+- **Inputs.** The row carries what the upload request needs and the card is no longer there to
+  supply: `upload_name` (`X-Filename`), `camera_model`, `capture_timestamp`, `source_path_hash`,
+  the BLAKE3 and size of the local copy, and `local_edit_root` (where the copy moves afterwards).
+- **Sidecars.** A sidecar's upload name derives from its master's *final* name, which is only known
+  after the master uploads (the server may collision-suffix it). A sidecar row therefore links to
+  its master's row (`master_node_uuid`, `sidecar_tail`, `sidecar_by_name`) and Drain names it from
+  the master's `server_relative_path` -- the same rule as a card re-insert. A sidecar whose master
+  was deferred *without* a row is not queued either: a row would upload it detached.
+- **Drain's upload phase** runs last in a pass, for `MEDIA` and `SIDECAR` rows alike. A row is held
+  back while a sidecar's master is still `PENDING` (including while it backs off) and fails with it
+  if the master `FAILED`. Before streaming it re-stats the local copy: a size or mtime that differs
+  from the baseline recorded at enqueue (the same one `prune` re-checks), or a missing file, fails
+  the row -- the recorded BLAKE3 would no longer describe the bytes. The upload sends that BLAKE3 in
+  `X-Blake3-Hash` and the response's hash must match. A transient error (network, 5xx, a stalled
+  upload) backs off like the other steps; a hash mismatch or a fatal HTTP classification (same
+  classifier as rebase) is `FAILED`, which `queue-drain -retry-failed` and the tray's Retry reset.
+  `200 DEDUPLICATED` is success.
+- **After the upload** the local copy moves to `local_edit_root/<relativePath>`, never overwriting:
+  if something is already there, or the move fails, the copy stays where it is, a WARN is logged,
+  the upload still counts, and the row records the path the file is *actually* at.
+- **Timeout.** The tray's drain pass has a two-minute deadline, which suits the quick phases but
+  would cancel any longer upload and retry it forever. The upload phase is bounded by the tray's own
+  lifetime instead (`ingest.WithUploadContext`) and, per upload, by the client's idle-stall and
+  response-header timeouts; the closing bookkeeping runs on a fresh context so a spent pass deadline
+  never loses a finished upload.
+- **Metered.** The tray already skips the whole drain pass on a metered link. Headless
+  `queue-drain` has no tray in front of it, so with `ingest.pauseUploadOnMetered` set it passes a
+  gate (`ingest.WithUploadGate`) that holds queued uploads back while the link is metered or the
+  probe fails, checked before each upload.
+- **Re-insert races.** A card re-insert can upload the same file while Drain streams it (Drain holds
+  no ingest gate, so a long upload never blocks a card). Closing a row is a compare-and-set on
+  `upload_status = PENDING` (`MarkUploadDone`): whichever finishes second leaves the local copy
+  alone, and Drain re-reads the row before moving anything. A re-insert that uploads the file also
+  closes a row Drain had given up on (`FAILED`), so it does not stay in the failed list. A *metered*
+  re-insert over such a row re-queues it instead of adding a second row for the same copy -- but only
+  while the copy still has the size and mtime recorded for it; if it changed, the file stays
+  `Deferred` and the card remains the other copy. The server deduplicates by hash, so a
+  double upload cannot corrupt bytes.
+- **Prune and GC.** `prune` only considers `OFFLINE` rows (an allowlist, `upload-ingest=` in its
+  report counts the skips): an `UPLOAD` row's local copy is the only copy off the card until the
+  upload is confirmed, and afterwards still not an offline ingest's to delete. A row with a
+  `PENDING` upload is not terminal, so the daily GC never collects it, however old -- and a finished
+  master row is kept while an unfinished (`PENDING` or `FAILED`) sidecar row links to it, since only
+  that row remembers the server-assigned name the sidecar is uploaded under.
+- **Counts.** A `PENDING` upload counts as "waiting to upload" (`AwaitingUpload`, `PendingBytes`); a
+  `FAILED` one counts in `Failed` and appears in the tray's failed-rows list with step `upload`.
 
 ## Soft-Delete Trash Buffer Lifecycle
 

@@ -505,6 +505,7 @@ async function refreshFailedRows() {
 const FAILED_STEP_LABELS = {
   archive_copy: "archive copy",
   rebase: "archive confirmation",
+  upload: "upload",
 };
 
 // renderFailedRows lists the queue's FAILED rows, each with its reason and
@@ -524,7 +525,7 @@ function renderFailedRows(holder) {
   holder.appendChild(intro);
 
   const retried = async (statusEl, result) => {
-    const n = (result.archiveCopies ?? 0) + (result.rebases ?? 0);
+    const n = (result.archiveCopies ?? 0) + (result.rebases ?? 0) + (result.uploads ?? 0);
     setFieldStatus(statusEl, n ? "Queued for retry" : "Already retried", "saved");
     await refreshFailedRows();
     await poll();

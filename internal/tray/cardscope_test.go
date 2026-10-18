@@ -176,6 +176,12 @@ func TestTriggerIngestEjectScope(t *testing.T) {
 		{SourcePath: "/media/CARD/DCIM/IMG_0001.JPG"},
 		{SourcePath: "/media/CARD/DCIM/IMG_0002.JPG", Skipped: true, Deferred: true, SkipReason: "upload skipped on metered connection -- re-insert card to retry"},
 	}}
+	// A metered deferral recorded in queue.db no longer depends on the card:
+	// it is Queued, not Deferred, so the card may eject (as in offline mode).
+	queuedUpload := ingest.CardResult{Files: []ingest.FileResult{
+		{SourcePath: "/media/CARD/DCIM/IMG_0001.JPG"},
+		{SourcePath: "/media/CARD/DCIM/IMG_0002.JPG", Queued: true, UploadQueueID: "up-1", LocalPath: "/scratch/2026/IMG_0002.JPG"},
+	}}
 	cases := []struct {
 		name       string
 		result     ingest.CardResult
@@ -189,6 +195,7 @@ func TestTriggerIngestEjectScope(t *testing.T) {
 		{"manual ingest of a card volume", clean, false, "/media/CARD", false, true, 0},
 		{"manual folder import", clean, false, "/home/me/import", false, true, 0},
 		{"detected card with metered deferral", deferred, true, "/media/CARD", false, false, 1},
+		{"detected card with a queued metered deferral", queuedUpload, true, "/media/CARD", true, true, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

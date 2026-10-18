@@ -63,8 +63,13 @@ type DrainSummary struct {
 	ArchiveCopiesFailed int
 	RebasesDone         int
 	RebasesFailed       int
-	Remaining           int
-	Err                 error
+	// UploadsDone / UploadsFailed mirror ingest.DrainStats: queued
+	// metered-deferred uploads the server accepted, and those that hit a
+	// permanent failure this pass.
+	UploadsDone   int
+	UploadsFailed int
+	Remaining     int
+	Err           error
 }
 
 // MarshalJSON renders Err as a string -- see
@@ -174,6 +179,9 @@ type FailedQueueRow struct {
 const (
 	FailedStepArchiveCopy = "archive_copy"
 	FailedStepRebase      = "rebase"
+	// FailedStepUpload is a queued metered-deferred upload (queue.OriginUpload)
+	// that hit a permanent failure.
+	FailedStepUpload = "upload"
 )
 
 // QueueRetryCounts is the tray-local mirror of internal/queue.ResetCounts:
@@ -181,6 +189,7 @@ const (
 type QueueRetryCounts struct {
 	ArchiveCopies int64 `json:"archiveCopies"`
 	Rebases       int64 `json:"rebases"`
+	Uploads       int64 `json:"uploads"`
 }
 
 // QueueFailureManager is the optional half of a QueueReader that can list

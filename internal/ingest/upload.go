@@ -42,12 +42,17 @@ import (
 //
 // On a metered connection with ingest.pauseUploadOnMetered set, steps 3-4
 // are skipped: the verified local copy is placed under the agent's own
-// path template and the file is reported Deferred. Re-inserting the card
-// finds that copy (identical bytes at the planned name) and reuses it
-// instead of failing on the existing file. Deferred files are not queued
-// in queue.db -- see docs/offline-queue.md's "Upload mode on a metered
-// connection".
+// path template and, when a queue is configured, recorded in queue.db as an
+// OriginUpload row that Drain's upload phase sends later (queueDeferredUpload,
+// upload_queue.go): the file is then reported Queued. With no queue, or if
+// the insert fails, it is reported Deferred and the card stays the only other
+// copy. Re-inserting the card finds the local copy (identical bytes at the
+// planned name) and reuses it instead of failing on the existing file, and a
+// re-insert that uploads closes the file's pending row (reconcileQueuedUpload)
+// -- see docs/offline-queue.md's "Upload mode on a metered connection".
 
+// deferredUploadReason is the Deferred (unqueued) file's SkipReason: with no
+// queue row, re-inserting the card is the only retry.
 const deferredUploadReason = "upload skipped on metered connection -- re-insert card to retry"
 
 // errUnsafeRelativePath is returned (wrapped) when the server's
@@ -120,6 +125,9 @@ type uploadedMaster struct {
 	localDir string
 	deferred bool
 	failed   bool
+	// queueID is the queue.db key of the master's UPLOAD row when its
+	// deferral was queued, so a deferred sidecar's row can link to it.
+	queueID string
 }
 
 func newUploadPass() *uploadPass {
@@ -140,21 +148,35 @@ func (p *uploadPass) record(m *uploadedMaster) {
 // masterFor returns the master a sidecar belongs to, and the name the
 // sidecar should carry so it follows the master's final name.
 func (p *uploadPass) masterFor(sidecarPath string) (*uploadedMaster, string) {
+	m, tail, byName := p.masterLink(sidecarPath)
+	if m == nil {
+		return nil, filepath.Base(sidecarPath)
+	}
+	base := filepath.Base(sidecarPath)
+	if m.finalName == "" {
+		return m, base
+	}
+	if byName {
+		return m, m.finalName + tail
+	}
+	finalStem, _ := splitBase(m.finalName)
+	return m, finalStem + tail
+}
+
+// masterLink is the lookup behind masterFor: the sidecar's master, the
+// case-preserved tail (".xmp") the sidecar's name keeps after the master's
+// name, and whether the master was matched by its full base name (an
+// "IMG_1.CR3.xmp" sidecar) rather than its stem. A queued deferral stores
+// tail and byName so Drain can rebuild the name from the master's
+// server-assigned one (queue.Record.SidecarTail / SidecarByName).
+func (p *uploadPass) masterLink(sidecarPath string) (m *uploadedMaster, tail string, byName bool) {
 	dir, base := filepath.Split(sidecarPath)
 	stem, _ := splitBase(base)
 	ref, ok := p.masters[filepath.Join(dir, stem)]
 	if !ok {
-		return nil, base
+		return nil, "", false
 	}
-	tail := base[len(stem):] // ".xmp", case preserved
-	if ref.m.finalName == "" {
-		return ref.m, base
-	}
-	if ref.byName {
-		return ref.m, ref.m.finalName + tail
-	}
-	finalStem, _ := splitBase(ref.m.finalName)
-	return ref.m, finalStem + tail
+	return ref.m, base[len(stem):], ref.byName
 }
 
 // uploadItem is one file's upload-mode input.
@@ -173,6 +195,14 @@ type uploadItem struct {
 	// forceDefer defers regardless of the metered probe (the master was
 	// deferred, so the sidecar must not reach the server without it).
 	forceDefer bool
+	// masterQueueID, sidecarTail and sidecarByName link a deferred
+	// sidecar's queue row to its master's (see queue.Record).
+	masterQueueID string
+	sidecarTail   string
+	sidecarByName bool
+	// noQueue keeps a deferral out of queue.db: a sidecar whose master was
+	// deferred without a row must not be uploaded alone, detached from it.
+	noQueue bool
 }
 
 // ingestFileUpload handles one non-sidecar file in uploadStream mode and
@@ -220,6 +250,7 @@ func (e *Engine) ingestFileUpload(ctx context.Context, srcPath string, pass *upl
 		vars:             vars,
 		deferred:         fr.Deferred,
 		failed:           fr.Err != nil,
+		queueID:          fr.UploadQueueID,
 	}
 	if fr.LocalPath != "" {
 		m.finalName = filepath.Base(fr.LocalPath)
@@ -274,10 +305,18 @@ func (e *Engine) uploadSidecar(ctx context.Context, srcPath string, pass *upload
 		// deferred-copy lookup resolves there.
 		it.vars.CameraModel = master.vars.CameraModel
 		it.vars.CapturedAt = master.vars.CapturedAt
-		if master.deferred {
+		if master.deferred || master.queueID != "" {
 			it.forceDefer = true
 			if master.localDir != "" {
 				it.deferredLocalPath = filepath.Join(master.localDir, name)
+			}
+			if master.queueID != "" {
+				_, it.sidecarTail, it.sidecarByName = pass.masterLink(srcPath)
+				it.masterQueueID = master.queueID
+			} else {
+				// The master is deferred but has no queue row (no queue, or
+				// its insert failed): a sidecar row would upload alone.
+				it.noQueue = true
 			}
 		}
 	}
@@ -299,7 +338,7 @@ func (e *Engine) uploadFile(ctx context.Context, fr FileResult, it uploadItem) F
 		hold = metered || mErr != nil
 	}
 	if hold {
-		slog.Info("upload skipped on metered connection -- re-insert card to retry", "path", it.srcPath)
+		slog.Info("upload held back on metered connection", "path", it.srcPath)
 		return e.deferUpload(ctx, fr, it)
 	}
 	if e.Uploader == nil {
@@ -386,6 +425,16 @@ func placeLocalCopy(ctx context.Context, tmpPath, finalPath, wantHash string) (p
 // Deferred: nothing reached the server, so the card stays the only copy
 // outside this workstation.
 func (e *Engine) deferUpload(ctx context.Context, fr FileResult, it uploadItem) FileResult {
+	fr = e.deferUploadCopy(ctx, fr, it)
+	if fr.Err != nil || !fr.Deferred {
+		return fr
+	}
+	return e.queueDeferredUpload(ctx, fr, it)
+}
+
+// deferUploadCopy is deferUpload's copy step: the verified local copy is in
+// place (or already was) and the result is Deferred, with no queue row yet.
+func (e *Engine) deferUploadCopy(ctx context.Context, fr FileResult, it uploadItem) FileResult {
 	localPath := it.deferredLocalPath
 	if localPath != "" && filesMatch(it.srcPath, localPath) {
 		// A sidecar deferred with its master: an earlier deferred pass
@@ -454,19 +503,24 @@ func (e *Engine) streamUpload(ctx context.Context, fr FileResult, it uploadItem)
 	rel, err := safeRelativePath(upResp.RelativePath)
 	if err != nil {
 		_ = os.Remove(tmpPath)
+		e.reconcileQueuedUpload(ctx, it, fr.Write, upResp, "", "")
 		fr.Err = fmt.Errorf("place local copy of %s (node %s uploaded): %w", it.srcPath, upResp.NodeUUID, err)
 		return fr
 	}
 	localPath := filepath.Join(e.Ingest.LocalEditRoot, rel)
 	fr.LocalPath = localPath
 
-	if moved := e.moveDeferredCopy(ctx, it, localPath, fr.Write.FullHash, fr.Write.SizeBytes); moved {
+	if movedFrom := e.moveDeferredCopy(ctx, it, localPath, fr.Write.FullHash, fr.Write.SizeBytes); movedFrom != "" {
 		_ = os.Remove(tmpPath)
+		e.reconcileQueuedUpload(ctx, it, fr.Write, upResp, localPath, movedFrom)
 		e.localPHash(ctx, &fr, localPath)
 		return fr
 	}
 
 	placed, err := placeLocalCopy(ctx, tmpPath, localPath, fr.Write.FullHash)
+	// The upload landed whether or not the copy could be placed, so a queued
+	// deferral of this file is finished either way.
+	e.reconcileQueuedUpload(ctx, it, fr.Write, upResp, localPath, "")
 	if err != nil {
 		fr.Err = fmt.Errorf("place local copy of %s (node %s uploaded): %w", it.srcPath, upResp.NodeUUID, err)
 		return fr
@@ -489,7 +543,8 @@ func (e *Engine) streamUpload(ctx context.Context, fr FileResult, it uploadItem)
 // copy, not two -- but only when it holds exactly the uploaded bytes
 // (full BLAKE3 against wantHash, so an edited copy is never moved) and
 // nothing is at the server's path yet; a verified copy left behind is
-// logged at WARN. Reports whether the earlier copy now sits at localPath.
+// logged at WARN. Returns the path the earlier copy was moved from, or ""
+// when nothing was moved (the earlier copy now sits at localPath).
 //
 // The candidates are the names a deferred pass can have used: the card's
 // own base name (what deferUpload rendered) and, for a sidecar, the
@@ -503,7 +558,7 @@ func (e *Engine) streamUpload(ctx context.Context, fr FileResult, it uploadItem)
 // deferredSweepHashBudget bytes across all candidates: the first is always
 // checked (one large video may exceed the budget on its own), and once a
 // further check would overrun the budget the sweep stops with a WARN.
-func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath, wantHash string, wantSize int64) bool {
+func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath, wantHash string, wantSize int64) (movedFrom string) {
 	names := []string{it.vars.OriginalName}
 	if it.uploadName != "" && it.uploadName != it.vars.OriginalName {
 		names = append(names, it.uploadName)
@@ -513,7 +568,7 @@ func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath,
 		misses := 0
 		for counter := 1; counter <= maxCollisionSuffix; counter++ {
 			if ctx.Err() != nil {
-				return false
+				return ""
 			}
 			suffix := ""
 			if counter > 1 {
@@ -546,7 +601,7 @@ func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath,
 			if budget := deferredSweepHashBudget.Load(); hashed > 0 && hashed+wantSize > budget {
 				slog.Warn("upload: stopped looking for an earlier deferred copy: hash budget spent; any copy not yet checked stays at its own name",
 					"local", localPath, "hashedBytes", hashed, "budgetBytes", budget, "next", prior)
-				return false
+				return ""
 			}
 			hashed += wantSize
 			if vr, err := Verify(prior, wantHash, WithContext(ctx)); err != nil || !vr.Verified {
@@ -561,11 +616,11 @@ func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath,
 			}
 			if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 				slog.Warn("upload: could not move the earlier deferred copy", "deferred", prior, "local", localPath, "err", err)
-				return false
+				return ""
 			}
 			if err := renameNoClobber(prior, localPath); err != nil {
 				slog.Warn("upload: could not move the earlier deferred copy", "deferred", prior, "local", localPath, "err", err)
-				return false
+				return ""
 			}
 			if dir := filepath.Dir(prior); dir != filepath.Dir(localPath) {
 				if dirErr := syncParentDirFn(dir); dirErr != nil {
@@ -573,10 +628,10 @@ func (e *Engine) moveDeferredCopy(ctx context.Context, it uploadItem, localPath,
 				}
 			}
 			slog.Info("upload: moved the earlier deferred copy to the server's path", "from", prior, "to", localPath)
-			return true
+			return prior
 		}
 	}
-	return false
+	return ""
 }
 
 // deferredSweepHashBudget caps the bytes moveDeferredCopy hashes (full

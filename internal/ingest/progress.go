@@ -133,6 +133,31 @@ type DrainOption func(*drainOptions)
 
 type drainOptions struct {
 	progress func(ProgressEvent)
+	// uploadCtx, when set, bounds the upload phase's streaming instead of
+	// the pass's own context (see WithUploadContext).
+	uploadCtx context.Context //nolint:containedctx // an option carrying the caller's lifetime context, like http.Request
+	// uploadGate, when set, is asked before every queued upload whether the
+	// link is metered (see WithUploadGate).
+	uploadGate func() (metered bool, err error)
+}
+
+// WithUploadContext bounds Drain's upload phase with ctx instead of the
+// pass's context. A pass context carries the caller's per-pass deadline (the
+// tray's is two minutes), which suits the quick phases but would cancel and
+// forever retry any upload longer than that; ctx is meant to be the
+// caller's own lifetime (the tray's shutdown). A single upload is still
+// bounded by the client's idle-stall and response-header timeouts.
+func WithUploadContext(ctx context.Context) DrainOption {
+	return func(o *drainOptions) { o.uploadCtx = ctx }
+}
+
+// WithUploadGate makes Drain hold queued uploads back while gate reports a
+// metered link. It fails closed: a gate error holds them too. It is asked
+// before each upload, not once per pass. The tray skips a whole pass on a
+// metered link before calling Drain; this is for callers without that gate
+// (the headless queue-drain).
+func WithUploadGate(gate func() (metered bool, err error)) DrainOption {
+	return func(o *drainOptions) { o.uploadGate = gate }
 }
 
 // WithDrainProgress reports byte-progress samples during Drain's phase 2
