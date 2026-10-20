@@ -40,6 +40,129 @@ func TestIsLoopbackHost(t *testing.T) {
 	}
 }
 
+// TestIsLoopbackBound: the BOUND address is always a numeric IP:port, so a
+// host NAME is never loopback evidence here.
+//
+// The distinction from isLoopbackHost is the whole point of the bound
+// check: "localhost:38080" is resolved by the host, so net.Listen can land
+// it on a routable interface while the configured string still reads
+// "localhost".
+func TestIsLoopbackBound(t *testing.T) {
+	tests := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:38080", true},
+		{"127.5.6.7:38080", true},
+		{"[::1]:38080", true},
+		{"0.0.0.0:38080", false},
+		{"192.168.1.5:38080", false},
+		// A name is not a bound address: only the resolved IP counts.
+		{"localhost:38080", false},
+		// ...and the name check is case-SENSITIVE here, unlike
+		// isLoopbackHost's EqualFold: a bound address is never a name at
+		// all, so there is nothing to fold.
+		{"LocalHost:38080", false},
+		// An address with no port is not a bound address either:
+		// net.SplitHostPort rejects it, so the check fails closed on it.
+		{"[::]", false},
+		{"127.0.0.1", false},
+		{"localhost", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isLoopbackBound(tt.addr); got != tt.want {
+			t.Errorf("isLoopbackBound(%q) = %v, want %v", tt.addr, got, tt.want)
+		}
+	}
+}
+
+// TestLoopbackOnlyRequiresTheBoundAddress: the loopback-only protections
+// (the Host-header check and the whole /api/* route table) must follow the
+// address the listener ACTUALLY holds.
+//
+// A configured "localhost:38080" whose name resolves to a routable address
+// used to get the loopback-only treatment while listening on a routable
+// interface -- the Host check accepting "localhost:38080" from any peer.
+func TestLoopbackOnlyRequiresTheBoundAddress(t *testing.T) {
+	s := &StatusServer{Addr: "localhost:38080"}
+
+	// No listener yet: the configured address is all there is, and it says
+	// loopback. Serve records the bind before it builds the handler, so a
+	// served server never takes this branch -- this is the construction
+	// path a test uses.
+	if !s.loopbackOnly() {
+		t.Error("loopbackOnly() = false before any listener was bound")
+	}
+
+	// A routable bind disqualifies it even though the configured string
+	// says localhost.
+	s.boundAddr = "192.168.1.5:38080"
+	if s.loopbackOnly() {
+		t.Error("loopbackOnly() = true with a non-loopback bind")
+	}
+
+	// A real loopback bind qualifies.
+	s.boundAddr = "127.0.0.1:38080"
+	if !s.loopbackOnly() {
+		t.Error("loopbackOnly() = false with a loopback bind and a loopback configured address")
+	}
+
+	// An operator-widened configured address stays widened.
+	s.Addr = "0.0.0.0:38080"
+	if s.loopbackOnly() {
+		t.Error("loopbackOnly() = true for an operator-widened bind")
+	}
+}
+
+// TestMismatchBindKeepsTheHostGateAndDropsTheAPI pins the CONSEQUENCE of
+// the mismatch state, not just the predicate.
+//
+// A configured "localhost:38080" that the host's resolver mapped to a
+// routable address sits in an awkward middle. The /api/* routes must not be
+// registered -- they are gated on the bind, so a routable listener never
+// gets the mutating surface. But the read-only page must still refuse a
+// non-loopback Host: the gate is intent-based, and dropping it here would
+// let a LAN browser read /status.json (watch dirs, local paths, queue
+// state) from a server the operator configured for loopback.
+func TestMismatchBindKeepsTheHostGateAndDropsTheAPI(t *testing.T) {
+	s := &StatusServer{
+		Addr:       "localhost:38080",
+		StatusFunc: func() Status { return Status{} },
+		boundAddr:  "192.168.1.5:38080",
+	}
+	handler := s.handler("38080")
+
+	// A LAN name is refused: the Host gate survived the routable bind.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/status.json", nil)
+	req.Host = "workstation.lan:38080"
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("GET /status.json with a LAN Host = %d, want %d -- the Host gate must survive a routable bind",
+			rec.Code, http.StatusForbidden)
+	}
+
+	// A loopback Host still reads the page.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/status.json", nil)
+	req.Host = "127.0.0.1:38080"
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /status.json with a loopback Host = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	// The /api/* surface is gone: the bind disqualifies it.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.Host = "127.0.0.1:38080"
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /api/status = %d, want %d -- the api routes must not be registered on a routable bind",
+			rec.Code, http.StatusNotFound)
+	}
+}
+
 func TestOriginAllowed(t *testing.T) {
 	const addr = "127.0.0.1:38080"
 	tests := []struct {
