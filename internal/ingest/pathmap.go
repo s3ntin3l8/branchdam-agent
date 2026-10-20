@@ -3,6 +3,7 @@ package ingest
 import (
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -58,6 +59,27 @@ func ToContainerPath(mappings []config.PathMapping, workstationPath string) (str
 	cp := strings.TrimRight(filepath.ToSlash(m.ContainerPath), "/")
 	if rel == "" {
 		return cp, nil
+	}
+	// The part below the mapping root must stay below it. A ".." that
+	// survived the translation would be resolved by the SERVER against
+	// its own filesystem -- a different one, in a different container --
+	// so the container path would point at a file the mapping never
+	// covered.
+	//
+	// Normalize with the slash-path rules rather than filepath's: the
+	// container is Linux while the workstation may not be, so the check
+	// has to hold for the container's rules. path.Clean resolves the
+	// interior ".." segments ("2026/../photo.jpg" is "photo.jpg") and
+	// leaves only a genuine escape at the front, which is what is
+	// refused.
+	rel = path.Clean(rel)
+	if rel == "." {
+		// path.Clean maps "./" to "." -- the part below the mapping root
+		// is the root itself, not a child of it.
+		return cp, nil
+	}
+	if rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", fmt.Errorf("%w: %s escapes the mapped root", ErrNoPathMapping, workstationPath)
 	}
 	return cp + "/" + rel, nil
 }
