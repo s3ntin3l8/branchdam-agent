@@ -227,6 +227,22 @@ const statusServerShutdownTimeout = 5 * time.Second
 // Serve runs the status server on ln and blocks until ctx is cancelled,
 // then shuts down gracefully (bounded by statusServerShutdownTimeout). Returns nil on a clean ctx-triggered
 // shutdown, matching net/http.Server.Shutdown's own contract.
+//
+// The timeouts on the http.Server below are set for the STATUS-PAGE shape and
+// are deliberately aggressive: every /api/* route today is a short read-only
+// JSON request. IdleTimeout in particular is shorter than the client's
+// sub-minute keep-alive retry window, so an idle keep-alive connection -- and
+// the goroutine and file descriptor behind it -- is released promptly.
+//
+// A route that ever starts streaming (a server probe, sync results,
+// update-status polling) is NOT bounded by that. IdleTimeout bounds the idle
+// period BETWEEN requests, not an in-flight response: a handler that streams
+// for 5s under a 2s IdleTimeout still delivers its full body. The knob that
+// would cut such a route mid-stream is WriteTimeout, which is deliberately
+// left unset here -- so a future streaming route would be unbounded, not cut.
+// Whoever adds one must set WriteTimeout deliberately; raising IdleTimeout
+// instead would only pin idle connections (and the goroutine and file
+// descriptor behind them) for longer.
 func (s *StatusServer) Serve(ctx context.Context, ln net.Listener) error {
 	bound := ln.Addr().String()
 	_, port, err := net.SplitHostPort(bound)
@@ -246,9 +262,22 @@ func (s *StatusServer) Serve(ctx context.Context, ln net.Listener) error {
 	// resolved by the host, and can land on a routable interface. Set before
 	// the handler is built, since handler/mux read it.
 	s.boundAddr = bound
+	// ReadHeaderTimeout alone bounds only the header phase: an idle
+	// keep-alive connection (and the goroutine and file descriptor behind
+	// it) stayed pinned indefinitely. There is no reason for a status page
+	// to hold a connection open.
+	//
+	// ReadTimeout bounds reading the REQUEST (headers and body), not the
+	// handler's execution: a click handler that takes two minutes
+	// (drainPruneClickTimeout) still runs to completion under it, because
+	// the timeout covers the read side only. WriteTimeout is the knob that
+	// would cap the response, and it is deliberately left unset -- see the
+	// note on IdleTimeout above.
 	s.srv = &http.Server{
 		Handler:           s.handler(port),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
