@@ -34,8 +34,11 @@ jobs:
       # coverage. Codecov (below) still reports the real per-path number.
       coverage-source: "hooks/resolve"
       coverage-fail-under: "0"
-      # Only the files this push touched can have introduced a secret. The
-      # baseline is keyed by filename and line number, so an unchanged file
-      # keeps its entry and the scan stays consistent.
+      # Only the files this push touched can have introduced a secret.
+      # detect-secrets matches a known secret by filename, hash and type -- not
+      # by line number -- so a secret that shifts lines is still recognised,
+      # and the hook rewrites the baseline's line number and fails the build
+      # until the baseline is refreshed. That is why a change to a baselined
+      # file needs the baseline refreshed in the same change.
       detect-secrets-scope: "changed"
     secrets: inherit
