@@ -34,4 +34,16 @@ jobs:
       # coverage. Codecov (below) still reports the real per-path number.
       coverage-source: "hooks/resolve"
       coverage-fail-under: "0"
+      # The shared workflow's detect-secrets step needs `detect-secrets-hook`
+      # on PATH, and this repository deliberately keeps it out of
+      # requirements.txt -- so the scan does not run here at all. The
+      # `detect-secrets-scope` input would therefore have nothing to scope.
+      #
+      # (If detect-secrets is ever added, the scope is 'changed': only the
+      # files this push touched can have introduced a secret. detect-secrets
+      # matches a known secret by filename, hash and type -- not by line
+      # number -- so a secret that shifts lines is still recognised, and the
+      # hook rewrites the baseline's line number and fails the build until
+      # the baseline is refreshed. That is why a change to a baselined file
+      # needs the baseline refreshed in the same change.)
     secrets: inherit
