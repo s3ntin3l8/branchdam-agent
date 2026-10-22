@@ -85,13 +85,15 @@ repos:
         # with Go 1.26.7 (the panic-triggering AST shape in stdlib `net/poll`
         # changed between those patch releases; honnef.co/go-tools' v0.7.0
         # buildir handles the 1.26.7 shape correctly and panics on 1.26.6).
-        # CI uses Go 1.26.7 (per `go.mod`'s `toolchain go1.26.7` directive,
-        # which `actions/setup-go@v7` honors); a `go install` from local Go
-        # 1.26.6 reproduces the panic.
+        # CI uses the Go `go.mod` declares via its `toolchain` directive
+        # (currently go1.26.10, which `actions/setup-go@v7` honors); a
+        # `go install` from local Go 1.26.6 reproduces the panic.
         #
         # Pivoting to `go install`-built golangci-lint in a repo-local
-        # `.bin/` (same pattern as the `govulncheck` hook above), pinned
-        # to the Go toolchain `go.mod` declares via `GOTOOLCHAIN=go1.26.7`.
+        # `.bin/` (same pattern as the `govulncheck` hook above). The local
+        # path builds with the Go the `GOTOOLCHAIN` floor selects (at least
+        # 1.26.7, the version that avoids the panic); CI additionally uses
+        # the toolchain `go.mod` declares.
         # `GOTOOLCHAIN=go1.26.7` is a minimum-version floor (bare versions
         # behave as `<ver>+auto`), not an exact pin: a host with Go 1.27+
         # builds the binary with 1.27+ and inherits the same stdlib
