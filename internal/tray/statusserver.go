@@ -90,6 +90,17 @@ type StatusServer struct {
 
 	srv *http.Server
 
+	// boundAddr is the address the listener ACTUALLY holds, recorded by
+	// Serve before it builds the handler. It is empty until then.
+	//
+	// "localhost" is a NAME, not an address: net.Listen resolves it through
+	// the host's resolver, so on a machine whose resolver maps it to a
+	// routable address the listener lands on a routable interface while the
+	// configured string still reads "localhost". Deciding from the
+	// configured string alone would apply loopback-only protections to a
+	// server that is not on loopback.
+	boundAddr string
+
 	// ingestBatch is set while a window-started ingest batch
 	// (POST /api/actions/ingest-start) is running, so a second click
 	// reports "already running" instead of queuing another batch behind
@@ -151,7 +162,7 @@ func (s *StatusServer) mux() *http.ServeMux {
 }
 
 // handler is the root handler Serve installs: mux() behind a Host-header
-// check when the server is bound to loopback. port is the port the
+// check when the server is CONFIGURED for loopback. port is the port the
 // listener actually holds (not parsed from s.Addr, which may say ":0" in
 // tests).
 //
@@ -163,6 +174,14 @@ func (s *StatusServer) mux() *http.ServeMux {
 // hostname in Host, so rejecting any Host that isn't a loopback name or
 // IP on this listener's port closes it. Native clients (the Wails window,
 // curl) address the server by 127.0.0.1/localhost and pass unchanged.
+//
+// The gate keys off the CONFIGURED address -- the operator's intent -- and
+// not off the address the listener holds. The /api/* route table is the
+// half that has to follow the bind (see registerAPIRoutes); this gate must
+// not disappear with it. A configured "localhost:38080" that the host's
+// resolver mapped to a routable address is still a loopback-only server as
+// far as the operator is concerned, and dropping the gate there would let a
+// LAN browser read /status.json where it used to get a 403.
 //
 // Not applied to an operator-widened bind (tray.statusAddr set to a
 // non-loopback host): the operator has deliberately made the read-only
@@ -208,14 +227,57 @@ const statusServerShutdownTimeout = 5 * time.Second
 // Serve runs the status server on ln and blocks until ctx is cancelled,
 // then shuts down gracefully (bounded by statusServerShutdownTimeout). Returns nil on a clean ctx-triggered
 // shutdown, matching net/http.Server.Shutdown's own contract.
+//
+// The timeouts on the http.Server below are set for the STATUS-PAGE shape and
+// are deliberately aggressive: every /api/* route today is a short read-only
+// JSON request. IdleTimeout in particular is shorter than the client's
+// sub-minute keep-alive retry window, so an idle keep-alive connection -- and
+// the goroutine and file descriptor behind it -- is released promptly.
+//
+// A route that ever starts streaming (a server probe, sync results,
+// update-status polling) is NOT bounded by that. IdleTimeout bounds the idle
+// period BETWEEN requests, not an in-flight response: a handler that streams
+// for 5s under a 2s IdleTimeout still delivers its full body. The knob that
+// would cut such a route mid-stream is WriteTimeout, which is deliberately
+// left unset here -- so a future streaming route would be unbounded, not cut.
+// Whoever adds one must set WriteTimeout deliberately; raising IdleTimeout
+// instead would only pin idle connections (and the goroutine and file
+// descriptor behind them) for longer.
 func (s *StatusServer) Serve(ctx context.Context, ln net.Listener) error {
-	_, port, err := net.SplitHostPort(ln.Addr().String())
+	bound := ln.Addr().String()
+	_, port, err := net.SplitHostPort(bound)
 	if err != nil {
 		return fmt.Errorf("tray: status server listener address %q: %w", ln.Addr(), err)
 	}
+	// A configured loopback address that the host resolved to a routable
+	// one: the /api/* routes are not registered (they are gated on the
+	// bind), but the read-only status page still answers. Say so on the
+	// host -- otherwise the missing routes look like a build that never had
+	// them, and nothing in the log says why.
+	if isLoopbackHost(s.Addr) && !isLoopbackBound(bound) {
+		log.Printf("tray: statusAddr %s bound to %s; the /api/* routes are disabled", s.Addr, bound)
+	}
+	// Decide the loopback-only question from the address the listener
+	// ACTUALLY holds, not from the configured s.Addr string: "localhost" is
+	// resolved by the host, and can land on a routable interface. Set before
+	// the handler is built, since handler/mux read it.
+	s.boundAddr = bound
+	// ReadHeaderTimeout alone bounds only the header phase: an idle
+	// keep-alive connection (and the goroutine and file descriptor behind
+	// it) stayed pinned indefinitely. There is no reason for a status page
+	// to hold a connection open.
+	//
+	// ReadTimeout bounds reading the REQUEST (headers and body), not the
+	// handler's execution: a click handler that takes two minutes
+	// (drainPruneClickTimeout) still runs to completion under it, because
+	// the timeout covers the read side only. WriteTimeout is the knob that
+	// would cap the response, and it is deliberately left unset -- see the
+	// note on IdleTimeout above.
 	s.srv = &http.Server{
 		Handler:           s.handler(port),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -252,7 +314,14 @@ func (s *StatusServer) ListenAndServe(ctx context.Context) error {
 
 func (s *StatusServer) handleStatusJSON(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	view := statusPageView{Version: s.Version, Status: s.StatusFunc()}
+	view := statusPageView{Version: s.Version}
+	// StatusFunc is the one func field on the struct that was not
+	// nil-tolerant: every other caller checks before use, and a nil here
+	// panicked the request -- taking the tray's whole HTTP handler down
+	// with it.
+	if s.StatusFunc != nil {
+		view.Status = s.StatusFunc()
+	}
 	if s.SettingsFunc != nil {
 		view.Settings = s.SettingsFunc()
 	}

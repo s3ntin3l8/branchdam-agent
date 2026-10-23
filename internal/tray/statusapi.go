@@ -107,15 +107,22 @@ type UpdateRollbacker interface {
 const drainPruneClickTimeout = 2 * time.Minute
 
 // isLoopbackHost reports whether addr's host resolves to the loopback
-// interface. Used once, at route-registration time in Serve, to decide
-// whether the /api/* routes get registered at all -- see Serve's own
-// comment for why this is a registration-time decision rather than a
-// per-request check: tray.statusAddr is hand-editable, and an operator who
-// has explicitly widened the bind (matching normalizeLoopback's own
-// deliberate pass-through of an explicit non-loopback host) has already
-// accepted the read-only status page being reachable off the workstation.
-// Adding mutating actuators on top of that without an explicit opt-in
-// would be a materially bigger blast radius than today's information leak.
+// interface.
+//
+// This is the CONFIGURED-STRING check, and it accepts the literal name
+// "localhost". For a listener's real address use isLoopbackBound, which
+// never accepts a name -- see its own comment for why that distinction is
+// the whole point.
+//
+// It is read by loopbackOnly, when the handler is built, to decide whether
+// the /api/* routes get registered at all -- see Serve's own comment for
+// why this is a registration-time decision rather than a per-request check:
+// tray.statusAddr is hand-editable, and an operator who has explicitly
+// widened the bind (matching normalizeLoopback's own deliberate
+// pass-through of an explicit non-loopback host) has already accepted the
+// read-only status page being reachable off the workstation. Adding
+// mutating actuators on top of that without an explicit opt-in would be a
+// materially bigger blast radius than today's information leak.
 func isLoopbackHost(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -126,6 +133,55 @@ func isLoopbackHost(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// isLoopbackBound reports whether a listener's REAL address is on the
+// loopback interface.
+//
+// Unlike isLoopbackHost this never accepts a host NAME: the address comes
+// from net.Listener.Addr(), which is always a numeric IP:port. That
+// distinction is the whole point -- "localhost:38080" is resolved by the
+// host's resolver, so it can land on a routable interface while still
+// reading as loopback in the configured string.
+//
+// An address that does not parse as host:port is not a bound address at
+// all, and the check fails closed on it: a security predicate's dead branch
+// must never read as loopback.
+func isLoopbackBound(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// loopbackOnly reports whether the loopback-only protections apply.
+//
+// Two halves, and both must hold:
+//   - the CONFIGURED address looks loopback (the operator's intent, and
+//     the behaviour that has always applied), and
+//   - the listener actually BOUND to a loopback address.
+//
+// Requiring the second half is what makes the first one safe to trust: a
+// configured "localhost:38080" whose name resolves to a routable address
+// used to get the loopback-only treatment (the Host-header check, and the
+// whole /api/* route table) while actually listening on a routable
+// interface. The bind is the fact; the configured string is only an
+// intention about it.
+//
+// Before a listener exists there is no bind to consult, so only the
+// configured half applies. Serve records the bound address before it
+// builds the handler, so a SERVED StatusServer never reaches that branch:
+// it is the construction path the tests use, which have no listener.
+func (s *StatusServer) loopbackOnly() bool {
+	if !isLoopbackHost(s.Addr) {
+		return false
+	}
+	if s.boundAddr == "" {
+		return true
+	}
+	return isLoopbackBound(s.boundAddr)
 }
 
 // originAllowed rejects requests a browser's fetch/XHR made on behalf of a
@@ -194,11 +250,11 @@ func (s *StatusServer) withAPIAuth(next http.HandlerFunc) http.HandlerFunc {
 
 // registerAPIRoutes adds the hardened /api/* surface to mux, called from
 // Serve. Registration -- not just enforcement -- is gated on
-// isLoopbackHost: an operator-widened bind address gets none of these
+// s.loopbackOnly: an operator-widened bind address gets none of these
 // routes at all (a 404, indistinguishable from a build that predates this
 // feature) rather than a 403 that would still confirm the routes exist.
 func (s *StatusServer) registerAPIRoutes(mux *http.ServeMux) {
-	if !isLoopbackHost(s.Addr) {
+	if !s.loopbackOnly() {
 		return
 	}
 	mux.HandleFunc("GET /api/status", s.withAPIAuth(s.handleStatusJSON))

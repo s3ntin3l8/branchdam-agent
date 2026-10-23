@@ -53,8 +53,8 @@ jobs:
     env:
       RELEASE_VERSION: ${{ inputs.release-tag || inputs.version-suffix }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - name: Build
@@ -65,7 +65,7 @@ jobs:
             -o dist/branchdam-agent ./cmd/branchdam-agent
       - name: Package
         run: tar -C dist -czf "branchdam-agent-${{ env.RELEASE_VERSION }}-linux-amd64.tar.gz" branchdam-agent
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-amd64
           path: branchdam-agent-*-linux-amd64.tar.gz
@@ -89,8 +89,8 @@ jobs:
     env:
       RELEASE_VERSION: ${{ inputs.release-tag || inputs.version-suffix }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       # dist/icon.ico (internal/appicon, issue #201) is generated fresh
@@ -157,7 +157,7 @@ jobs:
         run: |
           cd dist
           zip -j "branchdam-agent-${{ env.RELEASE_VERSION }}-windows-amd64.zip" branchdam-agent.exe branchdam-agent-tray.exe branchdam-agent-ui.exe
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-amd64
           path: |
@@ -180,8 +180,8 @@ jobs:
     env:
       RELEASE_VERSION: ${{ inputs.release-tag || inputs.version-suffix }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - name: Build
@@ -267,7 +267,7 @@ jobs:
             --window-size 760 480 \
             "branchdam-agent-${{ env.RELEASE_VERSION }}-darwin-arm64.dmg" \
             dist/dmg-root/
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: darwin-arm64
           path: |
@@ -289,7 +289,7 @@ jobs:
     env:
       RELEASE_VERSION: ${{ inputs.release-tag || inputs.version-suffix }}
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
       - name: Assemble release set and checksums
@@ -340,7 +340,7 @@ jobs:
               --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
           done
       - name: Store complete release set
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-assets
           path: release-assets/
@@ -357,7 +357,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-assets
           path: release-assets

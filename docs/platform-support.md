@@ -234,16 +234,19 @@ pattern for `/`) -- there is no HTML rendering path left in `internal/tray` at a
 unauthenticated and loopback-only, same as before, for anyone who wants to `curl` it; the tray's
 "Open status page" menu item is gone along with the page it opened.
 
-**Host-header check (DNS rebinding).** When bound to loopback (the default), every request --
-the plain JSON routes and `/api/*` alike -- must carry a `Host` of `localhost`, a loopback IP
-literal, or an empty host (a client given a bare `:port` statusAddr), on the listener's own port;
-anything else gets `403`. Without it, a page on `http://attacker.example:38080` whose DNS record
-is rebound to `127.0.0.1` is same-origin with itself in the browser and could read
-`/status.json` (watch directories, local paths, queue state) off the loopback listener; the
-rebound request still names the attacker's host, which is what the check rejects. An
-operator-widened bind (`tray.statusAddr` set to a non-loopback host) skips the check, since the
-server cannot know every name the machine is reachable by; `/api/*` is not registered there at
-all. Loopback is decided case-insensitively (`LocalHost:38080` binds loopback and keeps the check).
+**Host-header check (DNS rebinding).** When the server is CONFIGURED for loopback (the default),
+every request -- the plain JSON routes and `/api/*` alike -- must carry a `Host` of `localhost`, a
+loopback IP literal, or an empty host (a client given a bare `:port` statusAddr), on the listener's
+own port; anything else gets `403`. Without it, a page on `http://attacker.example:38080` whose DNS
+record is rebound to `127.0.0.1` is same-origin with itself in the browser and could read
+`/status.json` (watch directories, local paths, queue state) off the loopback listener; the rebound
+request still names the attacker's host, which is what the check rejects. An operator-widened bind
+(`tray.statusAddr` set to a non-loopback host) skips the check, since the server cannot know every
+name the machine is reachable by; `/api/*` is not registered there at all. The check follows the
+CONFIGURED address -- the operator's intent -- and not the address the listener actually holds, so
+a configured `localhost:38080` that the host's resolver mapped to a routable address still enforces
+it: a LAN browser still gets `403`, exactly as it would from a loopback bind. Loopback is decided
+case-insensitively (`LocalHost:38080` binds loopback and keeps the check).
 
 **Wire shape.** `/status.json` gains `uploadPausedMetered` (boolean, always present): true when
 `ingest.pauseUploadOnMetered` is on and the last metered probe said metered or failed. It is
@@ -267,11 +270,15 @@ but it was retired (issue #236) for being lossy on any path containing a comma; 
 route is now the only way to set it. Every request must present `Authorization: Bearer <token>`,
 where `<token>` is a fresh value `internal/sessiontoken.Generate` writes 0600 beside `agent.log` on
 each tray start (never persisted across restarts, never passed as an argument). The routes are
-registered at all only when the status server's own bind address resolves to loopback -- an
-operator-widened `tray.statusAddr` gets a 404 on every `/api/*` route, not a 403 that would still
-confirm they exist -- and every request is also checked against `Origin`/`Sec-Fetch-Site` to reject
-the classic loopback-CSRF shape (a page loaded from elsewhere issuing a same-machine POST via a
-browser's fetch). See Known gaps for what this surface does not yet do. `internal/sessiontoken` is
+registered at all only when the listener actually holds a loopback address, so two different
+situations get a 404 on every `/api/*` route -- not a 403 that would still confirm they exist: an
+operator-widened `tray.statusAddr` (a deliberate choice, to make the read-only page reachable by
+whatever name the machine has on the network), and a configured `localhost:38080` that the host's
+resolver mapped to a routable address (the same "localhost means loopback" assumption, but decided
+from the address the listener holds rather than from the name). Every request is also checked
+against `Origin`/`Sec-Fetch-Site` to reject the classic loopback-CSRF shape (a page loaded from
+elsewhere issuing a same-machine POST via a browser's fetch). See Known gaps for what this surface
+does not yet do. `internal/sessiontoken` is
 a package of its own, separate from `internal/tray`, specifically so `cmd/branchdam-agent-ui`
 (below) can read the token without pulling in `fyne.io/systray` -- a process with no tray menu has
 no business depending on it.
@@ -561,11 +568,14 @@ prompt-free.) Like macOS, it is never paired silently:
 
 1. A running tray gets the URL via `POST /api/actions/pair` (`source: "deeplink"`) and owns
    the confirmation dialog and config reload.
-2. With no tray running (or when `tray.statusAddr` is widened off loopback, in which case the
-   pairing URL is never sent to it), the process shows the confirmation itself, then pairs and reports
-   through dialogs (the GUI binary has no console). With no working dialog it refuses. Note that
-in the widened-`statusAddr` case a running tray keeps its old in-memory credentials until it is
-restarted or reloads its config, because the fallback writes `config.yaml` directly.
+2. With no tray running, or when the tray's `/api/*` surface is unreachable -- an operator-widened
+   `tray.statusAddr`, or a configured `localhost:38080` that the host's resolver mapped to a routable
+   address (the same "localhost means loopback" assumption, but decided from the address the listener
+   holds rather than from the name) -- the pairing URL is never sent to the tray. The process then
+   shows the confirmation itself, then pairs and reports through dialogs (the GUI binary has no
+   console). With no working dialog it refuses. Note that in either case a running tray keeps its
+   old in-memory credentials until it is restarted or reloads its config, because the fallback writes
+   `config.yaml` directly.
 
 ## DaVinci Resolve hook menu (issue #68, removed in v1.9.0)
 

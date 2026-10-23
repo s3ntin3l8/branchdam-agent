@@ -100,7 +100,7 @@ jobs:
       pull-requests: write
       issues: write
       checks: write
-    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@fdda31999b5aa0232de133cdce31805d3f81dcbf # main @ 2026-10-23
     with:
       mode: auto # review on trigger, no @mention needed
       mention-trigger: s3ntin3l8-hermes
@@ -112,7 +112,10 @@ jobs:
       # with an eye to the pull request and to the comment that asked for the
       # review, so a request is visibly picked up.
       hermes-use-runs: true
-    secrets: inherit # pragma: allowlist secret
+    secrets:
+      HERMES_APP_ID: ${{ secrets.HERMES_APP_ID }}
+      HERMES_APP_PRIVATE_KEY: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
+      HERMES_API_KEY: ${{ secrets.HERMES_API_KEY }}
 
   on-demand-review:
     # Restrict to trusted commenters -- otherwise any user could post
@@ -127,11 +130,14 @@ jobs:
       pull-requests: write
       issues: write
       checks: write
-    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@fdda31999b5aa0232de133cdce31805d3f81dcbf # main @ 2026-10-23
     with:
       mention-trigger: s3ntin3l8-hermes # mode: on-demand is the reusable workflow's default
       # See the auto-review job above: poll the run instead of firing and
       # forgetting, so a review that failed is a red check rather than a
       # silent no-op.
       hermes-use-runs: true
-    secrets: inherit # pragma: allowlist secret
+    secrets:
+      HERMES_APP_ID: ${{ secrets.HERMES_APP_ID }}
+      HERMES_APP_PRIVATE_KEY: ${{ secrets.HERMES_APP_PRIVATE_KEY }}
+      HERMES_API_KEY: ${{ secrets.HERMES_API_KEY }}
