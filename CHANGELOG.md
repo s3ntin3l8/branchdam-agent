@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.18.2](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.18.1...v1.18.2) (2026-10-23)
+
+
+### Bug Fixes
+
+* **deps:** move the Go toolchain to 1.26.10 for the stdlib advisory ([#351](https://github.com/s3ntin3l8/branchdam-agent/issues/351)) ([c281e2d](https://github.com/s3ntin3l8/branchdam-agent/commit/c281e2d4056a7d02eb81494c8576f3bf3ec99c94))
+* **security:** remediate the 2026-10-20 audit findings ([13333e9](https://github.com/s3ntin3l8/branchdam-agent/commit/13333e999d7b9d85f61f5c72416c0399e251ab24))
+
 ## [1.18.1](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.18.0...v1.18.1) (2026-10-18)
 
 
