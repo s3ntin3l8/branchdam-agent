@@ -96,11 +96,8 @@ jobs:
       github.event.pull_request.draft == false &&
       !startsWith(github.event.pull_request.head.ref, 'mullion/task-')
     permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      checks: write
-    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@fdda31999b5aa0232de133cdce31805d3f81dcbf # main @ 2026-10-23
+      contents: read # all gh calls in the callee use the Hermes App token
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@8957219ed8c28f90559cff917853542102011458 # main @ 2026-10-23
     with:
       mode: auto # review on trigger, no @mention needed
       mention-trigger: s3ntin3l8-hermes
@@ -126,11 +123,8 @@ jobs:
       github.actor != 's3ntin3l8-hermes[bot]' &&
       contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.comment.author_association)
     permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      checks: write
-    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@fdda31999b5aa0232de133cdce31805d3f81dcbf # main @ 2026-10-23
+      contents: read # all gh calls in the callee use the Hermes App token
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@8957219ed8c28f90559cff917853542102011458 # main @ 2026-10-23
     with:
       mention-trigger: s3ntin3l8-hermes # mode: on-demand is the reusable workflow's default
       # See the auto-review job above: poll the run instead of firing and
