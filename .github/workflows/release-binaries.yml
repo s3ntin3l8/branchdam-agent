@@ -9,7 +9,7 @@ name: Release Binaries
 # Deliberately NOT triggered by `on: release`. release-please creates the
 # GitHub Release using the default GITHUB_TOKEN, and GitHub's Actions
 # recursion guard means a release created by GITHUB_TOKEN does NOT fire
-# `on: release` (same reasoning branchDAM's own release.yml documents for why
+# `on: release` (same reasoning branchDAM's own release-please.yml documents for why
 # its image push can't be a separate tag-triggered workflow). v1.0.0 shipped
 # with zero assets for exactly this reason. Instead this is a `workflow_call`
 # invoked directly from release-please.yml, gated on `release_created`, fed
