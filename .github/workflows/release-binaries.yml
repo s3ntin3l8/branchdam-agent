@@ -372,7 +372,12 @@ jobs:
             test -s "${asset}.cert"
           done
       - name: Refuse mismatched manual release source
-        if: github.event_name == 'workflow_dispatch'
+        # Only a direct dispatch of THIS workflow must come from the tag ref.
+        # When release-please.yml chains in here (a push, or its own manual
+        # Run), `github.event_name`/`github.ref` are the caller's, so a release
+        # cut from main would fail this check after the release already exists.
+        # `github.workflow` is the caller's name inside a called workflow.
+        if: github.event_name == 'workflow_dispatch' && github.workflow == 'Release Binaries'
         env:
           RELEASE_TAG: ${{ inputs.release-tag }}
         run: |
