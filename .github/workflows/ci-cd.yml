@@ -13,7 +13,7 @@ jobs:
   test-go:
     permissions:
       contents: read
-    uses: s3ntin3l8/.github/.github/workflows/ci-go.yml@a80bd75142af1ac69bd3fe9ccfb40342a45978d4 # main @ 2026-10-19
+    uses: s3ntin3l8/.github/.github/workflows/ci-go.yml@main
     with:
       coverage-fail-under: "0"
       # go-selfupdate v1.6.0 unconditionally imports golang.org/x/crypto/openpgp

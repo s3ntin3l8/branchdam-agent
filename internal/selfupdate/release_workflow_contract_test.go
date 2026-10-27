@@ -13,6 +13,7 @@ import (
 
 type releaseWorkflowStep struct {
 	Name string         `yaml:"name"`
+	If   string         `yaml:"if"`
 	Uses string         `yaml:"uses"`
 	Run  string         `yaml:"run"`
 	With map[string]any `yaml:"with"`
@@ -269,6 +270,17 @@ func TestReleaseWorkflowMatchesUpdaterAttestationContract(t *testing.T) {
 	refGuard, _ := workflowStep(t, upload, "Refuse mismatched manual release source")
 	if !strings.Contains(refGuard.Run, `test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"`) {
 		t.Error("manual release upload must reject a mismatched tag ref")
+	}
+	// The guard is for a direct dispatch of THIS file only. When release-please.yml
+	// chains in, github.event_name/github.ref are the caller's, so an unscoped guard
+	// would fail a release cut from main after the release already exists.
+	for _, want := range []string{
+		"github.event_name == 'workflow_dispatch'",
+		"contains(github.workflow_ref, '/.github/workflows/release-binaries.yml@')",
+	} {
+		if !strings.Contains(refGuard.If, want) {
+			t.Errorf("ref guard condition %q is missing %q", refGuard.If, want)
+		}
 	}
 	workflowStep(t, upload, "Upload complete release set")
 }

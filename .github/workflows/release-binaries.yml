@@ -9,7 +9,7 @@ name: Release Binaries
 # Deliberately NOT triggered by `on: release`. release-please creates the
 # GitHub Release using the default GITHUB_TOKEN, and GitHub's Actions
 # recursion guard means a release created by GITHUB_TOKEN does NOT fire
-# `on: release` (same reasoning branchDAM's own release.yml documents for why
+# `on: release` (same reasoning branchDAM's own release-please.yml documents for why
 # its image push can't be a separate tag-triggered workflow). v1.0.0 shipped
 # with zero assets for exactly this reason. Instead this is a `workflow_call`
 # invoked directly from release-please.yml, gated on `release_created`, fed
@@ -372,7 +372,13 @@ jobs:
             test -s "${asset}.cert"
           done
       - name: Refuse mismatched manual release source
-        if: github.event_name == 'workflow_dispatch'
+        # Only a direct dispatch of THIS workflow must come from the tag ref.
+        # When release-please.yml chains in here (a push, or its own manual
+        # Run), `github.event_name`/`github.ref` are the caller's, so a release
+        # cut from main would fail this check after the release already exists.
+        # `github.workflow_ref` is the caller's inside a called workflow, so matching this
+        # file's path (not its `name:`) keeps the guard from failing open on a rename.
+        if: github.event_name == 'workflow_dispatch' && contains(github.workflow_ref, '/.github/workflows/release-binaries.yml@')
         env:
           RELEASE_TAG: ${{ inputs.release-tag }}
         run: |
