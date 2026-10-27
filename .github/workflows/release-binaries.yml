@@ -376,8 +376,9 @@ jobs:
         # When release-please.yml chains in here (a push, or its own manual
         # Run), `github.event_name`/`github.ref` are the caller's, so a release
         # cut from main would fail this check after the release already exists.
-        # `github.workflow` is the caller's name inside a called workflow.
-        if: github.event_name == 'workflow_dispatch' && github.workflow == 'Release Binaries'
+        # `github.workflow_ref` is the caller's inside a called workflow, so matching this
+        # file's path (not its `name:`) keeps the guard from failing open on a rename.
+        if: github.event_name == 'workflow_dispatch' && contains(github.workflow_ref, '/.github/workflows/release-binaries.yml@')
         env:
           RELEASE_TAG: ${{ inputs.release-tag }}
         run: |
