@@ -86,7 +86,7 @@ repos:
         # changed between those patch releases; honnef.co/go-tools' v0.7.0
         # buildir handles the 1.26.7 shape correctly and panics on 1.26.6).
         # CI uses the Go `go.mod` declares via its `toolchain` directive
-        # (currently go1.26.10, which `actions/setup-go@v7` honors); a
+        # (currently go1.26.11, which `actions/setup-go@v7` honors); a
         # `go install` from local Go 1.26.6 reproduces the panic.
         #
         # Pivoting to `go install`-built golangci-lint in a repo-local
