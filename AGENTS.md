@@ -36,7 +36,7 @@ This repo's correctness invariants are summarised as a checklist in `.claude/ski
 - golangci-lint is built with `go install` into a repo-local `.bin/`, using a Go toolchain floor of 1.26.7. Older Go panics in its buildir pass (issue #163).
 - `make build-darwin` is a build-only check that excludes `internal/tray` and `cmd/branchdam-agent`, because the darwin tray needs cgo. `make build-darwin-app` and `build-darwin-dmg` run only on a macOS host.
 - Release Please builds the changelog from the squash-merged PR title, so an unprefixed title drops out of the changelog. Releases go out as pre-releases (`"prerelease": true`). Any change to `internal/queue/store.go` or `internal/queue/migrations.go` relies on this; read CONTRIBUTING.md's "Pre-release gating" before touching the queue schema.
-- The review bot is Hermes (`s3ntin3l8-hermes[bot]`). It auto-reviews every non-draft same-repo PR on open, so don't request a review right after opening; use `mullion review` only for a re-review after pushing fixes. `required_conversation_resolution` is on: every inline thread blocks merge until replied to and resolved.
+- The review bot is Hermes (`s3ntin3l8-hermes[bot]`). It auto-reviews every non-draft same-repo PR on open; request reviews as the Workflow Conventions describe. `required_conversation_resolution` is on: every inline thread blocks merge until replied to and resolved.
 - Release-please's own PR never gets CI checks reported. That is expected; see CONTRIBUTING.md.
 - Branch DTOs and hashing are conformance-tested against branchDAM fixtures. Refresh them with `make contract-sync BRANCHDAM=<branchdam checkout>`, never by hand-editing `internal/branchdam/testdata/contract/`.
 

@@ -25,7 +25,7 @@ Every non-draft PR gets an automated review from the `s3ntin3l8-hermes[bot]` Git
 posted once on `opened` (or once on `ready_for_review` if the PR started as a draft). Ask for
 another look at any point -- including after addressing feedback -- by commenting
 `@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue). Agents
-request re-reviews through the Mullion review relay instead (see [`AGENTS.md`](AGENTS.md)).
+request reviews through the Mullion review relay instead (see [`AGENTS.md`](AGENTS.md)).
 
 Because `required_conversation_resolution` is on, any inline comment Hermes (or a human
 reviewer) attaches to a review thread blocks merge until that thread is replied to and resolved.
