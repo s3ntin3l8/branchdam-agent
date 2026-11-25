@@ -1,12 +1,12 @@
 ---
 name: branchdam-agent
-description: Correctness invariants for branchdam-agent (SD-card ingest, dual-write/verify, offline queue.db, prune, tray Runner gates, config patching, API-key rotation). Read this before changing or reviewing anything under internal/ingest, internal/queue, internal/prune, internal/tray, internal/config, internal/branchdam or internal/naming. These are changes that look harmless on their own but break something another package depends on.
+description: Correctness invariants for branchdam-agent (SD-card ingest, dual-write/verify, offline queue.db, prune, tray Runner gates and status API, card-volume scope, config patching, API-key rotation, self-update, Resolve/Luminar readers, exiftool pool, cross-platform builds). Read this before changing or reviewing anything under internal/ or cmd/, the release workflow, or a platform-tagged file.
 ---
 <!-- mullion:scaffold:branchdam-agent -->
 
 # branchdam-agent invariants
 
-AGENTS.md "Key Invariants" is the full statement of each rule. This file lists the mistakes that most often break them. Each entry gives the edit that looks reasonable, why it is wrong, and where the rule lives.
+`docs/invariants.md` is the full statement of each numbered rule (AGENTS.md "Key Invariants" has one-line summaries). This file lists the mistakes that most often break them. Each entry gives the edit that looks reasonable, why it is wrong, and where the rule lives.
 
 ## Ingest data path (`internal/ingest`)
 
@@ -51,6 +51,7 @@ AGENTS.md "Key Invariants" is the full statement of each rule. This file lists t
 - A file is deleted only when node-status reports found, live (`ACTIVE`/`HIDDEN`), `TIER3_MASTER_ARCHIVE`, `verified`, **and** the server's `fullHash` equals the BLAKE3 hash `queue.db` recorded (case-insensitive compare). `verified` alone is not enough.
 - A missing server hash, a mismatch, or no local hash means **keep the file**, counted as `no-server-hash` / `hash-mismatch` / `no-local-hash`. Each gets a `[SKIP]` line plus a pass-level `slog.Warn`, because the tray throws away per-file output.
 - Re-check local containment and on-disk mtime/size immediately before deleting.
+- Only `queue.KindMedia` rows are candidates (sidecars are skipped before node-status is asked), and a dry run never deletes.
 
 ## Tray Runner concurrency (`internal/tray`)
 
@@ -70,6 +71,10 @@ AGENTS.md "Key Invariants" is the full statement of each rule. This file lists t
 - **Auto-eject** happens only for a detection-triggered ingest of exactly a card volume root, and only when the summary is `OK()`. Manual paths never eject. `OK()` is false while any upload is `Deferred`.
 - Failed rows are re-queued with `ResetFailedNode`/`ResetFailed`. This takes no lock, because a drain never selects a FAILED row.
 - The loopback status server rejects any non-loopback `Host` (protection against DNS rebinding). Do not relax that check.
+- **Status API (`statusapi.go`):** `/api/*` routes are registered only when the configured address is loopback and the bound address is a loopback IP. Every route is wrapped in `withAPIAuth`: `originAllowed` rejects `Sec-Fetch-Site: cross-site` and any foreign `Origin`, then a constant-time Bearer token compare runs. An empty `Token` rejects everything; it never means "auth off".
+- **Card scope (`cardscope.go`):** a card volume is an immediate child of a `cardRoots` parent (or a Windows removable drive root) that neither contains nor sits inside the archive or local edit root. This keeps ingest and eject away from the NAS share and edit SSD, which mount under the same parents. "Ingest now" ingests each `selectCardVolumes` entry, never a `cardRoots` parent.
+- **IngestGate and detector:** a dialog render error is never added to the skip set (only an explicit refusal is). Resume re-offers held volumes through `TriggerDetectedIngest`, so the skip set and IngestGate still apply. Empty `cardRoots` stops the detector except on Windows, which also polls removable drives. `PathTemplate` is overwritten by every handshake. Empty `allowedExtensions` means accept all. Settings saves are serialised by `configSettings.saveMu`.
+- **Runtime state file (`internal/runtime`):** 0600 file, 0700 directory (chmod after `MkdirAll`), atomic temp+rename then directory fsync (`F_FULLFSYNC` on macOS). chmod/fsync failures are WARN; a failed write never blocks a drain.
 
 ## Config and keys (`internal/config`, `internal/branchdam`)
 
@@ -84,12 +89,33 @@ AGENTS.md "Key Invariants" is the full statement of each rule. This file lists t
   - Never overwrite a `${VAR}` placeholder. Return `ErrAPIKeyPlaceholder` and never echo the placeholder text.
   - A 401 on the new key's first use reverts to the old key, retries once, and never re-adopts that key id.
   - Each request reads `currentKey` once and signs with that same value.
+- **Secrets in logs:** log an `*HTTPError` only via `err.Error()`, never `%+v`/`%#v` (that dumps the raw body). Pairing URLs and keys go through `redactKey`/`redactKeyInRaw`.
 - **Events:** the `/events` payload is a double-encoded JSON string, but `evidenceJson` inside `EVENT_EDGE_ATTACHED` is a raw JSON object. `ValidateEdgeAttached` requires confidence in [0.50, 1.00] and an allowed relationship type, and rejects any agent-supplied `reviewState`.
 
 ## Locked ports
 
 - `internal/naming.Stem` is a byte-for-byte port of branchDAM's own function. Never add suffixes to it, Luminar-specific or otherwise. Luminar pairing uses its own local `stem` in `internal/luminar/derive.go`.
-- `internal/hashing` and the branchDAM DTOs are conformance-tested against fixtures from branchDAM. Refresh them with `make contract-sync BRANCHDAM=<checkout>`. Do not edit golden data by hand to make a test pass.
+- The branchDAM DTO fixtures in `internal/branchdam/testdata/contract/` come from `make contract-sync BRANCHDAM=<checkout>`, which also rewrites `SOURCE`, `ContractVersion` and `contract_version.golden.txt`. Never edit any of them by hand (`TestContractSourceMatchesContractVersion`).
+- `internal/hashing`'s golden vectors were transcribed by hand from branchDAM's own tests at a pinned commit (see `hashing_test.go`); `contract-sync` does not touch them. A failing vector means the port is wrong: fix the code, never the vector.
+
+## Ingest extras
+
+- **Never overwrite or delete a file the agent did not create.** `CopyToArchive` hitting a conflicting archive file ends the row in terminal `archive_copy FAILED`; offline ingest takes the next suffix instead of removing an unclaimed destination file; upload never overwrites a different local file at `relativePath`.
+- **Content dedup** (`checkContentDedup`, invariant 16) runs after the copy and before `Verify`, on in-flight hashes, with a per-file timeout (5 s online, 2 s offline); every failure falls open. Upload mode runs no `checkContentDedup` and relies on the server's `DEDUPLICATED`. The offline fallback when the NAS is unreachable is gated on `queueReader != nil`.
+
+## Self-update (`internal/selfupdate`, `cmd/branchdam-agent`)
+
+- Every download passes both the Sigstore check (issuer pinned to `token.actions.githubusercontent.com`, SAN regex pinned to this repo's `release-binaries.yml@`) and the SHA-256 check against `SHA256SUMS.txt`. Never drop either or widen the SAN regex.
+- Apply only when `GreaterThan` holds. Never call go-selfupdate's `UpdateCommand` (it compares with `Equal` and can downgrade).
+- The multi-target swap is all-or-nothing: withdraw the rollback sidecar first, swap siblings before the primary, write the sidecar only after every target swapped; any failure restores the targets already swapped.
+- `cmd/branchdam-agent-ui` has no self-update path. Release asset names, signing steps and identity are locked by `release_workflow_contract_test.go`; change the workflow and the test together.
+- Checking is on by default; applying is always an explicit action (tray click or `update` confirmation / `-yes`) that `selfUpdate.enabled` does not authorise.
+
+## External readers and subprocesses
+
+- **Resolve (`internal/resolve`):** a project-DB query failure is an error, never submitted as an empty snapshot (an empty snapshot deactivates the timeline's automatic edges). Connections are forced read-only (SQLite `mode=ro`, PostgreSQL `default_transaction_read_only=on`), and logged URLs are redacted (`docs/resolve-projectdb.md`).
+- **Luminar (`internal/luminar`):** open the catalog only as `file:<path>?mode=ro`, never `immutable=1` (it skips the WAL and returns stale reads). Pair only on exactly one match.
+- **exiftool pool (`internal/exiftool`):** never send `--`, or a path that starts with `-`, `#` or whitespace or contains CR/LF, through the `-stay_open` pool; it wedges the process permanently. `Execute` routes such requests to a one-shot fork, so add `--` only when `NeedsSeparator` is true.
 
 ## Cross-platform
 
