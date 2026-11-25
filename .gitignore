@@ -64,7 +64,12 @@ compose.override.yml
 # pattern -- gitignore never untracks a file already in the index, it only
 # keeps everything else under .claude/ (plans, scheduled-task state,
 # worktrees) from showing up as untracked clutter.
-.claude/
+# Claude Code: local state (plans, settings.local.json, worktrees) stays ignored; shared skills/agents are committed
+.claude/*
+!.claude/skills/
+!.claude/agents/
+!.claude/settings.json
+!.claude/hooks/
 
 # Agent workspace (superpowers plans, scratch) -- mirrors branchDAM's own
 # .gitignore; no such directory exists in this repo yet.

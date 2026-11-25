@@ -15,16 +15,17 @@ it via the "merge without waiting for requirements" path, which `enforce_admins:
 available to the repo owner.
 
 `required_conversation_resolution` is also on: every review thread (Hermes's or a human's) must
-be replied to and resolved before a PR is mergeable, even with `enforce_admins: false`. See
-[`AGENTS.md`](AGENTS.md)'s "Review thread resolution" guideline for the exact commands (thread
-resolution is a GraphQL-only concept, not a `gh pr` verb).
+be replied to and resolved before a PR is mergeable, even with `enforce_admins: false`. Thread
+resolution is GraphQL-only (`resolveReviewThread`), not a `gh pr` verb; [`AGENTS.md`](AGENTS.md)'s
+Workflow Conventions have the exact commands.
 
 ## Automated review
 
 Every non-draft PR gets an automated review from the `s3ntin3l8-hermes[bot]` GitHub App,
 posted once on `opened` (or once on `ready_for_review` if the PR started as a draft). Ask for
 another look at any point -- including after addressing feedback -- by commenting
-`@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue).
+`@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue). Agents
+request re-reviews through the Mullion review relay instead (see [`AGENTS.md`](AGENTS.md)).
 
 Because `required_conversation_resolution` is on, any inline comment Hermes (or a human
 reviewer) attaches to a review thread blocks merge until that thread is replied to and resolved.
