@@ -28,25 +28,24 @@ This repo's correctness invariants are summarised as a checklist in `.claude/ski
 
 ## Repo specifics
 
-- The pre-push gate is two targets, and neither covers the other:
-  - `make lint` runs pre-commit: gofmt, go vet, `go mod tidy -diff`, `go test -race`, golangci-lint and detect-secrets.
+- The pre-push gate is `make lint` + `make check` + golangci-lint; none covers the others:
+  - `make lint` runs the pre-commit-stage hooks: detect-secrets, whitespace/EOF/YAML/JSON fixers, gofmt, go vet and `go mod tidy`. It does not run tests or golangci-lint.
   - `make check` runs build, vet, `go test -race` with coverage, `make vulncheck`, `build-windows` and `build-darwin`. It does not need pre-commit.
-  - `make install-hooks` also installs a pre-push hook that runs `make vulncheck`.
+  - golangci-lint runs only as a pre-push hook (with `go test -race` and govulncheck), installed by `make install-hooks`. Without hooks, run it with `pre-commit run golangci-lint --hook-stage pre-push --all-files`.
 - `make vulncheck` needs `jq`. Its allowlist is `VULNCHECK_IGNORE` in the Makefile (default `GO-2026-5932`), mirrored by `govulncheck-ignore` in `ci-cd.yml`. Change both together.
 - golangci-lint is built with `go install` into a repo-local `.bin/`, using a Go toolchain floor of 1.26.7. Older Go panics in its buildir pass (issue #163).
 - `make build-darwin` is a build-only check that excludes `internal/tray` and `cmd/branchdam-agent`, because the darwin tray needs cgo. `make build-darwin-app` and `build-darwin-dmg` run only on a macOS host.
-- Release Please builds the changelog from the squash-merged PR title, so an unprefixed title drops out of the changelog. Releases go out as pre-releases (`"prerelease": true`). Any change to `internal/queue/store.go` or `internal/queue/migrations.go` relies on this; read CONTRIBUTING.md's "Pre-release gating" before touching the queue schema.
-- The review bot is Hermes (`s3ntin3l8-hermes[bot]`). It auto-reviews every non-draft same-repo PR on open; request reviews as the Workflow Conventions describe. `required_conversation_resolution` is on: every inline thread blocks merge until replied to and resolved.
+- Release Please builds the changelog from the squash-merged PR title, so an unprefixed title drops out of the changelog. Releases are normal releases: `release-please-config.json` has no `prerelease` flag (#169 removed it; it never produced one). A `queue.db` schema change therefore reaches every auto-updating agent with the next release; follow CONTRIBUTING.md's "queue.db schema changes" before touching `internal/queue/store.go` or `migrations.go`.
+- The review bot is Hermes (`s3ntin3l8-hermes[bot]`). It auto-reviews every non-draft same-repo PR on open, except `mullion/task-*` branches (Task Master runs its own review there, `hermes.yml`); request reviews as the Workflow Conventions describe. `required_conversation_resolution` is on: every inline thread blocks merge until replied to and resolved.
 - Release-please's own PR never gets CI checks reported. That is expected; see CONTRIBUTING.md.
 - Branch DTOs are conformance-tested against branchDAM fixtures: refresh them with `make contract-sync BRANCHDAM=<branchdam checkout>`, never by hand-editing `internal/branchdam/testdata/contract/`. The hashing golden vectors were transcribed by hand from a pinned branchDAM commit and are not touched by `contract-sync`.
-- **Skill and reviewer exist twice:** `.claude/skills/<n>/SKILL.md` ↔ `.agents/skills/<n>/SKILL.md` and `.claude/agents/<n>.md` ↔ `.agents/skills/<n>/SKILL.md` (same body; Claude Code reads `.claude/`, the other CLIs read `.agents/`). Edit both together; `scripts/check-agent-mirrors.sh` (pre-commit) fails on drift.
 
 ## Commands
 
 ```sh
 # Pre-PR Gates & Testing
 make check           # build + vet + test -race (coverage) + vulncheck + windows/darwin builds
-make lint            # pre-commit: gofmt, vet, tidy, test -race, golangci-lint, detect-secrets (run both)
+make lint            # pre-commit stage: detect-secrets, fixers, gofmt, vet, tidy (run both; golangci-lint is pre-push only)
 
 # Cross-compilation Builds
 make build-windows   # Builds dist/branchdam-agent.exe and dist/branchdam-agent-tray.exe
@@ -79,7 +78,7 @@ names.
 
 1. **Streaming Dual-Write**: the card is read once (`DualWrite` to local SSD + NAS, or one verified temp copy in upload mode), hashing xxHash64 + BLAKE3 in flight. Never re-read the card to hash.
 2. **Cache-Defeating Verify**: fsync, close, re-open unbuffered; fall back to buffered only at open time and only on the "unbuffered unsupported" errors. macOS `F_NOCACHE` is advisory.
-3. **Offline Queue Safety**: ingest intent is in `queue.db` before any network call (offline always, online when `queueDbPath` is set, metered-deferred uploads as `UPLOAD` rows); a POST that isn't accepted stays `Queued` for `Drain`. Queue schema changes ship as pre-releases (CONTRIBUTING.md).
+3. **Offline Queue Safety**: ingest intent is in `queue.db` before any network call (offline always, online when `queueDbPath` is set, metered-deferred uploads as `UPLOAD` rows); a POST that isn't accepted stays `Queued` for `Drain`. Queue schema changes are forward-only and additive, because an older binary (e.g. after a self-update rollback) opens a newer `queue.db` as is (CONTRIBUTING.md).
 4. **Path Translation**: payload paths are container-absolute via `pathMappings` (longest prefix) before dispatch.
 5. **Double-Encoded Event Envelopes**: `/agent/events` payload is a JSON string; `evidenceJson` inside `EVENT_EDGE_ATTACHED` is a raw object.
 6. **Surgical Config Patching**: `patch.go` edits the `yaml.Node` AST, keeps comments and `${VAR}` placeholders, writes atomically (0600, fsyncs), serialises on `patchMu`, and replaces a symlink's target, never the link.

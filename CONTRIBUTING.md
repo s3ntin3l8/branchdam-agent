@@ -41,25 +41,22 @@ maintainer can still get a review on a fork PR by commenting `@s3ntin3l8-hermes 
 `issue_comment` always runs the default branch's copy of the workflow, in the base repo's
 context, gated by commenter trust rather than fork origin.
 
-## Pre-release gating for queue.db schema changes
+## queue.db schema changes
 
-Any PR that touches `internal/queue/store.go` or `internal/queue/migrations.go` -- i.e. a
-schema-affecting change to `queue.db` -- must be released as a **pre-release**, not a
-regular tagged release. The mechanism is `release-please-config.json`'s
-`"prerelease": true` on the `.` package, which marks the next release-please PR as
-`1.x.y-pr.N` instead of `1.x.y`; downstream agents on the previous stable version are
-then notified of the pre-release rather than silently picking up an incompatible schema
-via auto-update.
+Releases are normal releases. `release-please-config.json` has no `prerelease` flag: #169 removed it, and it never
+produced a pre-release anyway (release-please doesn't re-version an existing release PR when the config changes). So a
+PR that touches `internal/queue/store.go` or `internal/queue/migrations.go` reaches every auto-updating agent with the
+next release, with no pre-release stage in front of it.
 
-`release-please` itself does not auto-detect "this PR touched the queue schema"; the
-`prerelease: true` setting here is currently **unconditional** on the package (every
-release of this repo goes out as a pre-release for the same reason), but the rule above
-is the contract: a release that ships a queue.db schema change without the pre-release
-flag set is a bug -- the `prerelease` setting must remain on, and a future tightening to
-"only this kind of change" via release-please's package-level config would not break the
-contract. See [`docs/offline-queue.md`](docs/offline-queue.md) for the migration contract
-this rule exists to protect (forward-only, idempotent, `PRAGMA user_version`-driven --
-issue #106 / PR #119).
+The safety comes from the migration contract instead (`internal/queue/migrations.go`, see
+[`docs/offline-queue.md`](docs/offline-queue.md)):
+
+- Migrations are forward-only and keyed on `PRAGMA user_version`; each one runs in one transaction with its
+  `user_version` bump, so a failure leaves the old schema untouched and the next `Open()` retries it.
+- An older binary opens a newer `queue.db` without error (`migrate` only rejects a version *below* its own), and a
+  self-update rollback runs exactly that combination. A schema change must therefore be additive: new tables, or
+  `ADD COLUMN` with a `DEFAULT`, never a rename, drop, or new constraint that older code would violate.
+- Call out a schema change in the PR description so the release notes can mention it.
 
 <!-- mullion:pointer:start -->
 See `AGENTS.md`'s Workflow Conventions section for our process rules.

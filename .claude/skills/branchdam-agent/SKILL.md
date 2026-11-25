@@ -34,7 +34,7 @@ description: Correctness invariants for branchdam-agent (SD-card ingest, dual-wr
   - A metered-deferred upload writes an `origin = UPLOAD` row before any network call and reports `Queued`, not `Deferred`. Without a queue, or if the insert fails, it stays `Deferred`.
   - Reordering an insert to after the POST loses files when the network fails mid-ingest.
 - **Migrations:** forward-only and idempotent. Each step runs in one transaction together with its `PRAGMA user_version` bump. Pragmas go in the DSN `_pragma` list, so every pooled connection gets them; a one-off `db.Exec("PRAGMA …")` covers only one connection. The path is escaped as a `file:` URI.
-  - Any schema change (`store.go`, `migrations.go`) relies on releases going out as pre-releases (see CONTRIBUTING.md).
+  - Any schema change (`store.go`, `migrations.go`) ships to every agent with the next normal release (there is no pre-release stage), and an older binary (self-update rollback) opens a newer `queue.db` as is. Keep changes additive: new tables or `ADD COLUMN ... DEFAULT`, never a rename, drop or new constraint (CONTRIBUTING.md "queue.db schema changes").
 - **GC and terminal states:**
   - A row with a `PENDING` upload is never terminal.
   - GC deletes only rows that finished successfully, are older than 90 days, and whose local copy is gone.
