@@ -59,3 +59,7 @@ flag set is a bug -- the `prerelease` setting must remain on, and a future tight
 contract. See [`docs/offline-queue.md`](docs/offline-queue.md) for the migration contract
 this rule exists to protect (forward-only, idempotent, `PRAGMA user_version`-driven --
 issue #106 / PR #119).
+
+<!-- mullion:pointer:start -->
+See `AGENTS.md`'s Workflow Conventions section for our process rules.
+<!-- mullion:pointer:end -->

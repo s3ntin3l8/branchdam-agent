@@ -1,15 +1,45 @@
 # AGENTS.md — branchdam-agent
 
-This file is the single source of truth for this repo's workflow rules and
-load-bearing invariants — the ones every agent needs before touching
-anything, regardless of which CLI you are. `CLAUDE.md` is a one-line
-`@AGENTS.md` import, so every CLI (Claude Code, Codex, opencode, agy) reads
-this file, natively or via that import. See [`CONTRIBUTING.md`](CONTRIBUTING.md)
-for the contributor workflow and [`docs/`](docs) for deeper architecture detail.
+This file holds this repo's load-bearing invariants and repo-specific facts: the ones every agent needs before touching anything, whichever CLI it runs in. `CLAUDE.md` is a one-line `@AGENTS.md` import, so every CLI (Claude Code, Codex, opencode, agy) reads this file, natively or through that import. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for branch protection and release details, and [`docs/`](docs) for deeper architecture detail.
 
 Workstation companion agent for branchDAM. Handles SD card ingestion, dual-copy
 verified storage writes, offline queueing, and catalog sync. Go binary
 (cross-platform: Linux, Windows, macOS) with system tray UI.
+
+<!-- mullion:briefing:start -->
+This repo's correctness invariants are summarised as a checklist in `.claude/skills/branchdam-agent/SKILL.md`. It covers changes that look harmless but break another package's assumptions: card re-reads, verify cache bypass, queue-before-network ordering, prune hash equality, tray `gate`/pause semantics, config patching and key rotation. Read it before changing `internal/ingest`, `internal/queue`, `internal/prune`, `internal/tray`, `internal/config`, `internal/branchdam` or `internal/naming`. For the self-review pass, or when delegating review of uncommitted changes, use the `branchdam-agent-reviewer` subagent (`.claude/agents/branchdam-agent-reviewer.md`), which applies that checklist to the diff.
+
+## Workflow Conventions
+
+- Never commit directly to the default branch. Always branch and open a PR.
+- Branch off the latest remote default branch, never off your local one: `git fetch origin && git checkout -b <branch> origin/<default>`. A local default branch is routinely stale, which is what makes a PR show up as "out-of-date with the base branch" the moment it's opened.
+- Work in a dedicated worktree per branch, under `.wt/<name>` (the branch name with `/` replaced by `-`, so the directory stays flat), off the latest remote default branch: `git fetch origin && git worktree add .wt/<name> -b <branch> origin/<default>`. A fresh worktree does not inherit installed dependencies — reinstall them there before testing or building.
+- Commit and PR titles need a Conventional Commits prefix (`feat:`, `fix:`, `chore:`, ...).
+- Squash-merge PRs — the PR title becomes the commit message on the default branch.
+- Require green CI before merging.
+- Run a self-review pass on your own diff before declaring done.
+
+  Request an automated/bot review through the review relay (`mullion review`, or the `request_review` tool) — once after opening the pull request, and again per head commit after pushing fixes for a changes-requested review, then wait for it. A review comment that mentions the review bot is for humans, not agents; if no relay is set up, tell the human instead. One review per pull request at a time: a review that is already running is not re-requested — the request is refused with its run id, and that refusal is the answer, not an error to retry: wait for it, or stop it with stop_review. A review takes 10-30 minutes; check review_status once instead of asking again. After pushing fixes for a changes-requested review, ask again only when no review is in flight. Once the review bot has approved, apply its remaining suggestions and push without requesting another review, even though the head moved: small targeted fixes do not change the verdict, and re-reviewing them only breeds more nits. Never re-trigger a review with an @mention of the review bot: that path is for humans, and it queues another round behind the running one.
+- Fixing the code is not enough to address review feedback — reply to each inline comment via the GitHub API, then resolve the thread via the GraphQL `resolveReviewThread` mutation, rather than pushing a silent fix. Reply with `gh api repos/{owner}/{repo}/pulls/<pr>/comments/<comment_id>/replies -f body="…"`; resolve with `gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'`, taking the thread id from a `reviewThreads` query on the pull request, not from the REST comment id.
+- File a tracked issue for anything a plan defers, blocks, or descopes, and link it from the PR (using the repository's issue template if it has one) — a footnote in a plan doc is not a durable record. Write each one as a spec an agent can implement on its own (scope, acceptance criteria), not as a note. Title it the way this repo titles commits and PRs, reusing its existing scope names rather than coining new ones; attach it as a sub-issue to the matching open epic when one exists; and set GitHub's `blocked_by` dependency where one issue cannot start before another closes.
+- After a merge, delete the local and remote branch and remove any associated worktree.
+- Before pushing, run the full lint/typecheck/test/format gate.
+<!-- mullion:briefing:end -->
+
+## Repo specifics
+
+- The pre-push gate is two targets, and neither covers the other:
+  - `make lint` runs pre-commit: gofmt, go vet, `go mod tidy -diff`, `go test -race`, golangci-lint and detect-secrets.
+  - `make check` runs build, vet, `go test -race` with coverage, `make vulncheck`, `build-windows` and `build-darwin`. It does not need pre-commit.
+  - `make install-hooks` also installs a pre-push hook that runs `make vulncheck`.
+- `make vulncheck` needs `jq`. Its allowlist is `VULNCHECK_IGNORE` in the Makefile (default `GO-2026-5932`), mirrored by `govulncheck-ignore` in `ci-cd.yml`. Change both together.
+- golangci-lint is built with `go install` into a repo-local `.bin/`, using a Go toolchain floor of 1.26.7. Older Go panics in its buildir pass (issue #163).
+- `make build-darwin` is a build-only check that excludes `internal/tray` and `cmd/branchdam-agent`, because the darwin tray needs cgo. `make build-darwin-app` and `build-darwin-dmg` run only on a macOS host.
+- Release Please builds the changelog from the squash-merged PR title, so an unprefixed title drops out of the changelog. Releases go out as pre-releases (`"prerelease": true`). Any change to `internal/queue/store.go` or `internal/queue/migrations.go` relies on this; read CONTRIBUTING.md's "Pre-release gating" before touching the queue schema.
+- The review bot is Hermes (`s3ntin3l8-hermes[bot]`). It reviews non-fork PRs automatically when they are opened. `required_conversation_resolution` is on, so every inline thread blocks merge until it is resolved.
+- Release-please's own PR never gets CI checks reported. That is expected; see CONTRIBUTING.md.
+- Branch DTOs and hashing are conformance-tested against branchDAM fixtures. Refresh them with `make contract-sync BRANCHDAM=<branchdam checkout>`, never by hand-editing `internal/branchdam/testdata/contract/`.
+- For invariant-sensitive changes, use the checklist skill `.claude/skills/branchdam-agent/SKILL.md` and the `branchdam-agent-reviewer` subagent.
 
 ## Commands
 
@@ -61,21 +91,3 @@ make build-darwin-app# Assembles macOS .app bundle via tools/mkbundle
 16. **Content dedup on in-flight hashes, with offline-aware fail-open (#88 + #82)**: `checkContentDedup` runs against `GET /api/v1/agent/check-content` in both `IngestCard` (online) and `IngestCardOffline`, *after* `DualWrite`/`WriteLocal` and before `Verify`, on the hashes the copy computed in flight -- it never reads the card itself (invariant 1). Phase 1 is the fast pre-screen (`fastHash` + `sizeBytes`, no `fullHash`); only on `possibleMatch: true` does phase 2 send `fullHash`. A confirmed match in a live state (`ACTIVE` or `HIDDEN`) is a duplicate: online removes the two copies `DualWrite` itself just created (O_EXCL, so they are its own), offline returns before the queue row so only its temp copy is removed; neither registers anything nor writes a queue row (online dedup runs before `registerNode`). A match at this file's own archive container path is the copy just written, never a duplicate. A re-run's already-present copies (`confirmRegistered`, invariant 3) share the pass's `dedupState` but skip the pre-screen -- the local copy's hash is in hand -- and look up `fullHash` directly (with `fastHash` + `sizeBytes`; a 400 retries once as `fastHash` + `fullHash` and sets `fullOnly`); there a live node at the own container path is evidence of registration (skip), and a pre-existing copy is never deleted. Each request has a per-file timeout (`PreflightTimeoutSecs`, 5s online / 2s offline) and every failure falls open. Per-pass `dedupState`: `unavailable` latches on a transport error, 404/501 (no endpoint), 401/403 (key refused) or 429 and skips the check for the rest of the pass; a 400 on the pre-screen means a server predating it, so `fullOnly` sends the rest of the pass straight to the full-hash lookup (dedup keeps working) -- a 400 never latches `unavailable`. The failure that latches is logged at WARN (later files skip the check quietly). Both reset per pass/card. There is no run-level probe. Upload mode (`ingest.uploadStream`) runs no `checkContentDedup`: its upload carries the in-flight BLAKE3 in `X-Blake3-Hash`, and the server answers a file it already holds live with `200 DEDUPLICATED` without receiving it -- the same after-copy, in-flight-hash rule, applied server-side (a queued upload's row records that BLAKE3 at enqueue, and `Drain` re-stats the local copy against the recorded size and mtime before sending it, failing the row if the copy changed). The offline auto-fallback in `TriggerIngest` (NAS unreachable → `IngestCardOffline` instead of error) is gated on `queueReader != nil`. (`internal/ingest/ingest.go` `checkContentDedup`/`dedupState`, `offline.go` `ingestFileOffline` step 4)
 17. **M5 tray UX wiring (#79 + #80 + #81 + #86 + #87)**: Five tray behaviors wired through Settings submenus and the headless `ingest` subcommand's `-allowed-extensions` override: (a) `IngestGate` confirmation dialog wrapping the detector's `triggerIngest(..., isDetection=true)` (tray.go:478-502) with an `autoImportPaths` allow-list; manual `TriggerIngest` (incl. "Import from folder…", run_supported.go:385) bypasses it. A dialog-render error is NOT added to the skip set (only explicit refusals are). (b) "Import from folder…" manual source picker reusing the same `dialogRunner`. (c) `RequireDCIM` (volume filter at `ListVolumesUnder`, applied by both the detector and "Ingest now", which ingests each `selectCardVolumes` entry -- never a `cardRoots` parent -- and drops any volume containing or inside the archive/local edit root, `internal/tray/cardscope.go`) + `AllowedExtensions` (walk-time filter at `shouldSkipByExtension`, ingest.go:235 / offline.go:128); empty `allowedExtensions` = "accept all" (backward-compat). (d) `PathTemplate` overwritten by `Handshake.NamingTemplate` at tray startup and on every `reload()` — operator edits survive only between Handshakes. (e) `autoEject` only fires for a detection-triggered ingest of exactly a card volume root (`shouldAutoEject`; manual ingests -- "Ingest now", "Import from folder…", `/api/actions/ingest` -- never eject; the headless `ingest -card` subcommand ejects only when `tray.IsCardVolumeRoot` holds for its path) whose summary is `OK()` (false while any upload is `Deferred` on a metered connection), via the platform-tagged `internal/eject` package (Linux: `udisksctl unmount -b <dev>` then `udisksctl power-off -b <dev>`; Darwin: `diskutil unmountDisk`; Windows: `FSCTL_LOCK_VOLUME` (retried) -> `FSCTL_DISMOUNT_VOLUME` -> `IOCTL_STORAGE_MEDIA_REMOVAL` (allow) -> `IOCTL_STORAGE_EJECT_MEDIA` via `DeviceIoControl`, stopping at the first failed step with an `eject.StepError`, and a removable drive root (`E:\`) counts as a card volume root; other: `ErrUnsupported` stub).
 18. **Rotated API keys: store, then switch, fall back once (`internal/branchdam/keyrotation.go`)**: `Client.Handshake` opens `pendingRotation.sealedApiKey` with the key that handshake authenticated with (`OpenRotatedKey`; a value that does not open is ignored, a cleartext `apiKey` is never used), hands it to the client's `KeyPersister` (`newServerClient` -> `config.SetRotatedAPIKey`), and swaps the in-memory key only after that durable write succeeds; it then adopts the key at once with a confirming handshake. `SetRotatedAPIKey` never overwrites a `${VAR}` placeholder -- it returns `ErrAPIKeyPlaceholder` (logged at WARN, telling the operator to update the env var; the placeholder text is never echoed) and the client stays on its current key. A `401` on the new key's first use reverts to the old key, retries that request once, writes the old key back once the server accepts it, and never re-adopts that key id in the process. Every request reads the key once (`currentKey`) and signs with that same value. See `docs/offline-queue.md` "Rotated API keys".
-
-## Review thread resolution
-
-Hermes reviews automatically on open (`.github/workflows/hermes.yml`'s
-`auto-review` job) — don't also `@s3ntin3l8-hermes Review` right after
-opening the PR, or you'll trigger a redundant second review. A re-review
-can be requested the same way after pushing fixes, but keep it to a
-couple of rounds — don't loop on it indefinitely.
-
-Every review thread (Hermes or human) must be replied to and resolved before
-a PR is mergeable. This is a GraphQL-only concept, not a `gh pr` verb:
-
-```sh
-# 1. Reply to inline comment (REST)
-gh api repos/s3ntin3l8/branchdam-agent/pulls/<PR>/comments/<comment_id>/replies -f body="Fixed in <sha>"
-# 2. Resolve thread (GraphQL)
-gh api graphql -f query="mutation { resolveReviewThread(input: {threadId: \"<thread_id>\"}) { thread { isResolved } } }"
-```
