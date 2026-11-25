@@ -84,19 +84,23 @@ jobs:
   #
   # `auto-review` reviews dependabot PRs too: a dependency bump can change a
   # runtime tool version without saying so (runway-ai-usage-tracker#627: a
-  # cosign-installer bump silently changed the default cosign from v2 to v3,
-  # which is itself still unpatched for a high-severity advisory), which is
-  # exactly what a reviewer catches (s3ntin3l8/.github#85). A
+  # cosign-installer v3 -> v4 bump silently changed the default cosign from
+  # v2.2.4 to v3.0.6, which is affected by GHSA-fx35-mq7g-6g98, fixed in
+  # v3.1.3), which is exactly what a reviewer catches (s3ntin3l8/.github#85). A
   # dependabot-authored run only sees DEPENDABOT secrets, so HERMES_APP_ID /
   # HERMES_APP_PRIVATE_KEY / HERMES_API_KEY must also be set under Settings ->
   # Secrets and variables -> Dependabot; without them the reusable workflow
   # skips green with a notice (s3ntin3l8/.github#96). The Dependabot secret
   # store is repo-wide: every workflow a dependabot PR triggers can read these
-  # secrets, and some actions here are pinned to floating tags, so a bump PR
-  # can run newer upstream code with access to them. That blast radius is
-  # accepted (same as the org-wide pattern in #96). release-please PRs
-  # (`github-actions[bot]`) stay excluded: a changelog PR has nothing for a
-  # code review to say.
+  # secrets. Third-party actions here are SHA-pinned, but a bump PR moves the
+  # SHA to newer upstream code that then runs with access to them; the
+  # `s3ntin3l8/.github` reusable workflows float at `@main` (dependabot does
+  # not bump those). That blast radius is accepted (same as the org-wide
+  # pattern in #96). Nothing sets `concurrency:`, so a batch of dependabot PRs
+  # queues one review per PR on the self-hosted runner, and a human PR's
+  # auto-review can wait behind them -- expected delay, not a hung Hermes.
+  # release-please PRs (`github-actions[bot]`) stay excluded: a changelog PR
+  # has nothing for a code review to say.
   auto-review:
     # NOTE: excluding by PR *author* (github.event.pull_request.user.login),
     # not github.actor -- on `ready_for_review`, github.actor is whoever
