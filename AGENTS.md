@@ -39,6 +39,7 @@ This repo's correctness invariants are summarised as a checklist in `.claude/ski
 - The review bot is Hermes (`s3ntin3l8-hermes[bot]`). It auto-reviews every non-draft same-repo PR on open; request reviews as the Workflow Conventions describe. `required_conversation_resolution` is on: every inline thread blocks merge until replied to and resolved.
 - Release-please's own PR never gets CI checks reported. That is expected; see CONTRIBUTING.md.
 - Branch DTOs and hashing are conformance-tested against branchDAM fixtures. Refresh them with `make contract-sync BRANCHDAM=<branchdam checkout>`, never by hand-editing `internal/branchdam/testdata/contract/`.
+- **Skill and reviewer exist twice:** `.claude/skills/<n>/SKILL.md` ↔ `.agents/skills/<n>/SKILL.md` and `.claude/agents/<n>.md` ↔ `.agents/skills/<n>/SKILL.md` (same body; Claude Code reads `.claude/`, the other CLIs read `.agents/`). Edit both together; `scripts/check-agent-mirrors.sh` (pre-commit) fails on drift.
 
 ## Commands
 
