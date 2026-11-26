@@ -82,14 +82,19 @@ func rawSecrets(path string) (rawSecretFields, error) {
 	}, nil
 }
 
-// redactDatabaseURL keeps a whole ${VAR} placeholder, and otherwise
-// replaces a URL password the way net/url.URL.Redacted does. A file DSN
-// with no userinfo is unchanged. A DSN url.Parse rejects is redacted
-// textually so a bare % or a non-numeric port cannot leak the password.
+// redactDatabaseURL keeps a whole ${VAR} placeholder. Otherwise a userinfo
+// password is replaced (net/url.URL.Redacted, or scheme://[redacted]@host
+// when the DSN does not parse) and a password query parameter is replaced
+// too: lib/pq accepts ?password= as a real credential. A DSN with no
+// userinfo and no password parameter is returned unchanged.
 func redactDatabaseURL(raw, loaded string) string {
 	if wholePlaceholder.MatchString(strings.TrimSpace(raw)) {
 		return strings.TrimSpace(raw)
 	}
+	return redactPasswordParam(redactUserinfo(loaded))
+}
+
+func redactUserinfo(loaded string) string {
 	u, err := url.Parse(loaded)
 	if err == nil {
 		if u.User == nil {
@@ -105,16 +110,52 @@ func redactDatabaseURL(raw, loaded string) string {
 
 // redactUserinfoText replaces scheme://userinfo@rest with
 // scheme://[redacted]@rest. The last @ splits userinfo from the host,
-// so a password that itself contains @ is still covered. No @ means
-// there is no userinfo to hide.
+// matching net/url. A DSN with no userinfo is returned as-is: there is
+// no password in that position to hide, and collapsing it would drop the
+// path the operator is looking at.
 func redactUserinfoText(dsn string) string {
 	scheme, rest, ok := strings.Cut(dsn, "://")
 	if !ok {
-		return redactedKey
+		return dsn
 	}
 	at := strings.LastIndex(rest, "@")
 	if at < 0 {
-		return redactedKey
+		return dsn
 	}
 	return scheme + "://" + redactedKey + "@" + rest[at+1:]
+}
+
+// redactPasswordParam replaces a password= value (query string or keyword
+// DSN) with xxxxx. The key match is case-insensitive and does not fire
+// inside a longer identifier.
+func redactPasswordParam(dsn string) string {
+	const key = "password="
+	lower := strings.ToLower(dsn)
+	var b strings.Builder
+	start := 0
+	for start < len(dsn) {
+		rel := strings.Index(lower[start:], key)
+		if rel < 0 {
+			b.WriteString(dsn[start:])
+			break
+		}
+		idx := start + rel
+		if idx > 0 && isKeyChar(dsn[idx-1]) {
+			b.WriteString(dsn[start : idx+len(key)])
+			start = idx + len(key)
+			continue
+		}
+		b.WriteString(dsn[start:idx])
+		b.WriteString("password=xxxxx")
+		val := idx + len(key)
+		for val < len(dsn) && dsn[val] != '&' && dsn[val] != ' ' {
+			val++
+		}
+		start = val
+	}
+	return b.String()
+}
+
+func isKeyChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
