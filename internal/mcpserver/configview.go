@@ -127,14 +127,15 @@ func redactUserinfoText(dsn string) string {
 
 // redactPasswordParam replaces a password= value (query string or keyword
 // DSN) with xxxxx. The key match is case-insensitive and does not fire
-// inside a longer identifier.
+// inside a longer identifier. The scan stays on the original string:
+// strings.ToLower is not length-preserving for some non-ASCII runes, and
+// indexes into a lowercased copy would miss the key or slice the wrong bytes.
 func redactPasswordParam(dsn string) string {
 	const key = "password="
-	lower := strings.ToLower(dsn)
 	var b strings.Builder
 	start := 0
 	for start < len(dsn) {
-		rel := strings.Index(lower[start:], key)
+		rel := indexFold(dsn[start:], key)
 		if rel < 0 {
 			b.WriteString(dsn[start:])
 			break
@@ -154,6 +155,20 @@ func redactPasswordParam(dsn string) string {
 		start = val
 	}
 	return b.String()
+}
+
+// indexFold returns the byte index of sub in s, matching ASCII case
+// only by comparing equal-length windows. sub is ASCII.
+func indexFold(s, sub string) int {
+	if sub == "" || len(s) < len(sub) {
+		return -1
+	}
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if strings.EqualFold(s[i:i+len(sub)], sub) {
+			return i
+		}
+	}
+	return -1
 }
 
 func isKeyChar(c byte) bool {

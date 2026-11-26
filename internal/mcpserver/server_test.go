@@ -234,6 +234,23 @@ func TestAgentConfigRedactsKey(t *testing.T) {
 	if gotURL != kept {
 		t.Fatalf("userinfo-free DSN = %q, want it unchanged", gotURL)
 	}
+
+	// U+0130 lowercases to a longer string. A search on strings.ToLower
+	// would use indexes that no longer match this DSN.
+	nonASCII := "postgres://example.\u0130/db?password=s3cret"
+	path = writeConfig(t, dir, "server:\n  baseUrl: http://127.0.0.1:8080\nintegrations:\n  resolvedb:\n    databaseUrl: "+nonASCII+"\n")
+	res = callTool(t, Options{ConfigPath: path}, "agent_config", map[string]any{})
+	if res.IsError {
+		t.Fatal(toolText(res))
+	}
+	raw = mustJSON(t, structured(t, res))
+	if strings.Contains(raw, "s3cret") {
+		t.Fatalf("password leaked beside a non-ASCII host: %s", raw)
+	}
+	gotURL, _ = structured(t, res)["integrations"].(map[string]any)["resolvedb"].(map[string]any)["databaseUrl"].(string)
+	if !strings.Contains(gotURL, "password=xxxxx") || !strings.Contains(gotURL, "\u0130") {
+		t.Fatalf("databaseUrl = %q", gotURL)
+	}
 }
 
 func TestPreflightTool(t *testing.T) {
