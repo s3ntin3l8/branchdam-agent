@@ -60,6 +60,7 @@ description: Correctness invariants for branchdam-agent (SD-card ingest, dual-wr
   - `Reconfigure` never waits on `gate`. It records the newest call and applies it when the gate frees. Never swap the engine under a card that is mid-copy, and `Close` the engine it replaces (that shuts down its exiftool pool).
   - A settings reload never restarts the detector directly, because that would cancel a detection-triggered ingest running on the detector's context. Record the interval/requireDCIM change and let `Reconfigure` restart the detector after the gate frees.
   - Rollback uses `TryLockIdle` then `applyMu`, the same as `StartApply`.
+  - MCP action tools (`internal/mcpserver`) are drivers over `Runner` through the tray loopback API only. They must not import `internal/tray` or call `Runner` in-process, and they must not expose prune, self-update, rollback, pair, settings writes, or hook install. The session token is read on every call and never logged.
 - **Pause:**
   - `paused` is session-only. Never persist it.
   - Pausing holds detector insertions (`pausedInserts`). It never drops them and never cancels an in-flight ingest.

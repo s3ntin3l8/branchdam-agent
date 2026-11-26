@@ -134,6 +134,8 @@ func registerTools(s *sdkmcp.Server, opts Options) {
 			}
 			return textResult(summary), preflightOut{OK: ok, Checks: checks}, nil
 		})
+
+	registerActionTools(s, opts)
 }
 
 func failedLimit(limit int) (int, error) {

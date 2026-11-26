@@ -34,6 +34,14 @@ func runMCPCmd(args []string) int {
 		Version:    version,
 		ConfigPath: resolvedPath,
 		QueuePath:  cfg.Offline.QueueDBPath,
+		StatusAddr: cfg.Tray.StatusAddrOrDefault(),
+		ResolveStatusAddr: func() (string, error) {
+			fresh, err := config.Load(resolvedPath)
+			if err != nil {
+				return "", err
+			}
+			return fresh.Tray.StatusAddrOrDefault(), nil
+		},
 		// Re-read on each call. agent_config already does, and a key or
 		// pathMappings edit would otherwise leave preflight on the
 		// startup snapshot.

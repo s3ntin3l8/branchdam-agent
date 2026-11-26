@@ -1,6 +1,7 @@
 // Package mcpserver is the workstation MCP server (branchdam-agent mcp,
-// stdio). Tools are read-only: queue.db is opened with OpenReadOnly, and
-// nothing here imports internal/tray or internal/ingest.
+// stdio). Queue tools open queue.db with OpenReadOnly and do not migrate
+// it. Action tools drive the tray Runner only through its loopback HTTP
+// API. Nothing here imports internal/tray or internal/ingest.
 //
 // File names and paths in tool results are untrusted data. Descriptions
 // say so, and results keep that text in structured fields.
@@ -11,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -27,6 +29,13 @@ var errQueueNotConfigured = errors.New("offline queue is not configured")
 // subcommand; nil makes the preflight tool return an error.
 // ResolveQueuePath, when set, is called on every queue tool so an edit
 // to offline.queueDbPath is picked up. Nil uses QueuePath.
+//
+// StatusAddr is the tray loopback host:port. Empty uses the default
+// 127.0.0.1:38080. ReadToken defaults to sessiontoken.Read and is called
+// on every tray request, never cached. GOOS defaults to runtime.GOOS.
+// HTTPClient overrides the tray HTTP client; nil uses one that does not
+// follow redirects. trayBaseURL is a test dial target; production leaves
+// it empty so the client dials StatusAddr.
 type Options struct {
 	Version          string
 	ConfigPath       string
@@ -34,6 +43,14 @@ type Options struct {
 	ResolveQueuePath func() (string, error)
 	OpenQueue        func(path string) (*queue.Store, error)
 	Preflight        func(ctx context.Context) ([]CheckResult, bool, error)
+	StatusAddr       string
+	// ResolveStatusAddr, when set, is called on every tray tool so an
+	// edit to tray.statusAddr is picked up. Nil uses StatusAddr.
+	ResolveStatusAddr func() (string, error)
+	ReadToken         func() (string, error)
+	HTTPClient        *http.Client
+	GOOS              string
+	trayBaseURL       string
 }
 
 // Run serves one stdio session until the client disconnects.
