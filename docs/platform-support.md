@@ -4,6 +4,10 @@ The headless subcommands (`preflight`, `ingest`, `queue-drain`, `luminar-sync`, 
 Windows, macOS, and Linux. The tray shell (`tray`) is Windows/macOS only. `mcp` is a stdio MCP
 server; its read tools (`queue_summary`, `list_failed`, `lookup_queue_row`, `agent_config`,
 `preflight`) work on every platform. It opens `queue.db` read-only and does not run migrations.
+Its action tools (`tray_status`, `start_ingest`, `cancel_ingest`, `drain_now`, `retry_failed`,
+`set_paused`) call the tray loopback API and only reach a tray on Windows and macOS. On Linux
+each returns the text `tray is not supported on this platform` and does not dial. A refused
+connection or a missing session token is the text `tray is not running`, not a tool error.
 
 ## Support matrix
 

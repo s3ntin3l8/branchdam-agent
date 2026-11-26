@@ -215,11 +215,15 @@ go run ./cmd/branchdam-agent preflight -config config.yaml
 
 ### Ask an assistant about the local queue
 
-`branchdam-agent mcp` speaks MCP over stdio. The tools are read-only:
+`branchdam-agent mcp` speaks MCP over stdio. Read tools are
 `queue_summary`, `list_failed`, `lookup_queue_row`, `agent_config` (the
 API key is redacted; an unexpanded `${VAR}` stays as the placeholder),
-and `preflight`. File names and paths in the results are untrusted data.
-The server opens `queue.db` read-only and does not run migrations.
+and `preflight`. Action tools (`tray_status`, `start_ingest`,
+`cancel_ingest`, `drain_now`, `retry_failed`, `set_paused`) drive the
+tray through its loopback API only; they do nothing in-process, and on
+Linux they report that the tray is not supported. File names and paths
+in the results are untrusted data. The server opens `queue.db` read-only
+and does not run migrations.
 
 ```sh
 claude mcp add branchdam-agent -- branchdam-agent mcp
