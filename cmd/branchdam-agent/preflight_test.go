@@ -10,6 +10,7 @@ import (
 
 	"github.com/s3ntin3l8/branchdam-agent/internal/branchdam"
 	"github.com/s3ntin3l8/branchdam-agent/internal/config"
+	"github.com/s3ntin3l8/branchdam-agent/internal/mcpserver"
 )
 
 type fakeHelloCaller struct {
@@ -50,7 +51,7 @@ func TestRunPreflightChecksHappyPath(t *testing.T) {
 	}
 	found := false
 	for _, c := range checks {
-		if c.Status == "OK" && strings.Contains(c.Message, "version 0.42.0") {
+		if c.Status == "OK" && strings.Contains(c.Detail, "version 0.42.0") {
 			found = true
 		}
 	}
@@ -71,7 +72,7 @@ func TestRunPreflightChecksEmptyVersionIsFailure(t *testing.T) {
 	}
 	found := false
 	for _, c := range checks {
-		if c.Status == "FAIL" && strings.Contains(c.Message, "empty version") {
+		if c.Status == "FAIL" && strings.Contains(c.Detail, "empty version") {
 			found = true
 		}
 	}
@@ -98,7 +99,7 @@ func TestRunPreflightChecksMissingAPIKey(t *testing.T) {
 	if ok {
 		t.Fatalf("expected overall ok=false for missing API key, checks: %v", checks)
 	}
-	if !strings.Contains(checks[0].Message, "apiKey is empty") {
+	if !strings.Contains(checks[0].Detail, "apiKey is empty") {
 		t.Errorf("expected apiKey-empty message, got %v", checks[0])
 	}
 }
@@ -119,7 +120,7 @@ func TestRunPreflightChecksUnexpandedAPIKeyPlaceholder(t *testing.T) {
 	}
 	found := false
 	for _, c := range checks {
-		if c.Status == "FAIL" && strings.Contains(c.Message, "server.apiKey") && strings.Contains(c.Message, "unexpanded placeholder") {
+		if c.Status == "FAIL" && strings.Contains(c.Detail, "server.apiKey") && strings.Contains(c.Detail, "unexpanded placeholder") {
 			found = true
 		}
 	}
@@ -136,7 +137,7 @@ func TestRunPreflightChecksExiftoolMissingIsWarnNotFail(t *testing.T) {
 	}
 	found := false
 	for _, c := range checks {
-		if c.Status == "WARN" && strings.Contains(c.Message, "exiftool not found") {
+		if c.Status == "WARN" && strings.Contains(c.Detail, "exiftool not found") {
 			found = true
 		}
 	}
@@ -180,7 +181,7 @@ func TestRunPreflightChecksPathMappingsPrinted(t *testing.T) {
 	}
 	found := false
 	for _, c := range checks {
-		if strings.Contains(c.Message, `D:\Photos`) && strings.Contains(c.Message, "/storage/archive") {
+		if strings.Contains(c.Detail, `D:\Photos`) && strings.Contains(c.Detail, "/storage/archive") {
 			found = true
 		}
 	}
@@ -191,9 +192,9 @@ func TestRunPreflightChecksPathMappingsPrinted(t *testing.T) {
 
 func TestPrintPreflightReportFormat(t *testing.T) {
 	var buf bytes.Buffer
-	checks := []preflightCheck{
-		{"OK", "server reachable at http://localhost:8080, version 0.42.0"},
-		{"WARN", "exiftool not found on PATH"},
+	checks := []mcpserver.CheckResult{
+		{Status: "OK", Detail: "server reachable at http://localhost:8080, version 0.42.0"},
+		{Status: "WARN", Detail: "exiftool not found on PATH"},
 	}
 	printPreflightReport(&buf, "config.yaml", checks, true, 42*time.Millisecond)
 	out := buf.String()
@@ -210,9 +211,21 @@ func TestPrintPreflightReportFormat(t *testing.T) {
 
 func TestPrintPreflightReportFailure(t *testing.T) {
 	var buf bytes.Buffer
-	checks := []preflightCheck{{"FAIL", "POST http://localhost:8080/api/v1/agent/hello: connection refused"}}
+	checks := []mcpserver.CheckResult{{Status: "FAIL", Detail: "POST http://localhost:8080/api/v1/agent/hello: connection refused"}}
 	printPreflightReport(&buf, "config.yaml", checks, false, time.Millisecond)
 	if !strings.Contains(buf.String(), "preflight FAILED") {
 		t.Errorf("report missing failure banner, got:\n%s", buf.String())
+	}
+}
+
+func TestCheckResultTextPadding(t *testing.T) {
+	if got := (mcpserver.CheckResult{Status: "OK", Detail: "server reachable"}).String(); got != "[OK  ] server reachable" {
+		t.Fatalf("OK line = %q", got)
+	}
+	if got := (mcpserver.CheckResult{Status: "WARN", Detail: "x"}).String(); got != "[WARN] x" {
+		t.Fatalf("WARN line = %q", got)
+	}
+	if got := (mcpserver.CheckResult{Status: "FAIL", Detail: "x"}).String(); got != "[FAIL] x" {
+		t.Fatalf("FAIL line = %q", got)
 	}
 }

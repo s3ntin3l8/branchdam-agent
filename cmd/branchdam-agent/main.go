@@ -9,7 +9,8 @@
 // the same internal/ingest.Engine `ingest` uses; see internal/tray's doc
 // comment), and `update` (the headless equivalent of the tray's
 // "Install and restart" menu item, for hosts that never run a tray; see
-// internal/selfupdate's doc comment). See docs/roadmap.md in the
+// internal/selfupdate's doc comment), and `mcp` (stdio MCP server for the
+// local queue, config and preflight; read-only). See docs/roadmap.md in the
 // branchdam repo and this repo's AGENTS.md.
 package main
 
@@ -128,6 +129,8 @@ func run(args []string) int {
 		return runInitCmd(args[1:])
 	case "pair":
 		return runPairCmd(args[1:])
+	case "mcp":
+		return runMCPCmd(args[1:])
 	case "-read-args":
 		return runReadArgsCmd(args[1:])
 	case "dialog":
@@ -162,6 +165,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  update        check for (and optionally apply) a newer release (-check, -yes; requires selfUpdate.enabled)")
 	fmt.Fprintln(os.Stderr, "  init          write a starter config.yaml to get started (-force to overwrite an existing one)")
 	fmt.Fprintln(os.Stderr, "  pair <url>    persist server.baseUrl + server.apiKey + agentId from a branchdam:// pairing URL")
+	fmt.Fprintln(os.Stderr, "  mcp           stdio MCP server: read-only queue, config, and preflight tools")
 	fmt.Fprintln(os.Stderr, "  -read-args    re-exec from a JSON sidecar (used by autostart, not for direct use)")
 	fmt.Fprintln(os.Stderr, "  version       print the agent's own version")
 }

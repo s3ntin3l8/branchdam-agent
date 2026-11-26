@@ -57,12 +57,13 @@ make build-darwin-app# Assembles macOS .app bundle via tools/mkbundle
 
 | Package | Responsibility |
 |---|---|
-| `cmd/branchdam-agent` | Subcommand dispatch (`preflight`, `ingest`, `tray`, `update`, `prune`, `luminar-sync`, `init`, hidden `dialog`) |
+| `cmd/branchdam-agent` | Subcommand dispatch (`preflight`, `ingest`, `tray`, `update`, `prune`, `luminar-sync`, `init`, `mcp`, hidden `dialog`) |
 | `internal/branchdam` | REST client for branchDAM `/api/v1/agent/*` contract (`hello`, `handshake`, `events`, `rebase`, `node-status`, `check-content`, `upload` (on its own HTTP client with no total timeout), `telemetry` (posted by the tray's own 15-minute timer via `Runner.TriggerTelemetry`, skipped while paused or config-incomplete)) |
 | `internal/ingest` | DualWrite (streaming multi-writer), cache-defeating Verify, EXIF/SRT metadata extraction, naming engine |
 | `internal/queue` | Local SQLite queue (`queue.db`) persisting ingest records and retry states for offline field operation |
 | `internal/tray` | Menu bar / system tray companion (Windows/macOS) with loopback HTTP status server (`127.0.0.1:38080`, `config.DefaultStatusAddr`; rejects any `Host` that isn't a loopback name/IP on its port, against DNS rebinding) |
 | `internal/selfupdate` | Checksum-validated self-update (`go-selfupdate`) with multi-target apply that is all-or-nothing for any failure the process survives (a failed target restores the ones already swapped; the rollback sidecar is written only after every target swaps; a crash mid-apply is not covered -- see `docs/platform-support.md`) and instant rollback |
+| `internal/mcpserver` | Stdio MCP server (`branchdam-agent mcp`): read-only queue, redacted config, and preflight tools. Does not import `internal/tray` or `internal/ingest`. Opens `queue.db` read-only and does not migrate it. |
 | `internal/luminar` | Read-only Luminar Neo catalog parser (schema verified against `db_version 155`) generating Tier-2 lineage edges from filename-inferred pairing -- see `docs/luminar-catalog.md` |
 | `internal/resolvehook` | Detects and installs DaVinci Resolve's render hook into its `Scripts/Utility` folder (`CandidateDirs`/`Detect`/`Install`, atomic temp-then-rename write) |
 | `internal/nodeindex` | File path to `nodeUuid` lookup resolver |
