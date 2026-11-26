@@ -215,7 +215,7 @@ type TrayConfig struct {
 // GitHub API call, never a download or a binary write. Applying an
 // update found by a check is a separate, always-explicit action (a tray
 // menu click, or `update`'s confirmation/-yes) that this flag does not
-// by itself authorize; see AGENTS.md's self-update invariants.
+// by itself authorize; see internal/selfupdate's package doc.
 type SelfUpdateConfig struct {
 	// Enabled turns self-update checks on. Default true (see
 	// defaultConfig()) -- set to false explicitly for zero outbound
@@ -581,8 +581,7 @@ func defaultConfig() Config {
 		// Applying one is a separate, always-explicit decision (a tray
 		// menu click, or `update`'s confirmation prompt / -yes) that
 		// this flag does not by itself authorize -- see
-		// internal/selfupdate's doc comment and AGENTS.md's self-update
-		// invariants. An operator who wants zero outbound GitHub traffic
+		// internal/selfupdate's doc comment. An operator who wants zero outbound GitHub traffic
 		// sets selfUpdate.enabled: false explicitly.
 		SelfUpdate: SelfUpdateConfig{Enabled: true},
 		// Dry run ON by default, including when config.yaml has no

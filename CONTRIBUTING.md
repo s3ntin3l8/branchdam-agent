@@ -15,16 +15,17 @@ it via the "merge without waiting for requirements" path, which `enforce_admins:
 available to the repo owner.
 
 `required_conversation_resolution` is also on: every review thread (Hermes's or a human's) must
-be replied to and resolved before a PR is mergeable, even with `enforce_admins: false`. See
-[`AGENTS.md`](AGENTS.md)'s "Review thread resolution" guideline for the exact commands (thread
-resolution is a GraphQL-only concept, not a `gh pr` verb).
+be replied to and resolved before a PR is mergeable, even with `enforce_admins: false`. Thread
+resolution is GraphQL-only (`resolveReviewThread`), not a `gh pr` verb; [`AGENTS.md`](AGENTS.md)'s
+Workflow Conventions have the exact commands.
 
 ## Automated review
 
 Every non-draft PR gets an automated review from the `s3ntin3l8-hermes[bot]` GitHub App,
 posted once on `opened` (or once on `ready_for_review` if the PR started as a draft). Ask for
 another look at any point -- including after addressing feedback -- by commenting
-`@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue).
+`@s3ntin3l8-hermes Review` on the PR (or `@s3ntin3l8-hermes Triage` on an issue). Agents
+request reviews through the Mullion review relay instead (see [`AGENTS.md`](AGENTS.md)).
 
 Because `required_conversation_resolution` is on, any inline comment Hermes (or a human
 reviewer) attaches to a review thread blocks merge until that thread is replied to and resolved.
@@ -40,22 +41,23 @@ maintainer can still get a review on a fork PR by commenting `@s3ntin3l8-hermes 
 `issue_comment` always runs the default branch's copy of the workflow, in the base repo's
 context, gated by commenter trust rather than fork origin.
 
-## Pre-release gating for queue.db schema changes
+## queue.db schema changes
 
-Any PR that touches `internal/queue/store.go` or `internal/queue/migrations.go` -- i.e. a
-schema-affecting change to `queue.db` -- must be released as a **pre-release**, not a
-regular tagged release. The mechanism is `release-please-config.json`'s
-`"prerelease": true` on the `.` package, which marks the next release-please PR as
-`1.x.y-pr.N` instead of `1.x.y`; downstream agents on the previous stable version are
-then notified of the pre-release rather than silently picking up an incompatible schema
-via auto-update.
+Releases are normal releases. `release-please-config.json` has no `prerelease` flag: #169 removed it, and it never
+produced a pre-release anyway (release-please doesn't re-version an existing release PR when the config changes). So a
+PR that touches `internal/queue/store.go` or `internal/queue/migrations.go` reaches every auto-updating agent with the
+next release, with no pre-release stage in front of it.
 
-`release-please` itself does not auto-detect "this PR touched the queue schema"; the
-`prerelease: true` setting here is currently **unconditional** on the package (every
-release of this repo goes out as a pre-release for the same reason), but the rule above
-is the contract: a release that ships a queue.db schema change without the pre-release
-flag set is a bug -- the `prerelease` setting must remain on, and a future tightening to
-"only this kind of change" via release-please's package-level config would not break the
-contract. See [`docs/offline-queue.md`](docs/offline-queue.md) for the migration contract
-this rule exists to protect (forward-only, idempotent, `PRAGMA user_version`-driven --
-issue #106 / PR #119).
+The safety comes from the migration contract instead (`internal/queue/migrations.go`, see
+[`docs/offline-queue.md`](docs/offline-queue.md)):
+
+- Migrations are forward-only and keyed on `PRAGMA user_version`; each one runs in one transaction with its
+  `user_version` bump, so a failure leaves the old schema untouched and the next `Open()` retries it.
+- An older binary opens a newer `queue.db` without error (`migrate` only rejects a version *below* its own), and a
+  self-update rollback runs exactly that combination. A schema change must therefore be additive: new tables, or
+  `ADD COLUMN` with a `DEFAULT`, never a rename, drop, or new constraint that older code would violate.
+- Call out a schema change in the PR description so the release notes can mention it.
+
+<!-- mullion:pointer:start -->
+See `AGENTS.md`'s Workflow Conventions section for our process rules.
+<!-- mullion:pointer:end -->
