@@ -213,6 +213,24 @@ cp config.example.yaml config.yaml
 go run ./cmd/branchdam-agent preflight -config config.yaml
 ```
 
+### Ask an assistant about the local queue
+
+`branchdam-agent mcp` speaks MCP over stdio. The tools are read-only:
+`queue_summary`, `list_failed`, `lookup_queue_row`, `agent_config` (the
+API key is redacted; an unexpanded `${VAR}` stays as the placeholder),
+and `preflight`. File names and paths in the results are untrusted data.
+The server opens `queue.db` read-only and does not run migrations.
+
+```sh
+claude mcp add branchdam-agent -- branchdam-agent mcp
+```
+
+Pass `-config` when the file is not in the default location:
+
+```sh
+claude mcp add branchdam-agent -- branchdam-agent mcp -config config.yaml
+```
+
 Or skip hand-copying the example: `branchdam-agent init` writes a starter config with empty
 required fields (never `config.example.yaml`'s `${VAR}` placeholders, which would immediately trip
 `preflight`'s validation) to the same default location described below, and prints what to edit

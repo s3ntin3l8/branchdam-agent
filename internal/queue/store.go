@@ -238,6 +238,13 @@ var pragmas = []string{
 	"foreign_keys(1)",
 }
 
+// readOnlyPragmas are connection-scoped only. journal_mode is absent on
+// purpose: setting it rewrites the database file, and a mode=ro open
+// fails if a pragma tries to change it.
+var readOnlyPragmas = []string{
+	"busy_timeout(5000)",
+}
+
 // dsn builds the driver DSN for the queue.db at path: an absolute
 // "file:" URI with the path percent-escaped, plus the _pragma list. The
 // driver hands a "file:" DSN to SQLite as a URI, and SQLite reads '?' as
@@ -245,8 +252,9 @@ var pragmas = []string{
 // so an unescaped "file:"+path silently opened a different file for a
 // path containing any of them. url.URL escapes exactly those (and
 // spaces). A Windows drive path becomes file:///C:/..., which SQLite
-// accepts.
-func dsn(path string) (string, error) {
+// accepts. mode is a SQLite URI parameter ("" or "ro"). query_only is
+// set for a read-only open so a later statement cannot write.
+func dsn(path, mode string, prags []string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
@@ -256,7 +264,13 @@ func dsn(path string) (string, error) {
 		p = "/" + p
 	}
 	q := url.Values{}
-	for _, pr := range pragmas {
+	if mode != "" {
+		q.Set("mode", mode)
+	}
+	if mode == "ro" {
+		q.Set("_query_only", "1")
+	}
+	for _, pr := range prags {
 		q.Add("_pragma", pr)
 	}
 	u := url.URL{Scheme: "file", Path: p, RawQuery: q.Encode()}
@@ -267,7 +281,7 @@ func dsn(path string) (string, error) {
 // durability pragmas set on every connection, and ensures the schema
 // exists.
 func Open(path string) (*Store, error) {
-	d, err := dsn(path)
+	d, err := dsn(path, "", pragmas)
 	if err != nil {
 		return nil, fmt.Errorf("queue: open %s: %w", path, err)
 	}
@@ -283,6 +297,27 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("queue: open %s: %w", path, err)
 	}
 	return s, nil
+}
+
+// OpenReadOnly opens an existing queue.db for queries only. It does not
+// create the file, set journal_mode, or run migrations, so a second
+// process can read while the tray writes and an older schema stays at
+// its user_version.
+func OpenReadOnly(path string) (*Store, error) {
+	d, err := dsn(path, "ro", readOnlyPragmas)
+	if err != nil {
+		return nil, fmt.Errorf("queue: open read-only %s: %w", path, err)
+	}
+	db, err := sql.Open("sqlite", d)
+	if err != nil {
+		return nil, fmt.Errorf("queue: open read-only %s: %w", path, err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("queue: open read-only %s: %w", path, err)
+	}
+	return &Store{db: db}, nil
 }
 
 func (s *Store) init() error {

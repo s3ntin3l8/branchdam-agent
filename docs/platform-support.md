@@ -1,7 +1,9 @@
 # Platform support
 
-The headless subcommands (`preflight`, `ingest`, `queue-drain`, `luminar-sync`, `prune`) run on
-Windows, macOS, and Linux. The tray shell (`tray`) is Windows/macOS only.
+The headless subcommands (`preflight`, `ingest`, `queue-drain`, `luminar-sync`, `prune`, `mcp`) run on
+Windows, macOS, and Linux. The tray shell (`tray`) is Windows/macOS only. `mcp` is a stdio MCP
+server; its read tools (`queue_summary`, `list_failed`, `lookup_queue_row`, `agent_config`,
+`preflight`) work on every platform. It opens `queue.db` read-only and does not run migrations.
 
 ## Support matrix
 
