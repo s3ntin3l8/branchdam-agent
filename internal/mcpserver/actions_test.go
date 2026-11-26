@@ -295,19 +295,95 @@ func TestNonLoopbackStatusAddr(t *testing.T) {
 	}
 }
 
+func TestResolveStatusAddrEachCall(t *testing.T) {
+	withTempTokenDir(t)
+	writeToken(t, "token-one")
+	var hosts []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ignoreProbe(w, r) {
+			return
+		}
+		hosts = append(hosts, r.Host)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	n := 0
+	addrs := []string{":38080", "127.0.0.1:38081"}
+	opts := Options{
+		StatusAddr:  "192.0.2.10:1",
+		trayBaseURL: srv.URL,
+		GOOS:        "darwin",
+		ResolveStatusAddr: func() (string, error) {
+			addr := addrs[n]
+			n++
+			return addr, nil
+		},
+	}
+	for range 2 {
+		res := callTool(t, opts, "tray_status", nil)
+		if res.IsError {
+			t.Fatal(toolText(res))
+		}
+	}
+	if n != 2 || len(hosts) != 2 || hosts[0] != "127.0.0.1:38080" || hosts[1] != "127.0.0.1:38081" {
+		t.Fatalf("n=%d hosts=%#v", n, hosts)
+	}
+}
+
+func TestSuppliedClientDoesNotFollowRedirect(t *testing.T) {
+	withTempTokenDir(t)
+	writeToken(t, "token-one")
+	var leaked []string
+	next := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ignoreProbe(w, r) {
+			return
+		}
+		leaked = append(leaked, r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer next.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ignoreProbe(w, r) {
+			return
+		}
+		http.Redirect(w, r, next.URL+"/api/status", http.StatusFound)
+	}))
+	defer srv.Close()
+	// A caller-supplied client follows redirects unless we replace CheckRedirect.
+	opts := Options{
+		StatusAddr:  "127.0.0.1:38080",
+		trayBaseURL: srv.URL,
+		GOOS:        "darwin",
+		HTTPClient:  &http.Client{},
+	}
+	res := callTool(t, opts, "tray_status", nil)
+	if !res.IsError {
+		t.Fatal("redirect was treated as success")
+	}
+	if len(leaked) != 0 {
+		t.Fatalf("token forwarded: %#v", leaked)
+	}
+}
+
 func TestNoTrayOrIngestImport(t *testing.T) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", nil, parser.ImportsOnly)
+	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, pkg := range pkgs {
-		for name, file := range pkg.Files {
-			for _, imp := range file.Imports {
-				path := strings.Trim(imp.Path.Value, `"`)
-				if strings.HasSuffix(path, "/internal/tray") || strings.HasSuffix(path, "/internal/ingest") {
-					t.Errorf("%s imports %s", name, path)
-				}
+	fset := token.NewFileSet()
+	for _, ent := range entries {
+		name := ent.Name()
+		if ent.IsDir() || !strings.HasSuffix(name, ".go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, imp := range file.Imports {
+			path := strings.Trim(imp.Path.Value, `"`)
+			if strings.HasSuffix(path, "/internal/tray") || strings.HasSuffix(path, "/internal/ingest") {
+				t.Errorf("%s imports %s", name, path)
 			}
 		}
 	}

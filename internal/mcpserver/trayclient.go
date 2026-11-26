@@ -79,9 +79,7 @@ func (c *trayClient) call(ctx context.Context, method, path string, body any) (*
 		}
 		addr = resolved
 	}
-	if addr == "" {
-		addr = config.DefaultStatusAddr
-	}
+	addr = normalizeStatusAddr(addr)
 	if err := requireLoopback(addr); err != nil {
 		return nil, nil, err
 	}
@@ -182,5 +180,24 @@ func requireLoopback(addr string) error {
 }
 
 func isConnRefused(err error) bool {
-	return errors.Is(err, syscall.ECONNREFUSED)
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	// Windows reports WSAECONNREFUSED as "actively refused", and that
+	// errno does not unwrap to syscall.ECONNREFUSED.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") || strings.Contains(msg, "actively refused")
+}
+
+// normalizeStatusAddr matches the tray's rewrite of a bare ":port" (bind
+// all interfaces) to 127.0.0.1:port, and an empty address to the default.
+// Duplicated here so this package does not import internal/tray.
+func normalizeStatusAddr(addr string) string {
+	if addr == "" {
+		return config.DefaultStatusAddr
+	}
+	if strings.HasPrefix(addr, ":") {
+		return "127.0.0.1" + addr
+	}
+	return addr
 }
