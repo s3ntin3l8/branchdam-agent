@@ -84,17 +84,37 @@ func rawSecrets(path string) (rawSecretFields, error) {
 
 // redactDatabaseURL keeps a whole ${VAR} placeholder, and otherwise
 // replaces a URL password the way net/url.URL.Redacted does. A file DSN
-// with no userinfo is unchanged.
+// with no userinfo is unchanged. A DSN url.Parse rejects is redacted
+// textually so a bare % or a non-numeric port cannot leak the password.
 func redactDatabaseURL(raw, loaded string) string {
 	if wholePlaceholder.MatchString(strings.TrimSpace(raw)) {
 		return strings.TrimSpace(raw)
 	}
 	u, err := url.Parse(loaded)
-	if err != nil || u.User == nil {
-		return loaded
+	if err == nil {
+		if u.User == nil {
+			return loaded
+		}
+		if _, ok := u.User.Password(); !ok {
+			return loaded
+		}
+		return u.Redacted()
 	}
-	if _, ok := u.User.Password(); !ok {
-		return loaded
+	return redactUserinfoText(loaded)
+}
+
+// redactUserinfoText replaces scheme://userinfo@rest with
+// scheme://[redacted]@rest. The last @ splits userinfo from the host,
+// so a password that itself contains @ is still covered. No @ means
+// there is no userinfo to hide.
+func redactUserinfoText(dsn string) string {
+	scheme, rest, ok := strings.Cut(dsn, "://")
+	if !ok {
+		return redactedKey
 	}
-	return u.Redacted()
+	at := strings.LastIndex(rest, "@")
+	if at < 0 {
+		return redactedKey
+	}
+	return scheme + "://" + redactedKey + "@" + rest[at+1:]
 }

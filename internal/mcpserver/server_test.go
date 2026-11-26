@@ -187,6 +187,28 @@ func TestAgentConfigRedactsKey(t *testing.T) {
 	if gotURL != "${TEST_RESOLVE_URL}" {
 		t.Fatalf("placeholder databaseUrl = %q", gotURL)
 	}
+
+	for _, malformed := range []struct {
+		dsn  string
+		want string
+	}{
+		{dsn: "postgres://u:p%zz@h/db", want: "postgres://[redacted]@h/db"},
+		{dsn: "postgres://u:pw@h:notaport/db", want: "postgres://[redacted]@h:notaport/db"},
+	} {
+		path = writeConfig(t, dir, "server:\n  baseUrl: http://127.0.0.1:8080\nintegrations:\n  resolvedb:\n    databaseUrl: "+malformed.dsn+"\n")
+		res = callTool(t, Options{ConfigPath: path}, "agent_config", map[string]any{})
+		if res.IsError {
+			t.Fatal(toolText(res))
+		}
+		raw = mustJSON(t, structured(t, res))
+		if strings.Contains(raw, "p%zz") || strings.Contains(raw, "u:pw@") {
+			t.Fatalf("malformed DSN leaked: %s", raw)
+		}
+		gotURL, _ = structured(t, res)["integrations"].(map[string]any)["resolvedb"].(map[string]any)["databaseUrl"].(string)
+		if gotURL != malformed.want {
+			t.Fatalf("databaseUrl = %q, want %q", gotURL, malformed.want)
+		}
+	}
 }
 
 func TestPreflightTool(t *testing.T) {
