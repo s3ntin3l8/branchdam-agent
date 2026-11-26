@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.0](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.18.2...v1.19.0) (2026-11-26)
+
+
+### Features
+
+* **mcp:** branchdam-agent mcp stdio subcommand with read-only queue tools ([#377](https://github.com/s3ntin3l8/branchdam-agent/issues/377)) ([1af7bb7](https://github.com/s3ntin3l8/branchdam-agent/commit/1af7bb78d2e56b51502693d3631977ff5a0642cf))
+* **mcp:** MCP action tools proxied through the tray API ([#379](https://github.com/s3ntin3l8/branchdam-agent/issues/379)) ([174c4b9](https://github.com/s3ntin3l8/branchdam-agent/commit/174c4b9aca0c1dd4889b76d3bdfe9dc4275b2741))
+
 ## [1.18.2](https://github.com/s3ntin3l8/branchdam-agent/compare/v1.18.1...v1.18.2) (2026-11-24)
 
 
