@@ -41,7 +41,7 @@ type failedOut struct {
 
 type lookupOut struct {
 	Found bool       `json:"found"`
-	Row   *FailedRow `json:"row,omitempty"`
+	Row   *lookupRow `json:"row,omitempty"`
 }
 
 type preflightOut struct {
@@ -94,7 +94,7 @@ func registerTools(s *sdkmcp.Server, opts Options) {
 			return textResult(fmt.Sprintf("%d failed", len(rows))), failedOut{Rows: rows}, nil
 		})
 
-	sdkmcp.AddTool(s, readOnlyTool("lookup_queue_row", "Look up one queue row by exactly one of nodeUuid, sourcePath, or localPath."),
+	sdkmcp.AddTool(s, readOnlyTool("lookup_queue_row", "Look up one queue row by exactly one of nodeUuid, sourcePath, or localPath. The row includes archiveCopyStatus, rebaseStatus, and uploadStatus."),
 		func(ctx context.Context, _ *sdkmcp.CallToolRequest, in lookupIn) (*sdkmcp.CallToolResult, lookupOut, error) {
 			rec, ok, err := lookup(ctx, opts, in)
 			if err != nil {
@@ -103,16 +103,11 @@ func registerTools(s *sdkmcp.Server, opts Options) {
 			if !ok {
 				return textResult("not found"), lookupOut{Found: false}, nil
 			}
-			row := failedRow(rec)
-			if !rec.Failed() {
-				row.Step = ""
-				row.LastError = ""
-				row.Attempts = 0
-			}
+			row := lookupFrom(rec)
 			return textResult("found " + rec.NodeUUID), lookupOut{Found: true, Row: &row}, nil
 		})
 
-	sdkmcp.AddTool(s, readOnlyTool("agent_config", "Return the loaded agent config. server.apiKey is redacted. An unexpanded ${VAR} placeholder is shown as the placeholder, not the environment value."),
+	sdkmcp.AddTool(s, readOnlyTool("agent_config", "Return the loaded agent config. server.apiKey is redacted. A password in integrations.resolvedb.databaseUrl is redacted. An unexpanded ${VAR} placeholder is shown as the placeholder, not the environment value."),
 		func(context.Context, *sdkmcp.CallToolRequest, struct{}) (*sdkmcp.CallToolResult, map[string]any, error) {
 			if opts.ConfigPath == "" {
 				return nil, nil, errors.New("config path is not set")

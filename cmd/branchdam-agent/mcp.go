@@ -34,14 +34,28 @@ func runMCPCmd(args []string) int {
 		Version:    version,
 		ConfigPath: resolvedPath,
 		QueuePath:  cfg.Offline.QueueDBPath,
+		// Re-read on each call. agent_config already does, and a key or
+		// pathMappings edit would otherwise leave preflight on the
+		// startup snapshot.
+		ResolveQueuePath: func() (string, error) {
+			fresh, err := config.Load(resolvedPath)
+			if err != nil {
+				return "", err
+			}
+			return fresh.Offline.QueueDBPath, nil
+		},
 		Preflight: func(ctx context.Context) ([]mcpserver.CheckResult, bool, error) {
+			fresh, err := config.Load(resolvedPath)
+			if err != nil {
+				return nil, false, err
+			}
 			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
 			var client helloCaller
-			if cfg.Server.APIKey != "" {
-				client = branchdam.New(cfg.Server.BaseURL, cfg.Server.APIKey)
+			if fresh.Server.APIKey != "" {
+				client = branchdam.New(fresh.Server.BaseURL, fresh.Server.APIKey)
 			}
-			checks, ok := runPreflightChecks(ctx, cfg, client, defaultLookPath, defaultRunVersion)
+			checks, ok := runPreflightChecks(ctx, fresh, client, defaultLookPath, defaultRunVersion)
 			return checks, ok, nil
 		},
 	})

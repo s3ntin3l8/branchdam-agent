@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -71,5 +72,41 @@ func TestOpenReadOnlyDoesNotMigrateOrWrite(t *testing.T) {
 	defer func() { _ = ro.Close() }()
 	if err := ro.QueryRow("PRAGMA user_version").Scan(&versionAfter); err != nil || versionAfter != 3 {
 		t.Fatalf("user_version after close = %d, err = %v, want 3", versionAfter, err)
+	}
+}
+
+// TestOpenReadOnlySeesWriterWAL is the other half of the MCP promise: a
+// second process can read queue.db while the tray still holds it open
+// (WAL, including the -shm file).
+func TestOpenReadOnlySeesWriterWAL(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "queue.db")
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+	if err := writer.InsertPending(ctx, sampleRecord("wal-1", "card.jpg")); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	counts, err := reader.Counts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.AwaitingUpload != 1 {
+		t.Fatalf("counts = %+v, want the writer's pending row", counts)
+	}
+	got, ok, err := reader.ByNodeUUID(ctx, "wal-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || got.SourcePath != "card.jpg" {
+		t.Fatalf("row ok=%v source=%q", ok, got.SourcePath)
 	}
 }

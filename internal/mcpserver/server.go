@@ -25,12 +25,15 @@ var errQueueNotConfigured = errors.New("offline queue is not configured")
 // Options wires the process's config into the server. OpenQueue defaults
 // to queue.OpenReadOnly. Preflight runs the same checks as the preflight
 // subcommand; nil makes the preflight tool return an error.
+// ResolveQueuePath, when set, is called on every queue tool so an edit
+// to offline.queueDbPath is picked up. Nil uses QueuePath.
 type Options struct {
-	Version    string
-	ConfigPath string
-	QueuePath  string
-	OpenQueue  func(path string) (*queue.Store, error)
-	Preflight  func(ctx context.Context) ([]CheckResult, bool, error)
+	Version          string
+	ConfigPath       string
+	QueuePath        string
+	ResolveQueuePath func() (string, error)
+	OpenQueue        func(path string) (*queue.Store, error)
+	Preflight        func(ctx context.Context) ([]CheckResult, bool, error)
 }
 
 // Run serves one stdio session until the client disconnects.
@@ -54,14 +57,22 @@ func Run(ctx context.Context, opts Options) error {
 }
 
 func (o Options) openQueue() (*queue.Store, error) {
-	if o.QueuePath == "" {
+	path := o.QueuePath
+	if o.ResolveQueuePath != nil {
+		resolved, err := o.ResolveQueuePath()
+		if err != nil {
+			return nil, err
+		}
+		path = resolved
+	}
+	if path == "" {
 		return nil, errQueueNotConfigured
 	}
 	open := o.OpenQueue
 	if open == nil {
 		open = queue.OpenReadOnly
 	}
-	return open(o.QueuePath)
+	return open(path)
 }
 
 func textResult(summary string) *sdkmcp.CallToolResult {

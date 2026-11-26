@@ -25,6 +25,29 @@ type FailedRow struct {
 	CreatedAt   int64  `json:"createdAtUnix"`
 }
 
+// lookupRow is a queue row plus the three step statuses, so a pending row,
+// one awaiting rebase, and a finished row are not the same shape. Step is
+// only set when the row failed; the statuses are always set.
+type lookupRow struct {
+	FailedRow
+	ArchiveCopyStatus string `json:"archiveCopyStatus"`
+	RebaseStatus      string `json:"rebaseStatus"`
+	UploadStatus      string `json:"uploadStatus"`
+}
+
+func lookupFrom(rec queue.Record) lookupRow {
+	row := lookupRow{FailedRow: failedRow(rec)}
+	row.ArchiveCopyStatus = rec.ArchiveCopyStatus
+	row.RebaseStatus = rec.RebaseStatus
+	row.UploadStatus = rec.UploadStatus
+	if !rec.Failed() {
+		row.Step = ""
+		row.LastError = ""
+		row.Attempts = 0
+	}
+	return row
+}
+
 func failedRow(rec queue.Record) FailedRow {
 	row := FailedRow{
 		NodeUUID:    rec.NodeUUID,

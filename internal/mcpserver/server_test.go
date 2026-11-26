@@ -73,6 +73,21 @@ func TestReadTools(t *testing.T) {
 		if looked["nodeUuid"] != "done-1" {
 			t.Fatalf("lookup %v row = %#v", args, looked)
 		}
+		if looked["archiveCopyStatus"] != "DONE" || looked["rebaseStatus"] != "DONE" || looked["uploadStatus"] != "SKIPPED" {
+			t.Fatalf("lookup %v statuses = %#v", args, looked)
+		}
+		if looked["step"] != "" {
+			t.Fatalf("lookup %v step = %#v, want empty for a finished row", args, looked["step"])
+		}
+	}
+
+	failedLookup := callTool(t, opts, "lookup_queue_row", map[string]any{"nodeUuid": "failed-1"})
+	if failedLookup.IsError {
+		t.Fatal(toolText(failedLookup))
+	}
+	failedRow := structured(t, failedLookup)["row"].(map[string]any)
+	if failedRow["step"] != "archive_copy" || failedRow["archiveCopyStatus"] != "FAILED" {
+		t.Fatalf("failed lookup = %#v", failedRow)
 	}
 
 	both := callTool(t, opts, "lookup_queue_row", map[string]any{
@@ -140,6 +155,37 @@ func TestAgentConfigRedactsKey(t *testing.T) {
 	server = structured(t, res)["server"].(map[string]any)
 	if server["apiKey"] != "${TEST_API_KEY}" {
 		t.Fatalf("placeholder apiKey = %#v", server["apiKey"])
+	}
+
+	const dbPassword = "test-password" // pragma: allowlist secret
+	const dbURL = "postgres://resolve:" + dbPassword + "@db.local:5432/resolve"
+	path = writeConfig(t, dir, "server:\n  apiKey: "+literalKey+"\n  baseUrl: http://127.0.0.1:8080\nintegrations:\n  resolvedb:\n    databaseUrl: "+dbURL+"\n")
+	res = callTool(t, Options{ConfigPath: path}, "agent_config", map[string]any{})
+	if res.IsError {
+		t.Fatal(toolText(res))
+	}
+	raw = mustJSON(t, structured(t, res))
+	if strings.Contains(raw, dbPassword) || strings.Contains(raw, literalKey) {
+		t.Fatalf("credential leaked: %s", raw)
+	}
+	gotURL, _ := structured(t, res)["integrations"].(map[string]any)["resolvedb"].(map[string]any)["databaseUrl"].(string)
+	if gotURL != "postgres://resolve:xxxxx@db.local:5432/resolve" {
+		t.Fatalf("databaseUrl = %q", gotURL)
+	}
+
+	t.Setenv("TEST_RESOLVE_URL", dbURL)
+	path = writeConfig(t, dir, "server:\n  baseUrl: http://127.0.0.1:8080\nintegrations:\n  resolvedb:\n    databaseUrl: ${TEST_RESOLVE_URL}\n")
+	res = callTool(t, Options{ConfigPath: path}, "agent_config", map[string]any{})
+	if res.IsError {
+		t.Fatal(toolText(res))
+	}
+	raw = mustJSON(t, structured(t, res))
+	if strings.Contains(raw, dbPassword) {
+		t.Fatalf("expanded database URL leaked: %s", raw)
+	}
+	gotURL, _ = structured(t, res)["integrations"].(map[string]any)["resolvedb"].(map[string]any)["databaseUrl"].(string)
+	if gotURL != "${TEST_RESOLVE_URL}" {
+		t.Fatalf("placeholder databaseUrl = %q", gotURL)
 	}
 }
 
